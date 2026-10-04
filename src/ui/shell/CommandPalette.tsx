@@ -5,8 +5,8 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CornerDownLeft, Search } from 'lucide-react';
-import { useUI } from '../../state/ui';
-import { toast } from '../../state/ui';
+import { toast, useUI } from '../../state/ui';
+import { isMac } from '../../platform';
 import { Keys } from './Keys';
 import { rankItems, type RankedGroup } from './paletteRank';
 import {
@@ -127,6 +127,11 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     e.stopPropagation();
+    if ((isMac ? e.metaKey : e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      onClose();
+      return;
+    }
     const n = flat.length;
     switch (e.key) {
       case 'ArrowDown':

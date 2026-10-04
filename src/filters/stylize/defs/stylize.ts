@@ -73,7 +73,7 @@ function relight(d: Uint8ClampedArray, j: number, L0: number, Lq: number) {
   }
 }
 
-export function applyCelShade(img: Img, p: ParamValues, ctx: FilterContext): Img {
+export function applyCelShade<T extends Img>(img: T, p: ParamValues, ctx: FilterContext): T {
   if (isEmpty(img)) return img;
   const { width: w, height: h, data } = img;
   const s = sc(ctx);

@@ -24,6 +24,7 @@ import {
   modeFromEvent,
   pointInSelection,
   updateOutlineDrag,
+  endOutlineDragVisual,
   type OutlineDrag,
 } from './selectCommon';
 import { deselect } from '../../editor/selection';
@@ -158,6 +159,7 @@ function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
 
   const onPointerUp = () => {
     clearSmartGuides();
+    vpState.spaceHeld = false;
     if (outline) {
       const o = outline;
       outline = null;
@@ -212,7 +214,36 @@ function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
   const onDeactivate = () => {
     drag = null;
     outline = null;
+    vpState.spaceHeld = false;
+    endOutlineDragVisual();
     clearSmartGuides();
+  };
+
+  const onKeyDown = (e: KeyboardEvent): boolean => {
+    if (drag && e.code === 'Space') {
+      // Space while dragging repositions the marquee (instead of the temporary Hand tool).
+      vpState.spaceHeld = true;
+      return true;
+    }
+    if (e.key === 'Escape' && (drag || outline)) {
+      drag = null;
+      outline = null;
+      vpState.spaceHeld = false;
+      endOutlineDragVisual();
+      clearSmartGuides();
+      viewport.requestOverlay();
+      return true;
+    }
+    return false;
+  };
+
+  const onKeyUp = (e: KeyboardEvent): boolean => {
+    if (e.code === 'Space' && vpState.spaceHeld) {
+      vpState.spaceHeld = false;
+      if (drag) drag.spaceLast = null;
+      return true;
+    }
+    return false;
   };
 
   const onHover = (e: ToolPointerEvent) => {
@@ -237,6 +268,8 @@ function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
     onPointerMove,
     onPointerUp,
     onHover,
+    onKeyDown,
+    onKeyUp,
     onDeactivate,
     renderOverlay,
   };

@@ -1,16 +1,44 @@
 /**
  * Compositor — renders a Document to canvases.
  *
- * THIS FILE IS THE CONTRACT. The function signatures below are used across the app; the bodies
- * are a minimal baseline (raster + solid fill, normal blending) to be completed by the renderer
- * module (text, shapes, gradients, patterns, masks, clipping, effects, filters, adjustments,
- * groups, caching). Keep the exported signatures stable.
+ * THIS FILE IS THE CONTRACT used across the app (signatures are stable). The implementation lives
+ * in ./engine.ts (layer pipeline, groups, clipping, adjustments, caching), ./text.ts (layout +
+ * warp), ./shapes.ts, ./paint.ts (gradients/patterns), ./mask.ts and ./effects/* (layer styles).
+ *
+ * Returned canvases:
+ *  - renderDocument / renderThumbnail return CACHED canvases: treat them as read-only (copy before
+ *    drawing on them).
+ *  - renderLayerToDoc / renderLayerContent / rasterizeLayer return fresh canvases you may keep.
  */
 import type { Document, ID, Layer, Paint, Rect, Size, TextProps, TransformableLayer } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
 import { createCanvas, ctx2d } from '../core/canvas';
-import { transformMatrix, transformedBounds } from '../core/geometry';
-import { compositeOp } from '../filters/engine';
+import { transformedBounds } from '../core/geometry';
+import { applyFilterStack, makeFilterContext } from '../filters/engine';
+import { bumpGeneration, px, renderCache, slots } from './cache';
+import {
+  compositeDocument,
+  effectsReachOf,
+  filterPad,
+  flattenRender,
+  layerGeometry,
+  layerSig,
+  makeRC,
+  renderLayer,
+  renderStats,
+  type RC,
+} from './engine';
+import { fillWithPaint as paintFill } from './paint';
+import { renderShapeContent } from './shapes';
+import { layoutTextProps, renderTextContent, requestTextFont, resetTextCaches, type LocalContent, type TextLayout } from './text';
+import { clearPool, fresh } from './surface';
+
+export type { TextLayout, TextLayoutLine, CaretInfo } from './text';
+export { caretAt, caretPositions, indexAtPoint, selectionRects, fontString, textLocalBounds } from './text';
+export { shapePath, shapeFillRule, shapeLocalBounds } from './shapes';
+export { createGradient, paintStyle, assetImage } from './paint';
+export { gradientGeometry } from './gradientMath';
+export { renderStats } from './engine';
 
 export interface RenderOptions {
   /** Output scale relative to document pixels (default 1). */
@@ -23,36 +51,17 @@ export interface RenderOptions {
   below?: ID;
 }
 
-/** Composite the whole document. Returns a canvas of size (doc.width*scale, doc.height*scale). */
+/**
+ * Composite the whole document. Returns a canvas of size (doc.width*scale, doc.height*scale).
+ * The canvas is cached and shared: do not draw on it.
+ */
 export function renderDocument(doc: Document, opts: RenderOptions = {}): HTMLCanvasElement {
-  const scale = opts.scale ?? 1;
-  const out = createCanvas(doc.width * scale, doc.height * scale);
-  const ctx = ctx2d(out);
-  if (opts.background !== false && doc.background) {
-    ctx.fillStyle = doc.background;
-    ctx.fillRect(0, 0, out.width, out.height);
-  }
-  const drawList = (ids: ID[]) => {
-    for (const id of ids) {
-      if (opts.below === id) return true;
-      const l = doc.layers[id];
-      if (!l || !l.visible || opts.hidden?.has(id)) continue;
-      if (l.type === 'group') {
-        if (drawList(l.childIds)) return true;
-        continue;
-      }
-      const lc = renderLayerToDoc(doc, l, { scale });
-      if (!lc) continue;
-      ctx.save();
-      ctx.globalAlpha = l.opacity;
-      ctx.globalCompositeOperation = compositeOp(l.blendMode);
-      ctx.drawImage(lc, 0, 0);
-      ctx.restore();
-    }
-    return false;
-  };
-  drawList(doc.rootIds);
-  return out;
+  return compositeDocument(doc, {
+    scale: opts.scale ?? 1,
+    background: opts.background !== false,
+    hidden: opts.hidden ?? null,
+    below: opts.below ?? null,
+  });
 }
 
 /**
@@ -64,23 +73,19 @@ export function renderLayerToDoc(
   layer: Layer,
   opts: { scale?: number; effects?: boolean; mask?: boolean } = {},
 ): HTMLCanvasElement | null {
-  const scale = opts.scale ?? 1;
-  const out = createCanvas(doc.width * scale, doc.height * scale);
-  const ctx = ctx2d(out);
-  ctx.scale(scale, scale);
-  if (layer.type === 'raster') {
-    const bmp = bitmaps.tryGet(layer.bitmapId);
-    if (!bmp) return null;
-    const m = transformMatrix(layer.transform, layer.width, layer.height);
-    ctx.transform(m.a, m.b, m.c, m.d, m.e, m.f);
-    ctx.drawImage(bmp, 0, 0);
-  } else if (layer.type === 'fill' && layer.fill.type === 'solid') {
-    ctx.fillStyle = layer.fill.color;
-    ctx.fillRect(0, 0, doc.width, doc.height);
-  } else {
-    return null;
-  }
-  return out;
+  const rc = makeRC(doc, opts.scale ?? 1);
+  const R = renderLayer(rc, layer, { effects: opts.effects !== false, mask: opts.mask !== false, filters: true });
+  if (!R) return null;
+  return flattenRender(rc, R);
+}
+
+function drawLocalAt(ctx: CanvasRenderingContext2D, lc: LocalContent) {
+  ctx.save();
+  ctx.setTransform(1 / lc.k, 0, 0, 1 / lc.k, lc.ox, lc.oy);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(lc.canvas, 0, 0);
+  ctx.restore();
 }
 
 /**
@@ -89,10 +94,18 @@ export function renderLayerToDoc(
  */
 export function renderLayerContent(doc: Document, layer: TransformableLayer): HTMLCanvasElement {
   const size = getLayerSize(layer);
-  const out = createCanvas(size.width, size.height);
+  let out = createCanvas(Math.max(1, Math.round(size.width)), Math.max(1, Math.round(size.height)));
+  const ctx = ctx2d(out);
   if (layer.type === 'raster') {
     const bmp = bitmaps.tryGet(layer.bitmapId);
-    if (bmp) ctx2d(out).drawImage(bmp, 0, 0);
+    if (bmp) ctx.drawImage(bmp, 0, 0);
+  } else if (layer.type === 'text') {
+    drawLocalAt(ctx, renderTextContent(layer.text, 1, 0, 0));
+  } else {
+    drawLocalAt(ctx, renderShapeContent(layer.shape, 1, 0, 0));
+  }
+  if (layer.filters?.some((f) => f.enabled)) {
+    out = applyFilterStack(out, layer.filters, makeFilterContext({ docWidth: doc.width, docHeight: doc.height, offsetX: layer.transform.x, offsetY: layer.transform.y, scale: 1 }));
   }
   return out;
 }
@@ -100,33 +113,27 @@ export function renderLayerContent(doc: Document, layer: TransformableLayer): HT
 /** Local content box size of a transformable layer (text is measured). */
 export function getLayerSize(layer: TransformableLayer): Size {
   if (layer.type === 'raster') return { width: layer.width, height: layer.height };
-  if (layer.type === 'shape') return { width: layer.shape.width, height: layer.shape.height };
-  return measureText(layer.text);
+  if (layer.type === 'shape') return { width: Math.max(1, layer.shape.width), height: Math.max(1, layer.shape.height) };
+  const l = layoutTextProps(layer.text);
+  return { width: l.width, height: l.height };
 }
 
-export interface TextLayout {
-  width: number;
-  height: number;
-  lines: { text: string; x: number; y: number; width: number }[];
-  /** Baseline offset of the first line from the top of the box. */
-  ascent: number;
-}
-
-/** Measure/lay out text (wrapping when boxWidth is set). */
+/**
+ * Measure/lay out text (wrapping when boxWidth is set). Exactly the layout the renderer draws:
+ * lines carry x/y/width/baseline and their [start, end) range in the (case-transformed) content.
+ * See caretAt / caretPositions / indexAtPoint / selectionRects for caret math.
+ */
 export function measureText(text: TextProps): TextLayout {
-  const c = createCanvas(1, 1);
-  const ctx = ctx2d(c);
-  ctx.font = `${text.fontStyle} ${text.fontWeight} ${text.fontSize}px "${text.fontFamily}"`;
-  const content = text.uppercase ? text.content.toUpperCase() : text.content;
-  const lines = content.split('\n');
-  const lh = text.fontSize * text.lineHeight;
-  let width = 0;
-  const out = lines.map((t, i) => {
-    const w = ctx.measureText(t).width + Math.max(0, t.length - 1) * text.letterSpacing;
-    width = Math.max(width, w);
-    return { text: t, x: 0, y: i * lh, width: w };
-  });
-  return { width: Math.max(1, Math.ceil(width)), height: Math.max(1, Math.ceil(lines.length * lh)), lines: out, ascent: text.fontSize * 0.8 };
+  requestTextFont(text);
+  return layoutTextProps(text);
+}
+
+function unionR(a: Rect | null, b: Rect | null): Rect | null {
+  if (!a) return b;
+  if (!b) return a;
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return { x, y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y };
 }
 
 /** Doc-space bounds of a layer's content (transformed box; groups = union; fills = canvas). */
@@ -140,25 +147,104 @@ export function getLayerBounds(doc: Document, layerId: ID): Rect | null {
   if (l.type === 'group') {
     let r: Rect | null = null;
     for (const c of l.childIds) {
-      const b = getLayerBounds(doc, c);
-      if (!b) continue;
-      r = r
-        ? {
-            x: Math.min(r.x, b.x),
-            y: Math.min(r.y, b.y),
-            width: Math.max(r.x + r.width, b.x + b.width) - Math.min(r.x, b.x),
-            height: Math.max(r.y + r.height, b.y + b.height) - Math.min(r.y, b.y),
-          }
-        : b;
+      const cl = doc.layers[c];
+      if (!cl || cl.type === 'adjustment') continue;
+      r = unionR(r, getLayerBounds(doc, c));
     }
     return r;
   }
   return { x: 0, y: 0, width: doc.width, height: doc.height };
 }
 
-/** Topmost visible, unlocked-for-selection layer with a non-transparent pixel at doc (x,y). */
+/**
+ * Doc-space bounds of everything a layer can draw: content including text/stroke/warp overflow,
+ * smart-filter growth and layer effects (shadows, glows, strokes). Null for adjustment layers.
+ */
+export function getLayerVisualBounds(doc: Document, layerId: ID): Rect | null {
+  const l = doc.layers[layerId];
+  if (!l || l.type === 'adjustment') return null;
+  const grow = effectsReachOf(l, 1) + filterPad(l.filters, 1);
+  let r: Rect | null = null;
+  const geom = layerGeometry(l, 1);
+  if (geom) {
+    const pts = [
+      geom.m.transformPoint({ x: geom.local.x, y: geom.local.y }),
+      geom.m.transformPoint({ x: geom.local.x + geom.local.width, y: geom.local.y }),
+      geom.m.transformPoint({ x: geom.local.x + geom.local.width, y: geom.local.y + geom.local.height }),
+      geom.m.transformPoint({ x: geom.local.x, y: geom.local.y + geom.local.height }),
+    ];
+    const xs = pts.map((p) => p.x);
+    const ys = pts.map((p) => p.y);
+    r = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+  } else if (l.type === 'fill') {
+    r = { x: 0, y: 0, width: doc.width, height: doc.height };
+  } else if (l.type === 'group') {
+    for (const c of l.childIds) {
+      const cl = doc.layers[c];
+      if (cl && cl.visible) r = unionR(r, getLayerVisualBounds(doc, c));
+    }
+  }
+  if (!r) return null;
+  return { x: r.x - grow, y: r.y - grow, width: r.width + 2 * grow, height: r.height + 2 * grow };
+}
+
+function alphaAt(c: HTMLCanvasElement | null, x: number, y: number): number {
+  if (!c || x < 0 || y < 0 || x >= c.width || y >= c.height) return 0;
+  try {
+    return ctx2d(c).getImageData(x, y, 1, 1).data[3];
+  } catch {
+    return 0;
+  }
+}
+
+/** Rendered alpha (0..255) of a layer at a doc point (content + effects, mask applied). */
+function sampleLayer(rc: RC, l: Layer, x: number, y: number, shapeOnly = false): number {
+  const R = renderLayer(rc, l);
+  if (!R) return 0;
+  const lx = Math.floor(x * rc.s) - R.region.x;
+  const ly = Math.floor(y * rc.s) - R.region.y;
+  if (lx < 0 || ly < 0 || lx >= R.region.w || ly >= R.region.h) return 0;
+  if (shapeOnly) return alphaAt(R.shape, lx, ly);
+  let a = alphaAt(R.core, lx, ly);
+  if (a > 10) return a;
+  for (const b of R.behind) a = Math.max(a, alphaAt(b.canvas, lx, ly));
+  return a;
+}
+
+/**
+ * Topmost visible leaf layer (descending into visible groups; skipping fill/adjustment and fully
+ * locked layers) whose rendered alpha at doc (x, y) exceeds ~10/255.
+ */
 export function hitTestLayer(doc: Document, x: number, y: number): ID | null {
-  return null;
+  if (!(x >= 0 && y >= 0 && x < doc.width && y < doc.height)) return null;
+  const rc = makeRC(doc, 1);
+  const visit = (ids: ID[]): ID | null => {
+    for (let i = ids.length - 1; i >= 0; i--) {
+      const l = doc.layers[ids[i]];
+      if (!l || !l.visible) continue;
+      if (l.type === 'group') {
+        const r = visit(l.childIds);
+        if (r) return r;
+        continue;
+      }
+      if (l.type === 'fill' || l.type === 'adjustment' || l.locks?.all) continue;
+      if (!(l.opacity > 0.02)) continue;
+      const vb = getLayerVisualBounds(doc, l.id);
+      if (!vb || x < vb.x || y < vb.y || x > vb.x + vb.width || y > vb.y + vb.height) continue;
+      if (sampleLayer(rc, l, x, y) <= 10) continue;
+      if (l.clipped) {
+        let k = i - 1;
+        while (k >= 0 && doc.layers[ids[k]]?.clipped) k--;
+        const base = k >= 0 ? doc.layers[ids[k]] : undefined;
+        if (base && base.type !== 'adjustment') {
+          if (!base.visible || sampleLayer(rc, base, x, y, true) <= 10) continue;
+        }
+      }
+      return l.id;
+    }
+    return null;
+  };
+  return visit(doc.rootIds);
 }
 
 /** Rasterize any layer into a doc-sized canvas (content + filters + effects + mask). */
@@ -167,22 +253,72 @@ export function rasterizeLayer(doc: Document, layerId: ID): HTMLCanvasElement | 
   return l ? renderLayerToDoc(doc, l) : null;
 }
 
-/** Small thumbnail of a layer (or the whole doc when layerId is null) fitting size×size. */
+/**
+ * Small thumbnail of a layer (or the whole doc when layerId is null) fitting size×size.
+ * Layer thumbnails show the content with smart filters (no effects, no mask — like Photoshop).
+ * Cached per layer version; the canvas is shared: do not draw on it.
+ */
 export function renderThumbnail(doc: Document, layerId: ID | null, size: number): HTMLCanvasElement {
-  const s = Math.min(size / doc.width, size / doc.height);
+  const s = Math.max(1e-4, Math.min(size / doc.width, size / doc.height));
   if (!layerId) return renderDocument(doc, { scale: s });
   const l = doc.layers[layerId];
-  return (l && renderLayerToDoc(doc, l, { scale: s })) || createCanvas(doc.width * s, doc.height * s);
+  const rc = makeRC(doc, s);
+  if (!l) return fresh(rc.W, rc.H);
+  const key = `T|${layerId}|${Math.round(size)}`;
+  const sig = `${layerSig(rc, l)}|${rc.W}x${rc.H}`;
+  const hit = slots.get<HTMLCanvasElement>(key, sig);
+  if (hit) return hit;
+  const out = fresh(rc.W, rc.H);
+  if (l.type !== 'adjustment') {
+    const R = renderLayer(rc, l, { effects: false, mask: false, filters: true });
+    if (R?.shape) ctx2d(out).drawImage(R.shape, R.region.x, R.region.y);
+  }
+  slots.set(key, sig, out, px(out), { layerId, max: 1 });
+  return out;
+}
+
+/** Grayscale thumbnail of a layer's mask fitting size×size (null when the layer has no mask). */
+export function renderMaskThumbnail(doc: Document, layerId: ID, size: number): HTMLCanvasElement | null {
+  const l = doc.layers[layerId];
+  const bmp = l?.mask ? bitmaps.tryGet(l.mask.bitmapId) : null;
+  if (!l?.mask || !bmp) return null;
+  const s = Math.max(1e-4, Math.min(size / doc.width, size / doc.height));
+  const W = Math.max(1, Math.round(doc.width * s));
+  const H = Math.max(1, Math.round(doc.height * s));
+  const key = `MT|${layerId}|${Math.round(size)}`;
+  const sig = `${l.mask.bitmapId}|${bitmaps.version(l.mask.bitmapId)}|${W}x${H}`;
+  const hit = slots.get<HTMLCanvasElement>(key, sig);
+  if (hit) return hit;
+  const out = fresh(W, H);
+  const ctx = ctx2d(out);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bmp, 0, 0, W, H);
+  slots.set(key, sig, out, px(out), { layerId, max: 1 });
+  return out;
 }
 
 /** Fill a rect with a Paint (solid/gradient/pattern) in the given context's current transform. */
 export function fillWithPaint(ctx: CanvasRenderingContext2D, paint: Paint, box: Rect, path?: Path2D) {
-  if (paint.type === 'solid') ctx.fillStyle = paint.color;
-  if (path) ctx.fill(path);
-  else ctx.fillRect(box.x, box.y, box.width, box.height);
+  paintFill(ctx, paint, box, path);
 }
 
-/** Drop cached renders (all, or for one layer). */
+/** Drop cached renders (all, or for one layer — composites are always dropped). */
 export function invalidateRenderCache(layerId?: ID) {
-  void layerId;
+  if (layerId !== undefined) {
+    slots.clear(layerId);
+    return;
+  }
+  slots.clear();
+  renderCache.clear();
+  resetTextCaches();
+  clearPool();
+  bumpGeneration();
+}
+
+/** Cache statistics (debugging / performance checks). */
+export function renderCacheInfo() {
+  return { slots: slots.size, slotPixels: slots.pixels, assets: renderCache.size, assetPixels: renderCache.pixels, ...renderStats };
 }

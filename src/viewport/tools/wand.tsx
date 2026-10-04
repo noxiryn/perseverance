@@ -19,6 +19,7 @@ import {
   modeFromEvent,
   pointInSelection,
   updateOutlineDrag,
+  endOutlineDragVisual,
   type OutlineDrag,
 } from './selectCommon';
 import { SelectionModeButtons, Sep, setToolOptionSafe } from '../options/common';
@@ -85,6 +86,7 @@ export const magicWandTool: ToolDef = {
   },
   onDeactivate() {
     outline = null;
+    endOutlineDragVisual();
   },
   renderOverlay(ctx) {
     if (outline?.moved) drawOutlineDrag(ctx, outline);

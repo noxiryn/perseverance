@@ -134,7 +134,7 @@ function shifted(plane: Float32Array, w: number, h: number, dx: number, dy: numb
 /* Halftone                                                            */
 /* ------------------------------------------------------------------ */
 
-function applyHalftone(img: Img, p: ParamValues, ctx: FilterContext): Img {
+function applyHalftone<T extends Img>(img: T, p: ParamValues, ctx: FilterContext): T {
   if (isEmpty(img)) return img;
   const { width: w, height: h, data } = img;
   const n = w * h;
@@ -608,7 +608,7 @@ interface PrintOpts {
   seed: number;
 }
 
-function printProcess(img: Img, o: PrintOpts, ctx: FilterContext): Img {
+function printProcess<T extends Img>(img: T, o: PrintOpts, ctx: FilterContext): T {
   if (isEmpty(img)) return img;
   const { width: w, height: h, data } = img;
   const n = w * h;

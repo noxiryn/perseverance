@@ -44,8 +44,11 @@ function useUiScale() {
     if (!root) return;
     const s = Math.max(0.5, Math.min(2, Number(scale) || 1));
     root.style.zoom = s === 1 ? '' : String(s);
+    // Reserved native-window-button areas are specified in device px: compensate for the zoom.
+    document.documentElement.style.setProperty('--shell-ui-scale', String(s));
     return () => {
       root.style.zoom = '';
+      document.documentElement.style.removeProperty('--shell-ui-scale');
     };
   }, [scale]);
 }

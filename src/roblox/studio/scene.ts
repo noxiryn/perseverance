@@ -156,7 +156,8 @@ export class StudioScene {
         gradientMap: this.gradientMap(shading.toonSteps),
         side,
       });
-      (m as THREE.MeshToonMaterial).flatShading = faceted;
+      // The toon shader honours FLAT_SHADED (from `material.flatShading`), but the typings omit it.
+      if (faceted) Object.assign(m, { flatShading: true });
     } else {
       const metal = kind === 'metal' || kind === 'gold';
       m = new THREE.MeshStandardMaterial({

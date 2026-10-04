@@ -1,0 +1,317 @@
+/**
+ * Shared helpers for layer effects (layer styles).
+ *
+ * The compositor renders each layer into a SURFACE: a canvas covering the layer's padded region
+ * in output pixels (document px × render scale). Effects receive that surface as `content`
+ * (masked + smart-filtered layer pixels) and draw into a same-sized `target`. Extra region info
+ * is passed through `EffectArgsExt` (optional, so effects also work on plain doc-sized canvases).
+ */
+import type { BlendMode, Gradient, ParamDef, ParamValues } from '../../core/types';
+import type { EffectDef, EffectRenderArgs } from '../../registry';
+import { ctx2d } from '../../core/canvas';
+import { acquire, release } from '../surface';
+
+/** Integer rect relative to the effect canvases. */
+export interface LocalRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface EffectRegion {
+  /** Position of the canvases' top-left in output px (doc px × scale). */
+  x: number;
+  y: number;
+  /** Bounds of the layer content (the layer's box), relative to the canvases. */
+  bounds: LocalRect;
+}
+
+export interface EffectArgsExt extends EffectRenderArgs {
+  region?: EffectRegion;
+  /** Emit an additional piece composited with its own operation (e.g. bevel highlight/shadow). */
+  addPiece?: (canvas: HTMLCanvasElement, op: GlobalCompositeOperation) => void;
+}
+
+export function regionOf(args: EffectRenderArgs): EffectRegion {
+  const r = (args as EffectArgsExt).region;
+  if (r) return r;
+  return { x: 0, y: 0, bounds: { x: 0, y: 0, w: args.content.width, h: args.content.height } };
+}
+
+/* ---------------- placement metadata ---------------- */
+
+export interface EffectMeta {
+  /** Override of the def's stage depending on params (e.g. stroke position). */
+  stage?(p: ParamValues): 'behind' | 'above';
+  /** Whether an 'above' effect is clipped to the content alpha (default true). */
+  clip?(p: ParamValues): boolean;
+  /** How far (output px) the effect can reach beyond the content edges. */
+  reach(p: ParamValues, scale: number): number;
+}
+
+const metas = new Map<string, EffectMeta>();
+
+export function defineEffect(def: EffectDef, meta: EffectMeta): EffectDef {
+  metas.set(def.id, meta);
+  return def;
+}
+
+export function effectMeta(id: string): EffectMeta | undefined {
+  return metas.get(id);
+}
+
+/** Stage of an effect instance (param-dependent for stroke). */
+export function effectStage(def: EffectDef, p: ParamValues): 'behind' | 'above' {
+  return metas.get(def.id)?.stage?.(p) ?? def.stage;
+}
+
+/** Whether an 'above' effect is clipped to the content alpha. */
+export function effectClips(def: EffectDef, p: ParamValues): boolean {
+  return metas.get(def.id)?.clip?.(p) ?? true;
+}
+
+/** Reach in output px (generic fallback for third-party effects: size + distance params). */
+export function effectReach(def: EffectDef, p: ParamValues, scale: number): number {
+  const m = metas.get(def.id);
+  if (m) return Math.max(0, m.reach(p, scale));
+  return (num(p.size, 0) * 1.5 + num(p.distance, 0) + num(p.length, 0)) * scale;
+}
+
+/* ---------------- params ---------------- */
+
+export function num(v: unknown, d: number): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : d;
+}
+export function str(v: unknown, d: string): string {
+  return typeof v === 'string' && v ? v : d;
+}
+export function bool(v: unknown, d: boolean): boolean {
+  return typeof v === 'boolean' ? v : d;
+}
+export const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+export function isGradient(v: unknown): v is Gradient {
+  return !!v && typeof v === 'object' && Array.isArray((v as Gradient).stops);
+}
+
+const BLEND_LABELS: [BlendMode, string][] = [
+  ['normal', 'Normal'],
+  ['darken', 'Darken'],
+  ['multiply', 'Multiply'],
+  ['color-burn', 'Color Burn'],
+  ['lighten', 'Lighten'],
+  ['screen', 'Screen'],
+  ['color-dodge', 'Color Dodge'],
+  ['linear-dodge', 'Linear Dodge (Add)'],
+  ['overlay', 'Overlay'],
+  ['soft-light', 'Soft Light'],
+  ['hard-light', 'Hard Light'],
+  ['difference', 'Difference'],
+  ['exclusion', 'Exclusion'],
+  ['hue', 'Hue'],
+  ['saturation', 'Saturation'],
+  ['color', 'Color'],
+  ['luminosity', 'Luminosity'],
+];
+
+export const BLEND_OPTIONS = BLEND_LABELS.map(([value, label]) => ({ value, label }));
+
+export const P = {
+  color: (key: string, label: string, def: string): ParamDef => ({ key, label, type: 'color', default: def }),
+  opacity: (def: number, key = 'opacity', label = 'Opacity'): ParamDef => ({
+    key,
+    label,
+    type: 'number',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: def,
+    unit: '%',
+    displayScale: 100,
+  }),
+  percent: (key: string, label: string, def: number): ParamDef => ({
+    key,
+    label,
+    type: 'number',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: def,
+    unit: '%',
+    displayScale: 100,
+  }),
+  px: (key: string, label: string, def: number, max = 250, min = 0): ParamDef => ({ key, label, type: 'number', min, max, step: 1, default: def, unit: 'px' }),
+  angle: (def: number, key = 'angle', label = 'Angle'): ParamDef => ({ key, label, type: 'angle', default: def }),
+  blend: (def: BlendMode, key = 'blendMode', label = 'Blend Mode'): ParamDef => ({ key, label, type: 'select', options: BLEND_OPTIONS, default: def }),
+};
+
+export const DEFAULT_GRADIENT: Gradient = {
+  kind: 'linear',
+  angle: 90,
+  scale: 1,
+  stops: [
+    { offset: 0, color: '#000000' },
+    { offset: 1, color: '#ffffff' },
+  ],
+};
+
+/* ---------------- geometry ---------------- */
+
+const DEG = Math.PI / 180;
+
+/** Photoshop light-angle convention: an angle of 120° puts the light top-left, so offsets go
+ * down-right. Returns the unit offset direction (y down). */
+export function offsetDir(angleDeg: number): { x: number; y: number } {
+  const a = angleDeg * DEG;
+  return { x: -Math.cos(a), y: Math.sin(a) };
+}
+
+/** Gaussian sigma used for a Photoshop-like "size" (soft extent) in px. */
+export function sizeSigma(sizePx: number): number {
+  return Math.max(0, sizePx) / 2.5;
+}
+
+/* ---------------- canvas ops ---------------- */
+
+/** Multiply the alpha (premultiplied) of a canvas by `factor` ≥ 1 using additive self-draws. */
+export function boostAlpha(c: HTMLCanvasElement, factor: number) {
+  if (!(factor > 1.001)) return;
+  const ctx = ctx2d(c);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'lighter';
+  let f = factor;
+  let guard = 0;
+  while (f >= 2 && guard++ < 10) {
+    ctx.globalAlpha = 1;
+    ctx.drawImage(c, 0, 0);
+    f /= 2;
+  }
+  if (f > 1.001) {
+    ctx.globalAlpha = Math.min(1, f - 1);
+    ctx.drawImage(c, 0, 0);
+  }
+  ctx.restore();
+}
+
+/** Replace a canvas' colors with `color` keeping its alpha. */
+export function colorize(c: HTMLCanvasElement, color: string) {
+  const ctx = ctx2d(c);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-in';
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.restore();
+}
+
+/** Draw `src` into a fresh scratch canvas blurred by `sigma` and offset by (dx, dy). */
+export function blurredCopy(src: HTMLCanvasElement, sigma: number, dx = 0, dy = 0): HTMLCanvasElement {
+  const out = acquire(src.width, src.height);
+  const ctx = ctx2d(out);
+  if (sigma > 0.05) ctx.filter = `blur(${sigma.toFixed(3)}px)`;
+  ctx.drawImage(src, dx, dy);
+  ctx.filter = 'none';
+  return out;
+}
+
+/**
+ * Soft dilation of a matte by `r` px (blur + alpha boost): used for spread/choke. Edges stay
+ * smooth; corners are rounded (like Photoshop's spread before blurring).
+ */
+export function softDilate(src: HTMLCanvasElement, r: number, dx = 0, dy = 0): HTMLCanvasElement {
+  if (r < 0.25) {
+    const out = acquire(src.width, src.height);
+    ctx2d(out).drawImage(src, dx, dy);
+    return out;
+  }
+  // With boost F, the 50% level of a blurred edge moves out by σ·Φ⁻¹(1 − 0.5/F).
+  const F = 12; // Φ⁻¹(1 − 1/24) ≈ 1.73
+  const sigma = r / 1.73;
+  const out = blurredCopy(src, sigma, dx, dy);
+  boostAlpha(out, F);
+  return out;
+}
+
+/** Inverse matte: opaque everywhere except where `src` (drawn at dx,dy) covers. */
+export function inverseMatte(src: HTMLCanvasElement, dx = 0, dy = 0): HTMLCanvasElement {
+  const out = acquire(src.width, src.height);
+  const ctx = ctx2d(out);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.drawImage(src, dx, dy);
+  ctx.globalCompositeOperation = 'source-over';
+  return out;
+}
+
+/** Draw a finished scratch canvas into the effect target with an opacity, then release it. */
+export function finish(target: CanvasRenderingContext2D, c: HTMLCanvasElement, opacity: number) {
+  if (opacity > 0) {
+    target.save();
+    target.setTransform(1, 0, 0, 1, 0, 0);
+    target.globalAlpha = clamp01(opacity);
+    target.globalCompositeOperation = 'source-over';
+    target.drawImage(c, 0, 0);
+    target.restore();
+  }
+  release(c);
+}
+
+/** Read the alpha channel of a sub-rect of a canvas. */
+export function readAlpha(c: HTMLCanvasElement, r: LocalRect): Uint8Array {
+  const img = ctx2d(c).getImageData(r.x, r.y, r.w, r.h).data;
+  const n = r.w * r.h;
+  const a = new Uint8Array(n);
+  for (let i = 0, j = 3; i < n; i++, j += 4) a[i] = img[j];
+  return a;
+}
+
+/** Content bounds expanded by d and clipped to the canvas. */
+export function workRect(args: EffectRenderArgs, d: number): LocalRect | null {
+  const b = regionOf(args).bounds;
+  const W = args.content.width;
+  const H = args.content.height;
+  const k = Math.ceil(Math.max(0, d)) + 2;
+  const x = Math.max(0, b.x - k);
+  const y = Math.max(0, b.y - k);
+  const r = Math.min(W, b.x + b.w + k);
+  const bt = Math.min(H, b.y + b.h + k);
+  if (r <= x || bt <= y) return null;
+  return { x, y, w: r - x, h: bt - y };
+}
+
+/** Parse a CSS hex color to [r, g, b]. */
+export function rgbOf(color: string): [number, number, number] {
+  let s = (color || '#000000').trim();
+  if (s[0] === '#') {
+    s = s.slice(1);
+    if (s.length === 3 || s.length === 4) s = s.split('').map((ch) => ch + ch).join('');
+    const n = parseInt(s.slice(0, 6), 16);
+    if (Number.isFinite(n)) return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  const m = s.match(/rgba?\(([^)]+)\)/i);
+  if (m) {
+    const p = m[1].split(/[\s,/]+/).map(Number);
+    return [p[0] || 0, p[1] || 0, p[2] || 0];
+  }
+  return [0, 0, 0];
+}
+
+/** Alpha component of a color string (#rrggbbaa / rgba()), 1 when absent. */
+export function alphaOfColor(color: string): number {
+  const s = (color || '').trim();
+  if (s[0] === '#' && (s.length === 9 || s.length === 5)) {
+    const hex = s.length === 5 ? s[4] + s[4] : s.slice(7, 9);
+    const v = parseInt(hex, 16);
+    return Number.isFinite(v) ? v / 255 : 1;
+  }
+  const m = s.match(/rgba\(([^)]+)\)/i);
+  if (m) {
+    const p = m[1].split(/[\s,/]+/).map(Number);
+    return p.length > 3 && Number.isFinite(p[3]) ? clamp01(p[3]) : 1;
+  }
+  return 1;
+}

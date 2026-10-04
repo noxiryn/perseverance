@@ -94,7 +94,7 @@ export function PreferencesDialog({ close }: { close: (r?: unknown) => void }) {
           </div>
         </Row>
         <Row label="Autosave" hint="Recovery copies of open documents">
-          <Select value={String(AUTOSAVE.find((a) => Number(a.value) === autosave)?.value ?? '5')} options={AUTOSAVE} onChange={(v) => setPref('autosaveMinutes', Number(v))} width={130} />
+          <Select value={String(AUTOSAVE.find((a) => Number(a.value) === autosave)?.value ?? String(PREF_DEFAULTS.autosaveMinutes))} options={AUTOSAVE} onChange={(v) => setPref('autosaveMinutes', Number(v))} width={130} />
         </Row>
 
         <div className="shell-pref-section">Canvas</div>

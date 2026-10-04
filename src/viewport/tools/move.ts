@@ -1,21 +1,26 @@
 /**
  * Move tool (V): drag layers (groups move children; locks respected; Shift constrains; Alt-drag
- * duplicates; Ctrl toggles auto-select), smart-guide snapping, arrow-key nudge, transform
- * controls (scale/rotate handles), and routing for an active Free Transform session.
+ * duplicates; Ctrl toggles auto-select), rubber-band layer selection on empty canvas with
+ * auto-select, smart-guide snapping, linked masks follow, arrow-key nudge, transform controls
+ * (scale/rotate handles), and routing for an active Free Transform session (Enter / Esc /
+ * Ctrl+Z / arrows). Guide dragging is routed by the viewport before the tool sees the event.
  */
 import { Move } from 'lucide-react';
 import type { Document, ID, Layer, Point, Rect, Transform } from '../../core/types';
 import type { ToolDef, ToolPointerEvent } from '../../registry';
-import { insertLayerDraft, isTransformable } from '../../core/document';
+import { insertLayerDraft, isEffectivelyVisible, isTransformable } from '../../core/document';
 import { viewport } from '../../editor/viewport';
 import { activeSession, toolOptions, useEditor } from '../../state/editor';
 import { useUI } from '../../state/ui';
+import { matchShortcut } from '../../ui/shortcuts';
 import { TransformSession, type Hit } from '../transform/session';
 import { activeTransform, cancelTransform, commitTransform } from '../transform/controller';
-import { cloneLayerTree, layerCorners, pickLayer, topGroupOf, topLevelIds, transformableLeaves } from '../layers';
+import { cloneLayerTree, layerCorners, layersTopDown, pickLayer, safeBounds, topGroupOf, topLevelIds, transformableLeaves } from '../layers';
 import { clearSmartGuides, collectSnapTargets, snapRect, type SnapTargets } from '../snap';
+import { MaskFollower } from '../maskFollow';
+import { translate } from '../math/affine';
 import { drawLabel } from '../draw';
-import { fmtPx, toastOnce, vpState } from '../state';
+import { ACCENT, fmtPx, toastOnce, vpState } from '../state';
 import { nudgeLayers } from './moveOps';
 import { MoveOptionsBar } from '../options/MoveOptions';
 
@@ -34,6 +39,7 @@ interface MoveDrag {
   duplicate: boolean;
   duplicated: boolean;
   cloneRoots: ID[];
+  follower: MaskFollower | null;
   dx: number;
   dy: number;
   last: Point;
@@ -45,7 +51,17 @@ interface TransformDrag {
   persistent: boolean;
 }
 
-let drag: MoveDrag | TransformDrag | null = null;
+interface BandDrag {
+  kind: 'band';
+  a: Point;
+  b: Point;
+  screen0: Point;
+  moved: boolean;
+  additive: boolean;
+  hits: ID[];
+}
+
+let drag: MoveDrag | TransformDrag | BandDrag | null = null;
 
 /* ---------------- transform controls cache ---------------- */
 
@@ -61,7 +77,7 @@ function selectedIds(): ID[] {
 function controlsSession(): TransformSession | null {
   const s = activeSession();
   if (!s || !useUI.getState().view.transformControls) return null;
-  const ids = selectedIds();
+  const ids = selectedIds().filter((id) => isEffectivelyVisible(s.doc, id));
   const key = ids.join(',');
   if (controls && controls.doc === s.doc && controls.key === key) return controls.session;
   const res = ids.length ? TransformSession.forLayers(s.doc, ids, 'immediate') : null;
@@ -97,6 +113,7 @@ function explain(doc: Document, ids: ID[]): string {
   return 'Select a layer to move (or turn on Auto-Select).';
 }
 
+/** Auto-select the layer under the pointer. Returns false when nothing is there. */
 function autoSelectAt(e: ToolPointerEvent): boolean {
   const s = activeSession();
   if (!s) return false;
@@ -105,9 +122,30 @@ function autoSelectAt(e: ToolPointerEvent): boolean {
   const opts = toolOptions('move', MOVE_DEFAULTS);
   const target = opts.autoSelectTarget === 'group' ? topGroupOf(s.doc, id) : id;
   const st = useEditor.getState();
-  if (e.shiftKey) st.setActiveLayer(target, 'toggle');
-  else if (!s.selectedLayerIds.includes(target) || s.activeLayerId !== target) st.setActiveLayer(target, 'replace');
+  if (e.shiftKey) {
+    if (!s.selectedLayerIds.includes(target)) st.setActiveLayer(target, 'toggle');
+  } else if (!s.selectedLayerIds.includes(target) || s.activeLayerId !== target) st.setActiveLayer(target, 'replace');
   return true;
+}
+
+/** Layers whose bounds intersect a doc rect (rubber-band selection), topmost first. */
+function layersInRect(doc: Document, r: Rect): ID[] {
+  const target = toolOptions('move', MOVE_DEFAULTS).autoSelectTarget;
+  const out: ID[] = [];
+  for (const id of layersTopDown(doc)) {
+    const l = doc.layers[id];
+    if (!l || !isTransformable(l) || !isEffectivelyVisible(doc, id) || l.locks.all) continue;
+    const b = safeBounds(doc, id);
+    if (!b) continue;
+    if (b.x > r.x + r.width || b.y > r.y + r.height || b.x + b.width < r.x || b.y + b.height < r.y) continue;
+    const pick = target === 'group' ? topGroupOf(doc, id) : id;
+    if (!out.includes(pick)) out.push(pick);
+  }
+  return out;
+}
+
+function bandRect(d: BandDrag): Rect {
+  return { x: Math.min(d.a.x, d.b.x), y: Math.min(d.a.y, d.b.y), width: Math.abs(d.b.x - d.a.x), height: Math.abs(d.b.y - d.a.y) };
 }
 
 /* ---------------- pointer handlers ---------------- */
@@ -130,6 +168,7 @@ function onPointerDown(e: ToolPointerEvent) {
 
   // Transform controls (handles / rotation zone) on the current selection.
   const ctl = controlsSession();
+  let insideControls = false;
   if (ctl && !e.altKey) {
     const hit: Hit = ctl.hitTest(screen);
     if (hit.kind === 'handle' || hit.kind === 'rotate') {
@@ -140,9 +179,14 @@ function onPointerDown(e: ToolPointerEvent) {
         return;
       }
     }
+    insideControls = hit.kind === 'inside';
   }
 
-  if (auto) autoSelectAt(e);
+  if (auto && !autoSelectAt(e) && !insideControls) {
+    // Empty canvas with auto-select: rubber-band select layers.
+    drag = { kind: 'band', a: { x: e.docX, y: e.docY }, b: { x: e.docX, y: e.docY }, screen0: screen, moved: false, additive: e.shiftKey, hits: [] };
+    return;
+  }
   const cur = activeSession()!;
   const sel = topLevelIds(cur.doc, selectedIds());
   if (!sel.length) {
@@ -172,6 +216,7 @@ function onPointerDown(e: ToolPointerEvent) {
     duplicate: e.altKey,
     duplicated: false,
     cloneRoots: [],
+    follower: null,
     dx: 0,
     dy: 0,
     last: { x: e.docX, y: e.docY },
@@ -208,6 +253,16 @@ function onPointerMove(e: ToolPointerEvent) {
     drag.session.move(e);
     return;
   }
+  if (drag.kind === 'band') {
+    const b = drag;
+    if (!b.moved && Math.hypot(e.screenX - b.screen0.x, e.screenY - b.screen0.y) < 3) return;
+    b.moved = true;
+    b.b = { x: e.docX, y: e.docY };
+    const s = activeSession();
+    b.hits = s ? layersInRect(s.doc, bandRect(b)) : [];
+    viewport.requestOverlay();
+    return;
+  }
   const d = drag;
   if (!d.moved) {
     if (Math.hypot(e.screenX - d.screen0.x, e.screenY - d.screen0.y) < 3) return;
@@ -215,6 +270,8 @@ function onPointerMove(e: ToolPointerEvent) {
     const s = activeSession();
     if (s) d.targets = collectSnapTargets(s.doc, { exclude: new Set(d.selection) });
     if (d.duplicate) startDuplicate(d);
+    const after = activeSession();
+    if (after) d.follower = MaskFollower.forLayers(after.doc, d.duplicated ? d.cloneRoots : d.selection);
   }
   let dx = e.docX - d.q0.x;
   let dy = e.docY - d.q0.y;
@@ -228,7 +285,7 @@ function onPointerMove(e: ToolPointerEvent) {
     dx += sn.dx;
     dy += sn.dy;
   }
-  // Whole pixels at ≥100% feel better (no blurry half-pixel positions); finer when zoomed in.
+  // Whole pixels at normal zoom (no blurry half-pixel positions); finer steps when zoomed in.
   const z = viewport.zoom();
   const q = z >= 4 ? 0.25 : 1;
   dx = Math.round(dx / q) * q;
@@ -238,6 +295,7 @@ function onPointerMove(e: ToolPointerEvent) {
   d.last = { x: e.docX, y: e.docY };
   const leaves = d.leaves;
   const starts = d.starts;
+  const masks = d.follower ? d.follower.update(translate(dx, dy)) : null;
   useEditor.getState().preview((draft) => {
     for (const id of leaves) {
       const l = draft.layers[id];
@@ -246,6 +304,7 @@ function onPointerMove(e: ToolPointerEvent) {
       l.transform.x = st.x + dx;
       l.transform.y = st.y + dy;
     }
+    masks?.(draft);
   });
   viewport.requestOverlay();
 }
@@ -262,6 +321,15 @@ function onPointerUp() {
       else d.session.cancel();
     }
     viewport.requestOverlay();
+    return;
+  }
+  if (d.kind === 'band') {
+    viewport.requestOverlay();
+    const s = activeSession();
+    if (!s || !d.moved) return;
+    let ids = d.hits;
+    if (d.additive) ids = [...s.selectedLayerIds.filter((id) => !ids.includes(id)), ...ids];
+    if (ids.length) useEditor.getState().setSelectedLayers(ids, d.hits[0] ?? ids[ids.length - 1]);
     return;
   }
   if (!d.moved) return;
@@ -306,9 +374,10 @@ function onHover(e: ToolPointerEvent) {
   }
 }
 
+const ARROWS: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+
 function onKeyDown(e: KeyboardEvent): boolean {
   const ses = activeTransform();
-  const arrows: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
   if (ses) {
     if (e.key === 'Enter') {
       commitTransform();
@@ -318,16 +387,28 @@ function onKeyDown(e: KeyboardEvent): boolean {
       cancelTransform();
       return true;
     }
-    if (arrows[e.key] && !e.ctrlKey && !e.metaKey) {
+    if (matchShortcut(e, 'Ctrl+Z')) {
+      if (!ses.undoStep()) cancelTransform();
+      return true;
+    }
+    if (ARROWS[e.key] && !e.ctrlKey && !e.metaKey) {
       const k = e.shiftKey ? 10 : 1;
-      ses.nudge(arrows[e.key][0] * k, arrows[e.key][1] * k);
+      ses.nudge(ARROWS[e.key][0] * k, ARROWS[e.key][1] * k);
       return true;
     }
     return false;
   }
-  if (arrows[e.key] && !e.ctrlKey && !e.metaKey && !e.altKey && activeSession()) {
+  if (e.key === 'Escape' && drag) {
+    if (drag.kind === 'move' && drag.moved) useEditor.getState().cancelPreview();
+    if (drag.kind === 'transform' && !drag.persistent) drag.session.cancel();
+    drag = null;
+    clearSmartGuides();
+    viewport.requestOverlay();
+    return true;
+  }
+  if (ARROWS[e.key] && !e.ctrlKey && !e.metaKey && !e.altKey && activeSession()) {
     const k = e.shiftKey ? 10 : 1;
-    nudgeLayers(arrows[e.key][0] * k, arrows[e.key][1] * k);
+    nudgeLayers(ARROWS[e.key][0] * k, ARROWS[e.key][1] * k);
     return true;
   }
   return false;
@@ -340,6 +421,17 @@ function onDeactivate() {
   vpState.hoverLayerId = null;
   if (activeTransform()) commitTransform();
   clearSmartGuides();
+}
+
+function strokeLayerOutline(ctx: CanvasRenderingContext2D, l: Layer, color: string) {
+  if (!isTransformable(l)) return;
+  const pts = layerCorners(l).map((p) => viewport.docToScreen(p));
+  ctx.beginPath();
+  pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+  ctx.closePath();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = color;
+  ctx.stroke();
 }
 
 function renderOverlay(ctx: CanvasRenderingContext2D) {
@@ -355,19 +447,37 @@ function renderOverlay(ctx: CanvasRenderingContext2D) {
     return;
   }
   const extras = useUI.getState().view.extras;
+  if (drag?.kind === 'band') {
+    if (!drag.moved) return;
+    ctx.save();
+    for (const id of drag.hits) {
+      const l = s.doc.layers[id];
+      if (!l) continue;
+      if (l.type === 'group') {
+        for (const leaf of transformableLeaves(s.doc, [id]).movable) strokeLayerOutline(ctx, s.doc.layers[leaf], ACCENT);
+      } else strokeLayerOutline(ctx, l, ACCENT);
+    }
+    const r = bandRect(drag);
+    const p0 = viewport.docToScreen({ x: r.x, y: r.y });
+    const p1 = viewport.docToScreen({ x: r.x + r.width, y: r.y + r.height });
+    const x = Math.round(p0.x) + 0.5;
+    const y = Math.round(p0.y) + 0.5;
+    const w = Math.round(p1.x - p0.x);
+    const h = Math.round(p1.y - p0.y);
+    ctx.fillStyle = 'rgba(139,124,246,0.10)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = 'rgba(139,124,246,0.9)';
+    ctx.strokeRect(x, y, w, h);
+    ctx.restore();
+    return;
+  }
   // Hover outline (auto-select preview)
   const hov = vpState.hoverLayerId;
   if (hov && extras && !drag && !selectedIds().includes(hov)) {
     const l = s.doc.layers[hov];
-    if (isTransformable(l)) {
-      const pts = layerCorners(l).map((p) => viewport.docToScreen(p));
+    if (l) {
       ctx.save();
-      ctx.beginPath();
-      pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-      ctx.closePath();
-      ctx.lineWidth = 1;
-      ctx.strokeStyle = 'rgba(139,124,246,0.9)';
-      ctx.stroke();
+      strokeLayerOutline(ctx, l, 'rgba(139,124,246,0.9)');
       ctx.restore();
     }
   }

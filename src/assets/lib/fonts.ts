@@ -10,6 +10,7 @@ import '@fontsource/playfair-display/latin-900.css';
 import '@fontsource/anton/latin-400.css';
 import '@fontsource/roboto-condensed/latin-700.css';
 import '@fontsource/caveat/latin-400.css';
+import '@fontsource/bangers/latin-400.css';
 
 export const FONT = {
   body: '"EB Garamond", "Libre Baskerville", "Times New Roman", serif',
@@ -18,6 +19,7 @@ export const FONT = {
   headCond: '"Oswald", "Roboto Condensed", "Arial Narrow", sans-serif',
   cond: '"Roboto Condensed", "Arial Narrow", sans-serif',
   hand: '"Caveat", "Segoe Print", cursive',
+  comic: '"Bangers", "Luckiest Guy", Impact, sans-serif',
 };
 
 const FACES: [string, number][] = [
@@ -28,6 +30,7 @@ const FACES: [string, number][] = [
   ['Anton', 400],
   ['Roboto Condensed', 700],
   ['Caveat', 400],
+  ['Bangers', 400],
 ];
 
 let ready: Promise<void> | null = null;

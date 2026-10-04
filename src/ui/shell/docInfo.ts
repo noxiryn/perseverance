@@ -66,3 +66,28 @@ export function tabLabel(name: string, dirty: boolean): string {
 export function windowTitle(name: string | null, dirty: boolean): string {
   return name ? `${name}${dirty ? ' *' : ''} — Perseverance` : 'Perseverance';
 }
+
+/* ------------------------------------------------------------------ */
+/* File drops                                                          */
+/* ------------------------------------------------------------------ */
+
+const PROJECT_EXTS = new Set(['pgfx', 'psd']);
+const SUPPORTED_EXTS = new Set(['pgfx', 'psd', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'avif', 'ico']);
+
+function extension(name: string): string {
+  const i = name.lastIndexOf('.');
+  return i >= 0 ? name.slice(i + 1).toLowerCase() : '';
+}
+
+/** Decide how a dropped file opens: projects, no open document or Shift → new document. */
+export function dropMode(name: string, hasDoc: boolean, shift: boolean): 'new' | 'place' {
+  if (PROJECT_EXTS.has(extension(name)) || !hasDoc || shift) return 'new';
+  return 'place';
+}
+
+/** Whether a dropped file can be opened (known extension or an image MIME type). */
+export function isSupportedDrop(name: string, mime = ''): boolean {
+  const ext = extension(name);
+  if (SUPPORTED_EXTS.has(ext)) return true;
+  return mime.startsWith('image/');
+}

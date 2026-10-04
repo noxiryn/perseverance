@@ -1,0 +1,327 @@
+/* Adjustments module — panel, adjustment editor, levels editor. */
+
+.adjustments-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+.adjustments-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.adjustments-section {
+  padding: 8px 10px 10px;
+  border-bottom: 1px solid var(--divider);
+}
+.adjustments-section.grow {
+  border-bottom: none;
+  flex: 1;
+}
+
+.adjustments-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+button.adjustments-heading {
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  width: 100%;
+  margin-bottom: 0;
+}
+button.adjustments-heading:hover {
+  color: var(--text);
+}
+
+/* ---------- add grid ---------- */
+
+.adjustments-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.adjustments-grid-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.adjustments-grid-row + .adjustments-grid-row {
+  padding-top: 3px;
+  border-top: 1px solid #222;
+}
+.adjustments-add-btn {
+  width: 30px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0;
+  transition:
+    background 80ms,
+    color 80ms;
+}
+.adjustments-add-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+.adjustments-add-btn:active {
+  background: var(--bg-active);
+}
+.adjustments-add-btn.current {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+.adjustments-grid.disabled .adjustments-add-btn {
+  opacity: 0.45;
+}
+
+.adjustments-hint {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+.adjustments-hint.center {
+  text-align: center;
+  padding-top: 8px;
+}
+
+/* ---------- preset list ---------- */
+
+.adjustments-presets {
+  display: flex;
+  flex-direction: column;
+  padding-top: 6px;
+}
+.adjustments-preset-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+  text-align: left;
+}
+.adjustments-preset-head:hover {
+  background: var(--bg-hover);
+}
+.adjustments-preset-head span:first-of-type {
+  flex: 1;
+}
+.adjustments-preset-head .count {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+.adjustments-preset-items {
+  display: flex;
+  flex-direction: column;
+  padding: 2px 0 4px 34px;
+}
+.adjustments-preset-item {
+  text-align: left;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  border-radius: var(--radius-sm);
+  padding: 0 6px;
+  cursor: pointer;
+}
+.adjustments-preset-item:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* ---------- editor ---------- */
+
+.adjustments-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.adjustments-editor-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 24px;
+}
+.adjustments-editor-icon {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  color: var(--text-strong);
+  margin-right: 6px;
+}
+.adjustments-editor-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.adjustments-editor-title .name {
+  font-weight: 600;
+  color: var(--text-strong);
+  font-size: var(--fs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.adjustments-editor-title .layer {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.adjustments-editor-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  margin-top: -4px;
+}
+.adjustments-editor-sub .clip.on {
+  color: var(--accent-strong);
+}
+.adjustments-editor-sub .hidden-badge {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg-active);
+  color: var(--text-dim);
+}
+.adjustments-preset-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+.adjustments-editor-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.adjustments-curves {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ---------- levels ---------- */
+
+.adjustments-histogram {
+  display: block;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+.adjustments-histogram.loading {
+  animation: adjustments-pulse 1.1s ease-in-out infinite alternate;
+}
+@keyframes adjustments-pulse {
+  from {
+    opacity: 0.55;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.adjustments-levels {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.adjustments-tri-track {
+  position: relative;
+  height: 12px;
+  margin-top: 1px;
+}
+.adjustments-range-shade {
+  position: absolute;
+  top: 0;
+  height: 2px;
+  background: #4a4a4a;
+  border-radius: 1px;
+}
+.adjustments-tri {
+  position: absolute;
+  top: 1px;
+  width: 12px;
+  height: 10px;
+  margin-left: -6px;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.adjustments-tri svg {
+  display: block;
+}
+.adjustments-tri:hover path {
+  stroke: var(--accent-strong);
+}
+.adjustments-levels-fields {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 2px;
+}
+.adjustments-sublabel {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 8px;
+  margin-bottom: 2px;
+}
+.adjustments-out-bar {
+  height: 10px;
+  border-radius: 2px;
+  border: 1px solid #3a3a3a;
+  background: linear-gradient(to right, #000, #fff);
+}
+
+/* ---------- empty state ---------- */
+
+.adjustments-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 22px 12px;
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+  text-align: center;
+  line-height: 1.45;
+}

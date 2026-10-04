@@ -1,0 +1,228 @@
+/* Looks panel */
+.looks-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: var(--fs-sm);
+}
+
+.looks-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 4px;
+}
+
+.looks-seg {
+  flex: 1;
+  display: flex;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2px;
+  gap: 2px;
+  min-width: 0;
+}
+.looks-seg button {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 20px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  min-width: 0;
+}
+.looks-seg button:hover {
+  color: var(--text);
+}
+.looks-seg button.active {
+  background: var(--bg-active);
+  color: var(--text-strong);
+  box-shadow: inset 0 -1px 0 var(--accent);
+}
+
+.looks-target {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0 9px 4px;
+  min-width: 0;
+}
+.looks-target-label {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.looks-target-name {
+  color: var(--text);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.looks-target-name em {
+  color: var(--warning);
+  font-style: normal;
+}
+
+.looks-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 2px 8px 6px;
+  border-bottom: 1px solid var(--divider);
+}
+.looks-cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.looks-cat {
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.looks-cat:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.looks-cat.active {
+  color: var(--text-strong);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.looks-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 4px;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.looks-grid-wrap {
+  flex: 1;
+  padding: 8px;
+}
+.looks-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 7px;
+}
+
+.looks-card {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel-2);
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.12s ease, transform 0.12s ease;
+}
+.looks-card:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+.looks-card:hover:not(:disabled) .looks-thumb img {
+  transform: scale(1.04);
+}
+.looks-card:active:not(:disabled) {
+  transform: scale(0.98);
+}
+.looks-card:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.looks-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.looks-thumb {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+}
+.looks-thumb img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.25s ease;
+}
+.looks-chips {
+  position: absolute;
+  left: 5px;
+  bottom: 5px;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+}
+.looks-chips span {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+.looks-badge {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+.looks-name {
+  padding: 5px 6px;
+  font-size: var(--fs-xs);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.looks-card.active .looks-name {
+  color: var(--text-strong);
+}
+
+.looks-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-top: 1px solid var(--divider);
+  min-height: 30px;
+}
+.looks-count {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  padding-right: 4px;
+}

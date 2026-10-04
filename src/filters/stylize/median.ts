@@ -111,7 +111,7 @@ export function medianChannel(src: Uint8Array, w: number, h: number, radius: num
 }
 
 /** Median filter of an RGBA image in place (premultiplied so transparent edges stay clean). */
-export function medianImage(img: Img, radius: number, preserveAlpha = true): Img {
+export function medianImage<T extends Img>(img: T, radius: number, preserveAlpha = true): T {
   const r = Math.round(radius);
   if (r < 1) return img;
   const { width: w, height: h, data } = img;

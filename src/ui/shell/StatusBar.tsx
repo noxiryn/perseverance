@@ -13,7 +13,8 @@ import { ErrorBoundary } from './ErrorBoundary';
 
 function ZoomField({ disabled }: { disabled: boolean }) {
   const zoom = useEditor((s) => (s.activeDocId ? (s.sessions[s.activeDocId]?.view.zoom ?? 0) : 0));
-  const label = disabled ? '—' : formatZoom(zoom || 1);
+  // zoom 0 = not fitted yet (the viewport fits on first render).
+  const label = disabled || !zoom ? '—' : formatZoom(zoom);
   const [text, setText] = useState(label);
   const focused = useRef(false);
   useEffect(() => {
@@ -22,7 +23,7 @@ function ZoomField({ disabled }: { disabled: boolean }) {
   const commit = () => {
     const z = parseZoom(text);
     if (z) viewport.zoomTo(z);
-    setText(disabled ? '—' : formatZoom(z ?? (zoom || 1)));
+    setText(z ? formatZoom(z) : label);
   };
   return (
     <input

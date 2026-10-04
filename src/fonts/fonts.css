@@ -1,0 +1,313 @@
+/* fonts-color module — FontSelect, font picker popover and Fonts panel. Prefix: fc- */
+
+.fc-dim {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* ---------------- FontSelect button ---------------- */
+.fc-fontselect {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text);
+}
+.fc-fontselect > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  line-height: 1.2;
+}
+.fc-fontselect:hover {
+  border-color: var(--border-strong);
+}
+.fc-fontselect-warn {
+  flex: none;
+  color: var(--warning);
+}
+
+/* ---------------- Picker popover ---------------- */
+.ui-popover.fc-fontpop {
+  padding: 8px 8px 6px;
+}
+.fc-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  height: min(440px, calc(100vh - 40px));
+}
+
+.fc-chips {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+.fc-chips.scroll {
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding-bottom: 1px;
+}
+.fc-chips.scroll::-webkit-scrollbar {
+  display: none;
+}
+.fc-chip {
+  flex: none;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.fc-chip:hover {
+  color: var(--text);
+  border-color: #4a4a4a;
+}
+.fc-chip.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text-strong);
+}
+
+.fc-picker-list {
+  flex: 1;
+  min-height: 0;
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+}
+.fc-picker-header {
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  padding: 0 10px 4px;
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+.fc-picker-row {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 4px;
+  cursor: pointer;
+  color: var(--text);
+  border-left: 2px solid transparent;
+}
+.fc-picker-row.hl {
+  background: var(--bg-hover);
+}
+.fc-picker-row.current {
+  border-left-color: var(--accent);
+  background: var(--bg-selected);
+}
+.fc-picker-name {
+  font-size: 16px;
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.fc-picker-sample {
+  font-size: 13px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.fc-picker-meta {
+  margin-left: auto;
+  padding-left: 8px;
+  flex: none;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  font-family: var(--font-ui);
+}
+.fc-picker-foot {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  flex: none;
+}
+.fc-picker-foot .ui-btn.small {
+  height: 20px;
+  padding: 0 6px;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+
+.fc-star {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: #555;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 0;
+}
+.fc-star:hover {
+  color: var(--text);
+  background: var(--bg-active);
+}
+.fc-star.on {
+  color: #f2c94c;
+}
+
+/* ---------------- Fonts panel ---------------- */
+.fc-fonts {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.fc-fonts-top {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 8px 6px;
+  border-bottom: 1px solid var(--divider);
+  flex: none;
+}
+.fc-fonts-preview {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.fc-fonts-preview > .ui-input {
+  flex: 1;
+}
+.fc-fonts-size {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 92px;
+  flex: none;
+}
+.fc-fonts-size .ui-slider {
+  flex: 1;
+}
+.fc-fonts-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  min-height: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.fc-fonts-target > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fc-fonts-target b {
+  color: var(--text);
+  font-weight: 500;
+}
+.fc-fonts-list {
+  flex: 1;
+  min-height: 0;
+}
+.fc-fonts-header {
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 0 10px 5px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.fc-card {
+  height: calc(100% - 4px);
+  margin: 2px 6px;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  background: var(--bg-panel-2);
+  cursor: pointer;
+  overflow: hidden;
+  padding: 4px 6px 0 8px;
+}
+.fc-card:hover {
+  border-color: var(--border-strong);
+  background: #222;
+}
+.fc-card.applied {
+  border-color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.fc-card-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 20px;
+  flex: none;
+}
+.fc-card-name {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.fc-card-check {
+  color: var(--accent-strong);
+  flex: none;
+}
+.fc-card-meta {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  white-space: nowrap;
+  flex: none;
+}
+.fc-card-preview {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  mask-image: linear-gradient(to right, #000 85%, transparent);
+}
+.fc-card-preview > span {
+  white-space: nowrap;
+}
+.fc-fonts-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--divider);
+  flex: none;
+}
+.fc-fonts-foot .ui-btn.small {
+  gap: 4px;
+}

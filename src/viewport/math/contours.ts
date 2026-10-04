@@ -54,7 +54,7 @@ const TABLE: number[][] = [
  * Trace iso-contours of a mask. Returns closed polylines as flat [x0, y0, x1, y1, …] arrays in
  * output coordinates (pixel-boundary space: a fully selected pixel (x, y) spans [x, x+1]).
  */
-export function traceContours(src: MaskSource, threshold = 128, simplify = true): Float32Array[] {
+export function traceContours(src: MaskSource, threshold = 127.5, simplify = true): Float32Array[] {
   const { data, width: W, height: H, stride, offset } = src;
   const ox = src.originX ?? 0;
   const oy = src.originY ?? 0;

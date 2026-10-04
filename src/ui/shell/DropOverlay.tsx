@@ -5,27 +5,19 @@
  */
 import { useEffect } from 'react';
 import { FileUp } from 'lucide-react';
-import { extOf } from '../../platform';
 import { useEditor } from '../../state/editor';
 import { toast } from '../../state/ui';
+import { dropMode, isSupportedDrop } from './docInfo';
 import { openFileWithIo } from './documents';
 import { useShell } from './shellStore';
 
 const ASSET_MIME = 'application/x-perseverance-asset';
-const PROJECT_EXTS = new Set(['pgfx', 'psd']);
-const SUPPORTED = new Set(['pgfx', 'psd', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'avif', 'ico']);
 
 function isFileDrag(e: DragEvent): boolean {
   const types = e.dataTransfer?.types;
   if (!types) return false;
   const list = Array.from(types);
   return list.includes('Files') && !list.includes(ASSET_MIME);
-}
-
-/** Decide how a dropped file opens. */
-export function dropMode(name: string, hasDoc: boolean, shift: boolean): 'new' | 'place' {
-  if (PROJECT_EXTS.has(extOf(name)) || !hasDoc || shift) return 'new';
-  return 'place';
 }
 
 export function useFileDrop() {
@@ -71,8 +63,7 @@ export function useFileDrop() {
       const hasDoc = !!useEditor.getState().activeDocId;
       const shift = e.shiftKey;
       for (const f of files) {
-        const ext = extOf(f.name);
-        if (ext && !SUPPORTED.has(ext) && !f.type.startsWith('image/')) {
+        if (!isSupportedDrop(f.name, f.type)) {
           toast(`“${f.name}” is not a supported file type`, 'warning');
           continue;
         }

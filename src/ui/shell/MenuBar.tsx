@@ -66,9 +66,12 @@ function evaluate(nodes: MenuTreeNode[]): Row[] {
   return rows;
 }
 
-export function runCommandSafely(c: CommandDef) {
-  // Let menus/palette unmount before dialogs open.
-  window.setTimeout(() => {
+/**
+ * Run a command, reporting failures (sync or async) as toasts. Menus and the palette defer the run
+ * (`defer`) so they can unmount before a dialog opens; keyboard shortcuts run immediately.
+ */
+export function runCommandSafely(c: CommandDef, defer = true) {
+  const exec = () => {
     try {
       if (c.enabled && !c.enabled()) return;
       const r = c.run();
@@ -82,7 +85,9 @@ export function runCommandSafely(c: CommandDef) {
       console.error(e);
       toast(`${c.label}: ${(e as Error)?.message ?? e}`, 'error', 4000);
     }
-  }, 0);
+  };
+  if (defer) window.setTimeout(exec, 0);
+  else exec();
 }
 
 const selectable = (r: Row | undefined) => !!r && r.kind === 'item';

@@ -1,0 +1,261 @@
+/* Shape tools: options bar, paint chips, preset browser, properties section. */
+
+.shape-opts {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 100%;
+  min-width: 0;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.shape-opts-label {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.shape-opts-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border-strong);
+  flex: none;
+  margin: 0 3px;
+}
+
+.shape-opts-spacer {
+  flex: 1;
+  min-width: 8px;
+}
+
+.shape-opts-hint {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* ---------- paint chips ---------- */
+
+.shape-chip {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: repeating-conic-gradient(#8a8a8a 0% 25%, #bdbdbd 0% 50%) 50% / 8px 8px;
+  cursor: pointer;
+  overflow: hidden;
+  flex: none;
+}
+.shape-chip:hover,
+.shape-chip.active {
+  border-color: var(--accent);
+}
+.shape-chip-paint {
+  position: absolute;
+  inset: 0;
+}
+.shape-chip-none {
+  position: absolute;
+  inset: 0;
+  background: #f2f2f2;
+}
+.shape-chip-none::after {
+  content: '';
+  position: absolute;
+  left: -3px;
+  right: -3px;
+  top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  background: var(--danger);
+  transform: rotate(-45deg);
+}
+.shape-chip-hole {
+  position: absolute;
+  inset: 6px;
+  border-radius: 1px;
+  background: var(--bg-panel);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.shape-pop {
+  padding: 0;
+}
+.shape-pop-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  min-width: 232px;
+}
+.shape-pop-hint {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  padding: 6px 2px;
+}
+
+.shape-modes {
+  display: flex;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2px;
+  gap: 2px;
+}
+.shape-mode {
+  flex: 1;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.shape-mode:hover {
+  color: var(--text-strong);
+}
+.shape-mode.active {
+  background: var(--bg-active);
+  color: var(--text-strong);
+}
+
+/* ---------- preset picker ---------- */
+
+.shape-preset-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-h);
+  padding: 0 6px;
+  max-width: 180px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.shape-preset-trigger:hover,
+.shape-preset-trigger.open {
+  border-color: var(--accent);
+}
+.shape-preset-trigger svg {
+  flex: none;
+  color: var(--text-strong);
+}
+.shape-preset-trigger.compact {
+  max-width: 150px;
+}
+.shape-preset-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+}
+
+.shape-browser {
+  width: 336px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+.shape-cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.shape-cat {
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.shape-cat:hover {
+  color: var(--text-strong);
+  border-color: var(--border-strong);
+}
+.shape-cat.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text-strong);
+}
+.shape-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+  max-height: 268px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.shape-tile {
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  background: var(--bg-input);
+  color: var(--text);
+  cursor: pointer;
+  padding: 0;
+}
+.shape-tile:hover {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+.shape-tile.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-strong);
+}
+.shape-empty {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  padding: 16px 4px;
+  text-align: center;
+}
+.shape-browser-foot {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+/* ---------- properties ---------- */
+
+.shape-props {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.shape-props-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.shape-props-row > .ui-row {
+  flex: 1;
+  min-width: 0;
+}
+.shape-props-dim {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.shape-props-empty {
+  color: var(--text-dim);
+  padding: 6px 0;
+}

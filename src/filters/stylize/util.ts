@@ -287,11 +287,11 @@ export function unpremultiplyInPlace(d: Uint8ClampedArray) {
  * Gaussian blur of an RGBA image in place with premultiplied alpha (no dark fringes at
  * transparent edges). `sigma` in image px. Uses the shared box blur for large radii.
  */
-export function blurImage(img: Img, sigma: number): Img {
+export function blurImage<T extends Img>(img: T, sigma: number): T {
   if (!(sigma > 0.2)) return img;
   premultiplyInPlace(img.data);
   if (sigma < 1.5) gaussSmallRGBA(img, sigma);
-  else boxBlurImageData(img as ImageData, sigma * 2);
+  else boxBlurImageData(img as unknown as ImageData, sigma * 2);
   unpremultiplyInPlace(img.data);
   return img;
 }
@@ -545,7 +545,7 @@ export function samplePlane(buf: Float32Array, w: number, h: number, fx: number,
  * Inverse-mapping distortion helper. `fill(sx, sy, y)` must write, for every output pixel x of row
  * y, the index-space source coordinates. Sampling is premultiplied bilinear.
  */
-export function remap(img: Img, fill: (sx: Float32Array, sy: Float32Array, y: number) => void, edge: Edge = autoEdge(img)): Img {
+export function remap<T extends Img>(img: T, fill: (sx: Float32Array, sy: Float32Array, y: number) => void, edge: Edge = autoEdge(img)): T {
   const { width: w, height: h } = img;
   const src = new Uint8ClampedArray(img.data);
   const dst = img.data;

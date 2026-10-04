@@ -29,6 +29,8 @@ export const vpState = {
   guideDrag: null as GuideDrag | null,
   /** Layer under the cursor (move tool hover outline). */
   hoverLayerId: null as string | null,
+  /** A tool draws the selection outline itself (e.g. while dragging it) → skip the default ants. */
+  suppressAnts: false,
 };
 
 /** doc → screen (CSS px) matrix for the active view. */

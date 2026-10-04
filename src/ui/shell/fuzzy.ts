@@ -44,6 +44,31 @@ export function fuzzyMatch(query: string, text: string): FuzzyResult | null {
   return { score: total, indices: [...new Set(all)].sort((a, b) => a - b) };
 }
 
+/**
+ * Strict match for secondary text (keywords, menu paths, categories): every query term must occur
+ * as a substring. Word-start occurrences score higher. Returns null when a term is missing.
+ */
+export function wordsMatch(query: string, text: string): number | null {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return 0;
+  const lower = text.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    let idx = lower.indexOf(term);
+    if (idx < 0) return null;
+    let best = term.length * 6;
+    while (idx >= 0) {
+      if (isWordStart(text, idx)) {
+        best = term.length * 10 + 10;
+        break;
+      }
+      idx = lower.indexOf(term, idx + 1);
+    }
+    score += best;
+  }
+  return score;
+}
+
 function matchTerm(term: string, text: string, lower: string): FuzzyResult | null {
   // Fast path: contiguous substring (prefer one at a word start).
   let best: FuzzyResult | null = null;
@@ -64,6 +89,10 @@ function matchTerm(term: string, text: string, lower: string): FuzzyResult | nul
   let score = 0;
   let ti = 0;
   let last = -2;
+  // Characters matched in the middle of a word without being consecutive ("scattered"); too many
+  // of them means the match is noise ('lev' should not match 'Save As').
+  let scattered = 0;
+  const maxScattered = Math.max(1, Math.floor(term.length / 2));
   for (let qi = 0; qi < term.length; qi++) {
     const ch = term[qi];
     // Look ahead for a word-start occurrence first.
@@ -81,7 +110,10 @@ function matchTerm(term: string, text: string, lower: string): FuzzyResult | nul
     if (next !== last + 1 && found >= 0) pick = found;
     if (pick === last + 1) score += 8;
     else if (isWordStart(text, pick)) score += 6;
-    else score += 1;
+    else {
+      score += 1;
+      if (++scattered > maxScattered) return null;
+    }
     indices.push(pick);
     last = pick;
     ti = pick + 1;

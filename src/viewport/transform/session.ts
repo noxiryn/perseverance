@@ -34,6 +34,7 @@ import {
   type Affine,
 } from '../math/affine';
 import { layerFrame, transformableLeaves } from '../layers';
+import { MaskFollower } from '../maskFollow';
 import { collectSnapTargets, clearSmartGuides, snapPoint, snapRect, type SnapTargets } from '../snap';
 import { selectionOutline, drawAnts } from '../outline';
 import { drawHandle, drawLabel, drawPivot, resizeCursorForAngle, rotateCursor } from '../draw';
@@ -109,6 +110,11 @@ export class TransformSession {
   label: string;
   /** Listeners notified on every change (options bar). */
   onChange: (() => void) | null = null;
+  /** Ids the session was created for (groups included) — their masks follow the transform. */
+  rootIds: ID[] = [];
+  /** In-session undo (Ctrl+Z while transforming). */
+  private undoStack: { D: Affine; pivot: Point }[] = [];
+  private follower: MaskFollower | null | undefined = undefined;
 
   private constructor(kind: 'layers' | 'selection', mode: 'immediate' | 'session', docId: ID, baseEntryId: ID, label: string) {
     this.kind = kind;
@@ -134,6 +140,7 @@ export class TransformSession {
       return 'Select a pixel, text, shape layer or group to transform.';
     }
     const ses = new TransformSession('layers', mode, doc.id, s.history.entries[s.history.index].id, label ?? (mode === 'session' ? 'Free Transform' : 'Transform'));
+    ses.rootIds = [...ids];
     let allRasterText = true;
     for (const id of movable) {
       const l = doc.layers[id];
@@ -324,6 +331,7 @@ export class TransformSession {
       const s0 = this.toScreen(g.q0);
       if (Math.hypot(e.screenX - s0.x, e.screenY - s0.y) < 2) return;
       g.moved = true;
+      this.pushUndo(g.D0, g.pivot0);
     }
     g.last = q;
     const F = g.F;
@@ -461,6 +469,7 @@ export class TransformSession {
 
   /** Nudge the whole box (arrow keys during a session). */
   nudge(dx: number, dy: number) {
+    this.pushUndo();
     const G = translate(dx, dy);
     this.D = mul(G, this.D);
     this.pivot = apply(G, this.pivot);
@@ -469,6 +478,7 @@ export class TransformSession {
 
   /** Apply values typed in the options bar (any subset). */
   setFields(v: { x?: number; y?: number; sx?: number; sy?: number; rotation?: number; skew?: number }) {
+    this.pushUndo();
     const F = this.frameMatrix();
     const pl = apply(invert(F), this.pivot);
     const cur = this.frameTransform();
@@ -497,6 +507,7 @@ export class TransformSession {
 
   /** Flip the frame around the pivot (handy in a session). */
   flip(horizontal: boolean) {
+    this.pushUndo();
     const F = this.frameMatrix();
     const pl = apply(invert(F), this.pivot);
     const local = about(pl, horizontal ? scale(-1, 1) : scale(1, -1));
@@ -518,6 +529,24 @@ export class TransformSession {
     return isIdentity(this.D, 1e-7);
   }
 
+  private pushUndo(D: Affine = this.D, pivot: Point = this.pivot) {
+    const last = this.undoStack[this.undoStack.length - 1];
+    if (last && isIdentity(mul(invert(last.D), D), 1e-9) && last.pivot.x === pivot.x && last.pivot.y === pivot.y) return;
+    this.undoStack.push({ D: { ...D }, pivot: { ...pivot } });
+    if (this.undoStack.length > 100) this.undoStack.shift();
+  }
+
+  /** Step back one gesture inside the session. Returns false when there is nothing to undo. */
+  undoStep(): boolean {
+    const prev = this.undoStack.pop();
+    if (!prev) return false;
+    this.gesture = null;
+    this.D = prev.D;
+    this.pivot = prev.pivot;
+    this.changed(true);
+    return true;
+  }
+
   private changed(geometry: boolean) {
     if (geometry && this.kind === 'layers') this.applyPreview();
     viewport.requestOverlay();
@@ -531,12 +560,26 @@ export class TransformSession {
     if (!s || s.doc.id !== this.docId) return;
     const D = this.D;
     const targets = this.targets;
+    if (this.follower === undefined) this.follower = MaskFollower.forLayers(s.doc, this.rootIds.length ? this.rootIds : targets.map((t) => t.id));
+    const masks = this.follower ? this.follower.update(D) : null;
+    const reshape = !isTranslation(D);
     useEditor.getState().preview((d) => {
       for (const t of targets) {
         const l = d.layers[t.id];
         if (!l || !isTransformable(l)) continue;
-        l.transform = decompose(mul(D, t.start), t.w, t.h, t.startTransform);
+        const tr = decompose(mul(D, t.start), t.w, t.h, t.startTransform);
+        if (l.type === 'shape' && reshape && Math.abs(tr.skewX ?? 0) < 1e-6) {
+          // Vector shapes keep crisp geometry and constant stroke width: bake the scale into the box.
+          const w = Math.max(0.5, Math.abs(tr.scaleX) * t.w);
+          const h = Math.max(0.5, Math.abs(tr.scaleY) * t.h);
+          const cx = tr.x + t.w / 2;
+          const cy = tr.y + t.h / 2;
+          l.shape.width = w;
+          l.shape.height = h;
+          l.transform = { ...tr, x: cx - w / 2, y: cy - h / 2, scaleX: Math.sign(tr.scaleX) || 1, scaleY: Math.sign(tr.scaleY) || 1, skewX: 0 };
+        } else l.transform = tr;
       }
+      masks?.(d);
     });
     this.previewed = true;
   }
@@ -670,6 +713,10 @@ function sideEnds(h: HandleId): [HandleId, HandleId] {
     default:
       return ['tr', 'br'];
   }
+}
+
+function isTranslation(m: Affine): boolean {
+  return Math.abs(m.a - 1) < 1e-9 && Math.abs(m.b) < 1e-9 && Math.abs(m.c) < 1e-9 && Math.abs(m.d - 1) < 1e-9;
 }
 
 function clampScale(k: number): number {

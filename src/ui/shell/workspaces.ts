@@ -82,8 +82,12 @@ export function sanitizeLayout(raw: unknown): WorkspaceLayout | null {
   const groups: DockGroupState[] = [];
   for (const slot of SLOTS) {
     const src = r.groups.find((x) => x && (x as DockGroupState).slot === slot) as Partial<DockGroupState> | undefined;
-    const tabs = (Array.isArray(src?.tabs) ? src!.tabs : []).filter((t): t is string => typeof t === 'string' && !seen.has(t));
-    tabs.forEach((t) => seen.add(t));
+    const tabs: string[] = [];
+    for (const t of Array.isArray(src?.tabs) ? src!.tabs : []) {
+      if (typeof t !== 'string' || seen.has(t)) continue;
+      seen.add(t);
+      tabs.push(t);
+    }
     const active = typeof src?.active === 'string' && tabs.includes(src.active) ? src.active : (tabs[0] ?? '');
     const size = typeof src?.size === 'number' && Number.isFinite(src.size) && src.size > 0 ? Math.min(10, Math.max(0.15, src.size)) : 1;
     groups.push({ slot, tabs, active, size, collapsed: !!src?.collapsed });

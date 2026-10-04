@@ -1,5 +1,5 @@
 /** Pure ranking/grouping for the command palette. */
-import { fuzzyMatch } from './fuzzy';
+import { fuzzyMatch, wordsMatch } from './fuzzy';
 
 export interface RankableItem {
   key: string;
@@ -48,13 +48,15 @@ export function rankItems<T extends RankableItem>(
       score = t.score + 20;
       indices = t.indices;
     } else {
-      const extra = `${it.subtitle ?? ''} ${it.keywords ?? ''}`;
-      const k = fuzzyMatch(q, extra);
-      if (!k) continue;
-      score = k.score * 0.5;
+      // Secondary text (menu path, category, keywords) must contain every term verbatim.
+      const extra = `${it.title} ${it.subtitle ?? ''} ${it.keywords ?? ''}`;
+      const k = wordsMatch(q, extra);
+      if (k === null) continue;
+      score = k * 0.5;
     }
     score += opts.boost?.[it.kind] ?? 0;
-    if (it.disabled) score -= 15;
+    // Disabled items cannot run right now: rank them below comparable enabled matches.
+    if (it.disabled) score -= 40;
     const list = byKind.get(it.kind);
     const entry = { item: it, score, indices };
     if (list) list.push(entry);

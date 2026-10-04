@@ -1,0 +1,423 @@
+/* ==========================================================================
+   Paint module — options bars, brush picker, Brushes panel
+   ========================================================================== */
+
+/* ---------- options bars ---------- */
+
+.paint-opts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  min-width: 0;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+.paint-opt-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border-strong);
+  flex: none;
+}
+.paint-opt-label {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+.paint-opt-hint {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.paint-opt-group {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+.paint-opts .ui-check {
+  flex: none;
+}
+.paint-toggle.ui-icon-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.paint-scrub {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex: none;
+}
+.paint-scrub .ui-num {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.paint-scrub-btn {
+  height: var(--control-h);
+  width: 14px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-left: none;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--bg-input);
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0;
+}
+.paint-scrub-btn:hover {
+  color: var(--text-strong);
+  background: var(--bg-hover);
+}
+.paint-scrub-pop {
+  width: 220px;
+  padding: 8px 10px;
+}
+
+.paint-seg {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  flex: none;
+}
+.paint-seg-btn {
+  width: 22px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0.65;
+}
+.paint-seg-btn:hover {
+  opacity: 1;
+  background: var(--bg-hover);
+}
+.paint-seg-btn.active {
+  opacity: 1;
+  background: var(--bg-active);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.paint-kind-icon {
+  border-radius: 2px;
+  display: block;
+}
+.paint-gradient-field {
+  width: 120px;
+  flex: none;
+}
+
+/* ---------- preset picker ---------- */
+
+.paint-picker-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 6px 0 3px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev);
+  color: var(--text);
+  cursor: pointer;
+  flex: none;
+}
+.paint-picker-btn:hover {
+  background: var(--bg-hover);
+}
+.paint-picker-size {
+  min-width: 22px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-sm);
+}
+.paint-tip-thumb {
+  display: block;
+  flex: none;
+  border-radius: 3px;
+  background: #101010;
+}
+.paint-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+.paint-picker-row {
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  align-items: center;
+  gap: 8px;
+}
+.paint-picker-list {
+  max-height: 360px;
+  overflow-y: auto;
+  margin: 0 -10px -10px;
+  padding: 0 4px 6px;
+  border-top: 1px solid var(--border);
+}
+
+/* ---------- preset list ---------- */
+
+.paint-presets {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 6px;
+}
+.paint-presets-cat {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 7px 8px 4px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  background: var(--bg-panel);
+}
+.paint-presets-list {
+  display: flex;
+  flex-direction: column;
+}
+.paint-presets-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
+  gap: 4px;
+  padding: 0 6px;
+}
+.paint-preset {
+  position: relative;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.paint-preset:hover {
+  background: var(--bg-hover);
+}
+.paint-preset.selected {
+  background: var(--bg-selected);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.paint-preset.list {
+  display: grid;
+  grid-template-columns: 30px 1fr 132px;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 6px;
+}
+.paint-preset.grid {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 5px 3px 4px;
+  border: 1px solid transparent;
+}
+.paint-preset.grid.selected {
+  box-shadow: none;
+  border-color: var(--accent);
+}
+.paint-preset-size {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.paint-preset-name {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.paint-preset.grid .paint-preset-name {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  max-width: 100%;
+}
+.paint-preset-stroke {
+  display: block;
+  pointer-events: none;
+}
+.paint-preset-del {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  display: none;
+  place-items: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: rgba(20, 20, 20, 0.92);
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0;
+}
+.paint-preset.grid .paint-preset-del {
+  top: 4px;
+  transform: none;
+}
+.paint-preset:hover .paint-preset-del {
+  display: grid;
+}
+.paint-preset-del:hover {
+  color: var(--danger);
+}
+.paint-empty {
+  padding: 18px 12px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+}
+
+/* ---------- Brushes panel ---------- */
+
+.paint-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+}
+.paint-panel-head {
+  flex: none;
+  padding: 8px 10px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.paint-panel-preview {
+  display: block;
+  width: 100%;
+  border-radius: var(--radius);
+  background:
+    radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.03), transparent 70%),
+    #111;
+  border: 1px solid var(--border);
+}
+.paint-panel-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
+.paint-panel-name {
+  color: var(--text-strong);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.paint-panel-size {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.paint-panel-tool {
+  margin-left: auto;
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: var(--fs-xs);
+}
+.paint-panel-tabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.paint-panel-viewbtns {
+  display: flex;
+  gap: 2px;
+}
+.paint-panel-search {
+  flex: none;
+  padding: 6px 8px 2px;
+}
+.paint-panel-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.paint-panel-foot {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+}
+.paint-row {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+.paint-row.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.paint-row-label {
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.paint-row-angle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.paint-row-angle .ui-slider {
+  flex: 1;
+  min-width: 0;
+}
+.paint-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 0 0 2px;
+}
+
+/* ---------- dialogs ---------- */
+
+.paint-dialog-text {
+  margin: 0 0 8px;
+  line-height: 1.5;
+  color: var(--text);
+  user-select: text;
+}
+.paint-dialog-hint {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+.paint-dialog-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}

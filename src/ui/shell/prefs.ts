@@ -16,7 +16,7 @@ export const PREFS_KEY = 'perseverance.prefs';
 export const PREF_DEFAULTS = {
   uiScale: 1,
   toasts: true,
-  autosaveMinutes: 5,
+  autosaveMinutes: 2,
   defaultBackground: 'white',
   checkerSize: 8,
 } as const;

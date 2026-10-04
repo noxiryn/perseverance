@@ -107,13 +107,13 @@ export function buildMenuTree(cmds: readonly CommandDef[]): { name: string; item
       .map((p) => p.trim())
       .filter(Boolean);
     if (!parts.length) continue;
-    let b = roots.get(parts[0]);
+    let b: Bucket | undefined = roots.get(parts[0]);
     if (!b) {
       b = newBucket(parts[0]);
       roots.set(parts[0], b);
     }
     for (const p of parts.slice(1)) {
-      let next = b.subs.get(p);
+      let next: Bucket | undefined = b.subs.get(p);
       if (!next) {
         next = newBucket(p);
         b.subs.set(p, next);

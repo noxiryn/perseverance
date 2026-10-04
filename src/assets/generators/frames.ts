@@ -76,11 +76,12 @@ const tornBorder = defineAsset(
     defaultOpacity: 1,
     params: [
       P.color('color', 'Color', '#0b0b0b'),
-      P.num('thickness', 'Thickness', 10, 260, 62, { unit: 'px' }),
+      P.num('thickness', 'Thickness', 10, 260, 64, { unit: 'px' }),
       P.pct('roughness', 'Roughness', 0.65),
-      P.pct('burn', 'Burnt edge', 0.6),
+      P.pct('burn', 'Burnt edge', 0.55),
       P.pct('flecks', 'Flecks', 0.6),
-      P.pct('texture', 'Scuffs', 0.6),
+      P.pct('texture', 'Scuffs', 0.55),
+      P.pct('fringe', 'Torn fringe', 0.45),
       P.seed(11),
     ],
     generate(p, { width: W, height: H }) {
@@ -88,23 +89,26 @@ const tornBorder = defineAsset(
       const seed = num(p, 'seed', 11);
       const r = makeRand(seed);
       const color = rgbOf(str(p, 'color', '#0b0b0b'));
-      const T = num(p, 'thickness', 62) * u;
+      const T = num(p, 'thickness', 64) * u;
       const rough = num(p, 'roughness', 0.65);
-      const burn = num(p, 'burn', 0.6);
+      const burn = num(p, 'burn', 0.55);
       const fleckAmt = num(p, 'flecks', 0.6);
-      const texture = num(p, 'texture', 0.6);
+      const texture = num(p, 'texture', 0.55);
+      const fringe = num(p, 'fringe', 0.45);
       const nBig = createNoise2D(seed + 1);
       const nMid = createNoise2D(seed + 2);
       const nSmall = createNoise2D(seed + 3);
       const nBand = createNoise2D(seed + 4);
-      const inset = T * 0.85;
-      const cr = Math.min(T * 1.6, Math.min(W, H) * 0.2);
-      const { pts, perimeter: Pm } = roundedRectSamples(inset, inset, W - inset, H - inset, cr, Math.max(1.2, 2.2 * u));
-      // chunks: big black tongues biting into the paper, and a few retreats
-      const chunks = Array.from({ length: Math.round(3 + 6 * rough) }, () => ({
+      const nRidge = createNoise2D(seed + 5);
+      const inset = T * 0.8;
+      const cr = Math.min(T * 1.2, Math.min(W, H) * 0.12);
+      const { pts, perimeter: Pm } = roundedRectSamples(inset, inset, W - inset, H - inset, cr, Math.max(1, 1.6 * u));
+      // a few deeper bites into the paper and a few retreats
+      const chunks = Array.from({ length: Math.round(4 + 7 * rough) }, () => ({
         s: r() * Pm,
-        w: (30 + r() * 140) * u,
-        h: T * (r() < 0.75 ? 0.5 + r() * 1.8 : -(0.3 + r() * 0.4)),
+        w: (14 + r() * 70) * u,
+        h: T * (r() < 0.7 ? 0.35 + r() * 0.9 : -(0.2 + r() * 0.3)),
+        sharp: r() < 0.5,
       }));
       const periodic = (n: (x: number, y: number) => number, s: number, featureLen: number, salt: number) => {
         const th = (s / Pm) * TAU;
@@ -116,47 +120,56 @@ const tornBorder = defineAsset(
       const offs: number[] = [];
       for (const q of pts) {
         let off =
-          T * (0.15 + rough * (0.55 * periodic(nBig, q.s, 320 * u, 0) + 0.28 * periodic(nMid, q.s, 70 * u, 3) + 0.12 * periodic(nSmall, q.s, 16 * u, 7)));
+          T *
+          (0.12 +
+            rough *
+              (0.38 * periodic(nBig, q.s, 260 * u, 0) +
+                0.3 * periodic(nMid, q.s, 60 * u, 3) +
+                0.16 * periodic(nSmall, q.s, 14 * u, 7) +
+                // ridged component → sharp torn creases instead of soft waves
+                0.22 * (0.5 - Math.abs(periodic(nRidge, q.s, 34 * u, 5)))));
         for (const c of chunks) {
           let d = Math.abs(q.s - c.s);
           d = Math.min(d, Pm - d);
-          off += c.h * Math.exp(-((d / c.w) ** 2) * 2.5);
+          const k = d / c.w;
+          off += c.h * (c.sharp ? Math.max(0, 1 - k) ** 1.6 : Math.exp(-k * k * 2.5));
         }
-        off += (r() - 0.5) * 4.5 * u * (0.3 + rough);
-        off = Math.max(-inset * 0.7, off);
+        off += (r() - 0.5) * 3.2 * u * (0.3 + rough);
+        off = Math.max(-inset * 0.75, off);
         offs.push(off);
         inner.push({ x: q.x + q.nx * off, y: q.y + q.ny * off });
-        const band = (5 + 16 * Math.abs(periodic(nBand, q.s, 40 * u, 11))) * u * (0.4 + burn);
+        const band = (4 + 14 * Math.abs(periodic(nBand, q.s, 36 * u, 11))) * u * (0.4 + burn);
         scorch.push({ x: q.x + q.nx * (off + band), y: q.y + q.ny * (off + band) });
       }
       const [c, ctx] = newCanvas(W, H);
-      // 1. burnt halo on the paper side (soft, blurred)
+      // 1. burnt edge on the paper side: narrow soft darkening + an irregular scorch band
       if (burn > 0) {
         ctx.save();
-        ctx.filter = `blur(${Math.max(1, T * 0.22)}px)`;
-        ctx.strokeStyle = rgba(shade(color, 0.08), 0.42 * burn);
-        ctx.lineWidth = T * 0.55;
+        ctx.filter = `blur(${Math.max(1, T * 0.16)}px)`;
+        ctx.strokeStyle = rgba(color, 0.3 * burn);
+        ctx.lineWidth = T * 0.42;
         ctx.beginPath();
         tracePoly(ctx, inner);
         ctx.stroke();
         ctx.restore();
-        // irregular semi-opaque scorch band
-        ctx.fillStyle = rgba(color, 0.32 * burn);
+        ctx.fillStyle = rgba(color, 0.22 * burn);
         ctx.fill(framePath(W, H, scorch), 'evenodd');
       }
       // 2. the frame itself
       ctx.fillStyle = rgba(color, 1);
       ctx.fill(framePath(W, H, inner), 'evenodd');
-      // 3. scuffs / mottling inside the black (source-atop keeps it on the frame)
+      // 3. worn print inside the black: soft mottling, worn speckle patches, scratches
       if (texture > 0) {
         ctx.save();
         ctx.globalCompositeOperation = 'source-atop';
-        const { fw, fh, s } = fieldDims(W, H, 120_000);
-        const f = noiseField(fw, fh, s / u, { seed: seed + 9, freq: 8, octaves: 5, warp: 0.6 });
-        const g = noiseField(fw, fh, s / u, { seed: seed + 10, freq: 32, octaves: 2 });
-        const light = shade(color, 0.32);
+        const { fw, fh, s } = fieldDims(W, H, 140_000);
+        const f = noiseField(fw, fh, s / u, { seed: seed + 9, freq: 5, octaves: 4 });
+        const g = noiseField(fw, fh, s / u, { seed: seed + 10, freq: 40, octaves: 2 });
+        const wornF = noiseField(fw, fh, s / u, { seed: seed + 12, freq: 9, octaves: 3 });
+        const light = shade(color, 0.36);
         const scuff = paintField(fw, fh, (i, _x, _y, px, o) => {
-          const a = smoothstep(0.12, 0.5, f[i]) * 0.55 + smoothstep(0.35, 0.7, g[i]) * 0.35;
+          const worn = smoothstep(0.15, 0.55, wornF[i]) * smoothstep(0.1, 0.6, g[i] * 0.5 + 0.5);
+          const a = smoothstep(-0.1, 0.8, f[i]) * 0.16 + worn * 0.5;
           px[o] = light.r;
           px[o + 1] = light.g;
           px[o + 2] = light.b;
@@ -164,46 +177,74 @@ const tornBorder = defineAsset(
         });
         drawUpscaled(ctx, scuff, W, H);
         const area = (W * H) / (u * u * 1e6);
-        drawScratches(ctx, W, H, u, '#d8d8d8', r, 260 * texture * area, { angle: 0, angleJitter: 0.35, alpha: 0.45, maxLen: 90, width: 0.7 });
-        drawScratches(ctx, W, H, u, '#d8d8d8', r, 160 * texture * area, { angle: Math.PI / 2, angleJitter: 0.35, alpha: 0.4, maxLen: 70, width: 0.7 });
-        drawSpecks(ctx, W, H, u, { r: 235, g: 235, b: 235 }, r, 1.2 * texture);
+        drawScratches(ctx, W, H, u, '#cfcfcf', r, 300 * texture * area, { angle: 0, angleJitter: 0.25, alpha: 0.38, maxLen: 110, width: 0.7 });
+        drawScratches(ctx, W, H, u, '#cfcfcf', r, 120 * texture * area, { angle: Math.PI / 2, angleJitter: 0.3, alpha: 0.3, maxLen: 70, width: 0.6 });
+        drawSpecks(ctx, W, H, u, { r: 220, g: 220, b: 220 }, r, 1.1 * texture);
         ctx.restore();
       }
-      // 4. flecks scattered just inside the tear, denser near the edge
-      const nFlecks = Math.round((Pm / u / 1000) * 420 * fleckAmt);
+      // 4. torn fringe: a thin light fibrous lip where the black layer tore away
+      if (fringe > 0) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'source-atop';
+        ctx.lineJoin = 'round';
+        let i = 0;
+        while (i < inner.length - 1) {
+          const len = 8 + Math.floor(r() * 60);
+          if (r() < 0.55 * fringe + 0.15) {
+            const seg = new Path2D();
+            const w = (1.5 + r() * 3.5) * u;
+            for (let k = 0; k <= len && i + k < inner.length; k++) {
+              const q = pts[i + k];
+              const e = inner[i + k];
+              const x = e.x - q.nx * w * 0.6;
+              const y = e.y - q.ny * w * 0.6;
+              if (k) seg.lineTo(x, y);
+              else seg.moveTo(x, y);
+            }
+            ctx.strokeStyle = rgba(shade(color, 0.75), (0.25 + r() * 0.45) * fringe);
+            ctx.lineWidth = w;
+            ctx.stroke(seg);
+          }
+          i += len;
+        }
+        ctx.restore();
+      }
+      // 5. flecks scattered just inside the tear, denser near the edge
+      const nFlecks = Math.round((Pm / u / 1000) * 460 * fleckAmt);
       const fl = new Path2D();
       for (let i = 0; i < nFlecks; i++) {
         const k = Math.floor(r() * pts.length);
         const q = pts[k];
-        const d = -Math.log(1 - r() * 0.995) * T * 0.3 + 1.5 * u;
+        const d = -Math.log(1 - r() * 0.995) * T * 0.22 + 1.2 * u;
         const tj = (r() - 0.5) * 6 * u;
         const x = inner[k].x + q.nx * d - q.ny * tj;
         const y = inner[k].y + q.ny * d + q.nx * tj;
-        const size = u * (0.4 + r() ** 3 * 5.5) * (1 - 0.5 * smoothstep(0, T, d));
-        tracePoly(fl, blob(x, y, size, r, r.int(4, 7), 0.7));
+        const size = u * (0.35 + r() ** 3 * 4.5) * (1 - 0.6 * smoothstep(0, T, d));
+        tracePoly(fl, blob(x, y, size, r, r.int(4, 7), 0.75));
       }
       ctx.fillStyle = rgba(color, 0.95);
       ctx.fill(fl);
-      // 5. paper fibers crossing the torn edge
+      // 6. paper fibers crossing the torn edge
       ctx.save();
       ctx.lineCap = 'round';
       const fib = new Path2D();
-      const nFib = Math.round((Pm / u / 1000) * 260 * (0.4 + rough));
+      const nFib = Math.round((Pm / u / 1000) * 240 * (0.4 + rough));
       for (let i = 0; i < nFib; i++) {
         const k = Math.floor(r() * pts.length);
         const q = pts[k];
         const e = inner[k];
-        const len = (2 + r() * 9) * u;
+        const len = (2 + r() * 8) * u;
         const tang = (r() - 0.5) * 1.6;
         const ex = e.x + (q.nx * Math.cos(tang) - q.ny * Math.sin(tang)) * len;
         const ey = e.y + (q.ny * Math.cos(tang) + q.nx * Math.sin(tang)) * len;
         fib.moveTo(e.x - q.nx * 2 * u, e.y - q.ny * 2 * u);
         fib.quadraticCurveTo(e.x + (r() - 0.5) * len, e.y + (r() - 0.5) * len, ex, ey);
       }
-      ctx.strokeStyle = rgba(color, 0.75);
-      ctx.lineWidth = Math.max(0.5, 0.7 * u);
+      ctx.strokeStyle = rgba(color, 0.7);
+      ctx.lineWidth = Math.max(0.5, 0.6 * u);
       ctx.stroke(fib);
       ctx.restore();
+      void offs;
       return c;
     },
   },

@@ -1,0 +1,396 @@
+/* fonts-color module — Swatches panel, Color panel, palette dialogs. Prefix: fc- */
+
+.fc-dim {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.fc-note {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  line-height: 1.35;
+}
+
+/* ---------------- Swatches ---------------- */
+.fc-swatches {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.fc-sw-top {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 8px 4px;
+  flex: none;
+}
+.fc-sw-select {
+  width: 100%;
+}
+.fc-sw-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 8px 8px;
+}
+.fc-sw-group + .fc-sw-group {
+  margin-top: 8px;
+}
+.fc-sw-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  margin: 2px 0 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fc-sw-link {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  padding: 0;
+}
+.fc-sw-link:hover {
+  color: var(--danger);
+}
+.fc-sw-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 15px);
+  gap: 3px;
+}
+.fc-sw-cell {
+  width: 15px;
+  height: 15px;
+  border-radius: 2px;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+  padding: 0;
+  border: none;
+}
+.fc-sw-cell:hover {
+  box-shadow:
+    0 0 0 1px #0c0c0c,
+    0 0 0 2px #d8d8d8;
+  position: relative;
+  z-index: 1;
+}
+.fc-sw-cell.sel {
+  box-shadow:
+    0 0 0 1px #0c0c0c,
+    0 0 0 2px var(--accent-strong);
+  position: relative;
+  z-index: 1;
+}
+.fc-sw-add {
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--text-faint);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.fc-sw-add:hover {
+  color: var(--text-strong);
+}
+.fc-sw-hint {
+  margin-top: 4px;
+}
+.fc-sw-foot {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 30px;
+  padding: 0 6px;
+  border-top: 1px solid var(--divider);
+  flex: none;
+}
+
+/* ---------------- Extract dialog ---------------- */
+.fc-extract {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.fc-extract-preview {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-radius: var(--radius);
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  min-height: 74px;
+}
+.fc-extract-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+.fc-extract-chip > span {
+  width: 100%;
+  aspect-ratio: 1;
+  max-height: 48px;
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+.fc-extract-chip > code {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+/* ---------------- Color panel ---------------- */
+.fc-color {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.fc-chips2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 10px 6px;
+}
+.fc-chips2-stack {
+  position: relative;
+  width: 44px;
+  height: 40px;
+  flex: none;
+}
+.fc-chip2 {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  border: 1px solid #555;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+  padding: 0;
+}
+.fc-chip2.front {
+  left: 0;
+  top: 0;
+  z-index: 2;
+}
+.fc-chip2.back {
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+}
+.fc-chip2.edit {
+  border-color: #fff;
+  box-shadow:
+    0 0 0 1px #000,
+    0 0 0 2.5px var(--accent);
+  z-index: 3;
+}
+.fc-chips2-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fc-chips2-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fc-chips2-info > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.fc-chips2-info > div.on {
+  background: var(--bg-active);
+  color: var(--text);
+}
+.fc-chips2-info code {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+.fc-chips2-info > div.on code {
+  color: var(--text-strong);
+}
+.fc-color-picker {
+  display: flex;
+  justify-content: center;
+  padding: 2px 10px 6px;
+}
+.fc-color-tabs {
+  padding: 2px 10px 4px;
+  border-top: 1px solid var(--divider);
+  padding-top: 6px;
+}
+.fc-color-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 10px 10px;
+}
+.fc-ch {
+  display: grid;
+  grid-template-columns: 14px 1fr 52px;
+  align-items: center;
+  gap: 8px;
+}
+.fc-ch-label {
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  text-align: center;
+}
+.fc-ch-track {
+  position: relative;
+  height: 10px;
+  border-radius: 5px;
+  cursor: ew-resize;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+.fc-ch-thumb {
+  position: absolute;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  margin: -5.5px 0 0 -5.5px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+}
+.fc-hex {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.fc-hex-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.fc-hex-input {
+  flex: 1;
+  font-family: var(--font-mono);
+  text-transform: lowercase;
+}
+.fc-hex-code {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  padding: 0 6px;
+  height: 22px;
+  line-height: 22px;
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  user-select: text;
+}
+.fc-harmony {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.fc-harmony-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.fc-harmony-swatch {
+  flex: 1;
+  height: 34px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  position: relative;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0 0 2px;
+}
+.fc-harmony-swatch > span {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  color: #fff;
+  mix-blend-mode: difference;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.fc-harmony-swatch:hover > span {
+  opacity: 1;
+}
+.fc-harmony-swatch:hover {
+  box-shadow:
+    0 0 0 1px #0c0c0c,
+    0 0 0 2px #d8d8d8;
+}
+.fc-harmony-swatch.base {
+  box-shadow:
+    0 0 0 1px #0c0c0c,
+    0 0 0 2px var(--accent);
+}
+.fc-contrast {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.fc-contrast-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+}
+.fc-contrast-sample {
+  width: 34px;
+  height: 22px;
+  border-radius: 3px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 13px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  flex: none;
+}
+.fc-contrast-label {
+  color: var(--text-dim);
+  flex: 1;
+}
+.fc-contrast-ratio {
+  font-family: var(--font-mono);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+.fc-badge {
+  min-width: 58px;
+  text-align: center;
+  font-size: var(--fs-xs);
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: 600;
+}
+.fc-badge.ok {
+  background: rgba(79, 201, 138, 0.16);
+  color: var(--success);
+}
+.fc-badge.warn {
+  background: rgba(242, 184, 75, 0.16);
+  color: var(--warning);
+}
+.fc-badge.fail {
+  background: rgba(239, 91, 91, 0.16);
+  color: var(--danger);
+}

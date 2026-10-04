@@ -196,3 +196,64 @@
   display: flex;
   gap: 4px;
 }
+
+.viewport-seg-text {
+  gap: 0;
+}
+
+.viewport-seg-btn {
+  height: 20px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.viewport-seg-btn:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.viewport-seg-btn.active {
+  color: var(--text-strong);
+  background: var(--bg-active);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.viewport-cr-swatch {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  color: #fff;
+}
+
+.viewport-cr-swatch.neg {
+  outline: 1px dashed var(--danger);
+  outline-offset: 1px;
+}
+
+.viewport-cr-swatch:hover {
+  border-color: var(--text-strong);
+}
+
+.viewport-cr-chip {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  vertical-align: -1px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.viewport-root:focus {
+  outline: none;
+}

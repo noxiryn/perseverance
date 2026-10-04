@@ -21,6 +21,7 @@ import {
   modeFromEvent,
   pointInSelection,
   updateOutlineDrag,
+  endOutlineDragVisual,
   type OutlineDrag,
 } from './selectCommon';
 import { SelectionModeButtons, Sep, setToolOptionSafe } from '../options/common';
@@ -145,6 +146,7 @@ function makeLasso(): ToolDef {
     onDeactivate() {
       pts = null;
       outline = null;
+      endOutlineDragVisual();
     },
     renderOverlay(ctx) {
       if (outline) {
@@ -284,6 +286,7 @@ function makePolyLasso(): ToolDef {
     onDeactivate() {
       cancel();
       outline = null;
+      endOutlineDragVisual();
     },
     renderOverlay(ctx) {
       if (outline) {

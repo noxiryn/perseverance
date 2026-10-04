@@ -130,14 +130,18 @@ export async function applyFontToActiveLayer(f: FontDef) {
   viewport.requestRender();
 }
 
+/** Menu-only aliases that would duplicate another palette entry. */
+const PALETTE_HIDDEN = new Set(['edit.keyboardShortcuts']);
+
 export function collectPaletteItems(): PaletteItem[] {
   const out: PaletteItem[] = [];
 
   for (const c of commands.list()) {
+    if (PALETTE_HIDDEN.has(c.id)) continue;
     out.push({
       key: `command:${c.id}`,
       kind: 'command',
-      title: c.label.replace(/…$/, '…'),
+      title: c.label,
       subtitle: menuPathLabel(c),
       shortcut: shortcutAlternatives(c.shortcut)[0],
       icon: c.icon,

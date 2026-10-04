@@ -5,7 +5,7 @@
 import type { Rect, TextProps } from '../core/types';
 import { createCanvas, ctx2d } from '../core/canvas';
 import { ensureFont, isFontReady } from '../fonts/loader';
-import { cacheGeneration, objId, px, renderCache } from './cache';
+import { cacheGeneration, objId, px, slots } from './cache';
 import { layoutText, lineIndexForCaret, type Measure } from './textLayout';
 import { isWarpActive, warpPoint } from './warpMath';
 import { fillWithPaint } from './paint';
@@ -297,13 +297,23 @@ function setupTextCtx(ctx: CanvasRenderingContext2D, t: TextProps) {
   ctx.miterLimit = 2;
 }
 
+/**
+ * Local origin of a raster so that canvas pixel 0 lands on an integer device pixel when the
+ * device mapping is `k·u + e` with frac(e) = f (pixel-exact drawing of untransformed layers).
+ */
+export function alignedOrigin(minLocal: number, k: number, f: number): number {
+  return (Math.floor(f + k * minLocal + 1e-9) - f) / k;
+}
+
 /** Render the flat (unwarped) text into a canvas: local content with padding P. */
-function renderFlat(t: TextProps, layout: TextLayout, k: number, P: number): LocalContent {
-  const wPx = Math.ceil((layout.width + 2 * P) * k);
-  const hPx = Math.ceil((layout.height + 2 * P) * k);
+function renderFlat(t: TextProps, layout: TextLayout, k: number, P: number, fx = 0, fy = 0): LocalContent {
+  const ox = alignedOrigin(-P, k, fx);
+  const oy = alignedOrigin(-P, k, fy);
+  const wPx = Math.ceil((layout.width + P - ox) * k);
+  const hPx = Math.ceil((layout.height + P - oy) * k);
   const canvas = createCanvas(wPx, hPx);
   const ctx = ctx2d(canvas);
-  ctx.setTransform(k, 0, 0, k, P * k, P * k);
+  ctx.setTransform(k, 0, 0, k, -ox * k, -oy * k);
   setupTextCtx(ctx, t);
   const box: Rect = { x: 0, y: 0, width: layout.width, height: layout.height };
   const size = Math.max(0.5, Number(t.fontSize) || 12);
@@ -328,7 +338,7 @@ function renderFlat(t: TextProps, layout: TextLayout, k: number, P: number): Loc
   } else {
     const tmp = acquire(wPx, hPx);
     const tc = ctx2d(tmp);
-    tc.setTransform(k, 0, 0, k, P * k, P * k);
+    tc.setTransform(k, 0, 0, k, -ox * k, -oy * k);
     setupTextCtx(tc, t);
     tc.fillStyle = '#ffffff';
     tc.strokeStyle = '#ffffff';
@@ -340,9 +350,9 @@ function renderFlat(t: TextProps, layout: TextLayout, k: number, P: number): Loc
     // Paint laid out over the layout box, extended over the padding (glyph overflow).
     const paintC = acquire(wPx, hPx);
     const pc = ctx2d(paintC);
-    pc.setTransform(k, 0, 0, k, P * k, P * k);
+    pc.setTransform(k, 0, 0, k, -ox * k, -oy * k);
     const area = new Path2D();
-    area.rect(-P, -P, layout.width + 2 * P, layout.height + 2 * P);
+    area.rect(ox, oy, wPx / k, hPx / k);
     fillWithPaint(pc, fill, box, area);
     tc.setTransform(1, 0, 0, 1, 0, 0);
     tc.globalCompositeOperation = 'source-in';
@@ -353,7 +363,7 @@ function renderFlat(t: TextProps, layout: TextLayout, k: number, P: number): Loc
     release(tmp, paintC);
   }
   if (t.antiAlias === false) hardenAlpha(canvas);
-  return { canvas, k, ox: -P, oy: -P };
+  return { canvas, k, ox, oy };
 }
 
 function hardenAlpha(c: HTMLCanvasElement) {
@@ -446,24 +456,54 @@ function warpContent(flat: LocalContent, t: TextProps, layout: TextLayout): Loca
   return { canvas: out, k, ox: nox, oy: noy };
 }
 
+/** Local bounds (layout coordinates) covered by a text layer's raster: layout box + overflow. */
+export function textLocalBounds(t: TextProps): Rect {
+  const layout = layoutTextProps(t);
+  const P = textPadding(t, layout);
+  if (!isWarpActive(t.warp)) return { x: -P, y: -P, width: layout.width + 2 * P, height: layout.height + 2 * P };
+  const a = layout.width / 2;
+  const c = layout.height / 2;
+  let minX = Infinity,
+    minY = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity;
+  const N = 24;
+  for (let j = 0; j <= N; j++) {
+    for (let i = 0; i <= N; i++) {
+      if (j > 0 && j < N && i > 0 && i < N && (i + j) % 3) continue;
+      const lx = -P + ((layout.width + 2 * P) * i) / N;
+      const ly = -P + ((layout.height + 2 * P) * j) / N;
+      const [X, Y] = warpPoint(t.warp, lx - a, ly - c, a, c);
+      minX = Math.min(minX, X + a);
+      minY = Math.min(minY, Y + c);
+      maxX = Math.max(maxX, X + a);
+      maxY = Math.max(maxY, Y + c);
+    }
+  }
+  return { x: minX - 2, y: minY - 2, width: maxX - minX + 4, height: maxY - minY + 4 };
+}
+
 /**
- * Rasterize a text layer's content at k px per local unit (cached by TextProps identity).
+ * Rasterize a text layer's content at k px per local unit (cached per TextProps identity).
  * The canvas includes overflow (stroke, descenders, warp) around the layout box.
+ * `fx/fy` = fractional device offset of the local origin (pixel-exact placement of
+ * axis-aligned text); ignored for warped text.
  */
-export function renderTextContent(t: TextProps, kRequested: number): LocalContent {
+export function renderTextContent(t: TextProps, kRequested: number, fx = 0, fy = 0): LocalContent {
   requestTextFont(t);
   const layout = layoutTextProps(t);
   const P = textPadding(t, layout);
-  // Keep canvases within limits.
   const warp = isWarpActive(t.warp);
   const growth = warp ? 1.8 : 1;
   const maxDim = Math.max(layout.width + 2 * P, layout.height + 2 * P) * growth;
   const k = Math.max(0.01, Math.min(kRequested, MAX_TEXT_SIDE / Math.max(1, maxDim)));
-  const key = `text|${objId(t)}|${k.toFixed(4)}|${cacheGeneration()}`;
-  const hit = renderCache.get<LocalContent>(key);
+  if (warp || k !== kRequested) fx = fy = 0;
+  const key = `text|${objId(t)}`;
+  const sig = `${k.toFixed(5)}|${fx.toFixed(4)}|${fy.toFixed(4)}|${cacheGeneration()}`;
+  const hit = slots.get<LocalContent>(key, sig);
   if (hit) return hit;
-  let content = renderFlat(t, layout, k, P);
+  let content = renderFlat(t, layout, k, P, fx, fy);
   if (warp) content = warpContent(content, t, layout);
-  renderCache.set(key, content, px(content.canvas));
+  slots.set(key, sig, content, px(content.canvas), { max: 3 });
   return content;
 }

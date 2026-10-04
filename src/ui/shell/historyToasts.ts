@@ -4,7 +4,7 @@
  * strokes (throttled), and respects the 'toasts' preference.
  */
 import { useEditor, type EditorState } from '../../state/editor';
-import { toast, useUI } from '../../state/ui';
+import { dismissToast, toast, useUI } from '../../state/ui';
 import { getPref } from './prefs';
 
 export interface HistorySnapshot {
@@ -57,7 +57,6 @@ export function decideHistoryToast(prev: HistorySnapshot, next: HistorySnapshot,
     // Continuous edits: at most one toast per 6s per label.
     if (label === state.lastLabel && now - state.lastLabelAt < 6000) return null;
   } else if (label === state.lastLabel && now - state.lastLabelAt < 1200) return null;
-  if (now - state.lastToastAt < 350) return null;
   state.lastToastAt = now;
   state.lastLabel = label;
   state.lastLabelAt = now;
@@ -88,8 +87,12 @@ export function installHistoryToasts() {
   // Track when other modules show their own toasts so we do not double-announce.
   let lastForeignToastAt = 0;
   let ownToast = false;
+  let lastOwn: { id: string; at: number } | null = null;
   useUI.subscribe((s, p) => {
-    if (s.toasts.length > p.toasts.length && !ownToast) lastForeignToastAt = Date.now();
+    if (s.toasts === p.toasts || ownToast) return;
+    // Only additions count (removals happen on expiry or when we replace our own toast).
+    const prevIds = new Set(p.toasts.map((t) => t.id));
+    if (s.toasts.some((t) => !prevIds.has(t.id))) lastForeignToastAt = Date.now();
   });
 
   useEditor.subscribe((st) => {
@@ -108,10 +111,16 @@ export function installHistoryToasts() {
     if (!label || !getPref('toasts', true)) return;
     // Let the committing code show its own toast first; skip ours if it did.
     window.setTimeout(() => {
-      if (Date.now() - lastForeignToastAt < 600) return;
+      const now = Date.now();
+      if (now - lastForeignToastAt < 600) return;
+      // Rapid successive commits: replace our previous toast so only the latest action shows.
+      if (lastOwn && now - lastOwn.at < 900) dismissToast(lastOwn.id);
       ownToast = true;
       try {
         toast(completedMessage(label), 'success', 2200);
+        const list = useUI.getState().toasts;
+        const t = list[list.length - 1];
+        lastOwn = t ? { id: t.id, at: now } : null;
       } finally {
         ownToast = false;
       }

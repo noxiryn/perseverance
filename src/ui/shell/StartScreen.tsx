@@ -113,9 +113,9 @@ function Section({ title, action, children, className }: { title: string; action
 }
 
 const TIPS: { text: ReactNode; keys?: string }[] = [
-  { text: 'Search every command, filter, look, asset and font', keys: 'Ctrl+K' },
+  { text: 'Search commands, filters, looks, assets and fonts', keys: 'Ctrl+K' },
   { text: 'Hold Space to pan · hold Alt while painting to pick a color' },
-  { text: 'Drop images onto the window to place them as layers — Shift opens a new document' },
+  { text: 'Drop images on the window to place them as layers (Shift: new document)' },
   { text: 'Hide all panels for a distraction-free canvas', keys: 'Tab' },
   { text: 'See every keyboard shortcut', keys: 'F1' },
 ];

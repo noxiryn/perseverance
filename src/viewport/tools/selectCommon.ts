@@ -7,7 +7,7 @@ import { combine, selectionFromCanvas, setSelection, type SelectionMode } from '
 import { viewport } from '../../editor/viewport';
 import { activeSession } from '../../state/editor';
 import { selectionOutline, drawAnts } from '../outline';
-import { docToScreenMatrix } from '../state';
+import { docToScreenMatrix, vpState } from '../state';
 import { mul, translate } from '../math/affine';
 import { drawLabel } from '../draw';
 
@@ -84,6 +84,14 @@ export function beginOutlineDrag(e: ToolPointerEvent): OutlineDrag {
   return { start: { x: e.docX, y: e.docY }, dx: 0, dy: 0, moved: false };
 }
 
+/** Stop suppressing the default ants (call when an outline drag ends or is abandoned). */
+export function endOutlineDragVisual() {
+  if (vpState.suppressAnts) {
+    vpState.suppressAnts = false;
+    viewport.requestOverlay();
+  }
+}
+
 export function updateOutlineDrag(d: OutlineDrag, e: ToolPointerEvent) {
   let dx = e.docX - d.start.x;
   let dy = e.docY - d.start.y;
@@ -94,6 +102,7 @@ export function updateOutlineDrag(d: OutlineDrag, e: ToolPointerEvent) {
   d.dx = Math.round(dx);
   d.dy = Math.round(dy);
   if (d.dx || d.dy) d.moved = true;
+  if (d.moved) vpState.suppressAnts = true;
   viewport.requestOverlay();
 }
 
@@ -110,6 +119,7 @@ export function drawOutlineDrag(ctx: CanvasRenderingContext2D, d: OutlineDrag) {
 
 /** Commit a moved selection outline as a new (translated) mask. */
 export function commitOutlineDrag(d: OutlineDrag): boolean {
+  endOutlineDragVisual();
   const doc = activeSession()?.doc;
   const sel = doc?.selection;
   if (!doc || !sel || !d.moved) return false;

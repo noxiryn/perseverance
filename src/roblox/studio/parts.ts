@@ -56,7 +56,7 @@ export function buildHairGeometry(style: HairStyle): THREE.BufferGeometry | null
   if (style === 'none') return null;
   const parts: THREE.BufferGeometry[] = [];
   const R = rng(style === 'spiky' ? 7 : style === 'messy' ? 23 : style === 'slick' ? 5 : 11);
-  const CAP = { sx: 0.71, sy: 0.56, sz: 0.69, y: 0.12, z: -0.02 };
+  const CAP = { sx: 0.84, sy: 0.64, sz: 0.82, y: 0.08, z: -0.02 };
   const cp = (t: number, a: number) => capPoint(t, a, CAP.sx, CAP.sy, CAP.sz, CAP.y, CAP.z);
 
   if (style === 'spiky') {

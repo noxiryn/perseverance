@@ -2,6 +2,7 @@
  * Commands owned by the shell: Window menu (workspaces, one checkable entry per panel, command
  * palette, toggle panels), Help menu, Edit ▸ Preferences, color swap/reset.
  */
+import type { ComponentType } from 'react';
 import { ArrowLeftRight, Command as CommandIcon, FolderOpen, Info, Keyboard, Lightbulb, PanelRightDashed, RotateCcw, Settings } from 'lucide-react';
 import { commands, panels, type CommandDef, type PanelDef } from '../../registry';
 import { desktop, isDesktop } from '../../platform';
@@ -13,11 +14,13 @@ import { ShortcutsDialog } from './dialogs/ShortcutsDialog';
 import { TipsDialog } from './dialogs/TipsDialog';
 import { applyWorkspace, isPanelVisible, resetWorkspace, WORKSPACE_PRESETS } from './workspaces';
 
+type DialogComponent = ComponentType<{ close: (result?: unknown) => void }>;
+
 /** Open a dialog only once (re-running the command while it is open does nothing). */
-function singleton<P extends Record<string, unknown>>(component: Parameters<typeof openDialog>[0], props?: P) {
+function singleton(component: DialogComponent) {
   return () => {
     const open = useUI.getState().dialogs.some((d) => d.component === (component as unknown));
-    if (!open) void openDialog(component, props);
+    if (!open) void openDialog(component);
   };
 }
 
@@ -124,7 +127,7 @@ export function registerShellCommands() {
       shortcut: 'F1',
       icon: Keyboard,
       keywords: ['keys', 'hotkeys', 'shortcuts', 'help'],
-      run: singleton(ShortcutsDialog as never),
+      run: singleton(ShortcutsDialog),
     },
     {
       id: 'help.tips',
@@ -134,7 +137,7 @@ export function registerShellCommands() {
       order: 1,
       icon: Lightbulb,
       keywords: ['tutorial', 'guide', 'tips', 'getting started', 'learn'],
-      run: singleton(TipsDialog as never),
+      run: singleton(TipsDialog),
     },
     {
       id: 'help.about',
@@ -144,7 +147,7 @@ export function registerShellCommands() {
       order: 0,
       icon: Info,
       keywords: ['version', 'credits', 'license'],
-      run: singleton(AboutDialog as never),
+      run: singleton(AboutDialog),
     },
 
     /* ---- Edit ---- */
@@ -156,7 +159,7 @@ export function registerShellCommands() {
       order: 0,
       icon: Keyboard,
       keywords: ['keys', 'hotkeys'],
-      run: singleton(ShortcutsDialog as never),
+      run: singleton(ShortcutsDialog),
     },
     {
       id: 'edit.preferences',
@@ -166,7 +169,7 @@ export function registerShellCommands() {
       order: 1,
       icon: Settings,
       keywords: ['settings', 'options', 'ui scale', 'autosave', 'toasts'],
-      run: singleton(PreferencesDialog as never),
+      run: singleton(PreferencesDialog),
     },
 
     /* ---- Colors (palette-only) ---- */

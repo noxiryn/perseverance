@@ -2,10 +2,10 @@
 import type { Paint, ShapeProps } from '../core/types';
 import { createCanvas, ctx2d } from '../core/canvas';
 import { shapePresets } from '../registry';
-import { cacheGeneration, objId, px, renderCache } from './cache';
+import { cacheGeneration, objId, px, slots } from './cache';
 import { linePolygon, polygonPoints, roundedPolygonOps, starPoints } from './shapeGeometry';
 import { fillWithPaint, paintThroughMask } from './paint';
-import type { LocalContent } from './text';
+import { alignedOrigin, type LocalContent } from './text';
 import { acquire, release } from './surface';
 
 const pathCache = new WeakMap<ShapeProps, Path2D>();
@@ -144,20 +144,35 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeProps) {
 
 const MAX_SHAPE_SIDE = 8192;
 
-/** Rasterize a shape layer's content at k px per local unit (cached by ShapeProps identity). */
-export function renderShapeContent(shape: ShapeProps, kRequested: number): LocalContent {
+/** Local bounds covered by a shape layer's raster (box + stroke/miter overflow). */
+export function shapeLocalBounds(shape: ShapeProps): { x: number; y: number; width: number; height: number } {
+  const P = shapePadding(shape);
+  const w = Math.max(1, Number(shape.width) || 1);
+  const h = Math.max(1, Number(shape.height) || 1);
+  return { x: -P, y: -P, width: w + 2 * P, height: h + 2 * P };
+}
+
+/**
+ * Rasterize a shape layer's content at k px per local unit (cached per ShapeProps identity).
+ * `fx/fy` = fractional device offset of the local origin (pixel-exact axis-aligned drawing).
+ */
+export function renderShapeContent(shape: ShapeProps, kRequested: number, fx = 0, fy = 0): LocalContent {
   const P = shapePadding(shape);
   const w = Math.max(1, Number(shape.width) || 1);
   const h = Math.max(1, Number(shape.height) || 1);
   const k = Math.max(0.01, Math.min(kRequested, MAX_SHAPE_SIDE / Math.max(w + 2 * P, h + 2 * P)));
-  const key = `shape|${objId(shape)}|${k.toFixed(4)}|${cacheGeneration()}`;
-  const hit = renderCache.get<LocalContent>(key);
+  if (k !== kRequested) fx = fy = 0;
+  const key = `shape|${objId(shape)}`;
+  const sig = `${k.toFixed(5)}|${fx.toFixed(4)}|${fy.toFixed(4)}|${cacheGeneration()}`;
+  const hit = slots.get<LocalContent>(key, sig);
   if (hit) return hit;
-  const canvas = createCanvas(Math.ceil((w + 2 * P) * k), Math.ceil((h + 2 * P) * k));
+  const ox = alignedOrigin(-P, k, fx);
+  const oy = alignedOrigin(-P, k, fy);
+  const canvas = createCanvas(Math.ceil((w + P - ox) * k), Math.ceil((h + P - oy) * k));
   const ctx = ctx2d(canvas);
-  ctx.setTransform(k, 0, 0, k, P * k, P * k);
+  ctx.setTransform(k, 0, 0, k, -ox * k, -oy * k);
   drawShape(ctx, shape);
-  const content: LocalContent = { canvas, k, ox: -P, oy: -P };
-  renderCache.set(key, content, px(canvas));
+  const content: LocalContent = { canvas, k, ox, oy };
+  slots.set(key, sig, content, px(canvas), { max: 3 });
   return content;
 }

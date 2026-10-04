@@ -4,6 +4,8 @@ import { isTransformable } from '../../core/document';
 import { activeSession, useEditor } from '../../state/editor';
 import { toast } from '../../state/ui';
 import { safeBounds, topLevelIds, transformableLeaves } from '../layers';
+import { MaskFollower } from '../maskFollow';
+import { translate } from '../math/affine';
 import { requireDoc, toastOnce } from '../state';
 
 export type AlignKind = 'left' | 'hcenter' | 'right' | 'top' | 'vcenter' | 'bottom';
@@ -42,8 +44,41 @@ export function nudgeLayers(dx: number, dy: number) {
     toastOnce(explainUnmovable(doc, ids));
     return;
   }
-  useEditor.getState().commit('Nudge', (d) => offsetLayersDraft(d, movable, dx, dy), { coalesce: true });
+  // Linked masks follow the nudge; consecutive presses reuse one mask copy (coalesced history step).
+  const s = activeSession()!;
+  const entryId = s.history.entries[s.history.index]?.id;
+  const key = movable.join(',');
+  const now = Date.now();
+  let st = nudgeState;
+  if (!st || st.docId !== doc.id || st.entryId !== entryId || st.key !== key || now - st.time > 900) {
+    st = { docId: doc.id, entryId: '', key, follower: MaskFollower.forLayers(doc, topLevelIds(doc, ids)), tx: 0, ty: 0, time: now };
+  }
+  st.tx += dx;
+  st.ty += dy;
+  st.time = now;
+  const masks = st.follower ? st.follower.update(translate(st.tx, st.ty)) : null;
+  useEditor.getState().commit(
+    'Nudge',
+    (d) => {
+      offsetLayersDraft(d, movable, dx, dy);
+      masks?.(d);
+    },
+    { coalesce: true },
+  );
+  const after = activeSession();
+  st.entryId = after?.history.entries[after.history.index]?.id ?? '';
+  nudgeState = st;
 }
+
+let nudgeState: {
+  docId: ID;
+  entryId: ID;
+  key: string;
+  follower: MaskFollower | null;
+  tx: number;
+  ty: number;
+  time: number;
+} | null = null;
 
 /** Align the selected layers (to each other, or to the selection / canvas when only one). */
 export function alignLayers(kind: AlignKind) {

@@ -42,7 +42,7 @@ function anchoredMeans(src: Float32Array, w: number, h: number, r: number, H: Fl
   }
 }
 
-export function kuwahara(img: Img, radius: number): Img {
+export function kuwahara<T extends Img>(img: T, radius: number): T {
   const r = Math.max(1, Math.round(radius));
   const { width: w, height: h, data } = img;
   const n = w * h;

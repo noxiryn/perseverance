@@ -92,6 +92,34 @@ function endTemp(kind?: Exclude<TempKind, null>) {
   tempTool = null;
 }
 
+/* ---------------- focus classification ---------------- */
+
+const TEXT_INPUT_TYPES = new Set(['', 'text', 'search', 'number', 'email', 'password', 'url', 'tel', 'date', 'time', 'datetime-local', 'month', 'week']);
+/** Keys a focused non-text control (checkbox, slider, radio…) uses itself. */
+const CONTROL_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', ' ', 'Enter']);
+
+/**
+ * 'text' — keyboard input belongs to a text field (no global shortcuts at all);
+ * 'control' — a checkbox/slider/radio has focus: only the keys it uses are left to it, so tool
+ *  letters keep working after clicking an options-bar checkbox;
+ * null — nothing special.
+ */
+export function focusKind(t: EventTarget | null): 'text' | 'control' | null {
+  const el = t as HTMLElement | null;
+  if (!el || !el.tagName) return null;
+  if (el.tagName === 'INPUT') {
+    const type = ((el as HTMLInputElement).type || '').toLowerCase();
+    return TEXT_INPUT_TYPES.has(type) ? 'text' : 'control';
+  }
+  return isTypingTarget(el) ? 'text' : null;
+}
+
+function keyBelongsToFocus(e: KeyboardEvent): boolean {
+  const kinds = [focusKind(e.target), focusKind(document.activeElement)];
+  if (kinds.includes('text')) return true;
+  return kinds.includes('control') && CONTROL_KEYS.has(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey;
+}
+
 /* ---------------- handler ---------------- */
 
 let altAlone = false;
@@ -101,7 +129,7 @@ export function handleKeyDown(e: KeyboardEvent) {
   if (menuBarActive()) return; // menu bar / dropdown own the keyboard
   if (e.key !== 'Alt') altAlone = false;
 
-  const typing = isTypingTarget(e.target) || isTypingTarget(document.activeElement);
+  const typing = keyBelongsToFocus(e);
   const modal = isDialogOpen();
   const ctrl = isMac ? e.metaKey : e.ctrlKey;
 
@@ -144,7 +172,7 @@ export function handleKeyDown(e: KeyboardEvent) {
   const cmd = commandForEvent(e);
   if (cmd) {
     e.preventDefault();
-    runCommandSafely(cmd);
+    runCommandSafely(cmd, false);
     return;
   }
 
