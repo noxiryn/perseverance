@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#232327"/>
+      <stop offset="1" stop-color="#0c0c0e"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#b9adff"/>
+      <stop offset="0.55" stop-color="#8b7cf6"/>
+      <stop offset="1" stop-color="#5b4bd6"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.45" r="0.55">
+      <stop offset="0" stop-color="#8b7cf6" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#8b7cf6" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <circle cx="14" cy="14" r="4" fill="#ffffff" fill-opacity="0.07"/>
+    </pattern>
+    <clipPath id="sq"><rect x="64" y="64" width="896" height="896" rx="200"/></clipPath>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <g clip-path="url(#sq)">
+    <rect x="64" y="64" width="896" height="896" fill="url(#dots)"/>
+    <rect x="64" y="64" width="896" height="896" fill="url(#glow)"/>
+    <!-- torn paper edge accent -->
+    <path d="M64 800 L150 780 L210 812 L290 770 L360 806 L450 772 L520 812 L610 776 L690 808 L770 770 L850 806 L960 778 L960 960 L64 960 Z" fill="#ece8df" fill-opacity="0.92"/>
+    <path d="M64 830 L160 812 L230 842 L300 806 L380 838 L470 808 L540 842 L620 810 L700 840 L790 806 L870 838 L960 812 L960 960 L64 960 Z" fill="#d9d3c6"/>
+  </g>
+  <!-- P monogram -->
+  <path d="M330 250 H560 C680 250 760 330 760 440 C760 552 680 630 560 630 H450 V770 H330 Z M450 360 V520 H552 C610 520 640 486 640 440 C640 394 610 360 552 360 Z"
+        fill="url(#ink)" stroke="#0b0b0b" stroke-width="18" stroke-linejoin="round"/>
+  <!-- brush swoosh -->
+  <path d="M250 700 C380 640 560 600 790 560 C640 620 470 680 300 742 Z" fill="#0b0b0b"/>
+  <path d="M262 702 C390 650 560 612 760 572" fill="none" stroke="#b9adff" stroke-width="6" stroke-linecap="round" stroke-opacity="0.9"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+</svg>
