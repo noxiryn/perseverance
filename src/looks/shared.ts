@@ -83,6 +83,18 @@ const hasIdle = typeof window !== 'undefined' && 'requestIdleCallback' in window
 export class IdleQueue {
   private jobs: Job[] = [];
   private running = false;
+  private paused = false;
+
+  /** Hold queued jobs (e.g. while a heavy foreground task runs); the running job finishes. */
+  pause() {
+    this.paused = true;
+  }
+
+  resume() {
+    if (!this.paused) return;
+    this.paused = false;
+    this.pump();
+  }
 
   /** Queue a job (replaces a pending job with the same key). Lower priority runs first. */
   push(key: string, run: Job['run'], priority = 0) {
@@ -96,8 +108,11 @@ export class IdleQueue {
     this.jobs = this.jobs.filter((j) => j.key !== key);
   }
 
-  clear() {
+  /** Drop all queued jobs; returns their keys. */
+  clear(): string[] {
+    const keys = this.jobs.map((j) => j.key);
     this.jobs = [];
+    return keys;
   }
 
   get pending() {
@@ -105,10 +120,10 @@ export class IdleQueue {
   }
 
   private pump() {
-    if (this.running || !this.jobs.length) return;
+    if (this.running || this.paused || !this.jobs.length) return;
     this.running = true;
     const next = () => {
-      const job = this.jobs.shift();
+      const job = this.paused ? undefined : this.jobs.shift();
       if (!job) {
         this.running = false;
         return;
@@ -117,7 +132,7 @@ export class IdleQueue {
         .then(job.run)
         .catch((e) => console.warn(`[preview] ${job.key} failed`, e))
         .finally(() => {
-          if (!this.jobs.length) {
+          if (!this.jobs.length || this.paused) {
             this.running = false;
             return;
           }

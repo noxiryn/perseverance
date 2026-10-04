@@ -14,7 +14,7 @@ import { activeSession } from '../../state/editor';
 import { toast } from '../../state/ui';
 import { renderDocument } from '../../render/compositor';
 import { renderPlaceholderCharacter } from '../../roblox/placeholder';
-import { applyDestructive, applySmart, committedDoc, effectiveMode, resolveTarget, selectionAlpha, targetContext, targetSource, type FilterTarget } from './apply';
+import { applyDestructive, applySmart, committedDoc, effectiveMode, lastModeFor, resolveTarget, selectionAlpha, targetContext, targetSource, type FilterTarget } from './apply';
 import { blendSelection } from './selectionBlend';
 import { fitImage, paramsKey, runOnCopy } from './preview';
 import { getLastFilter, rememberParams, rememberedParams, setLastFilter } from './memory';
@@ -196,26 +196,33 @@ export function FilterGallery({ initialFilterId, close }: FilterGalleryProps & {
     const destructive = !!t && !smart;
     return { ...f, sel: destructive && t ? selectionAlpha(t, f.img.width, f.img.height, f.k) : null };
   }, [src, t, smart]);
-  const raf = useRef(0);
-  const [slow, setSlow] = useState(false);
+  const timer = useRef(0);
+  const slowRef = useRef(false);
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
-    cancelAnimationFrame(raf.current);
+    window.clearTimeout(timer.current);
     if (!sel) return;
-    raf.current = requestAnimationFrame(() => {
-      const c = bigRef.current;
-      if (!c) return;
-      const b = bigBase;
-      c.width = b.img.width;
-      c.height = b.img.height;
-      const fctx = t
-        ? targetContext(t, b.k)
-        : makeFilterContext({ docWidth: src.docW, docHeight: src.docH, offsetX: 0, offsetY: 0, scale: b.img.width / src.docW });
-      const { out, ms } = runOnCopy(sel, params, b.img, fctx);
-      if (b.sel) blendSelection(b.img.data, out.data, b.sel);
-      c.getContext('2d')!.putImageData(out, 0, 0);
-      setSlow(ms > 120);
-    });
-    return () => cancelAnimationFrame(raf.current);
+    // heavy filters: show a spinner and let it paint before the synchronous render
+    if (slowRef.current) setBusy(true);
+    timer.current = window.setTimeout(
+      () => {
+        const c = bigRef.current;
+        if (!c) return;
+        const b = bigBase;
+        c.width = b.img.width;
+        c.height = b.img.height;
+        const fctx = t
+          ? targetContext(t, b.k)
+          : makeFilterContext({ docWidth: src.docW, docHeight: src.docH, offsetX: 0, offsetY: 0, scale: b.img.width / src.docW });
+        const { out, ms } = runOnCopy(sel, params, b.img, fctx);
+        if (b.sel) blendSelection(b.img.data, out.data, b.sel);
+        c.getContext('2d')!.putImageData(out, 0, 0);
+        slowRef.current = ms > 120;
+        setBusy(false);
+      },
+      slowRef.current ? 40 : 0,
+    );
+    return () => window.clearTimeout(timer.current);
   }, [sel, params, bigBase, t, src]);
 
   // keep the selected thumbnail in view when filtering/searching
@@ -232,7 +239,7 @@ export function FilterGallery({ initialFilterId, close }: FilterGalleryProps & {
         if (smart) applySmart(sel, params, t.layer.id);
         else if (!applyDestructive(sel, params, t)) toast('The selection doesn’t overlap this layer — nothing was filtered.', 'warning');
         rememberParams(sel.id, params);
-        setLastFilter({ filterId: sel.id, params, mode: smart ? 'smart' : 'destructive' });
+        setLastFilter({ filterId: sel.id, params, mode: lastModeFor(t, smart ? 'smart' : 'destructive') });
         close('ok');
       } catch (err) {
         console.error('[fx-filters] gallery apply failed', err);
@@ -333,7 +340,11 @@ export function FilterGallery({ initialFilterId, close }: FilterGalleryProps & {
                 </div>
                 <div className="fxf-big" style={{ height: BIG_H }}>
                   <canvas ref={bigRef} className="fxf-preview-canvas" />
-                  {slow && <span className="fxf-badge">Heavy filter — preview is downscaled</span>}
+                  {busy && (
+                    <span className="fxf-spinner">
+                      <LoaderCircle size={16} />
+                    </span>
+                  )}
                 </div>
                 {sel.description && <p className="fxf-desc">{sel.description}</p>}
                 <div className="fxf-side-params">

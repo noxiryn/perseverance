@@ -144,7 +144,8 @@ function skull(): string {
       ],
     ],
   );
-  const teeth = polys([], [rectPts(38.7, 85, 2.6, 18), rectPts(48.7, 85, 2.6, 18), rectPts(58.7, 85, 2.6, 18)]);
+  // Tooth gaps stay inside the jaw (the outline bottom is at y = 101.5).
+  const teeth = polys([], [rectPts(38.7, 85, 2.6, 12), rectPts(48.7, 85, 2.6, 12), rectPts(58.7, 85, 2.6, 12)]);
   return outline + eyes + nose + teeth;
 }
 

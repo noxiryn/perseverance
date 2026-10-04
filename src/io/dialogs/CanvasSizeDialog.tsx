@@ -5,6 +5,7 @@ import type { Document } from '../../core/types';
 import { useEditor } from '../../state/editor';
 import { MAX_DOC_SIZE } from '../newDocument';
 import { isDocAligned } from '../util';
+import { useDeferredSubmit } from './useDeferredSubmit';
 import '../io.css';
 
 export type CanvasSizeResult = { width: number; height: number; anchor: number; extension: string | null };
@@ -79,7 +80,7 @@ export function CanvasSizeDialog({ close, doc }: { close: (r?: CanvasSizeResult)
     }
   };
   const changed = w !== doc.width || h !== doc.height;
-  const submit = () => (changed ? close({ width: w, height: h, anchor, extension: extColor() }) : close());
+  const submit = useDeferredSubmit(() => (changed ? close({ width: w, height: h, anchor, extension: extColor() }) : close()));
 
   return (
     <Dialog

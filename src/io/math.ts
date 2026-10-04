@@ -103,6 +103,55 @@ export function opBakedTransform(
   };
 }
 
+export type LayerTurn = 'flipH' | 'flipV' | 'rotate90cw' | 'rotate90ccw' | 'rotate180';
+
+/**
+ * Edit ▸ Transform flips/rotations of one layer about its own center, in DOCUMENT space:
+ * flips mirror across the canvas axes (for rotated/skewed layers this negates rotation and skew,
+ * for upright layers it is simply scale × −1); rotations add to the layer rotation.
+ */
+export function layerTurnTransform(op: LayerTurn, t: Transform): Transform {
+  switch (op) {
+    case 'flipH':
+      return { ...t, scaleX: -t.scaleX, rotation: normAngle(-t.rotation), ...(t.skewX ? { skewX: -t.skewX } : {}) };
+    case 'flipV':
+      return { ...t, scaleY: -t.scaleY, rotation: normAngle(-t.rotation), ...(t.skewX ? { skewX: -t.skewX } : {}) };
+    case 'rotate90cw':
+      return { ...t, rotation: normAngle(t.rotation + 90) };
+    case 'rotate90ccw':
+      return { ...t, rotation: normAngle(t.rotation - 90) };
+    case 'rotate180':
+      return { ...t, rotation: normAngle(t.rotation + 180) };
+  }
+}
+
+/** Map a point through a layer turn about `pivot` (screen-style axes: +y down, CW positive). */
+export function turnPoint(op: LayerTurn, x: number, y: number, pivot: { x: number; y: number }): { x: number; y: number } {
+  const dx = x - pivot.x;
+  const dy = y - pivot.y;
+  switch (op) {
+    case 'flipH':
+      return { x: pivot.x - dx, y };
+    case 'flipV':
+      return { x, y: pivot.y - dy };
+    case 'rotate90cw':
+      return { x: pivot.x - dy, y: pivot.y + dx };
+    case 'rotate90ccw':
+      return { x: pivot.x + dy, y: pivot.y - dx };
+    case 'rotate180':
+      return { x: pivot.x - dx, y: pivot.y - dy };
+  }
+}
+
+/**
+ * Turn a layer (local box lw×lh) about a document-space pivot — the combined center of all
+ * selected layers, so a multi-layer flip mirrors the whole arrangement like Photoshop.
+ */
+export function layerTurnAbout(op: LayerTurn, t: Transform, lw: number, lh: number, pivot: { x: number; y: number }): Transform {
+  const c = turnPoint(op, t.x + lw / 2, t.y + lh / 2, pivot);
+  return { ...layerTurnTransform(op, t), x: c.x - lw / 2, y: c.y - lh / 2 };
+}
+
 /** Transform of a layer after the whole document is resampled by (sx, sy). */
 export function scaleTransform(t: Transform, lw: number, lh: number, sx: number, sy: number): Transform {
   const cx = (t.x + lw / 2) * sx;

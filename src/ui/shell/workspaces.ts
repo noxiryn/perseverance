@@ -7,6 +7,7 @@
  * "Reset Workspace".
  */
 import { DEFAULT_WORKSPACE, useUI, type DockGroupState, type WorkspaceLayout } from '../../state/ui';
+import { useShell } from './shellStore';
 
 export const WORKSPACE_STORAGE_KEY = 'perseverance.workspace';
 
@@ -235,10 +236,36 @@ export function removePanel(w: WorkspaceLayout, panelId: string): WorkspaceLayou
   return next;
 }
 
-/** Whether a panel is currently visible (active, expanded tab of a dock group, or open flyout). */
+/**
+ * Whether a panel is currently visible: the active, expanded tab of a rendered dock group, or the
+ * open flyout. While the dock is collapsed to the icon strip, groups are not rendered, so only
+ * the flyout counts.
+ */
 export function isPanelVisible(panelId: string): boolean {
   const st = useUI.getState();
-  if (st.flyoutPanel === panelId) return true;
   if (!st.dockVisible) return false;
+  if (st.flyoutPanel === panelId) return true;
+  if (useShell.getState().dockCollapsed) return false;
   return st.workspace.groups.some((gr) => gr.active === panelId && !gr.collapsed && gr.tabs.includes(panelId));
+}
+
+/**
+ * Make a panel visible (or, with `toggle`, hide it again when it is already showing), taking the
+ * hidden dock (Tab) and the collapsed icon-strip dock into account. Used by the Window menu, the
+ * command palette and the tips dialog.
+ */
+export function revealPanel(panelId: string, toggle = false) {
+  if (!useUI.getState().dockVisible) {
+    // Panels were hidden with Tab: bring them back and always show (never toggle off).
+    useUI.setState({ dockVisible: true });
+    toggle = false;
+  }
+  const ui = useUI.getState();
+  if (useShell.getState().dockCollapsed) {
+    // Dock groups are not rendered: the panel opens as a flyout beside the strip.
+    ui.setFlyout(toggle && ui.flyoutPanel === panelId ? null : panelId);
+    return;
+  }
+  if (toggle) ui.togglePanel(panelId);
+  else ui.showPanel(panelId);
 }

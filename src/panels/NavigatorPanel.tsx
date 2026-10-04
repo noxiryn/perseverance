@@ -90,8 +90,11 @@ export function NavigatorPanel() {
     if (x1 > x0 && y1 > y0) rect = { x: left + x0 * scale, y: top + y0 * scale, w: (x1 - x0) * scale, h: (y1 - y0) * scale };
   }
 
-  const centerOn = (docX: number, docY: number) => {
+  const centerOn = (x: number, y: number) => {
     if (!doc) return;
+    // Keep the view centered somewhere on the document (never pan it completely away).
+    const docX = Math.max(0, Math.min(doc.width, x));
+    const docY = Math.max(0, Math.min(doc.height, y));
     const z = viewport.zoom();
     useEditor.getState().setView({ panX: z * (doc.width / 2 - docX), panY: z * (doc.height / 2 - docY) });
     viewport.requestRender();
@@ -162,7 +165,7 @@ export function NavigatorPanel() {
         )}
         <div className="layers-nav-pills" onPointerDown={(e) => e.stopPropagation()}>
           {PRESETS.map((p) => {
-            const active = p.zoom !== 'fit' && Math.abs(zoom - p.zoom) < 0.001;
+            const active = !!doc && p.zoom !== 'fit' && Math.abs(zoom - p.zoom) < 0.001;
             return (
               <button
                 key={p.label}
@@ -181,7 +184,7 @@ export function NavigatorPanel() {
           })}
         </div>
       </div>
-      <div className="layers-nav-zoom">
+      <div className="layers-nav-zoom" style={doc ? undefined : { opacity: 0.45, pointerEvents: 'none' }}>
         <div className="layers-nav-zoom-head">
           <span className="ui-label">Zoom</span>
           <NumberField

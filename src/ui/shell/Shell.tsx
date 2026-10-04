@@ -17,12 +17,12 @@ import { installDesktopIntegration } from './desktopIntegration';
 import { installHistoryToasts } from './historyToasts';
 import { installKeyboard } from './keyboard';
 import { OptionsBar } from './OptionsBar';
-import { PREF_DEFAULTS, usePref } from './prefs';
 import { StartScreen } from './StartScreen';
 import { StatusBar } from './StatusBar';
 import { TitleBar } from './TitleBar';
 import { Toasts } from './Toasts';
 import { Toolbar } from './Toolbar';
+import { useUiScale } from './uiScale';
 import { ViewportFallback, ViewportHost } from './ViewportHost';
 import './shell.css';
 
@@ -35,22 +35,6 @@ function CanvasArea() {
       <Toasts />
     </div>
   );
-}
-
-function useUiScale() {
-  const scale = usePref<number>('uiScale', PREF_DEFAULTS.uiScale);
-  useEffect(() => {
-    const root = document.getElementById('root');
-    if (!root) return;
-    const s = Math.max(0.5, Math.min(2, Number(scale) || 1));
-    root.style.zoom = s === 1 ? '' : String(s);
-    // Reserved native-window-button areas are specified in device px: compensate for the zoom.
-    document.documentElement.style.setProperty('--shell-ui-scale', String(s));
-    return () => {
-      root.style.zoom = '';
-      document.documentElement.style.removeProperty('--shell-ui-scale');
-    };
-  }, [scale]);
 }
 
 export function Shell() {

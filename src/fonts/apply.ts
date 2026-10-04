@@ -65,18 +65,29 @@ export async function applyFontFamily(family: string, opts: { quiet?: boolean; w
     return 'layers';
   }
 
+  setTypeToolFont(family, opts);
+  return 'tool';
+}
+
+/**
+ * Make `family` the Type tool's default font (weight snapped to one the family has, italic kept
+ * only when the family ships an italic). Shows a toast unless `quiet`.
+ */
+export function setTypeToolFont(family: string, opts: { quiet?: boolean; weight?: number } = {}) {
+  const def = findFont(family);
+  const weights = def?.weights?.length ? def.weights : [400];
   const st = useEditor.getState();
   st.setToolOption('type', 'fontFamily', family);
-  const cur = Number(toolOptions('type', { fontWeight: 400 }).fontWeight) || 400;
+  const curOpts = toolOptions('type', { fontWeight: 400, fontStyle: 'normal' as string });
+  const cur = Number(curOpts.fontWeight) || 400;
   const w = fontWeightFor(weights, opts.weight ?? cur);
   if (w !== cur) st.setToolOption('type', 'fontWeight', w);
-  void ensureFont(family, w);
+  const style = curOpts.fontStyle === 'italic' && def?.italic ? 'italic' : 'normal';
+  if (style !== curOpts.fontStyle) st.setToolOption('type', 'fontStyle', style);
+  void ensureFont(family, w, style);
   if (!opts.quiet) {
     const label = opts.weight ? `${family} ${weightName(w)}` : family;
-    toast(
-      st.activeDocId ? `Type tool font set to ${label} — select a text layer to restyle it` : `Type tool font set to ${label}`,
-      'info',
-    );
+    const hint = st.activeDocId && !targetTextLayers().length ? ' — select a text layer to restyle it' : '';
+    toast(`Type tool font set to ${label}${hint}`, 'info');
   }
-  return 'tool';
 }

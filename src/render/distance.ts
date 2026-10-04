@@ -86,10 +86,9 @@ export function edgeDistance(cov: Uint8Array | Uint8ClampedArray, w: number, h: 
   ensureMap(n, w);
   ensure(Math.max(w, h));
   const site = siteBuf;
-  if (mode === 'outside') for (let i = 0; i < n; i++) site[i] = cov[i] >= 128 ? 1 : 0;
-  else for (let i = 0; i < n; i++) site[i] = cov[i] < 128 ? 1 : 0;
-  // Pass 1 (row-major for cache locality): per column, squared vertical distance to the nearest
-  // site and that site's row. Forward sweep tracks the last site row of each column…
+  const outside = mode === 'outside';
+  // Pass 1, forward sweep (row-major for cache locality), fused with site detection: per
+  // column, squared vertical distance to the last site above and that site's row.
   const g = gBuf;
   const gy = gyBuf;
   const col = colBuf;
@@ -98,7 +97,9 @@ export function edgeDistance(cov: Uint8Array | Uint8ClampedArray, w: number, h: 
     const row = y * w;
     for (let x = 0; x < w; x++) {
       const i = row + x;
-      if (site[i]) col[x] = y;
+      const s = outside ? cov[i] >= 128 : cov[i] < 128;
+      site[i] = s ? 1 : 0;
+      if (s) col[x] = y;
       const last = col[x];
       if (last >= 0) {
         const dy = y - last;
@@ -110,13 +111,23 @@ export function edgeDistance(cov: Uint8Array | Uint8ClampedArray, w: number, h: 
       }
     }
   }
-  // …and the backward sweep the next one.
+  // Backward sweep fused with pass 2: once row y has seen the sites below it, its column
+  // distances are final and its 1D envelope can run immediately (one less pass over memory).
+  const md2 = Number.isFinite(maxDist) ? (maxDist + 2) * (maxDist + 2) : INF;
+  const R = Number.isFinite(maxDist) ? Math.ceil(maxDist) + 3 : w;
+  if (nearBuf.length < w) nearBuf = new Int32Array(w);
+  near = nearBuf;
   col.fill(-1, 0, w);
   for (let y = h - 1; y >= 0; y--) {
     const row = y * w;
+    // Rows entirely made of sites are 0; rows with no site within reach are all `maxDist`
+    // (every candidate distance is ≥ its vertical part) — both skip the envelope.
+    let allSite = true;
+    let minG = INF;
     for (let x = 0; x < w; x++) {
       const i = row + x;
       if (site[i]) col[x] = y;
+      else allSite = false;
       const next = col[x];
       if (next >= 0) {
         const dy = next - y;
@@ -125,23 +136,7 @@ export function edgeDistance(cov: Uint8Array | Uint8ClampedArray, w: number, h: 
           gy[i] = next;
         }
       }
-    }
-  }
-  // Pass 2: per row, lower envelope of parabolas.
-  const md2 = Number.isFinite(maxDist) ? (maxDist + 2) * (maxDist + 2) : INF;
-  const R = Number.isFinite(maxDist) ? Math.ceil(maxDist) + 3 : w;
-  if (nearBuf.length < w) nearBuf = new Int32Array(w);
-  near = nearBuf;
-  for (let y = 0; y < h; y++) {
-    const row = y * w;
-    // Rows entirely made of sites are 0; rows with no site within reach are all `maxDist`
-    // (every candidate distance is ≥ its vertical part) — both skip the envelope.
-    let allSite = true;
-    let minG = INF;
-    for (let x = 0; x < w; x++) {
-      const gv = g[row + x];
-      if (gv < minG) minG = gv;
-      if (!site[row + x]) allSite = false;
+      if (g[i] < minG) minG = g[i];
     }
     if (allSite) continue;
     if (minG >= md2) {

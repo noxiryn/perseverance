@@ -17,6 +17,7 @@ import {
   cancelEditing,
   commitEditing,
   drawSessionOverlay,
+  editingLayerId,
   focusTextarea,
   insertAtCaret,
   isEditing,
@@ -60,8 +61,15 @@ function onPointerDown(e: ToolPointerEvent) {
       editPointer = true;
       return;
     }
-    // Click outside the edited text commits it (like Photoshop).
+    // Click outside the edited text commits it (like Photoshop); a click on another text layer
+    // then continues editing that layer.
+    const editing = editingLayerId();
     commitEditing();
+    const after = activeSession();
+    const other = after ? textLayerAt(after.doc, { x: e.docX, y: e.docY }, 4, null) : null;
+    if (after && other && other !== editing && !after.doc.layers[other]?.locks.all) {
+      if (beginEditLayer(other, { at: { x: e.docX, y: e.docY }, pointerId: e.native?.pointerId })) editPointer = true;
+    }
     return;
   }
   const hit = textLayerAt(s.doc, { x: e.docX, y: e.docY }, 4, s.activeLayerId);

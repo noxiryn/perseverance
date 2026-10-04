@@ -4,8 +4,9 @@ import { ArrowLeft, ArrowRight, Check, Download, Eye, Image as ImageIcon, Layers
 import { Button, Dialog } from '../../controls';
 import { commands, runCommand } from '../../../registry';
 import { useEditor } from '../../../state/editor';
-import { useUI, toast } from '../../../state/ui';
+import { toast } from '../../../state/ui';
 import { createBlankDocument } from '../documents';
+import { revealPanel } from '../workspaces';
 import { Keys } from '../Keys';
 
 interface Step {
@@ -19,10 +20,7 @@ interface Step {
 const has = (id: string) => commands.has(id);
 const needDoc = () => !!useEditor.getState().activeDocId;
 
-function showPanel(id: string) {
-  useUI.setState({ dockVisible: true });
-  useUI.getState().showPanel(id);
-}
+const showPanel = (id: string) => revealPanel(id);
 
 const STEPS: Step[] = [
   {

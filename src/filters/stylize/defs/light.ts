@@ -223,7 +223,7 @@ export const glow: FilterDef = {
   icon: SunDim,
   description: 'Dreamy diffuse glow (Orton effect): luminous, soft, yet keeps contrast.',
   keywords: ['orton', 'dreamy', 'diffuse', 'soft focus', 'bloom', 'ethereal'],
-  params: [pxP('radius', 'Radius', 1, 150, 18), pctP('intensity', 'Intensity', 0.5), pctP('brightness', 'Brightness', 0.35)],
+  params: [pctP('threshold', 'Threshold', 0), pxP('radius', 'Radius', 1, 150, 18), pctP('intensity', 'Intensity', 0.5), pctP('brightness', 'Brightness', 0.35)],
   apply(img, p, ctx) {
     if (isEmpty(img)) return img;
     const { width: w, height: h, data } = img;
@@ -232,7 +232,19 @@ export const glow: FilterDef = {
     if (k <= 0) return img;
     const r = Math.max(1, num(p.radius, 18)) * sc(ctx);
     const br = 1 + clamp(num(p.brightness, 0.35), 0, 1) * 2;
+    const thr = clamp(num(p.threshold, 0), 0, 1);
     const P = toPlanes(img, true);
+    // threshold: the glow only blooms around tones above it (soft knee, spread by the radius)
+    let gate: Float32Array | null = null;
+    if (thr > 0.001) {
+      const g0 = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const a = P.a[i];
+        if (a <= 0) continue;
+        g0[i] = smoothstep(thr - 0.08, thr + 0.08, (P.r[i] * 0.2126 + P.g[i] * 0.7152 + P.b[i] * 0.0722) / a);
+      }
+      gate = blurPlaneMultires(g0, w, h, r * 0.75, blurFn);
+    }
     // brightened copy (premultiplied straight-screen approximation)
     const bright = [P.r, P.g, P.b].map((pl) => {
       const o = new Float32Array(n);
@@ -251,12 +263,14 @@ export const glow: FilterDef = {
       if (a === 0) continue;
       const af = a / 255;
       const bA = Math.max(ab[i], 1e-4);
+      const kk = gate ? k * Math.min(1, gate[i] * 1.6) : k;
+      if (kk <= 0.001) continue;
       for (let c = 0; c < 3; c++) {
         const orig = data[j + c] / 255;
         const s = bright[c][i] / af; // brightened straight
         const bl = Math.min(1, blurred[c][i] / bA); // blurred straight
         const orton = s * bl + (1 - s * bl) * bl * 0.25; // multiply + a touch of screen
-        data[j + c] = (orig + (orton - orig) * k) * 255;
+        data[j + c] = (orig + (orton - orig) * kk) * 255;
       }
     }
     return img;

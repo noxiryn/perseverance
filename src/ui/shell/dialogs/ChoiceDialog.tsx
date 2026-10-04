@@ -19,10 +19,24 @@ interface Props extends Record<string, unknown> {
   icon?: ComponentType<{ size?: number; strokeWidth?: number }>;
 }
 
+/**
+ * Enter picks the primary choice only when no button has keyboard focus. When a button is
+ * focused (e.g. the user tabbed to "Don't Save"), the browser's own Enter activation clicks
+ * *that* button — the Dialog's capture-phase handler must not pre-empt it with the primary.
+ */
+export function submitTarget(active: Element | null, primary: string | undefined): string | undefined {
+  if (active && active.tagName === 'BUTTON') return undefined;
+  return primary;
+}
+
 export function ChoiceDialog({ close, title, message, detail, choices, icon: Icon = TriangleAlert }: Props) {
   const primary = choices.find((c) => c.variant === 'primary');
+  const onSubmit = () => {
+    const v = submitTarget(document.activeElement, primary?.value);
+    if (v !== undefined) close(v);
+  };
   return (
-    <Dialog title={title} onClose={() => close()} width={440} onSubmit={primary ? () => close(primary.value) : undefined}>
+    <Dialog title={title} onClose={() => close()} width={440} onSubmit={primary ? onSubmit : undefined}>
       <div className="shell-choice">
         <div className="shell-choice-icon">
           <Icon size={20} strokeWidth={1.75} />

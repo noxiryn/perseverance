@@ -20,12 +20,50 @@ interface ClipData {
   /** Original doc-space position of the copied pixels. */
   x: number;
   y: number;
-  /** Size we last put on the system clipboard (to recognize our own data when pasting). */
-  systemSize: { width: number; height: number } | null;
+  /** When the copy happened (ms). */
+  time: number;
+  /** The PNG reached the system clipboard (so a different system image there is newer). */
+  systemWritten: boolean;
+  /** Tiny color signature used to recognize our own image when reading the system clipboard back. */
+  fingerprint: Uint8ClampedArray;
 }
 
 let clip: ClipData | null = null;
 let lastPasteCommand = 0;
+/** Last time the window lost focus (the user may have copied something in another app). */
+let lastBlur = 0;
+
+const FP = 8;
+
+function fingerprintOf(c: HTMLCanvasElement): Uint8ClampedArray {
+  const f = createCanvas(FP, FP);
+  const ctx = ctx2d(f, { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(c, 0, 0, FP, FP);
+  return ctx.getImageData(0, 0, FP, FP).data;
+}
+
+/** True when `external` (read from the system clipboard) is the image we put there. */
+function isOurImage(external: HTMLCanvasElement, data: ClipData): boolean {
+  if (external.width !== data.canvas.width || external.height !== data.canvas.height) return false;
+  const a = fingerprintOf(external);
+  const b = data.fingerprint;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff += Math.abs(a[i] - b[i]);
+  // PNG round trips may alter colors slightly (color management / premultiplication).
+  return diff / a.length < 10;
+}
+
+/**
+ * Which clipboard to paste from: the system image unless it is our own copy, or older than our
+ * internal copy (the system write failed and the window never lost focus since).
+ */
+function preferSystem(external: HTMLCanvasElement, data: ClipData | null): boolean {
+  if (!data) return true;
+  if (isOurImage(external, data)) return false;
+  if (data.systemWritten) return true; // something replaced our image on the system clipboard
+  return lastBlur > data.time;
+}
 
 export function hasInternalClipboard() {
   return !!clip;
@@ -72,7 +110,7 @@ async function writeSystemClipboard(canvas: HTMLCanvasElement) {
   try {
     if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') return;
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': canvasToBlob(canvas, 'image/png') })]);
-    if (clip && clip.canvas === canvas) clip.systemSize = { width: canvas.width, height: canvas.height };
+    if (clip && clip.canvas === canvas) clip.systemWritten = true;
   } catch {
     /* no focus / permission — the internal clipboard still works */
   }
@@ -83,7 +121,7 @@ export function copy(merged = false): boolean {
   if (!s) return false;
   const src = copySource(s, merged);
   if (!src) return false;
-  clip = { ...src, systemSize: null };
+  clip = { ...src, time: Date.now(), systemWritten: false, fingerprint: fingerprintOf(src.canvas) };
   void writeSystemClipboard(src.canvas);
   toast(`Copied ${src.canvas.width}×${src.canvas.height} px${merged ? ' (merged)' : ''}`, 'success', 1800);
   return true;
@@ -190,48 +228,66 @@ async function readSystemImage(): Promise<Blob | null> {
   return null;
 }
 
-export async function paste(inPlace = false) {
-  lastPasteCommand = Date.now();
-  const sysBlob = await readSystemImage();
-  let external: HTMLCanvasElement | null = null;
-  if (sysBlob) {
-    try {
-      external = await blobToCanvas(sysBlob);
-    } catch {
-      external = null;
-    }
-  }
-  // Prefer the system image when it is not the one we put there ourselves.
-  const ours =
-    !!clip &&
-    !!external &&
-    ((clip.systemSize && clip.systemSize.width === external.width && clip.systemSize.height === external.height) ||
-      (clip.canvas.width === external.width && clip.canvas.height === external.height));
-  if (external && !ours) {
-    placeCanvas(external, activeSession() ? nextLayerName(activeSession()!.doc) : 'Pasted Image', { label: 'Paste', quiet: true });
-    toast(`Pasted ${external.width}×${external.height} image`, 'success', 1800);
-    return;
-  }
-  if (!clip) {
-    toast('The clipboard has no image. Copy pixels or an image first.', 'info');
-    return;
-  }
+/** Paste an image that came from the system clipboard (another app) as a new centered layer. */
+function pasteExternal(external: HTMLCanvasElement, name = 'Pasted Image') {
   const s = activeSession();
-  const canvas = createCanvas(clip.canvas.width, clip.canvas.height);
-  ctx2d(canvas).drawImage(clip.canvas, 0, 0);
+  const id = placeCanvas(external, s ? nextLayerName(s.doc) : name, { label: 'Paste', quiet: true });
+  const placed = id ? activeSession()?.doc.layers[id] : null;
+  const scaled = placed && placed.type === 'raster' && placed.width !== external.width;
+  toast(
+    s
+      ? `Pasted ${external.width}×${external.height} image${scaled && placed.type === 'raster' ? ` (scaled to ${placed.width}×${placed.height} to fit)` : ''}`
+      : 'Pasted into a new document',
+    'success',
+    2200,
+  );
+}
+
+/** Paste the internal clipboard (centered, or at its original position). */
+function pasteInternal(data: ClipData, inPlace: boolean) {
+  const s = activeSession();
+  const canvas = createCanvas(data.canvas.width, data.canvas.height);
+  ctx2d(canvas).drawImage(data.canvas, 0, 0);
   if (!s) {
     placeCanvas(canvas, 'Pasted Image', { quiet: true });
     toast('Pasted into a new document', 'success', 1800);
     return;
   }
   const at = inPlace
-    ? { x: clip.x, y: clip.y }
+    ? { x: data.x, y: data.y }
     : { x: Math.round((s.doc.width - canvas.width) / 2), y: Math.round((s.doc.height - canvas.height) / 2) };
   placeCanvas(canvas, nextLayerName(s.doc), { at, label: inPlace ? 'Paste in Place' : 'Paste', quiet: true });
 }
 
-/** Window 'paste' events (e.g. from the OS menu) with image files → place them. */
+async function decode(blob: Blob | null): Promise<HTMLCanvasElement | null> {
+  if (!blob) return null;
+  try {
+    return await blobToCanvas(blob);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Edit ▸ Paste / Paste in Place: the system clipboard image when it is newer than (and not the
+ * same as) our internal copy, else the internal clipboard.
+ */
+export async function paste(inPlace = false) {
+  lastPasteCommand = Date.now();
+  const external = await decode(await readSystemImage());
+  if (external && preferSystem(external, clip)) return pasteExternal(external);
+  if (!clip) {
+    toast('The clipboard has no image. Copy pixels or an image first.', 'info');
+    return;
+  }
+  pasteInternal(clip, inPlace);
+}
+
+/** Window 'paste' events (OS menu / clipboard managers) with images → place them as layers. */
 export function installPasteListener() {
+  window.addEventListener('blur', () => {
+    lastBlur = Date.now();
+  });
   window.addEventListener('paste', (e) => {
     if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
     if (useUI.getState().dialogs.length) return;
@@ -241,10 +297,19 @@ export function installPasteListener() {
     const file = img?.getAsFile();
     if (file) {
       e.preventDefault();
-      void placeImageBlob(file, file.name && file.name !== 'image.png' ? file.name : 'Pasted Image');
+      const name = file.name && file.name !== 'image.png' ? file.name : 'Pasted Image';
+      if (!clip) {
+        void placeImageBlob(file, name);
+        return;
+      }
+      void decode(file).then((external) => {
+        if (!external) return void toast('The pasted image could not be read.', 'error');
+        if (preferSystem(external, clip)) pasteExternal(external, name);
+        else if (clip) pasteInternal(clip, false);
+      });
     } else if (clip && activeSession() && !e.clipboardData?.types.includes('text/plain')) {
       e.preventDefault();
-      void paste(false);
+      pasteInternal(clip, false);
     }
   });
 }

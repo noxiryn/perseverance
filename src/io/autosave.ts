@@ -7,7 +7,7 @@ import type { ID } from '../core/types';
 import { useEditor } from '../state/editor';
 import { openDialog, toast } from '../state/ui';
 import { encodeProject, decodeProject } from './project';
-import { currentEntryId, idle, markDirty, readPref } from './util';
+import { currentEntryId, idle, markDirty, readJSON, readPref, writeJSON } from './util';
 
 const DB_NAME = 'perseverance-recovery';
 const STORE = 'docs';
@@ -158,8 +158,35 @@ export async function discardEntries(entries: RecoveryEntry[]) {
   for (const e of entries) await removeRecovery(e.id);
 }
 
+/**
+ * Ids of documents that were still dirty when the page unloaded normally (the user quit and chose
+ * not to save). Written synchronously on 'pagehide'; a crash never gets there, so whatever is left
+ * in IndexedDB without this marker is a genuine crash leftover.
+ */
+const CLOSED_KEY = 'perseverance.recovery.closedDirty';
+
+function markClosedWithoutSaving() {
+  const st = useEditor.getState();
+  const ids = Object.values(st.sessions)
+    .filter((s) => s.dirty && stored.has(s.doc.id))
+    .map((s) => s.doc.id);
+  if (!ids.length) return;
+  const prev = readJSON<unknown>(CLOSED_KEY, []);
+  writeJSON(CLOSED_KEY, [...new Set([...(Array.isArray(prev) ? prev : []), ...ids])]);
+}
+
 async function offerRecovery() {
-  const entries = (await listRecovery()).filter((e) => !useEditor.getState().sessions[e.id]);
+  const marker = readJSON<unknown>(CLOSED_KEY, []);
+  const closed = new Set(Array.isArray(marker) ? marker.filter((x): x is string => typeof x === 'string') : []);
+  try {
+    localStorage.removeItem(CLOSED_KEY);
+  } catch {
+    /* ignore */
+  }
+  const all = (await listRecovery()).filter((e) => !useEditor.getState().sessions[e.id]);
+  // Documents deliberately closed without saving are not offered again.
+  await discardEntries(all.filter((e) => closed.has(e.id)));
+  const entries = all.filter((e) => !closed.has(e.id));
   if (!entries.length) return;
   const { RecoveryDialog } = await import('./dialogs/RecoveryDialog');
   await openDialog(RecoveryDialog, { entries });
@@ -182,5 +209,6 @@ export function startAutosave() {
     }
     for (const id of [...lastRun.keys()]) if (!st.sessions[id]) lastRun.delete(id);
   });
+  window.addEventListener('pagehide', markClosedWithoutSaving);
   window.setTimeout(() => void offerRecovery(), 1200);
 }

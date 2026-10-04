@@ -101,12 +101,12 @@ let lastTheme: 'dark' | 'light' = 'dark';
 
 function Tile({ img, size, title, like, players, radius = ICON_CORNER, highlight }: { img: string; size: number; title: string; like: number; players: string; radius?: number; highlight?: boolean }) {
   return (
-    <div className={`rbxp-tile${highlight ? ' mine' : ''}`} style={{ width: size }}>
+    <div className={`roblox-pv-tile${highlight ? ' mine' : ''}`} style={{ width: size }}>
       <img src={img} alt="" style={{ width: size, height: size, borderRadius: size * radius }} draggable={false} />
-      <div className="rbxp-tile-title" title={title}>
+      <div className="roblox-pv-tile-title" title={title}>
         {title}
       </div>
-      <div className="rbxp-tile-stats">
+      <div className="roblox-pv-tile-stats">
         <span>
           <ThumbsUp size={11} /> {like}%
         </span>
@@ -171,7 +171,7 @@ export function PreviewDialog({ close }: { close: (r?: unknown) => void }) {
         </div>
       }
     >
-      <div className="rbxp-controls">
+      <div className="roblox-pv-controls">
         <div className="roblox-seg">
           <button className={theme === 'dark' ? 'active' : undefined} onClick={() => setTheme('dark')}>
             <Moon size={12} /> Dark
@@ -189,10 +189,10 @@ export function PreviewDialog({ close }: { close: (r?: unknown) => void }) {
           <TextInput value={creator} onChange={setCreator} placeholder="Creator" />
         </div>
       </div>
-      <div className={`rbxp rbxp-${theme}`}>
-        <div className="rbxp-section">
-          <div className="rbxp-h">Recommended For You</div>
-          <div className="rbxp-row">
+      <div className={`roblox-pv roblox-pv-${theme}`}>
+        <div className="roblox-pv-section">
+          <div className="roblox-pv-h">Recommended For You</div>
+          <div className="roblox-pv-row">
             <Tile img={neighbors[0].icon} size={150} title={neighbors[0].name} like={neighbors[0].like} players={neighbors[0].players} />
             <Tile img={art.icon} size={150} title={title} like={like} players={players} highlight />
             {neighbors.slice(1, 5).map((n) => (
@@ -201,28 +201,28 @@ export function PreviewDialog({ close }: { close: (r?: unknown) => void }) {
           </div>
         </div>
 
-        <div className="rbxp-split">
-          <div className="rbxp-section">
-            <div className="rbxp-h">Small sizes</div>
-            <div className="rbxp-row" style={{ alignItems: 'flex-end' }}>
+        <div className="roblox-pv-split">
+          <div className="roblox-pv-section">
+            <div className="roblox-pv-h">Small sizes</div>
+            <div className="roblox-pv-row" style={{ alignItems: 'flex-end' }}>
               {[100, 75, 50].map((s) => (
-                <div key={s} className="rbxp-small">
+                <div key={s} className="roblox-pv-small">
                   <img src={art.icon} alt="" style={{ width: s, height: s, borderRadius: s * ICON_CORNER }} draggable={false} />
                   <span>{s}px</span>
                 </div>
               ))}
-              <div className="rbxp-small">
+              <div className="roblox-pv-small">
                 <img src={art.icon} alt="" style={{ width: 64, height: 64, borderRadius: '50%' }} draggable={false} />
                 <span>badge</span>
               </div>
             </div>
-            <div className="rbxp-list">
+            <div className="roblox-pv-list">
               {[neighbors[2], { name: title, icon: art.icon, like, players, mine: true }, neighbors[3]].map((n) => (
-                <div key={n.name} className={`rbxp-list-row${'mine' in n ? ' mine' : ''}`}>
+                <div key={n.name} className={`roblox-pv-list-row${'mine' in n ? ' mine' : ''}`}>
                   <img src={n.icon} alt="" style={{ width: 48, height: 48, borderRadius: 48 * ICON_CORNER }} draggable={false} />
                   <div>
-                    <div className="rbxp-tile-title">{n.name}</div>
-                    <div className="rbxp-tile-stats">
+                    <div className="roblox-pv-tile-title">{n.name}</div>
+                    <div className="roblox-pv-tile-stats">
                       <span>
                         <ThumbsUp size={11} /> {n.like}%
                       </span>
@@ -235,15 +235,15 @@ export function PreviewDialog({ close }: { close: (r?: unknown) => void }) {
               ))}
             </div>
           </div>
-          <div className="rbxp-section">
-            <div className="rbxp-h">Wide tiles</div>
-            <div className="rbxp-row">
+          <div className="roblox-pv-section">
+            <div className="roblox-pv-h">Wide tiles</div>
+            <div className="roblox-pv-row">
               {[{ img: art.thumb, name: title, mine: true }, { img: neighbors[4].thumb, name: neighbors[4].name, mine: false }].map((t) => (
-                <div key={t.name} className={`rbxp-wide${t.mine ? ' mine' : ''}`}>
+                <div key={t.name} className={`roblox-pv-wide${t.mine ? ' mine' : ''}`}>
                   <img src={t.img} alt="" draggable={false} />
-                  <div className="rbxp-wide-band">
-                    <div className="rbxp-tile-title">{t.name}</div>
-                    <div className="rbxp-tile-stats">
+                  <div className="roblox-pv-wide-band">
+                    <div className="roblox-pv-tile-title">{t.name}</div>
+                    <div className="roblox-pv-tile-stats">
                       <span>
                         <ThumbsUp size={11} /> {t.mine ? like : neighbors[4].like}%
                       </span>
@@ -258,29 +258,29 @@ export function PreviewDialog({ close }: { close: (r?: unknown) => void }) {
           </div>
         </div>
 
-        <div className="rbxp-section">
-          <div className="rbxp-h">Game page</div>
-          <div className="rbxp-page">
-            <div className="rbxp-page-media">
+        <div className="roblox-pv-section">
+          <div className="roblox-pv-h">Game page</div>
+          <div className="roblox-pv-page">
+            <div className="roblox-pv-page-media">
               <img src={art.thumb} alt="" draggable={false} />
-              <span className="rbxp-arrow left">‹</span>
-              <span className="rbxp-arrow right">›</span>
-              <span className="rbxp-dots">
+              <span className="roblox-pv-arrow left">‹</span>
+              <span className="roblox-pv-arrow right">›</span>
+              <span className="roblox-pv-dots">
                 <i className="on" />
                 <i />
                 <i />
               </span>
             </div>
-            <div className="rbxp-page-info">
-              <img src={art.icon} alt="" className="rbxp-page-icon" draggable={false} />
-              <div className="rbxp-page-title">{title}</div>
-              <div className="rbxp-page-by">
+            <div className="roblox-pv-page-info">
+              <img src={art.icon} alt="" className="roblox-pv-page-icon" draggable={false} />
+              <div className="roblox-pv-page-title">{title}</div>
+              <div className="roblox-pv-page-by">
                 By <b>{creator || 'Creator'}</b>
               </div>
-              <button className="rbxp-play" type="button" tabIndex={-1}>
+              <button className="roblox-pv-play" type="button" tabIndex={-1}>
                 <Play size={22} fill="currentColor" />
               </button>
-              <div className="rbxp-page-stats">
+              <div className="roblox-pv-page-stats">
                 <div>
                   <b>{players}</b>
                   <span>Active</span>

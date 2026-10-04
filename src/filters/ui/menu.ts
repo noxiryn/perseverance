@@ -10,7 +10,7 @@ import { openDialog, toast } from '../../state/ui';
 import { openFilterDialog } from './filterDialog';
 import { FilterGallery, type FilterGalleryProps } from './FilterGallery';
 import { applyFilterNow } from './apply';
-import { getLastFilter, setLastFilter, subscribeLastFilter } from './memory';
+import { getLastFilter, subscribeLastFilter } from './memory';
 import { categoryRank, isBrowsableFilter } from './galleryModel';
 
 export const LAST_FILTER_ID = 'filter.last';
@@ -38,9 +38,8 @@ function lastFilterCommand(): CommandDef {
       const d = filters.get(l.filterId);
       if (!d) return void toast('The last filter is no longer available.', 'warning');
       const res = applyFilterNow(l.filterId, l.params, l.mode);
-      if (!res.ok) return void toast(res.error ?? `${d.name} could not be applied.`, 'info', 3600);
-      setLastFilter({ ...l, mode: res.mode ?? l.mode });
-      toast(`${d.name}${res.mode === 'smart' ? ' (Smart Filter)' : ''} applied`, 'success');
+      // success is announced by the shell's "<label> completed." history toast
+      if (!res.ok) toast(res.error ?? `${d.name} could not be applied.`, 'info', 3600);
     },
   };
 }

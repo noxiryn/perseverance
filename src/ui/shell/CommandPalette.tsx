@@ -21,6 +21,7 @@ import {
   type PaletteItem,
   type PaletteKind,
 } from './paletteSources';
+import { shellPortalHost } from './uiScale';
 
 const CAPS: Record<string, number> = { command: 12, tool: 6, panel: 5, filter: 8, look: 6, template: 6, asset: 6, font: 6 };
 
@@ -269,6 +270,6 @@ export function CommandPalette() {
     <div className="shell-pal-backdrop" onPointerDown={() => setOpen(false)}>
       <PaletteBody onClose={() => setOpen(false)} />
     </div>,
-    document.body,
+    shellPortalHost(),
   );
 }

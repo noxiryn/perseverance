@@ -15,7 +15,7 @@ export function PsdExportDialog({ close }: { close: (r?: PsdExportOptions) => vo
   return (
     <Dialog
       title="Export as Photoshop (PSD)"
-      width={440}
+      width={460}
       onClose={() => close()}
       onSubmit={submit}
       footer={
@@ -29,13 +29,15 @@ export function PsdExportDialog({ close }: { close: (r?: PsdExportOptions) => vo
     >
       <Checkbox checked={bake} onChange={setBake} label="Bake layer styles into pixels" />
       <div className="io-note" style={{ marginTop: 6, paddingLeft: 19 }}>
-        Drop shadows, strokes, glows and smart filters are rendered into each layer so the PSD looks identical in Photoshop.
+        {bake
+          ? 'Drop shadows, strokes, glows and overlays are rendered into each layer so the PSD looks exactly like your document.'
+          : 'Layer styles are written as editable Photoshop effects (drop/inner shadow, outer/inner glow, bevel, satin, stroke, color and gradient overlay). Layers using a style Photoshop does not have (long shadow, pattern overlay) are baked.'}
       </div>
       <div className="io-sep" />
       <div className="io-note">
-        Layers, groups, names, opacity, blend modes, visibility, clipping masks and layer masks are preserved. Text and shape layers
-        are exported as pixel layers. Brightness/Contrast, Levels, Curves, Exposure, Vibrance, Hue/Saturation, Invert, Posterize and
-        Threshold stay editable adjustment layers.
+        Layers, groups, names, opacity, fill, blend modes, visibility, clipping masks and layer masks are preserved. Text and shape layers are
+        exported as pixel layers (smart filters applied). Brightness/Contrast, Levels, Curves, Exposure, Vibrance, Hue/Saturation, Invert,
+        Posterize and Threshold stay editable adjustment layers.
       </div>
     </Dialog>
   );

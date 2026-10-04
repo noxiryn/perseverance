@@ -4,6 +4,7 @@ import { useEditor } from '../../state/editor';
 import { BLEND_OPTIONS, type StrokeSpec } from '../fillStroke';
 import type { StrokeLocation } from '../math';
 import { readJSON, writeJSON } from '../util';
+import { useDeferredSubmit } from './useDeferredSubmit';
 import '../io.css';
 
 const KEY = 'perseverance.strokeDialog';
@@ -26,10 +27,10 @@ export function StrokeDialog({ close }: { close: (r?: StrokeSpec) => void }) {
     color: primary,
   }));
   const set = <K extends keyof StrokeSpec>(k: K, v: StrokeSpec[K]) => setSpec((p) => ({ ...p, [k]: v }));
-  const submit = () => {
+  const submit = useDeferredSubmit(() => {
     writeJSON(KEY, { ...spec, color: undefined });
     close(spec);
-  };
+  });
   return (
     <Dialog
       title="Stroke"

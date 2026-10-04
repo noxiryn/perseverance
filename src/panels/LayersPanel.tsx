@@ -112,7 +112,7 @@ export function LayersPanel() {
     return (
       <div className="layers-panel">
         <LayersHeader doc={null} />
-        <div className="layers-empty">
+        <div className="layers-empty" style={{ flex: 1 }}>
           <Folder size={22} strokeWidth={1.4} />
           <div>No document open</div>
           {commands.has('file.new') && (

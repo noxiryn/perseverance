@@ -490,9 +490,11 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags): LayerRender | n
   const opacity = Math.max(0, Math.min(1, l.opacity));
   const knock = fill * opacity < 0.999;
   const behind: BehindPiece[] = [];
-  const core = fresh(region.w, region.h);
+  // Only behind-stage effects at full fill: the core IS the content (no copy).
+  const shareCore = fill >= 0.999 && sorted.every((e) => e.stage === 'behind');
+  const core = shareCore ? C : fresh(region.w, region.h);
   const kctx = ctx2d(core);
-  if (fill > 0) {
+  if (!shareCore && fill > 0) {
     kctx.globalAlpha = fill;
     kctx.drawImage(C, 0, 0);
     kctx.globalAlpha = 1;
@@ -732,7 +734,19 @@ interface RootPlan {
   prefix: string[];
   /** Signature of the empty accumulator (background, size…). */
   base: string;
+  /**
+   * Whether snapshots may be stored. Incremental (dirty-rect) composites only RESTORE: their
+   * accumulator is valid inside the dirty rect only.
+   */
+  store: boolean;
 }
+
+/**
+ * Last seen (prefix, adjustment signature) per adjustment: a 'pre' snapshot is only worth its
+ * full-canvas copy when the adjustment itself is being edited (its signature changes while
+ * everything below stays the same) — e.g. dragging a Hue/Saturation slider.
+ */
+const adjustmentSeen = new Map<string, { prefix: string; sig: string }>();
 
 function snapKey(rc: RC, adj: Layer, kind: 'pre' | 'post') {
   return `S${kind}|${rc.doc.id}|${adj.id}|${rc.s.toFixed(5)}|${rc.below ?? ''}`;
@@ -793,6 +807,15 @@ function restoreSnapshots(rc: RC, ids: ID[], acc: Acc, plan: RootPlan): number {
   return 0;
 }
 
+function anyShownAfter(rc: RC, ids: ID[], i: number): boolean {
+  for (let k = i + 1; k < ids.length; k++) {
+    if (ids[k] === rc.below) return false;
+    const l = rc.doc.layers[ids[k]];
+    if (l && isShown(rc, l)) return true;
+  }
+  return false;
+}
+
 /** Composite a layer list (bottom → top) into an accumulator. */
 function compositeList(rc: RC, ids: ID[], acc: Acc, plan?: RootPlan) {
   const doc = rc.doc;
@@ -828,10 +851,18 @@ function compositeList(rc: RC, ids: ID[], acc: Acc, plan?: RootPlan) {
       continue;
     }
     if (l.type === 'adjustment') {
-      const preSig = plan && prefixAt(plan, i - 1);
-      if (preSig !== undefined && plan) storeSnapshot(rc, acc, l, 'pre', preSig);
+      const preSig = plan?.store ? prefixAt(plan, i - 1) : undefined;
+      if (plan && preSig !== undefined) {
+        const key = snapKey(rc, l, 'pre');
+        const sig = layerSig(rc, l);
+        const seen = adjustmentSeen.get(key);
+        if (seen && seen.prefix === preSig && seen.sig !== sig) storeSnapshot(rc, acc, l, 'pre', preSig);
+        if (adjustmentSeen.size > 256) adjustmentSeen.clear();
+        adjustmentSeen.set(key, { prefix: preSig, sig });
+      }
       applyAdjustment(rc, acc, l);
-      if (plan && plan.prefix[i] !== undefined) storeSnapshot(rc, acc, l, 'post', plan.prefix[i]);
+      // 'post' snapshots only pay off when something above can change independently.
+      if (plan?.store && plan.prefix[i] !== undefined && anyShownAfter(rc, ids, i)) storeSnapshot(rc, acc, l, 'post', plan.prefix[i]);
       i++;
       continue;
     }
@@ -995,7 +1026,9 @@ export function compositeDocument(doc: Document, o: DocRenderOptions): HTMLCanva
             ctx.fillRect(dirty.x, dirty.y, dirty.w, dirty.h);
             acc.bounds = docR;
           }
-          compositeList(rc, doc.rootIds, acc);
+          // Resume from a cached adjustment snapshot when everything below it is unchanged
+          // (editing above a global adjustment never re-runs its filter).
+          compositeList(rc, doc.rootIds, acc, { prefix: prefixSigs(rc, doc.rootIds, base), base, store: false });
           ctx.restore();
           slots.set(key, sig, { canvas: out, items } satisfies DocEntry, px(out), { composite: true, max: 1 });
           return out;
@@ -1013,7 +1046,7 @@ export function compositeDocument(doc: Document, o: DocRenderOptions): HTMLCanva
     ctx.fillRect(0, 0, rc.W, rc.H);
     acc.bounds = docR;
   }
-  compositeList(rc, doc.rootIds, acc, { prefix: prefixSigs(rc, doc.rootIds, base), base });
+  compositeList(rc, doc.rootIds, acc, { prefix: prefixSigs(rc, doc.rootIds, base), base, store: true });
   const items: DocItem[] = raw.map((r) => ({ id: r.id, sig: r.sig, region: itemRegion(rc, r.layer) }));
   slots.set(key, sig, { canvas: out, items } satisfies DocEntry, px(out), { composite: true, max: 1 });
   return out;

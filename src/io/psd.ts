@@ -12,12 +12,13 @@ import { bitmaps } from '../core/bitmaps';
 import { createCanvas, ctx2d, opaqueBounds } from '../core/canvas';
 import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeGroupLayer, makeRasterLayer } from '../core/document';
 import { renderDocument, renderLayerToDoc } from '../render/compositor';
-import { filters } from '../registry';
+import { effects as effectRegistry, filters } from '../registry';
 import { resolveParams } from '../filters/engine';
 import { saveFile, type OpenedFile } from '../platform';
 import { activeSession, useEditor } from '../state/editor';
 import { openDialog, toast } from '../state/ui';
-import { fromPsdBlend, safeFileName, toPsdBlend } from './math';
+import { formatBytes, fromPsdBlend, safeFileName, toPsdBlend } from './math';
+import { effectLabel, effectsFromPsd, effectsToPsd } from './psdEffects';
 import { baseName, ensureFontsFor } from './util';
 
 /* ------------------------------------------------------------------ */
@@ -151,9 +152,18 @@ function maskToPsd(doc: Document, mask: LayerMask): LayerMaskData | undefined {
   };
 }
 
-/** Build the ag-psd structure for a document. Returns the names of layers that could not be exported. */
-export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd; skipped: string[] } {
-  const skipped: string[] = [];
+export interface PsdBuildReport {
+  /** Adjustment layers with no PSD equivalent (left out). */
+  skipped: string[];
+  /** Layers whose styles had to be baked into pixels (no Photoshop equivalent). */
+  baked: string[];
+  /** Groups whose styles could not be exported (folders cannot hold baked pixels). */
+  lostGroupStyles: string[];
+}
+
+/** Build the ag-psd structure for a document. */
+export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd } & PsdBuildReport {
+  const report: PsdBuildReport = { skipped: [], baked: [], lostGroupStyles: [] };
   const convert = (id: ID): PsdLayer | null => {
     const l = doc.layers[id];
     if (!l) return null;
@@ -169,19 +179,38 @@ export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd; ski
       if (m) common.mask = m;
     }
     if (l.type === 'group') {
+      // Folders carry no pixels: their styles can only travel as native Photoshop effects.
+      const fx = effectsToPsd(l.effects);
+      if (fx.info) common.effects = fx.info;
+      if (fx.unsupported.length) report.lostGroupStyles.push(`${l.name} (${fx.unsupported.map((e) => effectLabel(e.effectId)).join(', ')})`);
+      if (l.fillOpacity < 1) common.fillOpacity = l.fillOpacity;
       const children = l.childIds.map(convert).filter((c): c is PsdLayer => !!c);
       return { ...common, opened: !l.collapsed, children };
     }
     if (l.type === 'adjustment') {
       const a = toPsdAdjustment(l.adjustment.filterId, l.adjustment.params);
       if (!a) {
-        skipped.push(l.name);
+        report.skipped.push(l.name);
         return null;
       }
       return { ...common, adjustment: a };
     }
-    if (!opts.bakeStyles && l.fillOpacity < 1) common.fillOpacity = l.fillOpacity;
-    const full = renderLayerToDoc(doc, l, { effects: opts.bakeStyles, mask: false });
+    const enabledFx = l.effects.filter((e) => e.enabled);
+    let bake = opts.bakeStyles && enabledFx.length > 0;
+    let source: Layer = l;
+    if (!opts.bakeStyles && l.effects.length) {
+      const fx = effectsToPsd(l.effects);
+      if (fx.unsupported.length) {
+        bake = true;
+        report.baked.push(`${l.name} (${fx.unsupported.map((e) => effectLabel(e.effectId)).join(', ')})`);
+      } else if (fx.info) common.effects = fx.info;
+    }
+    if (!bake && l.fillOpacity < 1) {
+      // The renderer applies Fill to the content: export it at full fill and let Photoshop apply it.
+      common.fillOpacity = l.fillOpacity;
+      source = { ...l, fillOpacity: 1 } as Layer;
+    }
+    const full = renderLayerToDoc(doc, source, { effects: bake, mask: false });
     const b = full ? opaqueBounds(full) : null;
     if (!full || !b) return { ...common, top: 0, left: 0, bottom: 0, right: 0 };
     const c = createCanvas(b.width, b.height);
@@ -189,8 +218,11 @@ export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd; ski
     return { ...common, top: b.y, left: b.x, bottom: b.y + b.height, right: b.x + b.width, canvas: c };
   };
   const children = doc.rootIds.map(convert).filter((c): c is PsdLayer => !!c);
-  const psd: Psd = { width: doc.width, height: doc.height, channels: 4, bitsPerChannel: 8, colorMode: 3, children, canvas: renderDocument(doc, { background: true }) };
-  return { psd, skipped };
+  const comp = renderDocument(doc, { background: true });
+  const composite = createCanvas(comp.width, comp.height);
+  ctx2d(composite).drawImage(comp, 0, 0);
+  const psd: Psd = { width: doc.width, height: doc.height, channels: 4, bitsPerChannel: 8, colorMode: 3, children, canvas: composite };
+  return { psd, ...report };
 }
 
 export async function exportPsd(opts: PsdExportOptions): Promise<void> {
@@ -200,8 +232,11 @@ export async function exportPsd(opts: PsdExportOptions): Promise<void> {
     return;
   }
   try {
+    toast('Preparing PSD…', 'info', 1600);
     await ensureFontsFor(s.doc);
-    const { psd, skipped } = buildPsd(s.doc, opts);
+    // Let the toast paint before the (synchronous) layer rendering and encoding.
+    await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+    const { psd, skipped, baked, lostGroupStyles } = buildPsd(s.doc, opts);
     const data = writePsd(psd, { generateThumbnail: true, noBackground: true });
     const res = await saveFile({
       title: 'Export PSD',
@@ -210,8 +245,14 @@ export async function exportPsd(opts: PsdExportOptions): Promise<void> {
       data,
     });
     if (!res) return;
-    const extra = skipped.length ? ` · ${skipped.length} adjustment layer${skipped.length > 1 ? 's' : ''} not supported by PSD export were skipped (${skipped.slice(0, 3).join(', ')}${skipped.length > 3 ? '…' : ''})` : '';
-    toast(`Exported PSD${extra}`, skipped.length ? 'warning' : 'success', skipped.length ? 6000 : 2600);
+    const list = (a: string[]) => `${a.slice(0, 3).join(', ')}${a.length > 3 ? '…' : ''}`;
+    const notes: string[] = [];
+    if (skipped.length) notes.push(`${skipped.length} adjustment layer${skipped.length > 1 ? 's' : ''} without a PSD equivalent skipped (${list(skipped)})`);
+    if (baked.length) notes.push(`styles baked into pixels on ${list(baked)}`);
+    if (lostGroupStyles.length) notes.push(`group styles not exported: ${list(lostGroupStyles)}`);
+    const size = formatBytes(data.byteLength);
+    if (notes.length) toast(`Exported PSD (${size}) · ${notes.join(' · ')}`, 'warning', 7000);
+    else toast(`Exported PSD (${size})`, 'success');
   } catch (e) {
     console.error('[io] PSD export failed', e);
     toast(`PSD export failed: ${(e as Error).message ?? e}`, 'error', 5000);
@@ -244,9 +285,10 @@ function maskFromPsd(doc: Document, m: LayerMaskData | undefined): LayerMask | n
 }
 
 /** Convert an ag-psd structure to a Document (bitmaps are registered in the store). */
-export function psdToDocument(psd: Psd, name: string): { doc: Document; unsupported: number } {
+export function psdToDocument(psd: Psd, name: string): { doc: Document; unsupported: number; styled: number } {
   const doc = createDocument({ name, width: psd.width, height: psd.height, background: null });
   let unsupported = 0;
+  let styled = 0;
   const applyCommon = (target: Layer, l: PsdLayer, isGroup: boolean) => {
     target.opacity = Math.max(0, Math.min(1, l.opacity ?? 1));
     target.visible = !l.hidden;
@@ -255,6 +297,9 @@ export function psdToDocument(psd: Psd, name: string): { doc: Document; unsuppor
     (target as { blendMode: string }).blendMode = fromPsdBlend(l.blendMode, isGroup);
     if (l.transparencyProtected || l.protected?.transparency) target.locks = { ...target.locks, transparency: true };
     target.mask = maskFromPsd(doc, l.mask);
+    // Layer pixels from a PSD exclude layer effects: bring them back as live layer styles.
+    target.effects = effectsFromPsd(l.effects, (id) => !effectRegistry.list().length || effectRegistry.has(id));
+    if (target.effects.length) styled++;
   };
   const add = (list: PsdLayer[] | undefined, parentId: ID | null) => {
     for (const l of list ?? []) {
@@ -299,7 +344,7 @@ export function psdToDocument(psd: Psd, name: string): { doc: Document; unsuppor
     const layer = makeRasterLayer({ name: 'Background', bitmapId: bitmaps.add(psd.canvas), width: psd.canvas.width, height: psd.canvas.height });
     insertLayerDraft(doc, layer, {});
   } else throw new Error('the PSD contains no readable layers');
-  return { doc, unsupported };
+  return { doc, unsupported, styled };
 }
 
 export async function importPsd(file: OpenedFile): Promise<Document> {

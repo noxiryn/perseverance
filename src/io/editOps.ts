@@ -4,7 +4,10 @@
 import { activeSession, useEditor } from '../state/editor';
 import { toast } from '../state/ui';
 import { viewport } from '../editor/viewport';
-import { normAngle } from './math';
+import { getLayerBounds, getLayerSize } from '../render/compositor';
+import { rectUnion } from '../core/geometry';
+import type { Rect } from '../core/types';
+import { layerTurnAbout, type LayerTurn } from './math';
 import { requireSession, selectedTransformables } from './util';
 
 export function canUndo(): boolean {
@@ -39,8 +42,6 @@ export function redo() {
   viewport.requestRender();
 }
 
-type LayerTurn = 'flipH' | 'flipV' | 'rotate90cw' | 'rotate90ccw' | 'rotate180';
-
 const LABELS: Record<LayerTurn, string> = {
   flipH: 'Flip Horizontal',
   flipV: 'Flip Vertical',
@@ -49,7 +50,7 @@ const LABELS: Record<LayerTurn, string> = {
   rotate180: 'Rotate 180°',
 };
 
-/** Flip/rotate the selected layers about their own centers (transform only — non-destructive). */
+/** Flip/rotate the selected layers about their combined center (transform only — non-destructive). */
 export function turnLayers(op: LayerTurn) {
   const s = requireSession('transform layers');
   if (!s) return;
@@ -67,29 +68,16 @@ export function turnLayers(op: LayerTurn) {
     );
     return;
   }
-  const ids = new Set(targets.map((t) => t.id));
+  // Pivot: center of the combined bounds (a single layer turns about its own center).
+  let box: Rect | null = null;
+  for (const t of targets) box = rectUnion(box, getLayerBounds(s.doc, t.id));
+  const sizes = new Map(targets.map((t) => [t.id, getLayerSize(t)]));
+  const pivot = box ? { x: box.x + box.width / 2, y: box.y + box.height / 2 } : { x: s.doc.width / 2, y: s.doc.height / 2 };
   useEditor.getState().commit(LABELS[op], (d) => {
-    for (const id of ids) {
+    for (const [id, size] of sizes) {
       const l = d.layers[id];
       if (!l || (l.type !== 'raster' && l.type !== 'text' && l.type !== 'shape')) continue;
-      const t = l.transform;
-      switch (op) {
-        case 'flipH':
-          l.transform = { ...t, scaleX: -t.scaleX };
-          break;
-        case 'flipV':
-          l.transform = { ...t, scaleY: -t.scaleY };
-          break;
-        case 'rotate90cw':
-          l.transform = { ...t, rotation: normAngle(t.rotation + 90) };
-          break;
-        case 'rotate90ccw':
-          l.transform = { ...t, rotation: normAngle(t.rotation - 90) };
-          break;
-        case 'rotate180':
-          l.transform = { ...t, rotation: normAngle(t.rotation + 180) };
-          break;
-      }
+      l.transform = layerTurnAbout(op, l.transform, size.width, size.height, pivot);
     }
   });
   viewport.requestRender();

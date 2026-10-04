@@ -8,7 +8,7 @@ import { runCommand, statusItems, useRegistry } from '../../registry';
 import { useActiveDoc, useEditor } from '../../state/editor';
 import { useUI } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
-import { docSizeLabel, formatZoom, parseZoom } from './docInfo';
+import { clientToViewport, docSizeLabel, formatZoom, zoomToApply } from './docInfo';
 import { ErrorBoundary } from './ErrorBoundary';
 
 function ZoomField({ disabled }: { disabled: boolean }) {
@@ -17,13 +17,15 @@ function ZoomField({ disabled }: { disabled: boolean }) {
   const label = disabled || !zoom ? '—' : formatZoom(zoom);
   const [text, setText] = useState(label);
   const focused = useRef(false);
+  /** Set by Esc: the blur that follows must not apply the typed text. */
+  const cancelled = useRef(false);
   useEffect(() => {
     if (!focused.current) setText(label);
   }, [label]);
-  const commit = () => {
-    const z = parseZoom(text);
-    if (z) viewport.zoomTo(z);
-    setText(z ? formatZoom(z) : label);
+  const commit = (value: string) => {
+    const z = zoomToApply(value, label, zoom);
+    if (z !== null) viewport.zoomTo(z);
+    setText(z !== null ? formatZoom(z) : label);
   };
   return (
     <input
@@ -33,18 +35,24 @@ function ZoomField({ disabled }: { disabled: boolean }) {
       title="Zoom — type a value and press Enter"
       onFocus={(e) => {
         focused.current = true;
+        cancelled.current = false;
         e.target.select();
       }}
-      onBlur={() => {
+      onBlur={(e) => {
         focused.current = false;
-        commit();
+        if (cancelled.current) {
+          cancelled.current = false;
+          setText(label);
+          return;
+        }
+        commit(e.currentTarget.value);
       }}
       onChange={(e) => setText(e.target.value)}
       onKeyDown={(e) => {
         e.stopPropagation();
         if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
         else if (e.key === 'Escape') {
-          setText(label);
+          cancelled.current = true;
           (e.target as HTMLInputElement).blur();
         } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
           e.preventDefault();
@@ -70,7 +78,7 @@ function useCursorDocPos(): { x: number; y: number } | null {
       const r = el.getBoundingClientRect();
       const inside = e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom && el.contains(e.target as Node);
       if (!inside) return setPos(null);
-      const p = viewport.screenToDoc({ x: e.clientX - r.left, y: e.clientY - r.top });
+      const p = viewport.screenToDoc(clientToViewport(e.clientX, e.clientY, r, el.clientWidth, el.clientHeight));
       setPos((prev) => {
         const nx = Math.floor(p.x);
         const ny = Math.floor(p.y);

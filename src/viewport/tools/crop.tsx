@@ -16,7 +16,7 @@ import { clearSmartGuides, collectSnapTargets, snapPoint, snapRect, type SnapTar
 import { drawLabel, resizeCursorForAngle } from '../draw';
 import { applyCrop } from '../cropApply';
 import { Label, Sep, setToolOptionSafe } from '../options/common';
-import { fmtPx } from '../state';
+import { fmtPx, isTemporarilySuspended } from '../state';
 import '../viewport.css';
 
 export type CropPreset = 'free' | 'original' | '1:1' | '16:9' | '4:3' | '9:16' | 'roblox-icon' | 'thumbnail' | 'custom';
@@ -50,8 +50,10 @@ interface CropState {
   docId: string | null;
   docW: number;
   docH: number;
+  /** The box is still the untouched default (whole canvas): dragging inside it draws a new box. */
+  pristine: boolean;
 }
-export const useCropStore = create<CropState>()(() => ({ box: null, docId: null, docW: 0, docH: 0 }));
+export const useCropStore = create<CropState>()(() => ({ box: null, docId: null, docW: 0, docH: 0, pristine: true }));
 
 /** Current crop box for the active document (initialised to the whole canvas). */
 function ensureBox(): Rect | null {
@@ -60,7 +62,7 @@ function ensureBox(): Rect | null {
   const st = useCropStore.getState();
   if (st.box && st.docId === s.doc.id && st.docW === s.doc.width && st.docH === s.doc.height) return st.box;
   const box = initialBox();
-  useCropStore.setState({ box, docId: s.doc.id, docW: s.doc.width, docH: s.doc.height });
+  useCropStore.setState({ box, docId: s.doc.id, docW: s.doc.width, docH: s.doc.height, pristine: !currentRatio() });
   return box;
 }
 
@@ -72,8 +74,8 @@ function initialBox(): Rect | null {
   return r ? fitRatio(full, r) : full;
 }
 
-function setBox(box: Rect) {
-  useCropStore.setState({ box });
+function setBox(box: Rect, pristine = false) {
+  useCropStore.setState({ box, pristine });
   viewport.requestOverlay();
 }
 
@@ -117,7 +119,7 @@ function refitBox() {
 
 export function resetCrop() {
   const box = initialBox();
-  if (box) setBox(box);
+  if (box) setBox(box, !currentRatio());
 }
 
 export function commitCrop() {
@@ -153,6 +155,8 @@ interface Drag {
   moved: boolean;
 }
 let drag: Drag | null = null;
+/** Deactivated only temporarily (Space → Hand): keep the box on re-activation. */
+let suspended = false;
 
 function screenBox(box: Rect) {
   const p0 = viewport.docToScreen({ x: box.x, y: box.y });
@@ -195,8 +199,9 @@ function onPointerDown(e: ToolPointerEvent) {
   const box = ensureBox();
   if (!s || !box) return;
   const hit = hitTest({ x: e.screenX, y: e.screenY }, box);
+  const pristine = useCropStore.getState().pristine;
   drag = {
-    kind: hit.kind === 'handle' ? 'handle' : hit.kind === 'inside' ? 'move' : 'new',
+    kind: hit.kind === 'handle' ? 'handle' : hit.kind === 'inside' && !pristine ? 'move' : 'new',
     handle: hit.kind === 'handle' ? hit.handle : undefined,
     start: { x: e.docX, y: e.docY },
     screen0: { x: e.screenX, y: e.screenY },
@@ -242,9 +247,10 @@ function onPointerUp() {
   drag = null;
   clearSmartGuides();
   if (!d) return;
+  const wasPristine = !d.moved && useCropStore.getState().pristine;
   if (d.kind === 'new' && !d.moved) {
-    // A click outside the box without dragging keeps the previous box.
-    setBox(d.box0);
+    // A click without dragging keeps the previous box.
+    setBox(d.box0, wasPristine);
   }
   const box = useCropStore.getState().box;
   if (box && (box.width < 1 || box.height < 1)) setBox(d.box0);
@@ -254,7 +260,8 @@ function onPointerUp() {
 function onHover(e: ToolPointerEvent) {
   const box = ensureBox();
   if (!box) return;
-  viewport.setCursor(cursorFor(hitTest({ x: e.screenX, y: e.screenY }, box)));
+  const hit = hitTest({ x: e.screenX, y: e.screenY }, box);
+  viewport.setCursor(hit.kind === 'inside' && useCropStore.getState().pristine ? 'crosshair' : cursorFor(hit));
 }
 
 function onDoubleClick(e: ToolPointerEvent) {
@@ -370,11 +377,23 @@ export const cropTool: ToolDef = {
   OptionsBar: CropOptions,
   defaultOptions: { ...CROP_DEFAULTS },
   onActivate() {
-    useCropStore.setState({ box: null, docId: null });
+    if (suspended) {
+      // Back from a temporary tool (Space → Hand): keep the box the user was editing.
+      suspended = false;
+      ensureBox();
+      viewport.requestOverlay();
+      return;
+    }
+    useCropStore.setState({ box: null, docId: null, pristine: true });
     ensureBox();
     viewport.requestOverlay();
   },
   onDeactivate() {
+    if (isTemporarilySuspended('crop')) {
+      suspended = true;
+      return;
+    }
+    suspended = false;
     drag = null;
     clearSmartGuides();
     useCropStore.setState({ box: null, docId: null });

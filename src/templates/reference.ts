@@ -15,6 +15,35 @@ export function vignette(b: DocBuilder, amount = 0.6, color = '#000000', size = 
   if (!adj) b.asset('vignette-overlay', { color, amount, softness: 0.6 }, { name: 'Vignette', blendMode: 'multiply' });
 }
 
+/**
+ * Trace a polygon whose edges are torn (jagged, seeded) — used for mask shapes such as a torn
+ * newspaper strip. Points are in document px; `amp` is the tear depth.
+ */
+export function tornPolygon(ctx: CanvasRenderingContext2D, pts: [number, number][], amp: number, seed = 1, step = 14) {
+  let st = seed >>> 0 || 1;
+  const rand = () => {
+    st = (st * 1664525 + 1013904223) >>> 0;
+    return st / 0xffffffff;
+  };
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => {
+    const [nx, ny] = pts[(i + 1) % pts.length];
+    if (i === 0) ctx.moveTo(x, y);
+    const len = Math.hypot(nx - x, ny - y);
+    const n = Math.max(1, Math.round(len / step));
+    // perpendicular unit vector
+    const px = -(ny - y) / (len || 1);
+    const py = (nx - x) / (len || 1);
+    for (let k = 1; k <= n; k++) {
+      const t = k / n;
+      const j = k === n ? 0 : (rand() - 0.5) * 2 * amp;
+      ctx.lineTo(x + (nx - x) * t + px * j, y + (ny - y) * t + py * j);
+    }
+  });
+  ctx.closePath();
+  ctx.fill();
+}
+
 /** A katana as editable shapes (blade + guard + grip), from the tip to the hilt end. */
 export function sword(b: DocBuilder, tipX: number, tipY: number, endX: number, endY: number, width: number, steel = '#2a2a2e', edge = '#d8d8dc') {
   return b.group(
@@ -82,8 +111,8 @@ export const gothicPaper = defineTemplate({
 
     b.group('Title', () => {
       const title = { fontFamily: BLACKLETTER_HEAVY, fontWeight: 700, fontSize: 200, anchor: 'center' as const, fitWidth: 560, lineHeight: 1.05 };
-      b.text('Birdcage', { ...title, x: 512 + 18, y: 52 + 14, fill: solid('#9a9a9a') }, { name: 'Title Ghost', opacity: 0.45 });
-      b.text('Birdcage', { ...title, x: 512, y: 52, fill: solid('#141414') }, { name: 'Title' });
+      b.text('Birdcage', { ...title, x: 512 + 18, y: 40 + 14, fill: solid('#9a9a9a') }, { name: 'Title Ghost', opacity: 0.45 });
+      b.text('Birdcage', { ...title, x: 512, y: 40, fill: solid('#141414') }, { name: 'Title' });
     });
 
     b.asset(
@@ -92,7 +121,7 @@ export const gothicPaper = defineTemplate({
       { name: 'Swirl Tendrils' },
     );
 
-    const ch = b.character({ cx: 520, top: 318, height: 1120, pose: 'idle', style: 'shaded', skin: '#caa47c', shirt: '#151518', pants: '#1c1c20', hair: '#6d6f99' });
+    const ch = b.character({ cx: 520, top: 330, height: 900, pose: 'idle', style: 'shaded', skin: '#caa47c', shirt: '#151518', pants: '#1c1c20', hair: '#6d6f99' });
     b.smartFilter(ch, 'cel-shade', {
       levels: 4,
       smoothness: 0.15,
@@ -103,7 +132,8 @@ export const gothicPaper = defineTemplate({
       saturation: -10,
     });
 
-    b.text('VII', { fontFamily: SERIF, fontWeight: 600, fontSize: 54, x: 902, y: 462, anchor: 'center', fill: solid('#161616') }, { name: 'Numeral' });
+    const numeral = b.text('VII', { fontFamily: SERIF, fontWeight: 600, fontSize: 54, x: 902, y: 462, anchor: 'center', fill: solid('#161616') }, { name: 'Numeral' });
+    b.effect(numeral, 'stroke', { color: '#e6e5e1', size: 5, position: 'outside' });
 
     b.adjustment('hue-saturation', { saturation: -28 }, { name: 'Desaturate' });
     b.adjustment('curves', { curves: S_CURVE }, { name: 'Contrast' });
@@ -116,18 +146,18 @@ export const gothicPaper = defineTemplate({
 /* ------------------------------------------------------------------ */
 
 const AMBER = grad([
-  [0, '#160501'],
-  [0.3, '#5e1a05'],
-  [0.58, '#d9531a'],
-  [0.82, '#ffa53d'],
+  [0, '#1c0802'],
+  [0.28, '#7a2508'],
+  [0.52, '#e5601a'],
+  [0.76, '#ffa53d'],
   [1, '#fff2cc'],
 ]);
 
 /** Gentle contrast with deeper shadows (the ref's dark brown character against a hot center). */
 const SUN_CURVE = curves([
   [0, 0],
-  [70, 52],
-  [180, 196],
+  [64, 54],
+  [176, 200],
   [255, 255],
 ]);
 
@@ -218,7 +248,7 @@ export const sunburstIcon = defineTemplate({
     b.asset('fold-creases', { folds: 3, strength: 0.75, seed: 8 }, { name: 'Fold Creases', blendMode: 'overlay' });
     b.adjustment('gradient-map', { gradient: AMBER }, { name: 'Amber Gradient Map', opacity: 0.88 });
     b.adjustment('curves', { curves: SUN_CURVE }, { name: 'Contrast' });
-    vignette(b, 0.5, '#1a0600', 0.62);
+    vignette(b, 0.32, '#2a0a00', 0.7);
   },
 });
 
@@ -249,12 +279,46 @@ export const noirThumbnail = defineTemplate({
       },
       { collapsed: true },
     );
-    // Density 0.25 → three clippings: two on the left edge and one in the bottom-right corner.
-    b.asset(
-      'newspaper-clippings',
-      { columns: 3, tone: '#d9d6cd', density: 0.25, rotation: 6, placement: 'edges', textSize: 1.5, headlines: true, shadow: 0.5, seed: 3 },
-      { name: 'Newspaper Clippings' },
-    );
+    b.group('Newspaper Clippings', () => {
+      // Clippings are confined by torn-edge masks: a strip down the left edge and a torn corner
+      // at the bottom right (edit the masks to reveal more).
+      const left = b.asset(
+        'newspaper-clippings',
+        { columns: 3, tone: '#d9d6cd', density: 0.25, rotation: 4, placement: 'left', textSize: 1.5, headlines: true, shadow: 0.5, seed: 3 },
+        { name: 'Clippings (left)' },
+      );
+      b.mask(left, (ctx) =>
+        tornPolygon(ctx, [
+          [-20, -20],
+          [262, -20],
+          [236, 1100],
+          [-20, 1100],
+        ], 9, 5),
+      );
+      const br = b.asset(
+        'newspaper-clippings',
+        { columns: 3, tone: '#d6d3ca', density: 0.25, rotation: 8, placement: 'right', textSize: 1.4, headlines: true, shadow: 0.5, seed: 8 },
+        { name: 'Clippings (bottom right)' },
+      );
+      b.mask(br, (ctx) =>
+        tornPolygon(ctx, [
+          [1500, 1100],
+          [1556, 700],
+          [1940, 640],
+          [1940, 1100],
+        ], 10, 9),
+      );
+      // Paper edge shadow under the torn strips.
+      b.mask(b.solid('Strip Shadow', '#000000', { opacity: 0.18, blendMode: 'multiply' }), (ctx) => {
+        ctx.filter = 'blur(10px)';
+        tornPolygon(ctx, [[-20, -20], [270, -20], [244, 1100], [-20, 1100]], 9, 5);
+        tornPolygon(ctx, [[1492, 1100], [1548, 692], [1940, 632], [1940, 1100]], 10, 9);
+        ctx.filter = 'none';
+        ctx.globalCompositeOperation = 'destination-out';
+        tornPolygon(ctx, [[-20, -20], [262, -20], [236, 1100], [-20, 1100]], 9, 5);
+        tornPolygon(ctx, [[1500, 1100], [1556, 700], [1940, 640], [1940, 1100]], 10, 9);
+      });
+    });
 
     b.group('Slash Lines', () => {
       b.segment(905, 545, 1860, 78, 4, solid('#111111'), { taper: true, name: 'Slash 1' });
@@ -274,13 +338,14 @@ export const noirThumbnail = defineTemplate({
       { name: 'Second Character (replace me)' },
     );
     b.effect(right, 'drop-shadow', { color: '#000000', opacity: 0.85, angle: 120, distance: 40, spread: 0.12, size: 52, blendMode: 'multiply' });
-    b.asset('ink-splatter', { color: '#111111', seed: 4 }, { name: 'Ink Spray', x: 1300, y: 250, width: 340, height: 340, onlyElement: true, blendMode: 'multiply', opacity: 0.85 });
+    const spray = b.asset('ink-splatter', { color: '#111111', count: 6, seed: 4 }, { name: 'Ink Spray', blendMode: 'multiply', opacity: 0.85 });
+    b.radialMask(spray, 1440, 330, 40, 230);
 
     b.asset('halftone-dots', { size: 7, angle: 45, color: '#000000', seed: 1 }, { name: 'Halftone', blendMode: 'multiply', opacity: 0.3 });
     b.asset('fold-creases', { folds: 4, strength: 0.85, seed: 12 }, { name: 'Fold Lines', blendMode: 'overlay' });
     b.adjustment('black-white', {}, { name: 'Black & White' });
     b.adjustment('levels', { inBlack: 18, inWhite: 236, gamma: 0.95 }, { name: 'Levels' });
-    vignette(b, 0.75);
+    vignette(b, 0.62, '#000000', 0.64);
   },
 });
 
@@ -290,9 +355,10 @@ export const noirThumbnail = defineTemplate({
 
 const RED_MAP = grad([
   [0, '#0a0000'],
-  [0.38, '#6e0505'],
-  [0.7, '#e0241f'],
-  [1, '#fff1ea'],
+  [0.34, '#5c0404'],
+  [0.6, '#d8261c'],
+  [0.82, '#ff7a4a'],
+  [1, '#fff4ec'],
 ]);
 
 export const crimsonThumbnail = defineTemplate({
@@ -322,7 +388,7 @@ export const crimsonThumbnail = defineTemplate({
     );
 
     b.group('Smoke', () => {
-      b.smoke('Red Smoke', { color: '#c4141c', highlight: '#ff3b30', side: 'right', coverage: 0.62, density: 0.95, scale: 1.1, curl: 0.5, seed: 7 });
+      b.smoke('Red Smoke', { color: '#d8161e', highlight: '#ff4a3a', shadow: '#3a0204', side: 'right', coverage: 0.72, density: 1, scale: 1.1, curl: 0.5, seed: 7 });
       b.gradient(
         'Red Glow',
         radial(
@@ -331,28 +397,28 @@ export const crimsonThumbnail = defineTemplate({
             [0.5, '#9c0a0a88'],
             [1, '#5a000000'],
           ],
-          { offsetX: 0.42, offsetY: 0.05, scale: 0.75 },
+          { offsetX: 0.5, offsetY: 0.1, scale: 0.7 },
         ),
-        { blendMode: 'screen', opacity: 0.55 },
+        { blendMode: 'screen', opacity: 0.35 },
       );
-      // Library smoke adds fine wisps; masked so it stays on the right half.
-      const wisps = b.asset('smoke', { color: '#d11a1a', density: 0.7, scale: 1.6, turbulence: 0.35, coverage: 0.55, side: 'right', glow: 0.5, seed: 19 }, { name: 'Smoke Wisps', blendMode: 'screen', opacity: 0.45 });
-      b.smartFilter(wisps, 'gaussian-blur', { radius: 5 });
-      b.fadeMask(wisps, 760, 0, 1240, 0);
     });
 
-    const ch = b.character({ cx: 1420, top: 70, height: 1240, pose: 'idle', style: 'shaded', skin: '#e8cfb5', shirt: '#c2501e', pants: '#2a1a14', hair: '#140c0c', flipX: true });
+    const ch = b.character({ cx: 1410, top: 96, height: 1060, pose: 'idle', style: 'shaded', skin: '#e8cfb5', shirt: '#c2501e', pants: '#2a1a14', hair: '#140c0c', flipX: true });
     b.smartFilter(ch, 'gradient-map', { gradient: RED_MAP }, { opacity: 0.8 });
     b.smartFilter(ch, 'halftone', { shape: 'dot', size: 7, angle: 45, mode: 'mono', ink: '#1f0000', paper: '#ffffff', mix: 0.3 });
     b.effect(ch, 'outer-glow', { color: '#ff1a1a', opacity: 0.35, size: 44, blendMode: 'screen' });
 
-    sword(b, 560, 640, 1250, 852, 26);
+    sword(b, 520, 650, 1240, 846, 26);
 
-    const front = b.smoke('Smoke (front)', { color: '#b3121a', highlight: '#ff4a3a', side: 'bottom', coverage: 0.38, density: 0.85, scale: 1.2, seed: 41 }, { blendMode: 'screen', opacity: 0.85 });
-    b.fadeMask(front, 820, 0, 1180, 0);
+    const front = b.smoke('Smoke (front)', { color: '#c4141c', highlight: '#ff5a40', side: 'bottom', coverage: 0.5, density: 1, scale: 1.1, seed: 41 }, { blendMode: 'screen' });
+    b.fadeMask(front, 860, 0, 1240, 0);
+
+    b.asset('fold-creases', { folds: 4, strength: 0.6, seed: 4 }, { name: 'Fold Creases', blendMode: 'overlay' });
+    vignette(b, 0.45, '#000000', 0.66);
+    b.adjustment('brightness-contrast', { contrast: 15 }, { name: 'Contrast' });
 
     b.group('Title', () => {
-      b.text('永遠の英雄', { fontFamily: KANJI, fontWeight: 700, fontSize: 88, x: 52, y: 24, fitWidth: 470, lineHeight: 1.05, fill: solid('#bdbdbd') }, { name: 'Kanji', opacity: 0.3 });
+      b.text('永遠の英雄', { fontFamily: KANJI, fontWeight: 700, fontSize: 88, x: 52, y: 24, fitWidth: 470, lineHeight: 1.05, fill: solid('#c8c8c8') }, { name: 'Kanji', opacity: 0.42 });
       b.text('ETERNITY', { fontFamily: SERIF, fontWeight: 600, fontSize: 84, x: 42, y: 30, fitWidth: 470, lineHeight: 1.05, letterSpacing: 2, fill: solid('#efefef') }, { name: 'Title' });
     });
 
@@ -361,10 +427,8 @@ export const crimsonThumbnail = defineTemplate({
       b.effect(name, 'drop-shadow', { color: '#000000', opacity: 0.6, angle: 120, distance: 6, size: 10 });
       b.text('"FOR THEIR ONE AND ONLY HERO."', { fontFamily: SERIF, fontWeight: 500, fontSize: 40, x: 44, y: 1004, lineHeight: 1.05, letterSpacing: 1, fill: solid('#e8e8e8') }, { name: 'Quote' });
     });
-
-    b.asset('fold-creases', { folds: 4, strength: 0.6, seed: 4 }, { name: 'Fold Creases', blendMode: 'overlay' });
-    vignette(b, 0.6);
-    b.adjustment('brightness-contrast', { contrast: 15 }, { name: 'Contrast' });
+    // Film texture over the type too (subtle), like a printed still.
+    b.asset('dust-specks', { seed: 16 }, { name: 'Dust (top)', blendMode: 'screen', opacity: 0.35 });
   },
 });
 

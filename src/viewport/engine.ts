@@ -21,7 +21,7 @@ import { beginMoveGuide, beginNewGuide, cancelGuideDrag, drawGuides, endGuideDra
 import { drawSmartGuides } from './snap';
 import { normalizePan, wheelZoomFactor } from './math/zoom';
 import { activeTransform } from './transform/controller';
-import { onInputOverrideChange, vpState, type InputOverride } from './state';
+import { PERSISTENT_OVERLAY_TOOLS, onInputOverrideChange, vpState, type InputOverride } from './state';
 
 type Drag =
   | { kind: 'pan'; pointerId: number; last: Point }
@@ -61,6 +61,7 @@ export class ViewportEngine {
   private compositeDirty = true;
   private composite: HTMLCanvasElement | null = null;
   private compositeDoc: Document | null = null;
+  private scaled: { src: HTMLCanvasElement; k: number; canvas: HTMLCanvasElement } | null = null;
   private cursorOverride: string | null = null;
   private appliedCursor = '';
   private antsTimer = 0;
@@ -203,6 +204,7 @@ export class ViewportEngine {
     installViewport(null);
     this.composite = null;
     this.compositeDoc = null;
+    this.scaled = null;
   }
 
   /* ------------------------------------------------------------------ */
@@ -303,6 +305,35 @@ export class ViewportEngine {
     return this.composite;
   }
 
+  /**
+   * High-quality copy of the composite at device scale `k` (< 1), cached per composite canvas +
+   * scale. Null when it would be too large (then the composite is drawn directly).
+   */
+  private getScaled(comp: HTMLCanvasElement, k: number, docW: number, docH: number): HTMLCanvasElement | null {
+    const dw = docW * k;
+    const dh = docH * k;
+    const w = Math.ceil(dw - 1e-6);
+    const h = Math.ceil(dh - 1e-6);
+    if (w < 1 || h < 1 || w * h > 16_777_216) return null;
+    const s = this.scaled;
+    if (s && s.src === comp && s.k === k) return s.canvas;
+    let c = s?.canvas ?? null;
+    if (!c || c.width !== w || c.height !== h) {
+      c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+    }
+    const ctx = c.getContext('2d');
+    if (!ctx) return null;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(comp, 0, 0, comp.width, comp.height, 0, 0, dw, dh);
+    this.scaled = { src: comp, k, canvas: c };
+    return c;
+  }
+
   private checkerPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
     if (this.checker && this.checker.dpr === this.dpr) return this.checker.pattern;
     const cell = Math.max(2, Math.round(CHECKER_CELL * this.dpr));
@@ -374,6 +405,22 @@ export class ViewportEngine {
 
     const comp = this.getComposite(doc);
     if (!comp) return;
+    if (k < 1) {
+      // Minified: blit a cached, high-quality pre-scaled copy 1:1 (the origin sits on a device
+      // pixel), so panning costs a plain copy instead of re-filtering the full composite.
+      const sc = this.getScaled(comp, k, doc.width, doc.height);
+      if (sc) {
+        const sx = vx0 - x0;
+        const sy = vy0 - y0;
+        const sw = Math.min(sc.width - sx, W - vx0);
+        const sh = Math.min(sc.height - sy, H - vy0);
+        if (sw > 0 && sh > 0) {
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(sc, sx, sy, sw, sh, vx0, vy0, sw, sh);
+        }
+        return;
+      }
+    }
     const cs = comp.width / Math.max(1, doc.width);
     // Smoothing follows the device-pixel scale: high-quality minification below 1:1, crisp
     // nearest-neighbour pixels once a document pixel covers 2+ device pixels (e.g. 100% on HiDPI).
@@ -424,7 +471,13 @@ export class ViewportEngine {
       if (on) layer(`overlay ${ov.id}`, () => ov.render(ctx));
     }
     layer('guides', () => drawGuides(ctx, doc, size, view.extras && view.guides));
-    const tool = tools.get(useEditor.getState().activeTool);
+    const ed = useEditor.getState();
+    // A tool suspended by a temporary tool (Space → Hand) keeps showing its crop box / transform box.
+    if (ed.previousTool && ed.previousTool !== ed.activeTool && PERSISTENT_OVERLAY_TOOLS.has(ed.previousTool)) {
+      const prev = tools.get(ed.previousTool);
+      if (prev?.renderOverlay) layer(`tool ${prev.id} overlay (suspended)`, () => prev.renderOverlay!(ctx));
+    }
+    const tool = tools.get(ed.activeTool);
     if (tool?.renderOverlay) layer(`tool ${tool.id} overlay`, () => tool.renderOverlay!(ctx));
     const ovr = vpState.inputOverride;
     if (ovr?.renderOverlay) layer(`override ${ovr.id}`, () => ovr.renderOverlay!(ctx));

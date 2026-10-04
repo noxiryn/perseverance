@@ -2,7 +2,7 @@
 import type { Document, Point } from '../core/types';
 import type { ToolPointerEvent } from '../registry';
 import { viewport } from '../editor/viewport';
-import { activeDoc, activeSession } from '../state/editor';
+import { activeDoc, activeSession, useEditor } from '../state/editor';
 import { toast } from '../state/ui';
 import type { Affine } from './math/affine';
 
@@ -50,6 +50,18 @@ export const vpState = {
   /** A tool draws the selection outline itself (e.g. while dragging it) → skip the default ants. */
   suppressAnts: false,
 };
+
+/**
+ * True while `toolId` is only temporarily switched away from (e.g. Space held for the Hand tool):
+ * its in-progress state (crop box, polygon points, free transform) must survive.
+ */
+export function isTemporarilySuspended(toolId: string): boolean {
+  const st = useEditor.getState();
+  return st.previousTool === toolId && st.activeTool !== toolId;
+}
+
+/** Tools whose overlay stays visible while they are temporarily suspended. */
+export const PERSISTENT_OVERLAY_TOOLS = new Set(['move', 'crop', 'lasso', 'polygon-lasso']);
 
 const overrideListeners = new Set<() => void>();
 

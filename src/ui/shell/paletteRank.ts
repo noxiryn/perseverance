@@ -8,6 +8,8 @@ export interface RankableItem {
   subtitle?: string;
   keywords?: string;
   disabled?: boolean;
+  /** Listed only when its kind is selected (it duplicates another entry in the "All" scope). */
+  onlyInKind?: boolean;
 }
 
 export interface RankedItem<T> {
@@ -20,6 +22,26 @@ export interface RankedItem<T> {
 export interface RankedGroup<T> {
   kind: string;
   items: RankedItem<T>[];
+}
+
+/** Label without a trailing ellipsis, lower-cased (for duplicate detection). */
+export const bareLabel = (s: string): string =>
+  s
+    .replace(/(…|\.\.\.)\s*$/, '')
+    .trim()
+    .toLowerCase();
+
+/** Menus whose commands open the same filter dialog as a palette "filter" item. */
+const FILTER_MENU = /^(Filter(\/|$)|Image\/Adjustments(\/|$))/;
+
+/**
+ * Names (bareLabel) of filters that a Filter / Image ▸ Adjustments menu command already exposes;
+ * their palette filter items would be exact duplicates in the "All" scope.
+ */
+export function filterNamesCoveredByCommands(list: readonly { label: string; menu?: string }[]): Set<string> {
+  const out = new Set<string>();
+  for (const c of list) if (c.menu && FILTER_MENU.test(c.menu)) out.add(bareLabel(c.label));
+  return out;
 }
 
 /**
@@ -40,7 +62,7 @@ export function rankItems<T extends RankableItem>(
   const q = query.trim();
   const byKind = new Map<string, RankedItem<T>[]>();
   for (const it of items) {
-    if (opts.onlyKind && it.kind !== opts.onlyKind) continue;
+    if (opts.onlyKind ? it.kind !== opts.onlyKind : it.onlyInKind) continue;
     const t = fuzzyMatch(q, it.title);
     let score: number;
     let indices: number[] = [];

@@ -11,7 +11,7 @@ import { activeDoc, activeSession } from '../../state/editor';
 import { toast } from '../../state/ui';
 import { renderDocument } from '../../render/compositor';
 import { analysisMask, autoColorCurves, autoContrastParams, autoToneCurves } from './auto';
-import { activeRasterTarget, editRasterPixels, readLayerPixels } from './apply';
+import { activeRasterTarget, editRasterPixels, readTargetPixels } from './apply';
 import { computeHistogram, readDownscaled } from './histogram';
 import { createAdjustmentLayer, layersAbove, NO_DOC_MESSAGE } from './layers';
 import { applyLuts } from './math';
@@ -129,12 +129,14 @@ export function runAuto(kind: AutoKind) {
   const label = AUTO_LABEL[kind];
   const layer = s.activeLayerId ? s.doc.layers[s.activeLayerId] : null;
 
-  if (layer?.type === 'raster') {
+  // Pixel layer (or its mask when the mask is the edit target): destructive, one bitmap patch.
+  if (layer?.type === 'raster' || (layer?.mask && s.editTarget === 'mask')) {
     const target = activeRasterTarget(label.toLowerCase());
     if (!target) return;
-    const px = readLayerPixels(target.layer);
+    const px = readTargetPixels(target);
     const res = autoParams(kind, px, target.mask);
-    if (!res) return toast(`${label}: the layer already uses its full tonal range — nothing to change.`, 'info');
+    const what = target.kind === 'mask' ? 'mask' : 'layer';
+    if (!res) return toast(`${label}: the ${what} already uses its full tonal range — nothing to change.`, 'info');
     const luts =
       res.filterId === 'levels'
         ? (() => {
@@ -163,6 +165,10 @@ export function runAuto(kind: AutoKind) {
 function desaturate() {
   const target = activeRasterTarget('desaturate');
   if (!target) return;
+  if (target.kind === 'mask') {
+    toast('Layer masks are grayscale — Desaturate has no effect. Click the layer thumbnail to edit its pixels instead.', 'info');
+    return;
+  }
   editRasterPixels(target, 'Desaturate', (img) => hueSaturationPixels(img, { saturation: -100 }));
 }
 

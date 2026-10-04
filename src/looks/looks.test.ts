@@ -1,0 +1,231 @@
+import { beforeAll, describe, expect, it } from 'vitest';
+import { produce } from 'immer';
+import type { Document, Layer, RasterLayer } from '../core/types';
+import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeFilterInstance, makeGroupLayer, makeRasterLayer, makeTextLayer } from '../core/document';
+import { effects, filters, type LookDef } from '../registry';
+import {
+  LOOK_META_KEY,
+  buildLook,
+  currentLookId,
+  hasLook,
+  insertLookDraft,
+  isInsideLookGroup,
+  lookGroups,
+  lookMetaOf,
+  resolveTarget,
+  stripLookDraft,
+  targetCaps,
+  type OverlayFactory,
+} from './engine';
+import { BUILTIN_LOOKS } from './defs';
+
+/* ---------- fixtures ---------- */
+
+const ident = (img: ImageData) => img;
+
+beforeAll(() => {
+  filters.register({ id: 't-cel', name: 'Cel', category: 'Stylize', params: [{ key: 'levels', label: 'Levels', type: 'number', min: 2, max: 8, default: 4 }], apply: ident });
+  filters.register({ id: 't-rim', name: 'Rim', category: 'Roblox', params: [], apply: ident });
+  filters.register({ id: 't-curves', name: 'Curves', category: 'Adjustments', adjustment: true, params: [{ key: 'amount', label: 'Amount', type: 'number', min: 0, max: 1, default: 0.5 }], apply: ident });
+  effects.register({ id: 't-shadow', name: 'Shadow', stage: 'behind', order: 1, params: [{ key: 'size', label: 'Size', type: 'number', min: 0, max: 100, default: 12 }], render: () => {} });
+});
+
+const fakeOverlay: OverlayFactory = (o, w, h) =>
+  o.assetId === 'missing-asset' ? null : makeRasterLayer({ name: `asset ${o.assetId}`, bitmapId: `bm_${o.assetId}`, width: w, height: h });
+
+const LOOK: LookDef = {
+  id: 'test-look',
+  name: 'Test Look',
+  category: 'Test',
+  swatch: ['#000', '#fff'],
+  layerFilters: [{ filterId: 't-cel', params: { levels: 3 } }, { filterId: 't-rim' }, { filterId: 'not-registered' }],
+  layerEffects: [{ effectId: 't-shadow', params: { size: 30 } }, { effectId: 'nope' }],
+  overlays: [{ assetId: 'paper', blendMode: 'multiply', opacity: 0.5, name: 'Paper' }, { assetId: 'missing-asset' }],
+  adjustments: [{ filterId: 't-curves', name: 'Contrast', opacity: 0.8, blendMode: 'overlay' }, { filterId: 'absent' }],
+};
+
+function makeDoc(): { doc: Document; charId: string; textId: string; adjId: string } {
+  const doc = createDocument({ name: 'T', width: 100, height: 50 });
+  const ch = makeRasterLayer({ name: 'Character', bitmapId: 'bm_char', width: 40, height: 40 });
+  ch.filters.push(makeFilterInstance('user-filter'));
+  const text = makeTextLayer({ name: 'Title' });
+  const adj = makeAdjustmentLayer({ filterId: 't-curves' });
+  insertLayerDraft(doc, ch);
+  insertLayerDraft(doc, text);
+  insertLayerDraft(doc, adj);
+  return { doc, charId: ch.id, textId: text.id, adjId: adj.id };
+}
+
+/* ---------- tests ---------- */
+
+describe('targetCaps', () => {
+  it('knows which layer types hold filters/effects', () => {
+    const { doc, charId, textId, adjId } = makeDoc();
+    expect(targetCaps(doc.layers[charId])).toEqual({ filters: true, effects: true });
+    expect(targetCaps(doc.layers[textId])).toEqual({ filters: true, effects: true });
+    expect(targetCaps(doc.layers[adjId])).toEqual({ filters: false, effects: false });
+    expect(targetCaps(makeGroupLayer({}))).toEqual({ filters: false, effects: true });
+    expect(targetCaps(null)).toEqual({ filters: false, effects: false });
+  });
+});
+
+describe('buildLook', () => {
+  it('puts filters/effects on the target and textures/grades in the group', () => {
+    const { doc, charId } = makeDoc();
+    const b = buildLook(LOOK, doc, charId, fakeOverlay);
+    expect(b.filters.map((f) => f.filterId)).toEqual(['t-cel', 't-rim']);
+    expect(b.filters[0].params).toEqual({ levels: 3 });
+    expect(b.effects.map((e) => e.effectId)).toEqual(['t-shadow']);
+    expect(b.effects[0].params).toEqual({ size: 30 });
+    // overlays first, then adjustments on top
+    expect(b.groupLayers.map((l) => l.name)).toEqual(['Paper', 'Contrast']);
+    const paper = b.groupLayers[0] as RasterLayer;
+    expect(paper.blendMode).toBe('multiply');
+    expect(paper.opacity).toBe(0.5);
+    const adj = b.groupLayers[1] as Extract<Layer, { type: 'adjustment' }>;
+    expect(adj.type).toBe('adjustment');
+    expect(adj.adjustment.params).toEqual({ amount: 0.5 });
+    expect(adj.opacity).toBe(0.8);
+    expect(adj.blendMode).toBe('overlay');
+    // missing ids are reported, not thrown
+    expect(b.skipped.join(' ')).toMatch(/not-registered/);
+    expect(b.skipped.join(' ')).toMatch(/nope/);
+    expect(b.skipped.join(' ')).toMatch(/missing-asset/);
+    expect(b.skipped.join(' ')).toMatch(/absent/);
+  });
+
+  it('whole-document mode converts filters to adjustment layers and skips character filters', () => {
+    const { doc } = makeDoc();
+    const b = buildLook(LOOK, doc, null, fakeOverlay);
+    expect(b.filters).toEqual([]);
+    expect(b.effects).toEqual([]);
+    expect(b.groupLayers.map((l) => `${l.type}:${l.name}`)).toEqual(['adjustment:Cel', 'raster:Paper', 'adjustment:Contrast']);
+    expect(b.skipped.join(' ')).toMatch(/t-rim/);
+    expect(b.skipped.join(' ')).toMatch(/t-shadow/);
+  });
+});
+
+describe('insert / strip', () => {
+  it('applies in one recipe: group at the top + tracked target filters', () => {
+    const { doc, charId } = makeDoc();
+    const built = buildLook(LOOK, doc, charId, fakeOverlay);
+    const next = produce(doc, (d) => {
+      insertLookDraft(d, built, charId);
+    });
+    const groups = lookGroups(next);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].name).toBe('Look: Test Look');
+    expect(groups[0].meta).toEqual({ lookId: 'test-look' });
+    expect(groups[0].blendMode).toBe('pass-through');
+    expect(next.rootIds[next.rootIds.length - 1]).toBe(groups[0].id);
+    expect(groups[0].childIds.map((id) => next.layers[id].name)).toEqual(['Paper', 'Contrast']);
+    const ch = next.layers[charId];
+    expect(ch.filters.map((f) => f.filterId)).toEqual(['user-filter', 't-cel', 't-rim']);
+    expect(lookMetaOf(ch)).toEqual({ lookId: 'test-look', filterIds: built.filters.map((f) => f.id), effectIds: built.effects.map((e) => e.id) });
+    expect(currentLookId(next, charId)).toBe('test-look');
+    expect(currentLookId(next, null)).toBe('test-look');
+    expect(hasLook(next, charId)).toBe(true);
+    expect(isInsideLookGroup(next, groups[0].childIds[0])).toBe(true);
+    expect(isInsideLookGroup(next, charId)).toBe(false);
+    // original untouched
+    expect(lookGroups(doc)).toHaveLength(0);
+  });
+
+  it('re-applying replaces the previous look instead of stacking', () => {
+    const { doc, charId } = makeDoc();
+    const first = produce(doc, (d) => {
+      insertLookDraft(d, buildLook(LOOK, d, charId, fakeOverlay), charId);
+    });
+    const other: LookDef = { id: 'other', name: 'Other', category: 'Test', swatch: ['#111'], layerFilters: [{ filterId: 't-cel' }], adjustments: [{ filterId: 't-curves' }] };
+    const second = produce(first, (d) => {
+      insertLookDraft(d, buildLook(other, d, charId, fakeOverlay), charId);
+    });
+    expect(lookGroups(second)).toHaveLength(1);
+    expect(lookGroups(second)[0].meta?.lookId).toBe('other');
+    expect(second.layers[charId].filters.map((f) => f.filterId)).toEqual(['user-filter', 't-cel']);
+    expect(second.layers[charId].effects).toEqual([]);
+    expect(lookMetaOf(second.layers[charId])?.lookId).toBe('other');
+    // the previous group's children are gone from the layer table
+    for (const id of lookGroups(first)[0].childIds) expect(second.layers[id]).toBeUndefined();
+  });
+
+  it('strip removes the group and only the look-added filters/effects', () => {
+    const { doc, charId, textId } = makeDoc();
+    const applied = produce(doc, (d) => {
+      insertLookDraft(d, buildLook(LOOK, d, charId, fakeOverlay), charId);
+      // a second layer that also carries a look (e.g. applied earlier)
+      insertLookDraft(d, { lookId: 'x', lookName: 'X', filters: [makeFilterInstance('t-cel')], effects: [], groupLayers: [], skipped: [] }, textId);
+    });
+    const stripped = produce(applied, (d) => {
+      stripLookDraft(d, charId);
+    });
+    expect(lookGroups(stripped)).toHaveLength(0);
+    expect(stripped.layers[charId].filters.map((f) => f.filterId)).toEqual(['user-filter']);
+    expect(stripped.layers[charId].meta?.[LOOK_META_KEY]).toBeUndefined();
+    // other layers keep their look unless stripping everything
+    expect(lookMetaOf(stripped.layers[textId])?.lookId).toBe('x');
+    const all = produce(applied, (d) => {
+      stripLookDraft(d, null, true);
+    });
+    expect(lookMetaOf(all.layers[textId])).toBeNull();
+    expect(all.layers[textId].filters).toEqual([]);
+    expect(hasLook(all, null)).toBe(false);
+  });
+});
+
+describe('resolveTarget', () => {
+  it('redirects unsupported targets and blocks locked layers', () => {
+    const { doc, charId, adjId } = makeDoc();
+    expect(resolveTarget(doc, charId)).toEqual({ targetId: charId });
+    expect(resolveTarget(doc, null)).toEqual({ targetId: null });
+    expect(resolveTarget(doc, 'gone')).toEqual({ targetId: null });
+    const adj = resolveTarget(doc, adjId);
+    expect(adj.targetId).toBeNull();
+    expect(adj.note).toBeTruthy();
+    const locked = produce(doc, (d) => {
+      d.layers[charId].locks.all = true;
+    });
+    expect(resolveTarget(locked, charId).blocked).toMatch(/locked/);
+  });
+});
+
+describe('built-in looks', () => {
+  it('ship 20+ looks including the reference styles', () => {
+    expect(BUILTIN_LOOKS.length).toBeGreaterThanOrEqual(20);
+    const ids = BUILTIN_LOOKS.map((l) => l.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of [
+      'gothic-paper',
+      'sunburst-halftone',
+      'noir-newspaper',
+      'crimson-film',
+      'toxic-green',
+      'royal-purple',
+      'ice-cold',
+      'golden-hour',
+      'vaporwave',
+      'blood-moon',
+      'teal-orange',
+      'sepia-vintage',
+      'ink-monochrome',
+      'comic-pop',
+      'cyber-neon',
+      'inferno',
+      'ghost-white',
+      'midnight-blue',
+      'retro-print',
+      'anime-impact',
+    ])
+      expect(ids, id).toContain(id);
+  });
+
+  it('every look has a description, a swatch and at least one part', () => {
+    for (const l of BUILTIN_LOOKS) {
+      expect(l.description?.length ?? 0, l.id).toBeGreaterThan(10);
+      expect(l.swatch.length, l.id).toBeGreaterThanOrEqual(2);
+      for (const c of l.swatch) expect(c).toMatch(/^#[0-9a-f]{3,8}$/i);
+      const parts = (l.layerFilters?.length ?? 0) + (l.layerEffects?.length ?? 0) + (l.adjustments?.length ?? 0) + (l.overlays?.length ?? 0);
+      expect(parts, l.id).toBeGreaterThan(0);
+    }
+  });
+});

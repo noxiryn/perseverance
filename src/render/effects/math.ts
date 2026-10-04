@@ -21,12 +21,31 @@ export function strokeCoverage(a: Uint8Array | Uint8ClampedArray, w: number, h: 
   const n = w * h;
   const out = new Uint8Array(n);
   if (!(size > 0) || !n) return out;
+  // coverage = clamp(size + .5 − d) — written as tight branches (hot loop over every pixel).
+  const lim = size + 0.5;
   if (position === 'outside') {
     const d = edgeDistance(a, w, h, 'outside', size + 2);
-    for (let i = 0; i < n; i++) out[i] = a[i] >= 128 ? 255 : Math.round(c01(size + 0.5 - d[i]) * 255);
+    for (let i = 0; i < n; i++) {
+      if (a[i] >= 128) {
+        out[i] = 255;
+        continue;
+      }
+      const v = lim - d[i];
+      if (v <= 0) continue;
+      out[i] = v >= 1 ? 255 : (v * 255 + 0.5) | 0;
+    }
   } else if (position === 'inside') {
     const d = edgeDistance(a, w, h, 'inside', size + 2);
-    for (let i = 0; i < n; i++) out[i] = a[i] < 128 ? (a[i] > 0 ? 255 : 0) : Math.round(c01(size + 0.5 - d[i]) * 255);
+    for (let i = 0; i < n; i++) {
+      const ai = a[i];
+      if (ai < 128) {
+        if (ai > 0) out[i] = 255;
+        continue;
+      }
+      const v = lim - d[i];
+      if (v <= 0) continue;
+      out[i] = v >= 1 ? 255 : (v * 255 + 0.5) | 0;
+    }
   } else {
     const half = size / 2;
     const dOut = edgeDistance(a, w, h, 'outside', half + 2);

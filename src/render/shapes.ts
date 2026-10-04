@@ -173,6 +173,6 @@ export function renderShapeContent(shape: ShapeProps, kRequested: number, fx = 0
   ctx.setTransform(k, 0, 0, k, -ox * k, -oy * k);
   drawShape(ctx, shape);
   const content: LocalContent = { canvas, k, ox, oy };
-  slots.set(key, sig, content, px(canvas), { max: 3 });
+  slots.set(key, sig, content, px(canvas), { max: 4 });
   return content;
 }

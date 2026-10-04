@@ -212,7 +212,6 @@ export function ColorPanel() {
 
   const rgb = parseColor(color);
   const [h, s, v] = hsv;
-  const hueCss = hsvHex(h, 1, 1);
 
   return (
     <div className="fc-color">
@@ -292,7 +291,7 @@ export function ColorPanel() {
         title="Harmonies"
         actions={<Select value={kind} onChange={setKind} options={HARMONIES} width={128} title="Harmony rule" />}
       >
-        <HarmonyRow base={color} kind={kind} hueCss={hueCss} saturation={s} onPick={(c, alt) => (alt ? useEditor.getState().setSecondaryColor(c) : emitHex(c), commit(c))} />
+        <HarmonyRow base={color} kind={kind} saturation={s} onPick={(c, alt) => (alt ? useEditor.getState().setSecondaryColor(c) : emitHex(c), commit(c))} />
       </Section>
 
       <Section title="Contrast (WCAG)" defaultOpen>
@@ -365,7 +364,6 @@ function HarmonyRow({
 }: {
   base: string;
   kind: HarmonyKind;
-  hueCss: string;
   saturation: number;
   onPick: (c: string, alt: boolean) => void;
 }) {

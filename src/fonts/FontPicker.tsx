@@ -149,7 +149,12 @@ export function FontPicker({ value, onPick }: { value: string; onPick: (family: 
       }}
     >
       <SearchInput value={query} onChange={setQuery} placeholder="Search fonts or vibes (gothic, signature…)" autoFocus />
-      <div className="fc-chips scroll">
+      <div
+        className="fc-chips scroll"
+        onWheel={(e) => {
+          if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY;
+        }}
+      >
         {chips.map((c) => (
           <button key={c.value} className={`fc-chip${filter === c.value ? ' active' : ''}`} onClick={() => setFilter(c.value)}>
             {c.label}

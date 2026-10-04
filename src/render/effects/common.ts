@@ -247,6 +247,32 @@ export function inverseMatte(src: HTMLCanvasElement, dx = 0, dy = 0): HTMLCanvas
   return out;
 }
 
+/**
+ * Draw `src` blurred by `sigma` (offset by dx, dy) straight into an effect target. Effect
+ * targets are always handed out empty, so effects can build their result in place.
+ */
+export function drawBlurred(target: CanvasRenderingContext2D, src: HTMLCanvasElement, sigma: number, dx = 0, dy = 0) {
+  target.save();
+  target.setTransform(1, 0, 0, 1, 0, 0);
+  target.globalAlpha = 1;
+  target.globalCompositeOperation = 'source-over';
+  if (sigma > 0.05) target.filter = `blur(${sigma.toFixed(3)}px)`;
+  target.drawImage(src, dx, dy);
+  target.restore();
+}
+
+/** Recolor everything drawn in the target with `color` at `opacity` (coverage is kept). */
+export function tint(target: CanvasRenderingContext2D, color: string, opacity: number) {
+  const c = target.canvas;
+  target.save();
+  target.setTransform(1, 0, 0, 1, 0, 0);
+  target.globalCompositeOperation = 'source-in';
+  target.globalAlpha = clamp01(opacity);
+  target.fillStyle = color;
+  target.fillRect(0, 0, c.width, c.height);
+  target.restore();
+}
+
 /** Draw a finished scratch canvas into the effect target with an opacity, then release it. */
 export function finish(target: CanvasRenderingContext2D, c: HTMLCanvasElement, opacity: number) {
   if (opacity > 0) {

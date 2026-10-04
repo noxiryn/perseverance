@@ -69,7 +69,7 @@ export function simplex(seed: number): Noise2 {
       t2 *= t2;
       n += t2 * t2 * (gx[g] * x2 + gy[g] * y2);
     }
-    return 70 * n;
+    return 99 * n;
   };
 }
 

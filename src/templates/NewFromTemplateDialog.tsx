@@ -3,7 +3,7 @@ import { LayoutTemplate, Loader2 } from 'lucide-react';
 import { templates, useRegistry, type TemplateDef } from '../registry';
 import { Button, Dialog, SearchInput } from '../ui/controls';
 import { openTemplate } from './open';
-import { useTemplatePreview } from './previews';
+import { cancelPendingTemplatePreviews, pauseTemplatePreviews, useTemplatePreview } from './previews';
 import './templates.css';
 
 const CATEGORY_ORDER: TemplateDef['category'][] = ['Thumbnail', 'Icon', 'Banner', 'Social', 'Blank'];
@@ -109,6 +109,15 @@ export function NewFromTemplateDialog({ close }: { close: (result?: string) => v
     return list.sort((a, b) => Number(a.category === 'Blank') - Number(b.category === 'Blank'));
   }, [all, category, query]);
 
+  // Previews still queued when the dialog closes are dropped (finished ones stay cached).
+  useEffect(
+    () => () => {
+      pauseTemplatePreviews(false);
+      cancelPendingTemplatePreviews();
+    },
+    [],
+  );
+
   const pick = (c: string) => {
     lastCategory = c;
     setCategory(c);
@@ -117,8 +126,15 @@ export function NewFromTemplateDialog({ close }: { close: (result?: string) => v
   const onOpen = async (t: TemplateDef) => {
     if (busy) return;
     setBusy(t.id);
-    const id = await openTemplate(t.id);
-    setBusy(null);
+    // Building at full resolution is the priority: hold thumbnail rendering meanwhile.
+    pauseTemplatePreviews(true);
+    let id: string | null = null;
+    try {
+      id = await openTemplate(t.id);
+    } finally {
+      pauseTemplatePreviews(false);
+      setBusy(null);
+    }
     if (id) close(id);
   };
 

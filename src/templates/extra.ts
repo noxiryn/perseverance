@@ -208,7 +208,7 @@ export const simulatorBright = defineTemplate({
     b.group('Stars', () => {
       for (const [sx, sy, r] of [
         [380, 230, 40],
-        [1590, 250, 34],
+        [1700, 330, 34],
         [520, 560, 26],
       ] as [number, number, number][])
         b.star(sx, sy, r, 5, 0.48, solid('#ffffff'), { stroke: stroke('#ff7a00', 6), name: 'Star' });
@@ -399,12 +399,12 @@ export const groupBanner = defineTemplate({
 
     b.group('Members', () => {
       const members: { cx: number; top: number; pose: 'hero' | 'arms-crossed'; shirt: string; name: string }[] = [
-        { cx: 1010, top: 80, pose: 'arms-crossed', shirt: '#2a2a38', name: 'Member 2 (replace me)' },
-        { cx: 1390, top: 80, pose: 'arms-crossed', shirt: '#2a3340', name: 'Member 3 (replace me)' },
-        { cx: 1200, top: 40, pose: 'hero', shirt: '#332a44', name: 'Your Character (replace me)' },
+        { cx: 1150, top: 96, pose: 'arms-crossed', shirt: '#2a2a38', name: 'Member 2 (replace me)' },
+        { cx: 1420, top: 96, pose: 'arms-crossed', shirt: '#2a3340', name: 'Member 3 (replace me)' },
+        { cx: 1285, top: 56, pose: 'hero', shirt: '#332a44', name: 'Your Character (replace me)' },
       ];
       for (const m of members) {
-        const c = b.character({ cx: m.cx, top: m.top, height: 560, pose: m.pose, style: 'shaded', shirt: m.shirt, pants: '#15151c', hair: '#0f0f14' }, { name: m.name });
+        const c = b.character({ cx: m.cx, top: m.top, height: 520, pose: m.pose, style: 'shaded', shirt: m.shirt, pants: '#15151c', hair: '#0f0f14' }, { name: m.name });
         b.smartFilter(c, 'rim-light', { color: '#e9cf8a', width: 8, angle: 135, intensity: 0.75 });
         if (c && m.pose === 'hero') b.characterId = c.id;
       }
@@ -417,7 +417,7 @@ export const groupBanner = defineTemplate({
     });
 
     b.group('Text', () => {
-      const t = b.text('YOUR GROUP', { fontFamily: SERIF, fontWeight: 700, fontSize: 104, x: 360, y: 150, letterSpacing: 8, lineHeight: 1.05, fill: solid('#f1e6c8') }, { name: 'Group Name' });
+      const t = b.text('YOUR GROUP', { fontFamily: SERIF, fontWeight: 700, fontSize: 104, x: 360, y: 150, fitWidth: 620, maxFontSize: 104, letterSpacing: 8, lineHeight: 1.05, fill: solid('#f1e6c8') }, { name: 'Group Name' });
       b.effect(t, 'outer-glow', { color: '#c9a24a', opacity: 0.3, size: 16, blendMode: 'screen' });
       b.rect(364, 282, 120, 4, solid('#c9a24a'), { name: 'Divider' });
       b.text('EST. 2024  •  JOIN TODAY', { fontFamily: BEBAS, fontSize: 44, x: 364, y: 306, letterSpacing: 6, lineHeight: 1, fill: solid('#c9a24a') }, { name: 'Tagline' });

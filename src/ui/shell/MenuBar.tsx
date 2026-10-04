@@ -13,9 +13,10 @@ import { formatShortcut } from '../shortcuts';
 import { toast } from '../../state/ui';
 import { buildMenuTree, MENU_MNEMONICS, shortcutAlternatives, type MenuTreeNode, type TopMenu } from './menuModel';
 import { useShell } from './shellStore';
+import { shellPortalHost, toCss } from './uiScale';
 
 /* ------------------------------------------------------------------ */
-/* Evaluated rows                                                      */
+/* Evaluated rows                                                   */
 /* ------------------------------------------------------------------ */
 
 type Row =
@@ -140,7 +141,8 @@ function MenuLevel({ rows, x, y, flipX, hl, openChild, level, onHover, onActivat
       className="shell-menu"
       data-shell-menu=""
       role="menu"
-      style={{ left: pos.left, top: pos.top, visibility: pos.ready ? 'visible' : 'hidden' }}
+      // Positions are measured in visual px; the portal host may carry the UI-scale CSS zoom.
+      style={{ left: toCss(pos.left), top: toCss(pos.top), visibility: pos.ready ? 'visible' : 'hidden' }}
       onContextMenu={(e) => e.preventDefault()}
     >
       {rows.map((r, i) => {
@@ -357,7 +359,7 @@ function MenuDropdown({ rows, anchor, keyboard, onClose, onNavigate }: DropdownP
         />
       ))}
     </>,
-    document.body,
+    shellPortalHost(),
   );
 }
 

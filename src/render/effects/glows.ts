@@ -1,7 +1,7 @@
 /** Outer glow and inner glow. */
 import { ctx2d } from '../../core/canvas';
 import { acquire, release } from '../surface';
-import { P, blurredCopy, boostAlpha, clamp01, colorize, defineEffect, finish, inverseMatte, num, sizeSigma, softDilate, str } from './common';
+import { P, blurredCopy, boostAlpha, clamp01, colorize, defineEffect, drawBlurred, finish, inverseMatte, num, sizeSigma, softDilate, str, tint } from './common';
 
 /** Glow matte: (optionally spread) matte blurred so the edge sits at full intensity. */
 function glowMatte(src: HTMLCanvasElement, size: number, spread: number): HTMLCanvasElement {
@@ -33,9 +33,14 @@ export const outerGlow = defineEffect(
       const size = Math.max(0, num(p.size, 18)) * args.scale;
       const spread = clamp01(num(p.spread, 0));
       if (size < 0.25 && spread < 0.001) return;
-      const c = glowMatte(args.content, size, spread);
-      colorize(c, str(p.color, '#ffffff'));
-      finish(args.target, c, num(p.opacity, 0.75));
+      // Built in place: (spread) matte blurred, boosted so the edge sits at full intensity, tinted.
+      if (spread > 0.001) {
+        const base = softDilate(args.content, size * spread);
+        drawBlurred(args.target, base, sizeSigma(size * (1 - spread)));
+        release(base);
+      } else drawBlurred(args.target, args.content, sizeSigma(size));
+      boostAlpha(args.target.canvas as HTMLCanvasElement, 2);
+      tint(args.target, str(p.color, '#ffffff'), num(p.opacity, 0.75));
     },
   },
   { reach: (p, s) => (Math.max(0, num(p.size, 18)) * 1.3 + 2) * s },

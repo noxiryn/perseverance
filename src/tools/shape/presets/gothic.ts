@@ -2,6 +2,7 @@
 import type { ShapePresetDef } from '../../../registry';
 import {
   angularSpiralPts,
+  circle,
   cubicPts,
   fmt,
   joinRuns,
@@ -76,17 +77,12 @@ function ornateCorner(): string {
   const arm = joinRuns(cubicPts([4, 4], [30, 0], [58, 2], [80, 8], 30), spiralPts(80, 18, 10, -90, 1.35, 0.32, 1, 60));
   const top = taperedStroke(arm, (t) => 0.8 + 8 * Math.pow(1 - t, 0.6));
   const left = top.map((p) => [p[1], p[0]] as Pt);
-  // Small inner curls mirrored about the diagonal.
-  const curl = joinRuns(cubicPts([14, 14], [30, 16], [44, 22], [48, 34], 20), spiralPts(42, 36, 6, -18, 1.1, 0.35, 1, 40));
+  // Small inner curls mirrored about the diagonal, growing out of the corner boss.
+  const curl = joinRuns(cubicPts([9, 9], [28, 14], [44, 22], [48, 34], 22), spiralPts(42, 36, 6, -18, 1.1, 0.35, 1, 40));
   const curlA = taperedStroke(curl, (t) => 0.8 + 4.5 * Math.pow(1 - t, 0.7));
   const curlB = curlA.map((p) => [p[1], p[0]] as Pt);
-  const knot: Pt[] = [
-    [0, 0],
-    [16, 3],
-    [20, 20],
-    [3, 16],
-  ];
-  return polys([top, left, knot, curlA, curlB]);
+  // Round boss hides the butt ends of all four strokes and gives the corner a clean knot.
+  return polys([top, left, curlA, curlB]) + circle(7, 7, 9);
 }
 
 function dividerFlourish(): string {

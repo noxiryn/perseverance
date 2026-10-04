@@ -35,7 +35,7 @@ export async function openFilterDialogWith(filterId: string, mode: 'auto' | Appl
     const p = params ?? rememberedParams(def);
     const res = applyFilterNow(filterId, p, mode);
     if (!res.ok) toast(res.error ?? `${def.name} could not be applied.`, 'warning');
-    else setLastFilter({ filterId, params: p, mode: res.mode ?? 'destructive' });
+    else setLastFilter({ filterId, params: p, mode });
     return;
   }
   await openDialog<unknown, FilterDialogProps>(FilterDialog, { filterId, mode, target: r.target, initialParams: params });

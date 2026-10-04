@@ -11,6 +11,7 @@ import { useEditor } from '../../state/editor';
 import { ColorPicker, Popover } from '../controls';
 import { buildToolSlots, nextInSlot, type ToolSlot } from './toolModel';
 import { useToolMemory } from './toolMemory';
+import { shellPortalHost, toCss } from './uiScale';
 
 /* ---------------- Tooltip ---------------- */
 
@@ -43,15 +44,16 @@ function useDelayedTip(delay = 500) {
   return { tip, show, hide };
 }
 
-export function Tip({ tip }: { tip: TipState | null }) {
+/** Delayed tooltip; x/y are visual px (from getBoundingClientRect). */
+export function Tip({ tip, side = 'right' }: { tip: TipState | null; side?: 'right' | 'left' }) {
   if (!tip) return null;
   return createPortal(
-    <div className="ui-tooltip shell-tip" style={{ left: tip.x, top: tip.y }}>
+    <div className={`ui-tooltip shell-tip${side === 'left' ? ' left' : ''}`} style={{ left: toCss(tip.x), top: toCss(tip.y) }}>
       <span className="shell-tip-name">{tip.name}</span>
       {tip.shortcut && <kbd>{tip.shortcut}</kbd>}
       {tip.hint && <div className="shell-tip-hint">{tip.hint}</div>}
     </div>,
-    document.body,
+    shellPortalHost(),
   );
 }
 

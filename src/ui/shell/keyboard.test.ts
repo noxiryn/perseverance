@@ -119,6 +119,18 @@ describe('tool shortcuts', () => {
     expect(useEditor.getState().activeTool).toBe('move');
   });
 
+  it('ignores auto-repeat so holding Shift+key does not spin through the group', () => {
+    key('b');
+    expect(useEditor.getState().activeTool).toBe('brush');
+    key('B', { shiftKey: true });
+    expect(useEditor.getState().activeTool).toBe('pencil');
+    for (let i = 0; i < 5; i++) {
+      const e = key('B', { shiftKey: true, repeat: true });
+      expect(e.defaultPrevented).toBe(true);
+    }
+    expect(useEditor.getState().activeTool).toBe('pencil');
+  });
+
   it('keeps working while a checkbox has focus, but leaves Space to it', () => {
     const box = document.createElement('input');
     box.type = 'checkbox';

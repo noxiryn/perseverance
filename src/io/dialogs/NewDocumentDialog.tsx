@@ -13,6 +13,7 @@ import {
   type NewDocumentSpec,
 } from '../newDocument';
 import { formatBytes } from '../math';
+import { useDeferredSubmit } from './useDeferredSubmit';
 import '../io.css';
 
 const CAT_ICONS: Record<string, typeof Gamepad2> = {
@@ -37,6 +38,21 @@ interface Item {
   width: number;
   height: number;
   description?: string;
+}
+
+function gcd(a: number, b: number): number {
+  return b ? gcd(b, a % b) : a;
+}
+
+/** '16:9', '1:1', … (falls back to a decimal ratio for odd sizes). */
+function aspectLabel(w: number, h: number): string {
+  w = Math.round(w);
+  h = Math.round(h);
+  if (w < 1 || h < 1) return '—';
+  const g = gcd(w, h);
+  const a = w / g;
+  const b = h / g;
+  return a <= 32 && b <= 32 ? `${a}:${b}` : `${(w / h).toFixed(2)}:1`;
 }
 
 function AspectIcon({ w, h }: { w: number; h: number }) {
@@ -85,14 +101,20 @@ export function NewDocumentDialog({ close, initial }: { close: (r?: NewDocumentS
   };
 
   const valid = width >= 1 && height >= 1 && width <= MAX_DOC_SIZE && height <= MAX_DOC_SIZE;
-  const submit = () => {
+  const submit = useDeferredSubmit(() => {
     if (!valid) return;
     close({ name: name.trim() || 'Untitled', width: Math.round(width), height: Math.round(height), background: bg, customColor: custom });
-  };
+  });
   const color = backgroundColorOf({ background: bg, customColor: custom });
-  const landscape = width >= height;
+  const square = width === height;
+  const landscape = width > height;
+  const swap = () => {
+    setWidth(height);
+    setHeight(width);
+  };
   const previewK = Math.min(150 / width, 96 / height);
   const activeGroup = groups.find((g) => g.cat === cat) ?? groups[0];
+  const selectedItem = selected ? groups.flatMap((g) => g.items).find((it) => it.key === selected) : undefined;
 
   return (
     <Dialog
@@ -177,15 +199,26 @@ export function NewDocumentDialog({ close, initial }: { close: (r?: NewDocumentS
           </div>
           <div className="io-form-label">Orientation</div>
           <div className="io-orient">
-            <button className={`io-orient-btn${!landscape ? ' active' : ''}`} title="Portrait" onClick={() => landscape && width !== height && (setWidth(height), setHeight(width))}>
+            <button
+              className={`io-orient-btn${!landscape && !square ? ' active' : ''}`}
+              title="Portrait"
+              disabled={square}
+              onClick={() => landscape && swap()}
+            >
               <span style={{ width: 9, height: 13 }} />
             </button>
-            <button className={`io-orient-btn${landscape ? ' active' : ''}`} title="Landscape" onClick={() => !landscape && (setWidth(height), setHeight(width))}>
+            <button
+              className={`io-orient-btn${landscape ? ' active' : ''}`}
+              title="Landscape"
+              disabled={square}
+              onClick={() => !landscape && !square && swap()}
+            >
               <span style={{ width: 13, height: 9 }} />
             </button>
-            <Button size="small" variant="ghost" icon={ArrowLeftRight} onClick={() => (setWidth(height), setHeight(width))} title="Swap width and height">
+            <Button size="small" variant="ghost" icon={ArrowLeftRight} disabled={square} onClick={swap} title="Swap width and height">
               Swap
             </Button>
+            {square && <span className="io-faint" style={{ fontSize: 'var(--fs-sm)' }}>Square</span>}
           </div>
           <div className="io-form-label">Background</div>
           <div className="ui-row">
@@ -198,9 +231,11 @@ export function NewDocumentDialog({ close, initial }: { close: (r?: NewDocumentS
               style={{ width: Math.max(6, width * previewK), height: Math.max(6, height * previewK), background: color ?? undefined }}
             />
             <div className="io-newdoc-info">
+              {selectedItem && <div className="io-newdoc-preset-name">{selectedItem.name}</div>}
               <div>
-                {Math.round(width)} × {Math.round(height)} px
+                {Math.round(width)} × {Math.round(height)} px <span className="io-dim">· {aspectLabel(width, height)}</span>
               </div>
+              {selectedItem?.description && <div className="io-dim">{selectedItem.description}</div>}
               <div className="io-dim">RGB · 8 bit · {formatBytes(width * height * 4)}</div>
               {!valid && <div className="io-error">Size must be 1–{MAX_DOC_SIZE} px</div>}
             </div>

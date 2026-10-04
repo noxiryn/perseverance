@@ -8,6 +8,10 @@ import {
   fitRect,
   formatBytes,
   fromPsdBlend,
+  layerTurnAbout,
+  layerTurnTransform,
+  turnPoint,
+  type LayerTurn,
   opBakedTransform,
   opDocSize,
   opMapPoint,
@@ -232,5 +236,49 @@ describe('misc', () => {
   it('clampRect', () => {
     expect(clampRect({ x: -5.5, y: 2.2, width: 10, height: 100 }, 50, 50)).toEqual({ x: 0, y: 2, width: 5, height: 48 });
     expect(clampRect({ x: 60, y: 0, width: 10, height: 10 }, 50, 50)).toBeNull();
+  });
+});
+
+describe('layer flips / rotations (Edit ▸ Transform)', () => {
+  const turns: LayerTurn[] = ['flipH', 'flipV', 'rotate90cw', 'rotate90ccw', 'rotate180'];
+  const w = 160,
+    h = 90;
+  const pivots = [
+    { x: 80 + 120, y: 45 - 40 },
+    { x: 400, y: 250 },
+  ];
+  for (const op of turns)
+    for (const t of samples)
+      for (const pivot of pivots)
+        it(`${op} maps every local point like the doc-space operation (rot ${t.rotation}, pivot ${pivot.x})`, () => {
+          const before = matrix(t, w, h);
+          const after = matrix(layerTurnAbout(op, t, w, h, pivot), w, h);
+          for (const [u, v] of [
+            [0, 0],
+            [w, 0],
+            [w, h],
+            [0, h],
+            [37, 61],
+          ]) {
+            const p0 = apply(before, u, v);
+            const want = turnPoint(op, p0.x, p0.y, pivot);
+            const got = apply(after, u, v);
+            expect(got.x).toBeCloseTo(want.x, 6);
+            expect(got.y).toBeCloseTo(want.y, 6);
+          }
+        });
+
+  it('flipping an upright layer only negates its scale (spec: scaleX/scaleY *= -1)', () => {
+    const t: Transform = { x: 10, y: 20, scaleX: 1.5, scaleY: 0.5, rotation: 0, skewX: 0 };
+    expect(layerTurnTransform('flipH', t)).toEqual({ ...t, scaleX: -1.5 });
+    expect(layerTurnTransform('flipV', t)).toEqual({ ...t, scaleY: -0.5 });
+  });
+
+  it('turning about the layer center keeps it in place', () => {
+    const t: Transform = { x: 100, y: 50, scaleX: 1, scaleY: 1, rotation: 15, skewX: 0 };
+    const r = layerTurnAbout('rotate90cw', t, w, h, { x: 100 + w / 2, y: 50 + h / 2 });
+    expect(r.x).toBeCloseTo(100, 9);
+    expect(r.y).toBeCloseTo(50, 9);
+    expect(r.rotation).toBe(105);
   });
 });

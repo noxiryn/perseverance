@@ -46,9 +46,12 @@ export function transformRect(r: Rect, m: DOMMatrix | null): Rect {
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
+/** Paint white coverage dabs (tinted later by the composite session — see CompositeMode.color). */
+export const COVERAGE = '#ffffff';
+
 export interface DabPainterOptions {
   tip: TipSpec;
-  /** CSS color (alpha allowed). */
+  /** CSS color (alpha allowed). COVERAGE ('#ffffff') draws the untinted white stamps. */
   color: string;
   /** Doc → canvas matrix (null = identity). */
   base: DOMMatrix | null;
@@ -72,8 +75,12 @@ export class DabPainter {
         const preset = brushPresets.get(opts.tip.presetId);
         this.white = (preset && textureTip(preset, res)) || roundTip(res, 1);
       }
-      this.stamp = tinted(this.white, opts.color);
+      this.stamp = this.isWhite ? this.white : tinted(this.white, opts.color);
     }
+  }
+
+  private get isWhite(): boolean {
+    return this.opts.color.toLowerCase() === COVERAGE;
   }
 
   /** The untinted (white alpha) stamp, for tools that mask other content with the tip. */
@@ -132,7 +139,8 @@ export class DabPainter {
     if (this.opts.tip.kind === 'pencil') {
       const p = this.toLocal(d.x, d.y);
       const n = Math.max(1, Math.round(d.size * this.scale));
-      const tip = tinted(pencilTip(n, this.opts.tip.square), this.opts.color);
+      const white = pencilTip(n, this.opts.tip.square);
+      const tip = this.isWhite ? white : tinted(white, this.opts.color);
       const x = Math.round(p.x - n / 2);
       const y = Math.round(p.y - n / 2);
       ctx.setTransform(1, 0, 0, 1, 0, 0);

@@ -1,7 +1,7 @@
 /** Brush (B), Pencil (B) and Eraser (E) tools. */
 import { Brush, Eraser, Pencil } from 'lucide-react';
 import { toolOptions } from '../../../state/editor';
-import { DabPainter, tipForPreset, type TipSpec } from '../engine/dabs';
+import { COVERAGE, DabPainter, tipForPreset, type TipSpec } from '../engine/dabs';
 import { hardConfig, strokeConfig } from '../engine/config';
 import { paintColorFor } from '../engine/target';
 import {
@@ -29,13 +29,17 @@ export const brushTool = createStampTool({
     const o = toolOptions('brush', BRUSH_DEFAULTS);
     const painter = new DabPainter({
       tip: tipForPreset(o.presetId, o.hardness),
-      color: paintColorFor(target, colors().primary),
+      color: COVERAGE,
       base: target.toLocal,
       maxSize: o.size,
     });
     return {
       config: strokeConfig(o, stabilizerRadius(o.smoothing)),
-      mode: { opacity: o.opacity, op: target.kind === 'mask' ? 'source-over' : brushCompositeOp(o.blendMode) },
+      mode: {
+        opacity: o.opacity,
+        op: target.kind === 'mask' ? 'source-over' : brushCompositeOp(o.blendMode),
+        color: paintColorFor(target, colors().primary),
+      },
       draw: (ctx, d) => painter.draw(ctx, d),
       airbrush: o.airbrush,
     };
@@ -62,13 +66,17 @@ export const pencilTool = createStampTool({
     const o = toolOptions('pencil', PENCIL_DEFAULTS);
     const painter = new DabPainter({
       tip: { kind: 'pencil', square: o.shape === 'square' },
-      color: paintColorFor(target, colors().primary),
+      color: COVERAGE,
       base: target.toLocal,
       maxSize: o.size,
     });
     return {
       config: hardConfig(o.size, stabilizerRadius(o.smoothing), o.pressureSize),
-      mode: { opacity: o.opacity, op: target.kind === 'mask' ? 'source-over' : brushCompositeOp(o.blendMode) },
+      mode: {
+        opacity: o.opacity,
+        op: target.kind === 'mask' ? 'source-over' : brushCompositeOp(o.blendMode),
+        color: paintColorFor(target, colors().primary),
+      },
       draw: (ctx, d) => painter.draw(ctx, d),
     };
   },
@@ -95,15 +103,15 @@ export const eraserTool = createStampTool({
     // On masks and transparency-locked layers the eraser paints the background color (like Photoshop).
     const paintsColor = target.kind === 'mask' || target.lockTransparency;
     const tip: TipSpec = o.mode === 'brush' ? tipForPreset(o.presetId, o.hardness) : { kind: 'pencil', square: o.mode === 'block' };
-    const painter = new DabPainter({
-      tip,
-      color: paintsColor ? paintColorFor(target, colors().secondary) : '#000000',
-      base: target.toLocal,
-      maxSize: o.size,
-    });
+    const painter = new DabPainter({ tip, color: COVERAGE, base: target.toLocal, maxSize: o.size });
     return {
       config: o.mode === 'brush' ? strokeConfig(o, stabilizerRadius(o.smoothing)) : hardConfig(o.size, stabilizerRadius(o.smoothing), false),
-      mode: { opacity: o.mode === 'block' ? 1 : o.opacity, op: paintsColor ? 'source-over' : 'destination-out' },
+      mode: {
+        opacity: o.mode === 'block' ? 1 : o.opacity,
+        op: paintsColor ? 'source-over' : 'destination-out',
+        // destination-out only uses coverage; masks / locked layers get the background color.
+        color: paintsColor ? paintColorFor(target, colors().secondary) : undefined,
+      },
       draw: (ctx, d) => painter.draw(ctx, d),
     };
   },

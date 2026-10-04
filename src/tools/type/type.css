@@ -1,0 +1,412 @@
+/* Type tool: hidden IME textarea, options bar, Character panel, Properties section, Warp dialog. */
+
+/* Invisible textarea that receives typing / IME / clipboard while editing text on canvas. */
+.type-ime {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 2px;
+  height: 18px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  opacity: 0;
+  color: transparent;
+  background: transparent;
+  caret-color: transparent;
+  font-size: 16px;
+  line-height: 18px;
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* ---------- options bar ---------- */
+
+.type-opts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  min-width: 0;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
+.type-opts-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border-strong);
+  flex: none;
+  margin: 0 2px;
+}
+.type-opts-spacer {
+  flex: 1;
+  min-width: 8px;
+}
+.type-opts-hint {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.type-opts-commit,
+.type-opts-cancel {
+  flex: none;
+}
+.type-opts-commit {
+  color: var(--success) !important;
+}
+.type-opts-cancel {
+  color: var(--danger) !important;
+}
+
+/* ---------- size field with presets ---------- */
+
+.type-size {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  min-width: 0;
+}
+.type-size > .ui-row {
+  flex: 1;
+  min-width: 0;
+}
+.type-size-presets {
+  flex: none;
+  width: 16px;
+  height: var(--control-h);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.type-size-presets:hover {
+  color: var(--text-strong);
+  border-color: var(--border-strong);
+}
+
+/* ---------- groups, chips, segmented ---------- */
+
+.type-btn-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  flex: none;
+}
+
+.type-chip {
+  position: relative;
+  flex: none;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: repeating-conic-gradient(#8a8a8a 0% 25%, #bdbdbd 0% 50%) 50% / 8px 8px;
+  cursor: pointer;
+  overflow: hidden;
+}
+.type-chip:hover,
+.type-chip.active {
+  border-color: var(--accent);
+}
+.type-chip-paint {
+  position: absolute;
+  inset: 0;
+}
+
+.type-pop {
+  padding: 0;
+}
+.type-fill-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  min-width: 236px;
+}
+
+.type-seg {
+  display: inline-flex;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2px;
+  gap: 2px;
+  flex: none;
+}
+.type-seg-btn {
+  min-width: 52px;
+  height: 20px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.type-seg.small .type-seg-btn {
+  min-width: 0;
+  height: 18px;
+  padding: 0 6px;
+  font-size: var(--fs-xs);
+}
+.type-seg-btn:hover:not(:disabled) {
+  color: var(--text-strong);
+}
+.type-seg-btn.active {
+  background: var(--bg-active);
+  color: var(--text-strong);
+}
+.type-seg-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ---------- layout helpers ---------- */
+
+.type-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: var(--control-h);
+}
+.type-row2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 6px;
+}
+.type-grid2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px 8px;
+}
+.type-cell {
+  min-width: 0;
+}
+.type-cell .ui-row {
+  width: 100%;
+}
+.type-cell .ui-num {
+  flex: 1;
+  min-width: 0;
+}
+.type-cell-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  color: var(--text-dim);
+  cursor: ew-resize;
+}
+.type-spacer {
+  flex: 1;
+  min-width: 4px;
+}
+.type-label {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  flex: none;
+}
+.type-hint {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  padding: 2px 0;
+}
+.type-mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- Character panel ---------- */
+
+.type-char {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.type-char-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--divider);
+  flex: none;
+  min-width: 0;
+}
+.type-char-target-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+.type-char-target-name.dim {
+  color: var(--text-dim);
+}
+.type-char-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  flex: none;
+}
+.type-char-dot.active {
+  background: var(--accent);
+}
+.type-char-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.type-char-block {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px;
+  border-bottom: 1px solid var(--divider);
+}
+.type-default-style {
+  margin-bottom: 6px;
+  padding: 2px 4px 2px 8px;
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+
+.type-presets {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.type-preset {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 3px 3px 5px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  cursor: pointer;
+  min-width: 0;
+  text-align: left;
+}
+.type-preset:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+.type-preset.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.type-preset-sample {
+  height: 44px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+  line-height: 1;
+}
+.type-preset-name {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  padding: 0 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.type-preset:hover .type-preset-name {
+  color: var(--text-strong);
+}
+
+.type-warp-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ---------- Properties section ---------- */
+
+.type-props {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.type-props-actions {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.type-props-actions .ui-btn {
+  flex: 1;
+  padding: 0 6px;
+}
+
+/* ---------- Warp dialog ---------- */
+
+.type-warp {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.type-warp-styles {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+.type-warp-style {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 5px 2px 4px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.type-warp-style:hover {
+  color: var(--text-strong);
+  border-color: var(--border-strong);
+}
+.type-warp-style.active {
+  color: var(--text-strong);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.type-warp-glyph {
+  display: block;
+  overflow: visible;
+}
+.type-warp-preview {
+  display: grid;
+  place-items: center;
+  height: 132px;
+  border-radius: var(--radius);
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  color: var(--accent-strong);
+}
+.type-warp-hint {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}

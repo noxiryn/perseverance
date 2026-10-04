@@ -32,8 +32,9 @@ export function ColorBalanceEditor({
   onChange: (all: ParamValues) => void;
   onCommit: (all: ParamValues) => void;
 }) {
-  const [tone, setTone] = useState<Tone>('mid');
   const edited = (t: Tone) => AXES.some((a) => num(values, `${t}${a.ch}`, 0) !== 0);
+  // Open on Midtones (like Photoshop) unless only another tonal range has edits.
+  const [tone, setTone] = useState<Tone>(() => (edited('mid') ? 'mid' : (TONES.find((t) => edited(t.value))?.value ?? 'mid')));
   const set = (key: string, v: number, commit: boolean) => {
     const next = { ...values, [key]: Math.round(Math.max(-100, Math.min(100, v))) };
     onChange(next);

@@ -5,6 +5,7 @@ import { useEditor } from '../../state/editor';
 import { defaultParams } from '../../filters/engine';
 import { BLEND_OPTIONS, type FillContents, type FillSpec } from '../fillStroke';
 import { readJSON, writeJSON } from '../util';
+import { useDeferredSubmit } from './useDeferredSubmit';
 import '../io.css';
 
 const KEY = 'perseverance.fillDialog';
@@ -29,30 +30,79 @@ const DEFAULTS: FillSpec = {
   preserveTransparency: false,
 };
 
-const thumbCache = new Map<string, HTMLCanvasElement>();
+/* ---------------- pattern thumbnails (generated lazily, a few per frame) ---------------- */
+
+const THUMB = 64;
+const thumbCache = new Map<string, HTMLCanvasElement | null>();
+const queue: { def: AssetDef; done: (c: HTMLCanvasElement | null) => void }[] = [];
+let pumping = false;
+
+function renderThumb(def: AssetDef): HTMLCanvasElement | null {
+  try {
+    return def.thumbnail ? def.thumbnail(THUMB) : def.generate(defaultParams(def.params), { width: THUMB, height: THUMB });
+  } catch (e) {
+    console.warn(`[io] pattern thumbnail ${def.id} failed`, e);
+    return null;
+  }
+}
+
+function pump() {
+  if (pumping) return;
+  pumping = true;
+  const step = () => {
+    const t0 = performance.now();
+    // ~10ms of work per frame keeps the dialog responsive while thumbnails stream in.
+    while (queue.length && performance.now() - t0 < 10) {
+      const job = queue.shift()!;
+      let c = thumbCache.get(job.def.id);
+      if (c === undefined) {
+        c = renderThumb(job.def);
+        thumbCache.set(job.def.id, c);
+      }
+      job.done(c);
+    }
+    if (queue.length) requestAnimationFrame(step);
+    else pumping = false;
+  };
+  requestAnimationFrame(step);
+}
+
+function requestThumb(def: AssetDef, done: (c: HTMLCanvasElement | null) => void): () => void {
+  const hit = thumbCache.get(def.id);
+  if (hit !== undefined) {
+    done(hit);
+    return () => undefined;
+  }
+  const job = { def, done };
+  queue.push(job);
+  pump();
+  return () => {
+    const i = queue.indexOf(job);
+    if (i >= 0) queue.splice(i, 1);
+  };
+}
 
 function PatternThumb({ def }: { def: AssetDef }) {
   const ref = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
-    const c = ref.current;
-    if (!c) return;
-    let src = thumbCache.get(def.id);
-    if (!src) {
-      try {
-        src = def.thumbnail ? def.thumbnail(64) : def.generate(defaultParams(def.params), { width: 64, height: 64 });
-        thumbCache.set(def.id, src);
-      } catch {
-        return;
-      }
-    }
-    c.width = 64;
-    c.height = 64;
-    const ctx = c.getContext('2d')!;
-    ctx.clearRect(0, 0, 64, 64);
-    ctx.drawImage(src, 0, 0, 64, 64);
-  }, [def]);
-  return <canvas ref={ref} />;
+  const [ready, setReady] = useState(false);
+  useEffect(
+    () =>
+      requestThumb(def, (src) => {
+        const c = ref.current;
+        if (!c || !src) return;
+        c.width = THUMB;
+        c.height = THUMB;
+        const ctx = c.getContext('2d')!;
+        ctx.clearRect(0, 0, THUMB, THUMB);
+        ctx.drawImage(src, 0, 0, THUMB, THUMB);
+        setReady(true);
+      }),
+    [def],
+  );
+  return <canvas ref={ref} className={ready ? 'ready' : undefined} />;
 }
+
+/* ---------------- dialog ---------------- */
 
 export function FillDialog({ close }: { close: (r?: FillSpec) => void }) {
   const [spec, setSpec] = useState<FillSpec>(() => ({ ...DEFAULTS, ...readJSON<Partial<FillSpec>>(KEY, {}) }));
@@ -60,23 +110,32 @@ export function FillDialog({ close }: { close: (r?: FillSpec) => void }) {
   const secondary = useEditor((st) => st.secondaryColor);
   const allAssets = useRegistry(assets);
   const patterns = useMemo(() => allAssets.filter((a) => a.category !== 'My Assets'), [allAssets]);
+  const categories = useMemo(() => [...new Set(patterns.map((p) => p.category))], [patterns]);
+  const [cat, setCat] = useState<string>(() => (spec.patternId && assets.get(spec.patternId)?.category) || 'all');
+  const shown = cat === 'all' ? patterns : patterns.filter((p) => p.category === cat);
   const set = <K extends keyof FillSpec>(k: K, v: FillSpec[K]) => setSpec((p) => ({ ...p, [k]: v }));
-  const patternMissing = spec.contents === 'pattern' && (!spec.patternId || !assets.get(spec.patternId));
-  const submit = () => {
+  const pattern = spec.patternId ? assets.get(spec.patternId) : undefined;
+  const patternMissing = spec.contents === 'pattern' && !pattern;
+  const submit = useDeferredSubmit(() => {
     if (patternMissing) return;
     writeJSON(KEY, spec);
     close(spec);
-  };
+  });
   const swatch = spec.contents === 'foreground' ? primary : spec.contents === 'background' ? secondary : null;
 
   return (
     <Dialog
       title="Fill"
-      width={420}
+      width={spec.contents === 'pattern' ? 500 : 420}
       onClose={() => close()}
       onSubmit={submit}
       footer={
         <>
+          {patternMissing && (
+            <span className="io-faint" style={{ marginRight: 'auto', fontSize: 'var(--fs-sm)' }}>
+              Choose a pattern
+            </span>
+          )}
           <Button onClick={() => close()}>Cancel</Button>
           <Button variant="primary" disabled={patternMissing} onClick={submit}>
             Fill
@@ -88,28 +147,57 @@ export function FillDialog({ close }: { close: (r?: FillSpec) => void }) {
         <span className="ui-label">Contents</span>
         <div className="io-swatch-row">
           <Select value={spec.contents} options={CONTENTS} onChange={(v) => set('contents', v)} width={170} />
-          {swatch && <span className="ui-swatch" style={{ width: 20, height: 20 }}><span style={{ background: swatch }} /></span>}
+          {swatch && (
+            <span className="ui-swatch" style={{ width: 20, height: 20 }} title={swatch}>
+              <span style={{ background: swatch }} />
+            </span>
+          )}
           {spec.contents === 'color' && <ColorField value={spec.color} onChange={(c) => set('color', c)} alpha showHex />}
         </div>
         {spec.contents === 'pattern' && (
-          <div className="io-span">
-            {patterns.length ? (
-              <div className="io-pattern-grid">
-                {patterns.map((a) => (
-                  <button key={a.id} className={`io-pattern${spec.patternId === a.id ? ' active' : ''}`} title={a.name} onClick={() => set('patternId', a.id)}>
-                    <PatternThumb def={a} />
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <div className="io-note">No patterns are available yet.</div>
-            )}
-          </div>
-        )}
-        {spec.contents === 'pattern' && spec.patternId && assets.get(spec.patternId)?.sizing !== 'document' && (
           <>
-            <span className="ui-label">Pattern scale</span>
-            <Slider value={Math.round(spec.patternScale * 100)} min={10} max={400} unit="%" onChange={(v) => set('patternScale', v / 100)} />
+            <span className="ui-label">Library</span>
+            <div className="io-swatch-row">
+              <Select
+                value={cat}
+                options={[{ value: 'all', label: `All patterns (${patterns.length})` }, ...categories.map((c) => ({ value: c, label: c }))]}
+                onChange={setCat}
+                width={190}
+              />
+              {pattern && <span className="io-pattern-name">{pattern.name}</span>}
+            </div>
+            <div className="io-span">
+              {shown.length ? (
+                <div className="io-pattern-grid">
+                  {shown.map((a) => (
+                    <button
+                      key={a.id}
+                      className={`io-pattern${spec.patternId === a.id ? ' active' : ''}`}
+                      title={`${a.name} — ${a.category}`}
+                      onClick={() => set('patternId', a.id)}
+                      onDoubleClick={() => {
+                        const next = { ...spec, patternId: a.id };
+                        writeJSON(KEY, next);
+                        close(next);
+                      }}
+                    >
+                      <PatternThumb def={a} />
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="io-note">No patterns are available yet.</div>
+              )}
+            </div>
+            {pattern && pattern.sizing !== 'document' && (
+              <>
+                <span className="ui-label">Pattern scale</span>
+                <Slider value={Math.round(spec.patternScale * 100)} min={10} max={400} unit="%" onChange={(v) => set('patternScale', v / 100)} />
+              </>
+            )}
+            {pattern && pattern.sizing === 'document' && (
+              <span className="io-span io-note">Full-canvas texture — generated at the document size.</span>
+            )}
           </>
         )}
       </div>

@@ -70,7 +70,8 @@ export function forgetParams(filterId: string) {
 export interface LastFilter {
   filterId: string;
   params: ParamValues;
-  mode: ApplyMode;
+  /** 'auto' when the user kept the target's default mode (re-applied with the new target's default). */
+  mode: 'auto' | ApplyMode;
 }
 
 let last: LastFilter | null = null;

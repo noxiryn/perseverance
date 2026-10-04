@@ -14,7 +14,7 @@ import { createCanvas, ctx2d } from '../../core/canvas';
 import { isTransformable } from '../../core/document';
 import { pointInPolygon } from '../../core/geometry';
 import { viewport } from '../../editor/viewport';
-import { selectionFromCanvas, setSelection } from '../../editor/selection';
+import { ellipseMask, rectMask, selectionFromCanvas, setSelection } from '../../editor/selection';
 import { activeSession, useEditor } from '../../state/editor';
 import {
   about,
@@ -606,22 +606,29 @@ export class TransformSession {
     const src = bitmaps.tryGet(sel.bitmapId);
     if (!src) return false;
     const doc = s.doc;
-    const c = createCanvas(doc.width, doc.height);
-    const ctx = ctx2d(c);
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
     const D = this.D;
-    ctx.setTransform(D.a, D.b, D.c, D.d, D.e, D.f);
-    ctx.drawImage(src, 0, 0);
     let shape: Selection['shape'] = null;
+    let c: HTMLCanvasElement;
     if (sel.shape && isAxisAligned(D, 1e-6)) {
+      // Vector rect/ellipse selections are regenerated exactly (no resampling blur at the edges).
       const r = sel.shape.rect;
       const p0 = apply(D, { x: r.x, y: r.y });
       const p1 = apply(D, { x: r.x + r.width, y: r.y + r.height });
-      shape = {
-        type: sel.shape.type,
-        rect: { x: Math.min(p0.x, p1.x), y: Math.min(p0.y, p1.y), width: Math.abs(p1.x - p0.x), height: Math.abs(p1.y - p0.y) },
-      };
+      let rect = { x: Math.min(p0.x, p1.x), y: Math.min(p0.y, p1.y), width: Math.abs(p1.x - p0.x), height: Math.abs(p1.y - p0.y) };
+      if (sel.shape.type === 'rect') {
+        const x0 = Math.round(rect.x);
+        const y0 = Math.round(rect.y);
+        rect = { x: x0, y: y0, width: Math.max(1, Math.round(rect.x + rect.width) - x0), height: Math.max(1, Math.round(rect.y + rect.height) - y0) };
+        c = rectMask(doc, rect);
+      } else c = ellipseMask(doc, rect);
+      shape = { type: sel.shape.type, rect };
+    } else {
+      c = createCanvas(doc.width, doc.height);
+      const ctx = ctx2d(c);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.setTransform(D.a, D.b, D.c, D.d, D.e, D.f);
+      ctx.drawImage(src, 0, 0);
     }
     const next = selectionFromCanvas(c, shape);
     setSelection(next, this.label);

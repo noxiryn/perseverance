@@ -396,7 +396,11 @@ export function PoseStudioDialog({ close, layerId }: PoseStudioProps & { close: 
             Reset All
           </Button>
           <span className="info">
-            {docSize ? `Transparent render at ${frame.width}×${frame.height} → new layer` : `No document open — a ${frame.width}×${frame.height} document will be created`}
+            {!docSize
+              ? `No document open — a ${frame.width}×${frame.height} document will be created`
+              : editing
+                ? `Transparent render at ${frame.width}×${frame.height} → replaces “${editing.name}” (keeps its position, filters and effects)`
+                : `Transparent render at ${frame.width}×${frame.height} → new layer`}
           </span>
           <Button onClick={cancel}>Cancel</Button>
           <Button variant="primary" icon={Sparkles} onClick={addToDocument} disabled={!scene || busy}>

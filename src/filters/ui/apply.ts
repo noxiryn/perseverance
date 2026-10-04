@@ -93,6 +93,15 @@ export function effectiveMode(t: FilterTarget, requested: 'auto' | ApplyMode | u
 }
 
 /**
+ * Mode to remember for Filter ▸ Last Filter: 'auto' when the user kept the target's default (so
+ * a smart filter on a text layer re-applies destructively to a pixel layer), else the explicit
+ * choice.
+ */
+export function lastModeFor(t: FilterTarget, chosen: ApplyMode): 'auto' | ApplyMode {
+  return chosen === effectiveMode(t, 'auto') ? 'auto' : chosen;
+}
+
+/**
  * Filter context for the target's local pixel space at `previewScale` (image px per local px).
  * Exact for unrotated layers: patterns line up with the document grid and size params are in
  * document px whatever the layer's scale.

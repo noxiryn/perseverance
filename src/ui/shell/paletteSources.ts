@@ -29,15 +29,17 @@ import {
 } from '../../registry';
 import type { TextLayer } from '../../core/types';
 import { activeDoc, activeLayer, activeSession, useEditor } from '../../state/editor';
-import { toast, useUI } from '../../state/ui';
+import { toast } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
 import { openFilterDialog } from '../../filters/ui/filterDialog';
 import { placeAsset } from '../../assets/place';
 import { applyLook } from '../../looks/engine';
 import { ensureFont } from '../../fonts/loader';
 import { menuPathLabel, shortcutAlternatives } from './menuModel';
+import { bareLabel, filterNamesCoveredByCommands } from './paletteRank';
 import { runCommandSafely } from './MenuBar';
 import { openTemplate } from './documents';
+import { revealPanel } from './workspaces';
 
 export type PaletteKind = 'command' | 'tool' | 'panel' | 'filter' | 'look' | 'template' | 'asset' | 'font';
 
@@ -53,6 +55,8 @@ export interface PaletteItem {
   disabled?: boolean;
   /** Render the title in this font family (font previews). */
   fontFamily?: string;
+  /** Hidden in the "All" scope because a menu command already offers the same action. */
+  onlyInKind?: boolean;
   run(): void | Promise<void>;
 }
 
@@ -135,8 +139,10 @@ const PALETTE_HIDDEN = new Set(['edit.keyboardShortcuts']);
 
 export function collectPaletteItems(): PaletteItem[] {
   const out: PaletteItem[] = [];
+  const allCommands = commands.list();
+  const coveredFilters = filterNamesCoveredByCommands(allCommands);
 
-  for (const c of commands.list()) {
+  for (const c of allCommands) {
     if (PALETTE_HIDDEN.has(c.id)) continue;
     out.push({
       key: `command:${c.id}`,
@@ -172,10 +178,7 @@ export function collectPaletteItems(): PaletteItem[] {
       subtitle: 'Show panel',
       icon: p.icon,
       keywords: `${p.id} panel window`,
-      run: () => {
-        useUI.setState({ dockVisible: true });
-        useUI.getState().showPanel(p.id);
-      },
+      run: () => revealPanel(p.id),
     });
   }
 
@@ -187,6 +190,7 @@ export function collectPaletteItems(): PaletteItem[] {
       subtitle: `Filter › ${f.category}`,
       icon: f.icon ?? (f.adjustment ? Blend : WandSparkles),
       keywords: [f.id, f.category, f.description ?? '', ...(f.keywords ?? [])].join(' '),
+      onlyInKind: coveredFilters.has(bareLabel(f.name)),
       run: () => {
         if (!requireDoc(f.name)) return;
         if (!activeSession()?.activeLayerId) return void toast('Select a layer to apply a filter to', 'info');

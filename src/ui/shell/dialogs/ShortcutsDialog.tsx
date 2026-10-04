@@ -84,21 +84,25 @@ export function ShortcutsDialog({ close }: { close: (r?: unknown) => void }) {
         </div>
         <Checkbox checked={onlyBound} onChange={setOnlyBound} label="Only with shortcuts" />
       </div>
-      <div className="shell-sc-list">
-        {filtered.map((g) => (
-          <div key={g.title} className="shell-sc-group">
-            <div className="shell-sc-group-title">{g.title}</div>
-            {g.rows.map((r, i) => (
-              <div key={i} className="shell-sc-row">
-                <span className="shell-sc-label">{r.label}</span>
-                {r.path && <span className="shell-sc-path">{r.path}</span>}
-                <span className="shell-sc-keys">
-                  {r.shortcuts.length ? r.shortcuts.map((s) => <Keys key={s} shortcut={s} />) : <span className="shell-sc-none">—</span>}
-                </span>
-              </div>
-            ))}
-          </div>
-        ))}
+      {/* The scroller and the multi-column list must be separate elements: multi-column content
+          inside a fixed-height box overflows sideways into extra columns instead of downward. */}
+      <div className="shell-sc-scroll">
+        <div className="shell-sc-list">
+          {filtered.map((g) => (
+            <div key={g.title} className="shell-sc-group">
+              <div className="shell-sc-group-title">{g.title}</div>
+              {g.rows.map((r, i) => (
+                <div key={i} className="shell-sc-row">
+                  <span className="shell-sc-label">{r.label}</span>
+                  {r.path && <span className="shell-sc-path">{r.path}</span>}
+                  <span className="shell-sc-keys">
+                    {r.shortcuts.length ? r.shortcuts.map((s) => <Keys key={s} shortcut={s} />) : <span className="shell-sc-none">—</span>}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
         {!filtered.length && <div className="ui-empty">No shortcuts match “{q}”.</div>}
       </div>
     </Dialog>

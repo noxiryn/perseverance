@@ -45,6 +45,7 @@ import { measureText } from '../render/compositor';
 import { renderPlaceholderCharacter, type PlaceholderOptions } from '../roblox/placeholder';
 import { fitFontSize, segmentTransform } from './layout';
 import { smokeCanvas, type SmokeOptions } from './paint';
+import { BILLOW_SMOKE_ID } from './smokeAsset';
 
 export interface LayerOpts {
   name?: string;
@@ -92,6 +93,9 @@ export interface CharacterOpts extends Omit<PlaceholderOptions, 'width' | 'heigh
 
 export const PLACEHOLDER_NAME = 'Your Character (replace me)';
 
+/** Placeholder canvas height ÷ visible figure height, per pose/style (measured once). */
+const FIGURE_RATIO = new Map<string, number>();
+
 /** Pick the first registered family of a list (or the first entry when the registry is empty). */
 export function resolveFont(choice: FontChoice | undefined, fallback = DEFAULT_TEXT.fontFamily): string {
   const list = choice === undefined ? [fallback] : Array.isArray(choice) ? choice : [choice];
@@ -102,7 +106,7 @@ export function resolveFont(choice: FontChoice | undefined, fallback = DEFAULT_T
 }
 
 /** Nearest available weight of a registered family. */
-function resolveWeight(family: string, weight: number): number {
+export function resolveWeight(family: string, weight: number): number {
   const def = fonts.get(family) ?? fonts.list().find((f) => f.family === family);
   if (!def || !def.weights.length) return weight;
   return def.weights.reduce((best, w) => (Math.abs(w - weight) < Math.abs(best - weight) ? w : best), def.weights[0]);
@@ -272,13 +276,18 @@ export class DocBuilder {
       const { cx, top, height, rotation, flipX, ...style } = c;
       const want = Math.max(16, height * this.preview);
       const render = (h: number) => renderPlaceholderCharacter({ ...style, width: Math.round(h * 0.9), height: Math.round(h) });
-      let canvas = render(want * 1.15);
+      // Canvas height per figure height depends on the pose; remember it so later builds
+      // (and previews) render the character once instead of measure + re-render.
+      const ratioKey = `${style.pose ?? 'idle'}|${style.style ?? 'shaded'}`;
+      const known = FIGURE_RATIO.get(ratioKey);
+      let canvas = render(want * (known ?? 1.15));
       let bounds = opaqueBounds(canvas, 8);
       if (!bounds) return null;
+      if (!known) FIGURE_RATIO.set(ratioKey, canvas.height / bounds.height);
       // Re-render so the figure itself is `want` px tall (crisper than scaling the raster).
       const f = want / bounds.height;
-      if (Math.abs(f - 1) > 0.02) {
-        canvas = render(want * 1.15 * f);
+      if (Math.abs(f - 1) > 0.03) {
+        canvas = render(canvas.height * f);
         bounds = opaqueBounds(canvas, 8) ?? bounds;
       }
       const pad = 2;
@@ -322,6 +331,8 @@ export class DocBuilder {
    * look must not depend on the asset library (e.g. the crimson reference's red smoke).
    */
   smoke(name: string, opts: SmokeOptions, o: LayerOpts = {}): RasterLayer | null {
+    // Prefer the registered asset so the layer can be regenerated with new params later.
+    if (assets.has(BILLOW_SMOKE_ID)) return this.asset(BILLOW_SMOKE_ID, { ...opts }, { name, ...o });
     try {
       const w = Math.max(8, Math.round(this.W * this.preview));
       const h = Math.max(8, Math.round(this.H * this.preview));

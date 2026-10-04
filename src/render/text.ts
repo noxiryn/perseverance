@@ -168,6 +168,7 @@ export function layoutTextProps(t: TextProps): TextLayout {
 
 export function resetTextCaches() {
   layoutCache = new WeakMap();
+  flatPixels.clear();
 }
 
 /* ---------------- caret helpers (for the type tool) ---------------- */
@@ -384,12 +385,48 @@ function hardenAlpha(c: HTMLCanvasElement) {
 /** Source px per warp-mesh cell (affine per triangle; 8px keeps the error far below a pixel). */
 const WARP_CELL = 8;
 
+/** Pixels of an unwarped text raster (input of the mesh warp). */
+interface FlatPixels {
+  data: Uint8ClampedArray;
+  w: number;
+  h: number;
+  k: number;
+  ox: number;
+  oy: number;
+}
+
+/**
+ * Flat rasters of warped texts keyed by everything BUT the warp: dragging a Bend/Distortion
+ * slider re-runs only the mesh warp (no text drawing, no GPU readback).
+ */
+const flatPixels = new Map<string, FlatPixels>();
+const FLAT_CACHE_MAX = 3;
+
+function flatPixelsFor(t: TextProps, layout: TextLayout, k: number, P: number): FlatPixels {
+  const { warp: _warp, ...rest } = t;
+  const key = `${k.toFixed(5)}|${cacheGeneration()}|${textFontReady(t) ? 1 : 0}|${JSON.stringify(rest)}`;
+  const hit = flatPixels.get(key);
+  if (hit) {
+    flatPixels.delete(key);
+    flatPixels.set(key, hit);
+    return hit;
+  }
+  const flat = renderFlat(t, layout, k, P);
+  const { canvas } = flat;
+  const data = ctx2d(canvas, { willReadFrequently: true }).getImageData(0, 0, canvas.width, canvas.height).data;
+  const fp: FlatPixels = { data, w: canvas.width, h: canvas.height, k, ox: flat.ox, oy: flat.oy };
+  flatPixels.set(key, fp);
+  while (flatPixels.size > FLAT_CACHE_MAX) flatPixels.delete(flatPixels.keys().next().value as string);
+  return fp;
+}
+
 /**
  * Warp a flat local content through the text warp mapping with a seamless software triangle
  * mesh (see meshWarp.ts): exact per-triangle inverse mapping + premultiplied bilinear sampling.
  */
-function warpContent(flat: LocalContent, t: TextProps, layout: TextLayout): LocalContent {
-  const { canvas: src, k, ox, oy } = flat;
+function warpContent(flat: FlatPixels, t: TextProps, layout: TextLayout): LocalContent {
+  const { k, ox, oy } = flat;
+  const src = { width: flat.w, height: flat.h };
   const a = layout.width / 2;
   const c = layout.height / 2;
   const w = t.warp;
@@ -412,7 +449,11 @@ function warpContent(flat: LocalContent, t: TextProps, layout: TextLayout): Loca
     if (X > maxX) maxX = X;
     if (Y > maxY) maxY = Y;
   }
-  if (!Number.isFinite(minX + minY + maxX + maxY)) return flat;
+  if (!Number.isFinite(minX + minY + maxX + maxY)) {
+    const c0 = createCanvas(src.width, src.height);
+    ctx2d(c0).putImageData(new ImageData(flat.data, src.width, src.height), 0, 0);
+    return { canvas: c0, k, ox, oy };
+  }
   const nox = Math.floor(minX - 2);
   const noy = Math.floor(minY - 2);
   const outW = Math.max(1, Math.min(MAX_TEXT_SIDE, Math.ceil((maxX + 2 - nox) * k)));
@@ -421,10 +462,9 @@ function warpContent(flat: LocalContent, t: TextProps, layout: TextLayout): Loca
     grid.dx[i] = (grid.dx[i] - nox) * k;
     grid.dy[i] = (grid.dy[i] - noy) * k;
   }
-  const srcData = ctx2d(src, { willReadFrequently: true }).getImageData(0, 0, src.width, src.height).data;
   const out = createCanvas(outW, outH);
   const img = new ImageData(outW, outH);
-  warpImage(srcData, src.width, src.height, img.data, outW, outH, grid);
+  warpImage(flat.data, src.width, src.height, img.data, outW, outH, grid);
   ctx2d(out).putImageData(img, 0, 0);
   return { canvas: out, k, ox: nox, oy: noy };
 }
@@ -475,8 +515,8 @@ export function renderTextContent(t: TextProps, kRequested: number, fx = 0, fy =
   const sig = `${k.toFixed(5)}|${fx.toFixed(4)}|${fy.toFixed(4)}|${cacheGeneration()}|${textFontReady(t) ? 'r' : 'p'}`;
   const hit = slots.get<LocalContent>(key, sig);
   if (hit) return hit;
-  let content = renderFlat(t, layout, k, P, fx, fy);
-  if (warp) content = warpContent(content, t, layout);
-  slots.set(key, sig, content, px(content.canvas), { max: 3 });
+  const content = warp ? warpContent(flatPixelsFor(t, layout, k, P), t, layout) : renderFlat(t, layout, k, P, fx, fy);
+  // A few raster scales per text (document, thumbnails, navigator) coexist without thrashing.
+  slots.set(key, sig, content, px(content.canvas), { max: 4 });
   return content;
 }

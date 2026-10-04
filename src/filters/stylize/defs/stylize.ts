@@ -47,15 +47,44 @@ import { angleP, boolP, colorP, numP, pctP, pxP, seedP } from '../params';
 /* Cel shade                                                           */
 /* ------------------------------------------------------------------ */
 
-/** Smooth band quantization of a 0..1 value into `levels` bands (band centers as outputs). */
-export function quantizeSmooth(L: number, levels: number, smoothness: number): number {
+/**
+ * Smooth band quantization of a 0..1 value into `levels` bands. Each band outputs its
+ * representative value (`reps[i]`, default: the band center); `smoothness` softens the steps.
+ */
+export function quantizeSmooth(L: number, levels: number, smoothness: number, reps?: ArrayLike<number>): number {
   const t = L * levels - 0.5;
   const i0 = Math.floor(t);
   const f = t - i0;
   const w2 = smoothness * 0.5;
   const s = w2 > 0.001 ? smoothstep(0.5 - w2, 0.5 + w2, f) : f >= 0.5 ? 1 : 0;
-  const band = clamp(i0 + s, 0, levels - 1);
-  return (band + 0.5) / levels;
+  if (!reps) return (clamp(i0 + s, 0, levels - 1) + 0.5) / levels;
+  const a = reps[i0 < 0 ? 0 : i0 > levels - 1 ? levels - 1 : i0];
+  const b = reps[i0 + 1 < 0 ? 0 : i0 + 1 > levels - 1 ? levels - 1 : i0 + 1];
+  return a + (b - a) * s;
+}
+
+/**
+ * Representative tone of each band: the mean luminance of the opaque pixels falling in it, so
+ * flat bands keep the image's own tonality (blacks stay black, highlights stay bright).
+ */
+export function bandRepresentatives(lum: Float32Array, data: Uint8ClampedArray, levels: number): Float32Array {
+  const sum = new Float64Array(levels),
+    cnt = new Float64Array(levels);
+  for (let i = 0, j = 3; i < lum.length; i++, j += 4) {
+    const a = data[j];
+    if (a === 0) continue;
+    const L = lum[i];
+    const b = L <= 0 ? 0 : L >= 1 ? levels - 1 : Math.min(levels - 1, Math.floor(L * levels));
+    sum[b] += L * a;
+    cnt[b] += a;
+  }
+  const reps = new Float32Array(levels);
+  for (let b = 0; b < levels; b++) {
+    const center = (b + 0.5) / levels;
+    // lean slightly towards the band center so neighbouring bands stay distinct
+    reps[b] = cnt[b] > 0 ? (sum[b] / cnt[b]) * 0.8 + center * 0.2 : center;
+  }
+  return reps;
 }
 
 /** Re-light a color to luminance Lq (0..1) keeping hue: darken by ratio, lighten towards white. */
@@ -90,9 +119,10 @@ export function applyCelShade<T extends Img>(img: T, p: ParamValues, ctx: Filter
   const lumS = Float32Array.from(lum0);
   blurPlane(lumS, w, h, Math.max(0.5, 0.9 * s));
   const n = w * h;
+  const reps = bandRepresentatives(lumS, data, levels);
   for (let i = 0, j = 0; i < n; i++, j += 4) {
     if (data[j + 3] === 0) continue;
-    const Lq = quantizeSmooth(lumS[i], levels, smooth);
+    const Lq = quantizeSmooth(lumS[i], levels, smooth, reps);
     relight(data, j, lum0[i], Lq);
   }
   saturateInPlace(data, sat);
@@ -117,7 +147,7 @@ export const celShade: FilterDef = {
   keywords: ['toon', 'anime', 'cartoon', 'posterize', 'outline', 'roblox', 'flat shading'],
   params: [
     numP('levels', 'Tone levels', 2, 8, 4, { step: 1 }),
-    pctP('smoothness', 'Band smoothness', 0.2),
+    pctP('smoothness', 'Smoothness', 0.2),
     numP('saturation', 'Saturation', -100, 100, 10),
     boolP('outline', 'Outline', true, { group: 'Outline' }),
     pxP('outlineThickness', 'Thickness', 0, 10, 2, { group: 'Outline', showIf: (v) => v.outline !== false }),

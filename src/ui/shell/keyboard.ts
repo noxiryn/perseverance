@@ -194,6 +194,11 @@ export function handleKeyDown(e: KeyboardEvent) {
   const k = eventKey(e);
   if (k.length === 1 && /[a-z]/.test(k)) {
     const id = resolveToolShortcut(k, e.shiftKey, tools.list(), ed.activeTool, useToolMemory.getState().lastUsed);
+    if (id && e.repeat) {
+      // Holding the key (e.g. Shift+U) must not spin through the group every ~30ms.
+      e.preventDefault();
+      return;
+    }
     if (id) {
       e.preventDefault();
       if (temp) {

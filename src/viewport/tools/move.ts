@@ -20,7 +20,7 @@ import { clearSmartGuides, collectSnapTargets, snapRect, type SnapTargets } from
 import { MaskFollower } from '../maskFollow';
 import { translate } from '../math/affine';
 import { drawLabel, strokePoly } from '../draw';
-import { ACCENT, fmtPx, toastOnce, vpState } from '../state';
+import { ACCENT, fmtPx, isTemporarilySuspended, toastOnce, vpState } from '../state';
 import { nudgeLayers } from './moveOps';
 import { MoveOptionsBar } from '../options/MoveOptions';
 
@@ -420,6 +420,8 @@ function onKeyDown(e: KeyboardEvent): boolean {
 }
 
 function onDeactivate() {
+  // Space → temporary Hand: keep the free transform session and any running gesture.
+  if (isTemporarilySuspended('move')) return;
   if (drag?.kind === 'transform' && !drag.persistent) drag.session.cancel();
   if (drag?.kind === 'move' && drag.moved) useEditor.getState().cancelPreview();
   drag = null;

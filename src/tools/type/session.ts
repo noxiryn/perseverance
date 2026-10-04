@@ -112,6 +112,23 @@ export function previewSessionLayer(mutate: (l: TextLayer) => void) {
   viewport.requestRender();
 }
 
+/**
+ * After a style change made with a button/menu while editing, give the keyboard back to the text
+ * (never steals focus from a field the user is typing in).
+ */
+export function refocusAfterStyleChange() {
+  if (!ses) return;
+  const ae = document.activeElement as HTMLElement | null;
+  const tag = ae?.tagName;
+  if (ae && ae !== document.body && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || ae.isContentEditable) && ae !== ses.ta) return;
+  window.setTimeout(() => {
+    const a2 = document.activeElement as HTMLElement | null;
+    const t2 = a2?.tagName;
+    if (a2 && a2 !== document.body && (t2 === 'INPUT' || t2 === 'TEXTAREA' || t2 === 'SELECT') && a2 !== ses?.ta) return;
+    focusTextarea();
+  }, 0);
+}
+
 function syncContentFromTextarea() {
   if (!ses) return;
   const raw = ses.ta.value;
@@ -817,7 +834,7 @@ function boxPath(ctx: CanvasRenderingContext2D, frame: TextFrame, w: number, h: 
 export function drawSessionOverlay(ctx: CanvasRenderingContext2D) {
   const s = ses;
   const l = sessionLayer();
-  if (!s || !l) return;
+  if (!s || !l || useEditor.getState().activeDocId !== s.docId) return;
   const t = l.text;
   const frame = frameOf(l);
   const layout = frame.layout;

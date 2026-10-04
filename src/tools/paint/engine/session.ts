@@ -2,10 +2,12 @@
  * CompositeSession — the live painting pipeline for GPU-drawn tools (brush, pencil, eraser,
  * clone, gradient, bucket).
  *
- *   stroke buffer S (dabs at flow)  ──►  T = before ⊕ (S · selection) at opacity / blend
+ *   stroke buffer S (dabs at flow)  ──►  T = before ⊕ (fill(S) · selection) at opacity / blend
  *
- * Only dirty rects are recomposited each frame (one rAF), the before-image is a GPU copy of
- * the layer taken at stroke start, and the BitmapPatch is read back once on commit.
+ * Brush-like tools paint WHITE coverage dabs into S and the color (or the clone source image)
+ * is applied once per composite (`mode.color` / `mode.fill`), which keeps low-alpha edges
+ * color-exact. Only dirty rects are recomposited each frame (one rAF), the before-image is a
+ * GPU copy of the layer taken at stroke start, and the BitmapPatch is read back once on commit.
  */
 import type { Rect } from '../../../core/types';
 import { bitmaps } from '../../../core/bitmaps';
@@ -20,6 +22,18 @@ export interface CompositeMode {
   opacity: number;
   /** Composite op used to apply the stroke buffer to the layer. */
   op: GlobalCompositeOperation;
+  /**
+   * Tint color for coverage-only strokes. When set, the stroke buffer holds WHITE dabs (a pure
+   * alpha mask) and the color is applied once per composite. White survives 8-bit premultiplied
+   * accumulation exactly, so soft edges of low-flow strokes (airbrush, smoke…) keep their true
+   * color instead of drifting to black.
+   */
+  color?: string;
+  /**
+   * Image fill for coverage strokes (clone stamp): `image` drawn through `matrix` (image → bitmap
+   * local space) and masked by the stroke coverage. Takes precedence over `color`.
+   */
+  fill?: { image: CanvasImageSource; matrix: DOMMatrix };
 }
 
 /* ---------------- canvas pool ---------------- */
@@ -44,7 +58,11 @@ function scratch(name: string, w: number, h: number): HTMLCanvasElement {
   return n;
 }
 
-/** Rect of the stroke buffer that may still hold pixels from the previous session. */
+/**
+ * Rect of the pooled stroke buffer that may hold pixels from earlier sessions. Grown on every
+ * markDirty (not only on commit/cancel), so even an abandoned session can't leak old dabs into
+ * the next stroke.
+ */
 let bufferGarbage: Rect | null = null;
 
 export class CompositeSession {
@@ -73,14 +91,15 @@ export class CompositeSession {
     const fresh = pool.get('buffer');
     this.buffer = pooled('buffer', w, h);
     this.bufferCtx = ctx2d(this.buffer);
+    this.bufferCtx.setTransform(1, 0, 0, 1, 0, 0);
     if (fresh === this.buffer && bufferGarbage) {
-      this.bufferCtx.setTransform(1, 0, 0, 1, 0, 0);
       this.bufferCtx.clearRect(bufferGarbage.x, bufferGarbage.y, bufferGarbage.width, bufferGarbage.height);
     }
     bufferGarbage = null;
-    this.bufferCtx.setTransform(1, 0, 0, 1, 0, 0);
     this.bufferCtx.globalAlpha = 1;
     this.bufferCtx.globalCompositeOperation = 'source-over';
+    this.bufferCtx.imageSmoothingEnabled = true;
+    this.bufferCtx.imageSmoothingQuality = 'high';
   }
 
   get isFinished() {
@@ -98,6 +117,7 @@ export class CompositeSession {
     if (!pr) return;
     this.frame = rectUnion(this.frame, pr);
     this.dirty = rectUnion(this.dirty, pr);
+    bufferGarbage = rectUnion(bufferGarbage, pr);
     this.schedule();
   }
 
@@ -149,27 +169,53 @@ export class CompositeSession {
     ctx.clearRect(x, y, w, h);
     ctx.drawImage(this.before, x, y, w, h, x, y, w, h);
 
-    // Stroke source, masked by the selection when there is one.
+    // Stroke source: filled/tinted (coverage strokes) and masked by the selection when needed.
+    // Every step draws over the whole w×h region, so nothing depends on how the browser treats
+    // pixels outside a drawn image with unbounded composite ops.
+    const { opacity, op, color, fill } = this.mode;
     let src: HTMLCanvasElement = this.buffer;
     let sx = x,
       sy = y;
-    if (t.selection) {
+    if (t.selection || color || fill) {
       const xs = scratch('masked', w, h);
       const xc = ctx2d(xs);
       xc.save();
       xc.setTransform(1, 0, 0, 1, 0, 0);
       xc.imageSmoothingEnabled = false;
-      xc.globalCompositeOperation = 'copy';
-      xc.drawImage(this.buffer, x, y, w, h, 0, 0, w, h);
-      xc.globalCompositeOperation = 'destination-in';
-      xc.drawImage(t.selection, x, y, w, h, 0, 0, w, h);
+      if (fill) {
+        // Image (e.g. the clone source) in local space, then keep it where the stroke covers.
+        xc.clearRect(0, 0, w, h);
+        const m = fill.matrix;
+        xc.save();
+        xc.beginPath();
+        xc.rect(0, 0, w, h);
+        xc.clip();
+        xc.setTransform(m.a, m.b, m.c, m.d, m.e - x, m.f - y);
+        xc.imageSmoothingEnabled = true;
+        xc.imageSmoothingQuality = 'high';
+        xc.drawImage(fill.image, 0, 0);
+        xc.restore();
+        xc.globalCompositeOperation = 'destination-in';
+        xc.drawImage(this.buffer, x, y, w, h, 0, 0, w, h);
+      } else {
+        xc.globalCompositeOperation = 'copy';
+        xc.drawImage(this.buffer, x, y, w, h, 0, 0, w, h);
+      }
+      if (t.selection) {
+        xc.globalCompositeOperation = 'destination-in';
+        xc.drawImage(t.selection, x, y, w, h, 0, 0, w, h);
+      }
+      if (color && !fill) {
+        xc.globalCompositeOperation = 'source-in';
+        xc.fillStyle = color;
+        xc.fillRect(0, 0, w, h);
+      }
       xc.restore();
       src = xs;
       sx = 0;
       sy = 0;
     }
 
-    const { opacity, op } = this.mode;
     if (t.lockTransparency && op !== 'source-over') {
       // Blend into a copy of the original, then put it back only where pixels existed.
       const rs = scratch('locked', w, h);
@@ -209,7 +255,6 @@ export class CompositeSession {
     this.flush();
     this.finished = true;
     const r = this.dirty;
-    bufferGarbage = r;
     if (!r) return false;
     if (!targetStillValid(this.target)) return false;
     const before = this.readBefore(r);
@@ -227,7 +272,6 @@ export class CompositeSession {
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.finished = true;
-    bufferGarbage = this.dirty;
     const r = this.dirty;
     if (!r || !targetStillValid(this.target)) return;
     const ctx = ctx2d(this.target.canvas);

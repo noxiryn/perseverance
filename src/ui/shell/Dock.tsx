@@ -10,6 +10,8 @@ import { showMenuAt, type MenuItem } from '../controls';
 import { ErrorBoundary } from './ErrorBoundary';
 import { PANEL_MIME, panelIcon, panelTitle } from './panelMeta';
 import { useShell } from './shellStore';
+import { Tip } from './Toolbar';
+import { toCss } from './uiScale';
 import { movePanel, removePanel, type DropTarget } from './workspaces';
 
 type Slot = DockGroupState['slot'];
@@ -68,6 +70,43 @@ function dropPanel(e: React.DragEvent, target: DropTarget) {
   e.stopPropagation();
   const ui = useUI.getState();
   ui.setWorkspace(movePanel(ui.workspace, id, target));
+}
+
+/**
+ * Track a resize drag started on `e.currentTarget`: pointer capture keeps the moves coming when
+ * the pointer leaves the handle, and the drag ends on pointerup, pointercancel (touch / pen) or
+ * capture loss, so it can never stay stuck. Listeners sit on window because a captured element
+ * that unmounts mid-drag reports the capture loss on the document.
+ */
+export function trackDrag(e: React.PointerEvent<HTMLElement>, cursorClass: string, onMove: (ev: PointerEvent) => void) {
+  const el = e.currentTarget;
+  const id = e.pointerId;
+  try {
+    el.setPointerCapture(id);
+  } catch {
+    /* pointer already released */
+  }
+  document.body.classList.add(cursorClass);
+  const move = (ev: PointerEvent) => {
+    if (ev.pointerId === id) onMove(ev);
+  };
+  const end = (ev: PointerEvent) => {
+    if (ev.pointerId !== id) return;
+    document.body.classList.remove(cursorClass);
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', end);
+    window.removeEventListener('pointercancel', end);
+    window.removeEventListener('lostpointercapture', end);
+    try {
+      if (el.hasPointerCapture(id)) el.releasePointerCapture(id);
+    } catch {
+      /* element gone */
+    }
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', end);
+  window.addEventListener('pointercancel', end);
+  window.addEventListener('lostpointercapture', end);
 }
 
 /** Index to insert at, based on pointer x over the tab buttons. */
@@ -179,33 +218,27 @@ function PanelGroup({ g, groupRef }: { g: DockGroupState; groupRef: (el: HTMLDiv
 
 function Splitter({ above, below, getEl }: { above: DockGroupState; below: DockGroupState; getEl: (slot: Slot) => HTMLDivElement | null }) {
   const active = !above.collapsed && !below.collapsed;
-  const onPointerDown = (e: React.PointerEvent) => {
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!active || e.button !== 0) return;
     const a = getEl(above.slot);
     const b = getEl(below.slot);
     if (!a || !b) return;
     e.preventDefault();
+    // All measurements are visual px (rects and clientY), so the ratio is zoom-independent.
     const startY = e.clientY;
     const hA = a.getBoundingClientRect().height;
     const hB = b.getBoundingClientRect().height;
     const W = above.size + below.size;
     const H = hA + hB;
-    const MIN = 96;
-    document.body.classList.add('shell-resizing-row');
-    const move = (ev: PointerEvent) => {
+    const visualPerCss = H / Math.max(1, a.offsetHeight + b.offsetHeight);
+    const MIN = Math.min(96 * visualPerCss, H / 2); // 96 CSS px minimum group height
+    trackDrag(e, 'shell-resizing-row', (ev) => {
       const nA = Math.max(MIN, Math.min(H - MIN, hA + (ev.clientY - startY)));
       const wA = (W * nA) / H;
       const ui = useUI.getState();
       ui.setGroupSize(above.slot, wA);
       ui.setGroupSize(below.slot, W - wA);
-    };
-    const up = () => {
-      document.body.classList.remove('shell-resizing-row');
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
+    });
   };
   return <div className={`shell-splitter${active ? ' active' : ''}`} onPointerDown={onPointerDown} />;
 }
@@ -217,20 +250,13 @@ function DockColumn() {
   const groups = ws.groups.filter((g) => g.tabs.length);
   const allCollapsed = groups.every((g) => g.collapsed);
 
-  const startResize = (e: React.PointerEvent) => {
+  const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     e.preventDefault();
     const startX = e.clientX;
     const startW = useUI.getState().dockWidth;
-    document.body.classList.add('shell-resizing-col');
-    const move = (ev: PointerEvent) => useUI.getState().setDockWidth(startW + (startX - ev.clientX));
-    const up = () => {
-      document.body.classList.remove('shell-resizing-col');
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
+    // dockWidth is in CSS px of the (possibly CSS-zoomed) UI; pointer deltas are visual px.
+    trackDrag(e, 'shell-resizing-col', (ev) => useUI.getState().setDockWidth(startW + toCss(startX - ev.clientX)));
   };
 
   return (
@@ -368,11 +394,7 @@ function Strip() {
         })}
         {!ws.strip.length && !collapsed && <div className="shell-strip-drop-hint" title="Drag a panel tab here" />}
       </div>
-      {tip && (
-        <div className="ui-tooltip shell-tip left" style={{ left: tip.x, top: tip.y }}>
-          {tip.name}
-        </div>
-      )}
+      <Tip tip={tip} side="left" />
     </div>
   );
 }
@@ -386,12 +408,14 @@ function Flyout({ sideRef }: { sideRef: React.RefObject<HTMLDivElement | null> }
 
   useLayoutEffect(() => {
     if (!id || !sideRef.current) return;
+    // Measured in visual px, applied as CSS px of the (possibly CSS-zoomed) UI.
     const side = sideRef.current.getBoundingClientRect();
+    const sideH = toCss(side.height);
     const icon = sideRef.current.querySelector<HTMLElement>(`[data-strip-panel="${CSS.escape(id)}"]`);
-    const avail = side.height - 16;
+    const avail = sideH - 16;
     const h = Math.min(avail, Math.max(380, Math.min(620, avail)));
-    let t = icon ? icon.getBoundingClientRect().top - side.top - 6 : 8;
-    t = Math.max(8, Math.min(t, side.height - h - 8));
+    let t = icon ? toCss(icon.getBoundingClientRect().top - side.top) - 6 : 8;
+    t = Math.max(8, Math.min(t, sideH - h - 8));
     setTop(t);
     setHeight(h);
   }, [id, sideRef]);

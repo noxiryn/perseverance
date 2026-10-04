@@ -1,6 +1,8 @@
 /**
  * Template preview thumbnails: each template is built once at low bitmap resolution, rendered
  * with the compositor after its fonts load, cached as a data URL, and its bitmaps are freed.
+ * Rendering runs in an idle queue; the dialog pauses it while a template is being opened and
+ * cancels what's still queued when it closes (finished previews stay cached).
  */
 import { useEffect, useState } from 'react';
 import { templates } from '../registry';
@@ -11,7 +13,7 @@ import { buildTemplate, hasTemplateSpec } from './define';
 export const TEMPLATE_PREVIEW_SIZE = 320;
 
 const cache = new Map<string, string>();
-const pending = new Map<string, Promise<string | null>>();
+const pending = new Map<string, { promise: Promise<string | null>; resolve: (url: string | null) => void }>();
 const listeners = new Set<() => void>();
 const queue = new IdleQueue();
 
@@ -20,26 +22,14 @@ export function getTemplatePreview(id: string): string | null {
   return cache.get(id) ?? null;
 }
 
-/** Render (once) and cache the preview of a template. Resolves with a data URL (or null on failure). */
+/** Render (once) and cache the preview of a template. Resolves with a data URL (or null on failure/cancel). */
 export function loadTemplatePreview(id: string, priority = 0): Promise<string | null> {
   const hit = cache.get(id);
   if (hit) return Promise.resolve(hit);
-  let p = pending.get(id);
-  if (p) return p;
-  p = new Promise<string | null>((resolve) => {
-    queue.push(
-      id,
-      async () => {
-        try {
-          resolve(await renderTemplatePreview(id));
-        } catch (e) {
-          console.warn(`[templates] preview of ${id} failed`, e);
-          resolve(null);
-        }
-      },
-      priority,
-    );
-  }).then((url) => {
+  const existing = pending.get(id);
+  if (existing) return existing.promise;
+  let resolve!: (url: string | null) => void;
+  const promise = new Promise<string | null>((r) => (resolve = r)).then((url) => {
     pending.delete(id);
     if (url) {
       cache.set(id, url);
@@ -47,8 +37,31 @@ export function loadTemplatePreview(id: string, priority = 0): Promise<string | 
     }
     return url;
   });
-  pending.set(id, p);
-  return p;
+  pending.set(id, { promise, resolve });
+  queue.push(
+    id,
+    async () => {
+      try {
+        resolve(await renderTemplatePreview(id));
+      } catch (e) {
+        console.warn(`[templates] preview of ${id} failed`, e);
+        resolve(null);
+      }
+    },
+    priority,
+  );
+  return promise;
+}
+
+/** Pause/resume preview rendering (the job in progress finishes). */
+export function pauseTemplatePreviews(paused: boolean) {
+  if (paused) queue.pause();
+  else queue.resume();
+}
+
+/** Drop queued (not yet started) preview jobs; their promises resolve with null. */
+export function cancelPendingTemplatePreviews() {
+  for (const id of queue.clear()) pending.get(id)?.resolve(null);
 }
 
 async function renderTemplatePreview(id: string): Promise<string | null> {

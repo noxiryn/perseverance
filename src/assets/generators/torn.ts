@@ -71,15 +71,20 @@ export const tornBorder = defineAsset(
       const rc = Math.min(T * 1.7, Math.min(W, H) * 0.2);
 
       /* ---------- coarse threshold grid ---------- */
-      const cell = Math.max(1, Math.min(4, Math.round(Math.min(W, H) / 220)));
+      const cell = Math.max(1, Math.min(6, Math.round(Math.min(W, H) / 180)));
       const gw = Math.ceil(W / cell) + 2;
       const gh = Math.ceil(H / cell) + 2;
       const E = new Float32Array(gw * gh);
+      /** worn-print amount (0..1) and pale streaks near the outer edge, per coarse cell */
+      const WEAR = new Float32Array(gw * gh);
+      const STREAK = new Float32Array(gw * gh);
+      const kWear = 1 / (55 * u);
+      const kWear2 = 1 / (13 * u);
+      const kStreak = 1 / (160 * u);
       const nBig = simplex(seed + 1);
       const nMid = simplex(seed + 2);
       const nSmall = simplex(seed + 3);
       const nWear = simplex(seed + 4);
-      const nFine = simplex(seed + 5);
       const nFib = simplex(seed + 6);
       const kBig = 1 / (300 * u);
       const kMid = 1 / (80 * u);
@@ -124,6 +129,11 @@ export const tornBorder = defineAsset(
           }
           e = T * Math.max(0.15, e) + bite;
           E[j * gw + i] = e;
+          if (texture > 0 && d < e + T) {
+            const wv = nWear(x * kWear, y * kWear) * 0.8 + nWear(x * kWear2 + 7.7, y * kWear2 + 3.1) * 0.2;
+            WEAR[j * gw + i] = smoothstep(0.05, 0.95, wv);
+            STREAK[j * gw + i] = smoothstep(0.2, 0.9, nFib(x * kStreak, y * kStreak)) * (1 - smoothstep(0, T * 0.9, d));
+          }
         }
       }
 
@@ -132,25 +142,25 @@ export const tornBorder = defineAsset(
       const img = ctx.createImageData(W, H);
       const px = img.data;
       const fineAmp = T * (0.025 + 0.05 * rough) + 1.4 * u;
-      const kF1 = 1 / (6 * u);
-      const kF2 = 1 / (2.6 * u);
+      // fine tear detail from tileable clumpy fields (≈6 px and ≈2.5 px features)
+      const fA = grainField(7103, 256, 4);
+      const fB = grainField(7207, 256, 2);
       // width of the speckled transition between black and paper
       const dissolve = T * (0.05 + 0.62 * burn) + 1.5 * u;
-      const kWear = 1 / (55 * u);
-      const kWear2 = 1 / (13 * u);
-      const kStreak = 1 / (160 * u);
       const light = shade(color, 0.3);
       const pale = shade(color, 0.62);
-      const g1 = grainField(seed, 256, 1);
-      const g2 = grainField(seed + 1, 256, 3);
-      const gs = Math.max(1, Math.round(u * 1.4)); // grain clump scale in px
+      const g1 = grainField(7301, 256, 1);
+      const g2 = grainField(7409, 256, 3);
+      const gs = Math.max(1, Math.round(u * 0.95)); // grain clump scale in px
       const band = fineAmp + dissolve * 1.1 + 2;
+      // the tiles are shared; a seed-dependent offset decorrelates different seeds
+      const tileOx = (seed * 73) & 255;
+      const tileOy = (seed * 151) & 255;
       const limit = reach * 1.6 + band;
       for (let y = 0; y < H; y++) {
         const gy = (y + 0.5) / cell + 0.5;
         const dyEdge = y + 0.5 < H - y - 0.5 ? y + 0.5 : H - y - 0.5;
-        const gRow = ((y / gs) & 255) * 256;
-        const gRow2 = (((y / gs) | 0) & 255) * 256;
+        const gRow = ((((y / gs) | 0) + tileOy) & 255) * 256;
         for (let x = 0; x < W; x++) {
           const dxEdge = x + 0.5 < W - x - 0.5 ? x + 0.5 : W - x - 0.5;
           if (dxEdge > limit && dyEdge > limit) {
@@ -163,12 +173,14 @@ export const tornBorder = defineAsset(
           const e = sampleField(E, gw, gh, (x + 0.5) / cell + 0.5, gy);
           let v = depth - e;
           if (v > band) continue; // clean paper
-          const grain = g1[gRow + ((x / gs) & 255)];
-          const grain2 = g2[gRow2 + (((x / gs) | 0) & 255)];
+          const gi = gRow + ((((x / gs) | 0) + tileOx) & 255);
+          const grain = g1[gi];
+          const grain2 = g2[gi];
           let a = 1;
           if (v > -band) {
             // fibrous tear detail + speckled dissolve, only near the edge
-            v -= fineAmp * (0.9 - 1.3 * Math.abs(nFine(x * kF1, y * kF1)) + 0.45 * nFine(x * kF2 + 17.3, y * kF2 - 4.1));
+            const fa = fA[gi] - 0.5;
+            v -= fineAmp * (0.9 - 2.6 * (fa < 0 ? -fa : fa) + 0.9 * (fB[gi] - 0.5));
             const t = 0.5 - v / dissolve + (grain - 0.5) * 1.25 + (grain2 - 0.5) * 0.9;
             a = t <= 0.44 ? 0 : t >= 0.56 ? 1 : (t - 0.44) / 0.12;
             if (a <= 0) continue;
@@ -177,10 +189,9 @@ export const tornBorder = defineAsset(
           // worn print inside the black: blotchy lighter scuffs, pale streaks, grain and specks
           let k = 0;
           if (texture > 0) {
-            const wv = nWear(x * kWear, y * kWear) * 0.8 + nWear(x * kWear2 + 7.7, y * kWear2 + 3.1) * 0.2;
-            const worn = smoothstep(0.05, 0.95, wv);
-            const outer = 1 - smoothstep(0, T * 0.9, depth);
-            const streak = smoothstep(0.2, 0.9, nFib(x * kStreak, y * kStreak)) * outer;
+            const gx = (x + 0.5) / cell + 0.5;
+            const worn = sampleField(WEAR, gw, gh, gx, gy);
+            const streak = sampleField(STREAK, gw, gh, gx, gy);
             const speck = grain > 0.93 && grain2 > 0.55 ? 1 : 0;
             k = texture * (worn * (0.15 + grain * 0.85) * 0.38 + grain * 0.14 + streak * (0.25 + grain * 0.5) + speck * 0.75 * (0.3 + worn));
             if (k > 1) k = 1;

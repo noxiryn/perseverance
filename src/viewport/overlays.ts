@@ -30,16 +30,18 @@ export function drawGrid(ctx: CanvasRenderingContext2D, doc: Document, gridSize:
   const bottom = Math.min(size.height, o.y + doc.height * z);
   const left = Math.max(0, o.x);
   const right = Math.min(size.width, o.x + doc.width * z);
-  const lines = (s: number, color: string) => {
+  const lines = (s: number, color: string, hair: boolean) => {
     if (s * z < 6) return;
+    const px = hair ? hairline(ctx) : crisp;
+    ctx.lineWidth = hair ? 1 / deviceRatio(ctx) : 1;
     ctx.beginPath();
     for (let v = Math.ceil(x0 / s) * s; v <= x1; v += s) {
-      const x = Math.round(o.x + v * z) + 0.5;
+      const x = px(o.x + v * z);
       ctx.moveTo(x, top);
       ctx.lineTo(x, bottom);
     }
     for (let v = Math.ceil(y0 / s) * s; v <= y1; v += s) {
-      const y = Math.round(o.y + v * z) + 0.5;
+      const y = px(o.y + v * z);
       ctx.moveTo(left, y);
       ctx.lineTo(right, y);
     }
@@ -47,10 +49,24 @@ export function drawGrid(ctx: CanvasRenderingContext2D, doc: Document, gridSize:
     ctx.stroke();
   };
   ctx.save();
-  ctx.lineWidth = 1;
-  if (sub * z >= 10) lines(sub, 'rgba(128,128,128,0.22)');
-  lines(step, 'rgba(128,128,128,0.6)');
+  if (sub * z >= 10) lines(sub, 'rgba(128,128,128,0.22)', true);
+  lines(step, 'rgba(128,128,128,0.6)', false);
   ctx.restore();
+}
+
+/** Device pixel ratio of a screen-space overlay context (its base transform is scale(dpr)). */
+function deviceRatio(ctx: CanvasRenderingContext2D): number {
+  const a = ctx.getTransform().a;
+  return a > 0 ? a : 1;
+}
+
+/** Crisp 1 CSS px line position. */
+const crisp = (v: number) => Math.round(v) + 0.5;
+
+/** Position for a 1-device-pixel hairline (finer on HiDPI screens). */
+function hairline(ctx: CanvasRenderingContext2D): (v: number) => number {
+  const d = deviceRatio(ctx);
+  return (v: number) => (Math.round(v * d) + 0.5) / d;
 }
 
 /** One line per document pixel (only drawn at high zoom). */
@@ -62,18 +78,20 @@ export function drawPixelGrid(ctx: CanvasRenderingContext2D, doc: Document, size
   const left = Math.max(0, o.x);
   const right = Math.min(size.width, o.x + doc.width * z);
   ctx.save();
-  ctx.lineWidth = 1;
-  // Fade in between 8× and 12×.
-  const a = Math.min(1, (z - 8) / 4) * 0.18 + 0.12;
+  const d = deviceRatio(ctx);
+  const px = hairline(ctx);
+  ctx.lineWidth = 1 / d;
+  // Fade in between 8× and 12× (hairlines on HiDPI are thinner, so make them a touch stronger).
+  const a = (Math.min(1, (z - 8) / 4) * 0.18 + 0.12) * (d >= 2 ? 1.35 : 1);
   ctx.strokeStyle = `rgba(128,128,128,${a.toFixed(3)})`;
   ctx.beginPath();
   for (let v = x0; v <= x1; v++) {
-    const x = Math.round(o.x + v * z) + 0.5;
+    const x = px(o.x + v * z);
     ctx.moveTo(x, top);
     ctx.lineTo(x, bottom);
   }
   for (let v = y0; v <= y1; v++) {
-    const y = Math.round(o.y + v * z) + 0.5;
+    const y = px(o.y + v * z);
     ctx.moveTo(left, y);
     ctx.lineTo(right, y);
   }

@@ -189,7 +189,7 @@ export const lensBlur: FilterDef = {
   params: [
     pxP('radius', 'Radius', 0, 100, 12),
     pctP('highlights', 'Highlight boost', 0.5),
-    pctP('threshold', 'Highlight threshold', 0.75),
+    pctP('threshold', 'Highlight level', 0.75),
     angleP('rotation', 'Blade rotation', 22),
   ],
   apply(img, p, ctx) {

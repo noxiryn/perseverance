@@ -45,15 +45,24 @@ function weightAt(a: DabArea, x: number, y: number, w: number): number {
   return f;
 }
 
+/* Grow-only scratch buffers for boxBlurRegion (one blur per dab → no per-dab allocations). */
+let blurA = new Float32Array(0);
+let blurB = new Float32Array(0);
+
 /**
  * Box blur of a region in premultiplied float space (radius k, clamp-to-edge inside the region).
- * Returns rw*rh*4 floats.
+ * Returns rw*rh*4 floats. The returned array is a shared scratch buffer (it may be longer than
+ * rw*rh*4): consume it before the next call.
  */
 export function boxBlurRegion(buf: PixelBuf, rx: number, ry: number, rw: number, rh: number, k: number): Float32Array {
   const src = buf.data;
   const W = buf.width;
   const n = rw * rh * 4;
-  const pm = new Float32Array(n);
+  if (blurA.length < n) {
+    blurA = new Float32Array(n);
+    blurB = new Float32Array(n);
+  }
+  const pm = blurA;
   for (let y = 0; y < rh; y++) {
     let si = ((ry + y) * W + rx) * 4;
     let di = y * rw * 4;
@@ -65,7 +74,7 @@ export function boxBlurRegion(buf: PixelBuf, rx: number, ry: number, rw: number,
       pm[di + 3] = src[si + 3];
     }
   }
-  const tmp = new Float32Array(n);
+  const tmp = blurB;
   const size = 2 * k + 1;
   // Horizontal pass.
   for (let y = 0; y < rh; y++) {

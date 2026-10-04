@@ -3,11 +3,11 @@ import { ctx2d } from '../../core/canvas';
 import { acquire, release } from '../surface';
 import {
   P,
-  blurredCopy,
   bool,
   clamp01,
   colorize,
   defineEffect,
+  drawBlurred,
   finish,
   inverseMatte,
   num,
@@ -17,6 +17,7 @@ import {
   sizeSigma,
   softDilate,
   str,
+  tint,
   type LocalRect,
 } from './common';
 import { longShadowFade } from './math';
@@ -45,14 +46,12 @@ export const dropShadow = defineEffect(
       const spread = clamp01(num(p.spread, 0));
       const dx = dir.x * dist;
       const dy = dir.y * dist;
-      let c: HTMLCanvasElement;
       if (spread > 0.001) {
         const base = softDilate(args.content, size * spread, dx, dy);
-        c = blurredCopy(base, sizeSigma(size * (1 - spread)));
+        drawBlurred(args.target, base, sizeSigma(size * (1 - spread)));
         release(base);
-      } else c = blurredCopy(args.content, sizeSigma(size), dx, dy);
-      colorize(c, str(p.color, '#000000'));
-      finish(args.target, c, num(p.opacity, 0.75));
+      } else drawBlurred(args.target, args.content, sizeSigma(size), dx, dy);
+      tint(args.target, str(p.color, '#000000'), num(p.opacity, 0.75));
     },
   },
   { reach: (p, s) => (Math.max(0, num(p.distance, 10)) + Math.max(0, num(p.size, 12)) * 1.3 + 2) * s },
@@ -81,15 +80,13 @@ export const innerShadow = defineEffect(
       const size = Math.max(0, num(p.size, 5)) * s;
       const choke = clamp01(num(p.choke, 0));
       const inv = inverseMatte(args.content, dir.x * dist, dir.y * dist);
-      let c: HTMLCanvasElement;
       if (choke > 0.001) {
         const base = softDilate(inv, size * choke);
-        c = blurredCopy(base, sizeSigma(size * (1 - choke)));
+        drawBlurred(args.target, base, sizeSigma(size * (1 - choke)));
         release(base);
-      } else c = blurredCopy(inv, sizeSigma(size));
+      } else drawBlurred(args.target, inv, sizeSigma(size));
       release(inv);
-      colorize(c, str(p.color, '#000000'));
-      finish(args.target, c, num(p.opacity, 0.75));
+      tint(args.target, str(p.color, '#000000'), num(p.opacity, 0.75));
     },
   },
   // The inverse matte needs margin around the content so its blur never sees the surface edge.

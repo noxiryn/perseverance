@@ -17,6 +17,7 @@ import {
   type ExportOptions,
 } from '../exportRender';
 import { formatBytes, safeFileName, withExtension } from '../math';
+import { useDeferredSubmit } from './useDeferredSubmit';
 import '../io.css';
 
 const FORMATS: { value: ExportFormat; label: string }[] = [
@@ -122,6 +123,7 @@ export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc:
     }
   };
 
+  const submitOnEnter = useDeferredSubmit(() => void doExport());
   const out = rendered?.key === key ? rendered.canvas : null;
   const preset = SIZE_PRESETS.find((p) => p.id === o.presetId);
 
@@ -130,7 +132,7 @@ export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc:
       title="Export As"
       width={920}
       onClose={() => close()}
-      onSubmit={doExport}
+      onSubmit={submitOnEnter}
       footer={
         <>
           <span className="io-faint" style={{ marginRight: 'auto', fontSize: 'var(--fs-sm)' }}>

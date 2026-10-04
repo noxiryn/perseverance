@@ -11,7 +11,7 @@ import { toast } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
 import { frameContains, mutateKeepingAnchor, textFrame } from './frame';
 import { writeTypeOptions, type TypeToolOptions } from './options';
-import { editingLayerId, isEditing, previewSessionLayer, useTypeEditing } from './session';
+import { editingLayerId, isEditing, previewSessionLayer, refocusAfterStyleChange, useTypeEditing } from './session';
 
 export type Phase = 'live' | 'commit';
 
@@ -73,6 +73,7 @@ export function applyTextChange(change: TextChange, phase: Phase, label: string,
   if (isEditing()) {
     previewSessionLayer((l) => applyTo(l, change));
     viewport.requestOverlay();
+    if (phase === 'commit') refocusAfterStyleChange();
     return 'layers';
   }
   const targets = textTargets();

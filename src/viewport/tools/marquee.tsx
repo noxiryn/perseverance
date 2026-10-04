@@ -14,7 +14,7 @@ import { ArrowRightLeft } from 'lucide-react';
 import { clearSmartGuides, collectSnapTargets, snapPoint, type SnapTargets } from '../snap';
 import { strokeAnts } from '../outline';
 import { drawLabel } from '../draw';
-import { fmtPx, vpState } from '../state';
+import { fmtPx, isTemporarilySuspended, vpState } from '../state';
 import {
   beginOutlineDrag,
   commitOutlineDrag,
@@ -231,6 +231,7 @@ function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
   };
 
   const onDeactivate = () => {
+    if (isTemporarilySuspended(id)) return;
     drag = null;
     outline = null;
     vpState.spaceHeld = false;

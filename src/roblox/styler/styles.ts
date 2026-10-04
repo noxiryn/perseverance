@@ -134,8 +134,8 @@ export const STYLES: StyleDef[] = [
       {
         key: 'halftone',
         options: [
-          { filterId: 'halftone', params: { mode: 'color', shape: 'dot', size: 7, angle: 45, paper: '#f5f1e8', transparentPaper: false, mix: 0.5 } },
-          { filterId: 'comic-dots', params: {} },
+          { filterId: 'halftone', params: { mode: 'color', shape: 'dot', size: 6, angle: 45, contrast: 22, paper: '#f5f1e8', transparentPaper: false, mix: 0.42 } },
+          { filterId: 'comic-dots', params: { size: 6, shadow: 0.5, saturation: 15 } },
         ],
       },
       topShade(0.28, 0.45),
@@ -259,12 +259,12 @@ export const STYLES: StyleDef[] = [
       {
         key: 'paint',
         options: [
-          { filterId: 'oil-paint', params: { radius: 4, detail: 0.5, shine: 0.3, angle: 135 } },
+          { filterId: 'oil-paint', params: { radius: 4, detail: 0.4, shine: 0.12, angle: 135 } },
           { filterId: 'kuwahara', params: { radius: 5 } },
           { filterId: 'toon-roblox', params: { levels: 7, smooth: 0.9, outlineWidth: 0, edges: 0 } },
         ],
       },
-      { key: 'rim', options: [{ filterId: 'rim-light', params: { color: '#ffd29a', width: 18, angle: 135, intensity: 0.55, softness: 0.9 } }] },
+      { key: 'rim', options: [{ filterId: 'rim-light', params: { color: '#ffd29a', width: 12, angle: 135, intensity: 0.5, softness: 0.9 } }] },
       topShade(0.3, 0.35, '#2a1408'),
     ],
     effects: [],

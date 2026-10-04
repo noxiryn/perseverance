@@ -5,7 +5,7 @@
 import type { Color, Document, ID } from '../core/types';
 import { templates, type TemplateDef } from '../registry';
 import { loadFonts } from '../looks/shared';
-import { DocBuilder, resolveFont, type BuildOptions, type FontChoice } from './builder';
+import { DocBuilder, resolveFont, resolveWeight, type BuildOptions, type FontChoice } from './builder';
 
 export interface TemplateSpec extends Omit<TemplateDef, 'build'> {
   /** Document background color (null = transparent). Default white. */
@@ -32,7 +32,14 @@ export async function buildTemplate(id: string, opts: BuildOptions = {}): Promis
     if (!def) throw new Error(`Unknown template “${id}”`);
     return { doc: await def.build(), characterId: null };
   }
-  await loadFonts((spec.fonts ?? []).map(([f, w, text]) => ({ family: resolveFont(f), weight: w ?? 400, text })), 3500);
+  await loadFonts(
+    (spec.fonts ?? []).map(([f, w, text]) => {
+      const family = resolveFont(f);
+      // Ask for a weight that exists, otherwise the load would only end at the timeout.
+      return { family, weight: resolveWeight(family, w ?? 400), text };
+    }),
+    3500,
+  );
   const b = new DocBuilder(spec.name, spec.width, spec.height, spec.background === undefined ? '#ffffff' : spec.background, opts);
   spec.build(b);
   return { doc: b.finish({ template: id }), characterId: b.characterId };

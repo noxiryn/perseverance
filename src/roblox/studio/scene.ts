@@ -439,7 +439,7 @@ export class StudioScene {
     const size = box.getSize(new THREE.Vector3());
     const half = Math.tan((Math.max(5, fov) * DEG) / 2);
     const horiz = Math.max(size.x, size.z);
-    const margin = framing === 'head' ? 1.12 : 1.08;
+    const margin = framing === 'head' ? 1.22 : 1.08;
     const dist = Math.max((size.y / 2) / half, (horiz / 2) / (half * Math.max(0.2, aspect))) * margin + horiz / 2;
     return { target: [c.x, c.y, c.z], baseDistance: Math.max(1, dist) };
   }

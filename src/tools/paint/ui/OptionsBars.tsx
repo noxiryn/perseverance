@@ -1,9 +1,10 @@
 /** Options bars for every paint tool (rendered by the shell's options bar host). */
 import { useMemo, useState, useSyncExternalStore } from 'react';
-import { Gauge, LocateOff, PenTool, RotateCcw, Wind } from 'lucide-react';
+import { Gauge, LocateOff, PenTool, RotateCcw, SlidersHorizontal, Wind } from 'lucide-react';
 import type { GradientKind } from '../../../core/types';
 import { assets, useRegistry } from '../../../registry';
 import { useEditor, useToolOptions } from '../../../state/editor';
+import { useUI } from '../../../state/ui';
 import { Checkbox, GradientField, IconButton, Popover, Select, Slider } from '../../../ui/controls';
 import { buildLUT, renderGradientPixels } from '../engine/gradient';
 import { createCanvas, ctx2d } from '../../../core/canvas';
@@ -29,6 +30,19 @@ import '../paint.css';
 
 const pct = { min: 0, max: 1, step: 1, displayScale: 100, unit: '%' } as const;
 
+/** Toggle the Brushes panel (tip, dynamics and smoothing settings) — like Photoshop's brush settings button. */
+function BrushesPanelToggle() {
+  const open = useUI((s) => s.flyoutPanel === 'brushes' || s.workspace.groups.some((g) => g.active === 'brushes' && !g.collapsed));
+  return (
+    <ToggleIcon
+      icon={SlidersHorizontal}
+      active={open}
+      title="Toggle the Brushes panel (tip shape, dynamics, presets)"
+      onClick={() => useUI.getState().togglePanel('brushes')}
+    />
+  );
+}
+
 function PressureToggles({ toolId, size, opacity }: { toolId: string; size: boolean; opacity?: boolean }) {
   return (
     <>
@@ -47,6 +61,7 @@ export function BrushOptionsBar() {
   return (
     <div className="paint-opts">
       <PresetPicker toolId="brush" />
+      <BrushesPanelToggle />
       <OptSep />
       <BlendSelect value={o.blendMode} onChange={(v) => setOpt('brush', 'blendMode', v)} />
       <ScrubNumber label="Opacity" value={o.opacity} onChange={(v) => setOpt('brush', 'opacity', v)} {...pct} />
@@ -98,7 +113,10 @@ export function EraserOptionsBar() {
   return (
     <div className="paint-opts">
       {o.mode === 'brush' ? (
-        <PresetPicker toolId="eraser" />
+        <>
+          <PresetPicker toolId="eraser" />
+          <BrushesPanelToggle />
+        </>
       ) : (
         <ScrubNumber label="Size" value={o.size} onChange={(v) => setOpt('eraser', 'size', Math.max(1, Math.round(v)))} min={1} max={1000} unit="px" sliderMax={300} />
       )}
@@ -144,6 +162,7 @@ export function CloneOptionsBar() {
   return (
     <div className="paint-opts">
       <PresetPicker toolId="clone-stamp" />
+      <BrushesPanelToggle />
       <OptSep />
       <BlendSelect value={o.blendMode} onChange={(v) => setOpt('clone-stamp', 'blendMode', v)} exclude={['behind', 'clear']} />
       <ScrubNumber label="Opacity" value={o.opacity} onChange={(v) => setOpt('clone-stamp', 'opacity', v)} {...pct} />

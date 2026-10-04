@@ -223,6 +223,8 @@ export function hitTestLayer(doc: Document, x: number, y: number): ID | null {
       const l = doc.layers[ids[i]];
       if (!l || !l.visible) continue;
       if (l.type === 'group') {
+        // Everything inside a fully locked group is locked too.
+        if (l.locks?.all) continue;
         const r = visit(l.childIds);
         if (r) return r;
         continue;

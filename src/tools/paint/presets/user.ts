@@ -3,7 +3,8 @@
  */
 import { brushPresets } from '../../../registry';
 import { uid } from '../../../core/ids';
-import type { BrushSettings } from '../options';
+import { useEditor } from '../../../state/editor';
+import { TIP_TOOLS, setOpts, type BrushSettings } from '../options';
 import type { PaintBrushPreset } from './presets';
 
 const KEY = 'perseverance.paint.userBrushes.v1';
@@ -88,8 +89,15 @@ export function saveUserPreset(name: string, settings: BrushSettings, airbrush?:
 }
 
 export function deleteUserPreset(id: string) {
+  const removed = brushPresets.get(id) as PaintBrushPreset | undefined;
   writeStore(readStore().filter((p) => p.id !== id));
   brushPresets.unregister(id);
+  // Tools still pointing at the deleted preset keep its tip via the preset it was based on.
+  const fallback = removed?.tipFrom && removed.tipFrom !== id && brushPresets.get(removed.tipFrom) ? removed.tipFrom : 'round-hard';
+  const opts = useEditor.getState().toolOptions;
+  for (const toolId of TIP_TOOLS) {
+    if ((opts[toolId] as { presetId?: string } | undefined)?.presetId === id) setOpts(toolId, { presetId: fallback });
+  }
 }
 
 export function renameUserPreset(id: string, name: string) {

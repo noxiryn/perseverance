@@ -69,7 +69,7 @@ export const BUILTIN_LOOKS: LookDef[] = [
     swatch: ['#2a0d02', '#c2410c', '#f59e0b', '#ffe8b0'],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#ffc46b', opacity: 0.55, size: 36, blendMode: 'screen' } }],
     overlays: [
-      { assetId: 'sunburst-rays', params: { rays: 80, center: { x: 0.5, y: 0.36 }, color: '#fff1c2', thickness: 0.5, fade: 0.6 }, blendMode: 'screen', opacity: 0.7, name: 'Sunburst' },
+      { assetId: 'sunburst-rays', params: { rays: 120, center: { x: 0.5, y: 0.36 }, color: '#fff1c2', thickness: 0.25, fade: 0.8 }, blendMode: 'soft-light', opacity: 0.55, name: 'Sunburst' },
       { assetId: 'light-leak', params: { seed: 4 }, blendMode: 'screen', opacity: 0.45, name: 'Warm Glow' },
       { assetId: 'halftone-dots', params: { size: 6, angle: 45, color: '#2a0d00' }, blendMode: 'multiply', opacity: 0.35, name: 'Halftone' },
       { assetId: 'fold-creases', params: { folds: 3, strength: 0.6 }, blendMode: 'overlay', name: 'Fold Creases' },
@@ -100,7 +100,7 @@ export const BUILTIN_LOOKS: LookDef[] = [
     swatch: ['#0d0d0d', '#5a5a5a', '#bdbdbd', '#efede8'],
     layerEffects: [{ effectId: 'drop-shadow', params: { color: '#000000', opacity: 0.9, angle: 125, distance: 26, spread: 0.1, size: 34 } }],
     overlays: [
-      { assetId: 'newspaper-clippings', params: { columns: 3, tone: '#dcd9d0', density: 0.55, rotation: 8, placement: 'edges' }, name: 'Newspaper Clippings' },
+      { assetId: 'newspaper-clippings', params: { columns: 3, tone: '#dcd9d0', density: 0.12, rotation: 6, placement: 'edges', textSize: 1.3 }, opacity: 0.92, name: 'Newspaper Clippings' },
       { assetId: 'halftone-dots', params: { size: 7, angle: 45, color: '#000000' }, blendMode: 'multiply', opacity: 0.3, name: 'Halftone' },
       { assetId: 'fold-creases', params: { folds: 4, strength: 0.75 }, blendMode: 'overlay', name: 'Fold Lines' },
       { assetId: 'vignette-overlay', params: { color: '#000000', amount: 0.7, softness: 0.6 }, blendMode: 'multiply', name: 'Vignette' },
@@ -132,7 +132,7 @@ export const BUILTIN_LOOKS: LookDef[] = [
     ],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#ff1f1f', opacity: 0.35, size: 40, blendMode: 'screen' } }],
     overlays: [
-      { assetId: 'smoke', params: { color: '#c4141c', density: 0.7, coverage: 0.5, side: 'right' }, blendMode: 'screen', opacity: 0.85, name: 'Red Smoke' },
+      { assetId: 'billow-smoke', params: { color: '#c4141c', highlight: '#ff4a3a', shadow: '#2a0204', density: 0.9, coverage: 0.55, side: 'right', seed: 7 }, blendMode: 'screen', opacity: 0.85, name: 'Red Smoke' },
       { assetId: 'film-scratches', params: { density: 0.55, color: '#ffffff' }, blendMode: 'screen', opacity: 0.6, name: 'Film Scratches' },
       { assetId: 'dust-specks', params: {}, blendMode: 'screen', opacity: 0.5, name: 'Dust' },
       { assetId: 'fold-creases', params: { folds: 4, strength: 0.6 }, blendMode: 'overlay', name: 'Fold Creases' },
@@ -371,7 +371,7 @@ export const BUILTIN_LOOKS: LookDef[] = [
     layerFilters: [{ filterId: 'rim-light', params: { color: '#ffb000', width: 16, angle: 90, intensity: 0.9 } }],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#ff6a00', opacity: 0.7, size: 34, blendMode: 'screen' } }],
     overlays: [
-      { assetId: 'smoke', params: { color: '#ff5a1f', side: 'full', coverage: 0.4, density: 0.5 }, blendMode: 'screen', opacity: 0.45, name: 'Fire Smoke' },
+      { assetId: 'billow-smoke', params: { color: '#ff5a1f', highlight: '#ffb347', shadow: '#3a0a00', side: 'bottom', coverage: 0.45, density: 0.7, seed: 23 }, blendMode: 'screen', opacity: 0.55, name: 'Fire Smoke' },
       { assetId: 'sparks-embers', params: { color: '#ffb347' }, blendMode: 'screen', opacity: 0.9, name: 'Embers' },
     ],
     adjustments: [

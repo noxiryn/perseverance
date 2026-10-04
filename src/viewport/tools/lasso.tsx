@@ -26,6 +26,7 @@ import {
   type OutlineDrag,
 } from './selectCommon';
 import { SelectionModeButtons, Sep, setToolOptionSafe } from '../options/common';
+import { isTemporarilySuspended } from '../state';
 
 export const LASSO_DEFAULTS = { mode: 'new' as SelectionMode, feather: 0, antiAlias: true };
 
@@ -146,6 +147,7 @@ function makeLasso(): ToolDef {
       return false;
     },
     onDeactivate() {
+      if (isTemporarilySuspended(id)) return; // Space-pan keeps the stroke going
       pts = null;
       outline = null;
       endOutlineDragVisual();
@@ -171,6 +173,7 @@ function makePolyLasso(): ToolDef {
   let hoverScreen: Point | null = null;
   let outline: OutlineDrag | null = null;
   let lastClick = 0;
+  let lastClickAt: Point = { x: -1e9, y: -1e9 };
 
   const constrain = (p: Point, shift: boolean): Point => {
     if (!shift || !pts.length) return p;
@@ -217,8 +220,11 @@ function makePolyLasso(): ToolDef {
       if (!s || e.button !== 0) return;
       const screen = { x: e.screenX, y: e.screenY };
       const now = performance.now();
-      const isDouble = now - lastClick < 300;
+      // The second click of a double-click (same spot, quick) must not add a duplicate vertex;
+      // quick clicks at different spots are separate vertices.
+      const isDouble = now - lastClick < 400 && Math.hypot(screen.x - lastClickAt.x, screen.y - lastClickAt.y) < 6;
       lastClick = now;
+      lastClickAt = screen;
       if (!pts.length) {
         const o = toolOptions(id, LASSO_DEFAULTS);
         mode = modeFromEvent(e, o.mode);
@@ -286,6 +292,7 @@ function makePolyLasso(): ToolDef {
       return false;
     },
     onDeactivate() {
+      if (isTemporarilySuspended(id)) return; // Space-pan keeps the points placed so far
       cancel();
       outline = null;
       endOutlineDragVisual();

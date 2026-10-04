@@ -72,9 +72,12 @@ function schedule(job: Job) {
 /* Keys & cache                                                        */
 /* ------------------------------------------------------------------ */
 
-/** Values that change whenever the layer's rendered pixels may change. */
+/**
+ * Values that change whenever the layer's thumbnail pixels may change. Thumbnails show content +
+ * smart filters only (no effects, no mask — like Photoshop), so those are not part of the key.
+ */
 export function layerThumbKey(doc: Document, l: Layer): unknown[] {
-  const common: unknown[] = [doc.width, doc.height, l.type, l.effects, l.filters, l.mask, l.mask ? bitmaps.version(l.mask.bitmapId) : 0];
+  const common: unknown[] = [doc.width, doc.height, l.type, l.filters];
   switch (l.type) {
     case 'raster':
       return [...common, l.bitmapId, bitmaps.version(l.bitmapId), l.transform, l.width, l.height];
@@ -135,8 +138,7 @@ export const LayerThumbCanvas = memo(function LayerThumbCanvas({
   style?: CSSProperties;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
-  const bmpIds = [layer.type === 'raster' ? layer.bitmapId : null, layer.mask?.bitmapId];
-  const tick = useBitmapVersions(bmpIds);
+  const tick = useBitmapVersions([layer.type === 'raster' ? layer.bitmapId : null]);
   const px = Math.round(size * DPR());
   const key = layerThumbKey(doc, layer);
   const ck = cacheKey(doc, layer.id, px);

@@ -3,14 +3,15 @@
  * for resampled/rotated pixels (the old ones stay referenced by history), the document JSON is
  * updated through commit().
  */
-import type { Document, Guide, ID, LayerEffect, Rect, Selection, TransformableLayer } from '../core/types';
+import type { Document, Guide, ID, LayerEffect, Rect, Selection, ShapeProps, TextProps, Transform, TransformableLayer } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
 import { createCanvas, ctx2d, ctxRead } from '../core/canvas';
 import { uid } from '../core/ids';
+import { createDocument, insertLayerDraft, makeRasterLayer } from '../core/document';
 import { getLayerBounds, getLayerSize, renderDocument } from '../render/compositor';
 import { maskBounds } from '../editor/selection';
 import { activeSession, useEditor } from '../state/editor';
-import { toast } from '../state/ui';
+import { openDialog, toast } from '../state/ui';
 import { viewport } from '../editor/viewport';
 import {
   canvasSizeOffset,
@@ -23,7 +24,7 @@ import {
   trimBounds,
   type CanvasOp,
 } from './math';
-import { isDocAligned, requireSession } from './util';
+import { ensureFontsFor, isDocAligned, requireSession } from './util';
 import { MAX_DOC_SIZE } from './newDocument';
 
 const afterGeometryChange = () => {
@@ -72,6 +73,32 @@ function scaleEffects(effects: LayerEffect[], k: number): LayerEffect[] {
   });
 }
 
+const r2 = (v: number) => Math.round(v * 100) / 100;
+
+/** Text properties scaled by k (font size, tracking, paragraph width, outline). */
+export function scaleTextProps(t: TextProps, k: number): TextProps {
+  return {
+    ...t,
+    fontSize: Math.max(1, r2(t.fontSize * k)),
+    letterSpacing: r2(t.letterSpacing * k),
+    boxWidth: t.boxWidth === null ? null : Math.max(1, r2(t.boxWidth * k)),
+    stroke: t.stroke ? { ...t.stroke, width: r2(t.stroke.width * k) } : null,
+  };
+}
+
+/** Shape properties scaled by (sx, sy) (box size; corner radius, line and stroke widths by √(sx·sy)). */
+export function scaleShapeProps(sh: ShapeProps, sx: number, sy: number): ShapeProps {
+  const k = Math.sqrt(sx * sy);
+  return {
+    ...sh,
+    width: Math.max(1, r2(sh.width * sx)),
+    height: Math.max(1, r2(sh.height * sy)),
+    cornerRadius: r2(sh.cornerRadius * k),
+    lineWidth: r2(sh.lineWidth * k),
+    stroke: sh.stroke ? { ...sh.stroke, width: r2(sh.stroke.width * k), ...(sh.stroke.dash ? { dash: sh.stroke.dash.map((v) => r2(v * k)) } : {}) } : null,
+  };
+}
+
 /** Resample the document (and every layer, mask, selection, guide) to newW × newH. */
 export function resizeImage(newW: number, newH: number, opts: { method?: ResampleMethod; scaleStyles?: boolean } = {}) {
   const s = requireSession('change the image size');
@@ -117,6 +144,28 @@ export function resizeImage(newW: number, newH: number, opts: { method?: Resampl
     }
   }
 
+  // Text and shapes: scale their own properties (font size, box size…) like Photoshop, so the
+  // Character/Properties values stay meaningful — when that is exact (uniform scale, or an
+  // unrotated shape); otherwise fall back to scaling the transform.
+  const nativeScaled = new Map<ID, { text?: TextProps; shape?: ShapeProps; transform: Transform }>();
+  const uniform = Math.abs(sx - sy) <= 1e-3 * Math.max(sx, sy);
+  for (const l of Object.values(doc.layers)) {
+    if (l.type !== 'text' && l.type !== 'shape') continue;
+    const t = l.transform;
+    const before = getLayerSize(l);
+    const cx = (t.x + before.width / 2) * sx;
+    const cy = (t.y + before.height / 2) * sy;
+    if (l.type === 'text' && uniform) {
+      const text = scaleTextProps(l.text, k);
+      const after = getLayerSize({ ...l, text });
+      nativeScaled.set(l.id, { text, transform: { ...t, x: cx - after.width / 2, y: cy - after.height / 2 } });
+    } else if (l.type === 'shape' && (uniform || (!t.rotation && !t.skewX))) {
+      const shape = scaleShapeProps(l.shape, sx, sy);
+      const after = getLayerSize({ ...l, shape });
+      nativeScaled.set(l.id, { shape, transform: { ...t, x: cx - after.width / 2, y: cy - after.height / 2 } });
+    }
+  }
+
   useEditor.getState().commit('Image Size', (d) => {
     d.width = newW;
     d.height = newH;
@@ -132,8 +181,15 @@ export function resizeImage(newW: number, newH: number, opts: { method?: Resampl
           l.transform = { ...l.transform, x: cx - r.w / 2, y: cy - r.h / 2 };
         }
       } else if (l.type === 'text' || l.type === 'shape') {
-        const size = getLayerSize(l);
-        l.transform = scaleTransform(l.transform, size.width, size.height, sx, sy);
+        const native = nativeScaled.get(l.id);
+        if (native) {
+          if (l.type === 'text' && native.text) l.text = native.text;
+          if (l.type === 'shape' && native.shape) l.shape = native.shape;
+          l.transform = native.transform;
+        } else {
+          const size = getLayerSize(l);
+          l.transform = scaleTransform(l.transform, size.width, size.height, sx, sy);
+        }
       }
       if (l.mask) l.mask = { ...l.mask, bitmapId: newMasks.get(l.mask.bitmapId) ?? l.mask.bitmapId, feather: l.mask.feather * k };
       if (opts.scaleStyles !== false && l.effects.length) l.effects = scaleEffects(l.effects, k);
@@ -466,10 +522,34 @@ export function duplicateDocument(doc: Document, name = `${doc.name} copy`): Doc
   return copy;
 }
 
-export function duplicateImage() {
+/** A flattened single-layer copy of a document (Duplicate ▸ merged layers only). */
+export function flattenedCopy(doc: Document, name: string): Document {
+  const comp = renderDocument(doc, { background: true });
+  const c = createCanvas(doc.width, doc.height);
+  ctx2d(c).drawImage(comp, 0, 0);
+  const copy = createDocument({ name, width: doc.width, height: doc.height, background: null });
+  copy.guides = doc.guides.map((g) => ({ ...g }));
+  copy.dpi = doc.dpi;
+  insertLayerDraft(copy, makeRasterLayer({ name: 'Background', bitmapId: bitmaps.add(c), width: doc.width, height: doc.height }), {});
+  return copy;
+}
+
+export async function duplicateImage() {
   const s = requireSession('duplicate');
   if (!s) return;
-  const copy = duplicateDocument(s.doc);
-  useEditor.getState().openDocument(copy, { label: 'Duplicate', activeLayerId: s.activeLayerId });
-  toast(`Created “${copy.name}”`, 'success');
+  const { DuplicateDialog } = await import('./dialogs/DuplicateDialog');
+  const r = await openDialog(DuplicateDialog, { name: s.doc.name, layerCount: Object.keys(s.doc.layers).length });
+  if (!r) return;
+  // The source may have changed (or closed) while the dialog was open.
+  const src = useEditor.getState().sessions[s.doc.id] ?? s;
+  if (r.merged) {
+    await ensureFontsFor(src.doc);
+    const copy = flattenedCopy(src.doc, r.name);
+    useEditor.getState().openDocument(copy, { label: 'Duplicate' });
+  } else {
+    const copy = duplicateDocument(src.doc, r.name);
+    useEditor.getState().openDocument(copy, { label: 'Duplicate', activeLayerId: src.activeLayerId });
+  }
+  requestAnimationFrame(() => viewport.fit());
+  toast(`Created “${r.name}”`, 'success');
 }

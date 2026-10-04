@@ -5,7 +5,7 @@
 import type { BrushPresetDef } from '../../../registry';
 import { createCanvas, ctx2d } from '../../../core/canvas';
 import { strokeConfig } from '../engine/config';
-import { DabPainter, tipForPreset } from '../engine/dabs';
+import { COVERAGE, DabPainter, tipForPreset } from '../engine/dabs';
 import { BrushStroke } from '../engine/stroke';
 import type { BrushSettings } from '../options';
 import { presetSettings } from '../presets/presets';
@@ -28,9 +28,10 @@ export function renderStrokePreview(settings: BrushSettings, w: number, h: numbe
   const s = previewSettings(settings, w, h);
   const size = s.size;
   const pad = Math.min(h * 0.32, Math.max(4, size * 0.6));
+  // Coverage dabs, tinted once at the end (see CompositeMode.color for why).
   const painter = new DabPainter({
     tip: tipForPreset(settings.presetId, settings.hardness),
-    color: opts.color ?? PREVIEW_COLOR,
+    color: COVERAGE,
     base: new DOMMatrix().scaleSelf(ratio, ratio),
     maxSize: size,
   });
@@ -49,6 +50,12 @@ export function renderStrokePreview(settings: BrushSettings, w: number, h: numbe
   draw(stroke.begin(point(0)));
   for (let i = 1; i <= N; i++) draw(stroke.move(point(i / N)));
   draw(stroke.end(point(1)));
+  bctx.setTransform(1, 0, 0, 1, 0, 0);
+  bctx.globalAlpha = 1;
+  bctx.globalCompositeOperation = 'source-in';
+  bctx.fillStyle = opts.color ?? PREVIEW_COLOR;
+  bctx.fillRect(0, 0, W, H);
+  bctx.globalCompositeOperation = 'source-over';
   if (settings.opacity >= 0.999) return buffer;
   const out = createCanvas(W, H);
   const octx = ctx2d(out);

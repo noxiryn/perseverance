@@ -256,7 +256,7 @@ export function ModelImportDialog({ close, files: initialFiles, layerId }: Model
 
   const emptyOverlay =
     !model && !loading ? (
-      <div className="roblox-studio-error" style={{ pointerEvents: 'auto' }}>
+      <div className="roblox-studio-error roblox-studio-empty">
         <div style={{ maxWidth: 420, display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'center' }}>
           {error ? <div style={{ color: 'var(--danger)' }}>{error}</div> : <div style={{ color: 'var(--text-strong)', fontSize: 'var(--fs-md)' }}>Drop your model files here</div>}
           <div>.obj + .mtl + textures, .glb, .gltf (+ .bin) or .fbx — select all files together.</div>
@@ -284,7 +284,11 @@ export function ModelImportDialog({ close, files: initialFiles, layerId }: Model
           <Button variant="ghost" size="small" icon={FolderOpen} onClick={chooseFiles}>
             Choose Files…
           </Button>
-          <span className="info">{model ? `${model.name} · ${model.meshCount} meshes · ${model.triangles.toLocaleString()} triangles → ${frame.width}×${frame.height} transparent render` : STUDIO_EXPORT_HINT}</span>
+          <span className="info">
+            {model
+              ? `${model.name} · ${model.meshCount} ${model.meshCount === 1 ? 'mesh' : 'meshes'} · ${model.triangles.toLocaleString()} triangles → ${frame.width}×${frame.height} transparent render`
+              : STUDIO_EXPORT_HINT}
+          </span>
           <Button onClick={cancel}>Cancel</Button>
           <Button variant="primary" icon={Sparkles} onClick={addToDocument} disabled={!model || busy || loading}>
             {editing ? 'Update Layer' : 'Add to Document'}

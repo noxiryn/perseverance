@@ -12,7 +12,7 @@ import { AboutDialog } from './dialogs/AboutDialog';
 import { PreferencesDialog } from './dialogs/PreferencesDialog';
 import { ShortcutsDialog } from './dialogs/ShortcutsDialog';
 import { TipsDialog } from './dialogs/TipsDialog';
-import { applyWorkspace, isPanelVisible, resetWorkspace, WORKSPACE_PRESETS } from './workspaces';
+import { applyWorkspace, isPanelVisible, resetWorkspace, revealPanel, WORKSPACE_PRESETS } from './workspaces';
 
 type DialogComponent = ComponentType<{ close: (result?: unknown) => void }>;
 
@@ -38,13 +38,7 @@ function panelCommand(p: PanelDef, order: number): CommandDef {
     shortcut: PANEL_SHORTCUTS[p.id],
     keywords: ['panel', 'show', p.id],
     checked: () => isPanelVisible(p.id),
-    run: () => {
-      const ui = useUI.getState();
-      if (!ui.dockVisible) {
-        useUI.setState({ dockVisible: true });
-        ui.showPanel(p.id);
-      } else ui.togglePanel(p.id);
-    },
+    run: () => revealPanel(p.id, true),
   };
 }
 

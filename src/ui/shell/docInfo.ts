@@ -57,6 +57,36 @@ function clampZoom(z: number) {
   return Math.max(0.02, Math.min(64, z));
 }
 
+/**
+ * Zoom the status-bar field should apply when the edit ends, or null for "no change": the text
+ * is unchanged, unparsable, or names the zoom already shown (so merely focusing and leaving the
+ * field never re-applies the rounded label and nudges the pan).
+ */
+export function zoomToApply(text: string, label: string, current: number): number | null {
+  if (text.trim() === label.trim()) return null;
+  const z = parseZoom(text);
+  if (z === null) return null;
+  if (current > 0 && (formatZoom(z) === label || Math.abs(z - current) <= current * 1e-6)) return null;
+  return z;
+}
+
+/**
+ * Pointer position relative to an element in the element's own CSS px. getBoundingClientRect()
+ * and clientX are visual px; they differ from CSS px when a CSS zoom applies to the element, so
+ * scale by clientWidth / rect.width.
+ */
+export function clientToViewport(
+  clientX: number,
+  clientY: number,
+  rect: { left: number; top: number; width: number; height: number },
+  cssWidth: number,
+  cssHeight: number,
+): { x: number; y: number } {
+  const sx = rect.width > 0 && cssWidth > 0 ? cssWidth / rect.width : 1;
+  const sy = rect.height > 0 && cssHeight > 0 ? cssHeight / rect.height : 1;
+  return { x: (clientX - rect.left) * sx, y: (clientY - rect.top) * sy };
+}
+
 /** Label for document tabs: 'Name *' when dirty. */
 export function tabLabel(name: string, dirty: boolean): string {
   return dirty ? `${name} *` : name;

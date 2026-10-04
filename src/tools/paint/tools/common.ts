@@ -242,7 +242,8 @@ export class AxisLock {
     const dx = p.x - this.anchor.x;
     const dy = p.y - this.anchor.y;
     if (!this.axis) {
-      if (Math.hypot(dx, dy) < 3 / viewport.zoom()) return { ...p, x: this.anchor.x, y: this.anchor.y };
+      // Decide the axis only after a clear initial movement (6 screen px).
+      if (Math.hypot(dx, dy) < 6 / viewport.zoom()) return { ...p, x: this.anchor.x, y: this.anchor.y };
       this.axis = Math.abs(dx) >= Math.abs(dy) ? 'x' : 'y';
     }
     return this.axis === 'x' ? { ...p, y: this.anchor.y } : { ...p, x: this.anchor.x };

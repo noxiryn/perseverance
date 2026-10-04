@@ -325,7 +325,7 @@ export const cutout: FilterDef = {
   description: 'Flat cut-paper color regions: simplified shapes with a few flat tones (great on Roblox renders).',
   keywords: ['posterize', 'flat', 'vector', 'paper cut', 'cel', 'simplify', 'poster'],
   params: [
-    numP('colors', 'Colors', 2, 16, 6, { step: 1, hint: 'Number of color families (materials)' }),
+    numP('colors', 'Colors', 2, 16, 8, { step: 1, hint: 'Number of color families (materials)' }),
     numP('tones', 'Tones per color', 1, 5, 3, { step: 1, hint: 'Flat light/mid/dark shades kept inside each color family' }),
     pxP('simplicity', 'Simplicity', 0, 12, 3, { step: 1 }),
     pctP('fidelity', 'Edge fidelity', 0.6),
@@ -336,7 +336,7 @@ export const cutout: FilterDef = {
     const { width: w, height: h, data } = img;
     const n = w * h;
     const s = ctx.scale > 0 ? ctx.scale : 1;
-    const K = clamp(Math.round(num(p.colors, 6)), 2, 16);
+    const K = clamp(Math.round(num(p.colors, 8)), 2, 16);
     const T = clamp(Math.round(num(p.tones, 3)), 1, 5);
     const simp = Math.max(0, num(p.simplicity, 3)) * s;
     const fid = clamp(num(p.fidelity, 0.6), 0, 1);
@@ -763,7 +763,7 @@ export const stamp: FilterDef = {
   description: 'Rubber-stamp print: two-tone threshold with rough edges and patchy, grungy ink.',
   keywords: ['rubber stamp', 'threshold', 'grunge', 'print', 'ink', 'two tone'],
   params: [
-    pctP('balance', 'Light/dark balance', 0.5),
+    pctP('balance', 'Balance', 0.5),
     pxP('smoothness', 'Smoothness', 0, 10, 2),
     pctP('roughness', 'Grunge', 0.45),
     colorP('ink', 'Ink', '#1a1a1a'),

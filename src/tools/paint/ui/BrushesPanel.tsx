@@ -29,6 +29,24 @@ function readView(): 'list' | 'grid' {
   }
 }
 
+/** Width (CSS px) of an element, tracked with a ResizeObserver. */
+function useElementWidth(fallback: number): [(el: HTMLDivElement | null) => void, number] {
+  const [width, setWidth] = useState(fallback);
+  const [el, setEl] = useState<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!el) return;
+    const update = () => {
+      const w = Math.round(el.clientWidth);
+      if (w > 0) setWidth((prev) => (Math.abs(prev - w) >= 2 ? w : prev));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [el]);
+  return [setEl, width];
+}
+
 /** Debounced live preview of the current settings. */
 function useSettingsPreview(settings: BrushSettings, w: number, h: number): HTMLCanvasElement | null {
   const [src, setSrc] = useState<HTMLCanvasElement | null>(null);
@@ -122,7 +140,9 @@ export function BrushesPanel() {
     }),
     [opts],
   );
-  const preview = useSettingsPreview(retouch ? { ...settings, presetId: '', flow: 1 } : settings, 248, 46);
+  const [headRef, headWidth] = useElementWidth(268);
+  const previewW = Math.max(120, headWidth - 20);
+  const preview = useSettingsPreview(retouch ? { ...settings, presetId: '', flow: 1 } : settings, previewW, 46);
   const set = (key: keyof BrushToolOptions, value: unknown) => setOpts(toolId, { [key]: value });
 
   const pick = (p: BrushPresetDef) => {
@@ -172,8 +192,8 @@ export function BrushesPanel() {
 
   return (
     <div className="paint-panel">
-      <div className="paint-panel-head">
-        <CanvasView source={preview} width={248} height={46} className="paint-panel-preview" />
+      <div className="paint-panel-head" ref={headRef}>
+        <CanvasView source={preview} width={previewW} height={46} className="paint-panel-preview" />
         <div className="paint-panel-meta">
           <TipThumb presetId={retouch ? '' : settings.presetId} hardness={settings.hardness} size={16} />
           <span className="paint-panel-name">{retouch ? 'Round' : (current?.name ?? 'Custom')}</span>

@@ -9,11 +9,10 @@ import { fonts, useRegistry, type FontDef } from '../registry';
 import { useEditor } from '../state/editor';
 import { toast } from '../state/ui';
 import { SearchInput, Slider, showContextMenu, type MenuItem } from '../ui/controls';
-import { applyFontFamily } from './apply';
+import { applyFontFamily, setTypeToolFont } from './apply';
 import { defaultPreviewText, POPULAR_FAMILIES } from './catalog';
 import { FontFaceText, StarButton } from './FontPicker';
 import { useFontPrefs } from './prefs';
-import { fontWeightFor } from './loader';
 import {
   filterFonts,
   groupByCategory,
@@ -62,7 +61,6 @@ export function FontsPanel() {
   const [query, setQuery] = useState('');
   const [size, setSize] = useState(preview.size);
   const listRef = useRef<VirtualListHandle>(null);
-  const chipsRef = useRef<HTMLDivElement>(null);
   const filter = (preview.category || 'all') as FontFilter;
 
   useEffect(() => maybeLoadSystemFonts(), []);
@@ -113,17 +111,7 @@ export function FontsPanel() {
         disabled: !target.count,
         run: () => void applyFontFamily(f.family),
       },
-      {
-        label: 'Set as Type Tool Default',
-        run: () => {
-          const st = useEditor.getState();
-          st.setToolOption('type', 'fontFamily', f.family);
-          const cur = Number(st.toolOptions.type?.fontWeight) || 400;
-          const w = fontWeightFor(weights, cur);
-          if (w !== cur) st.setToolOption('type', 'fontWeight', w);
-          toast(`Type tool font set to ${f.family}`, 'info');
-        },
-      },
+      { label: 'Set as Type Tool Default', run: () => setTypeToolFont(f.family) },
     ];
     if (weights.length > 1) {
       items.push({
@@ -158,9 +146,8 @@ export function FontsPanel() {
         <SearchInput value={query} onChange={setQuery} placeholder="Search fonts, vibes (gothic, signature…)" />
         <div
           className="fc-chips scroll"
-          ref={chipsRef}
           onWheel={(e) => {
-            if (chipsRef.current && Math.abs(e.deltaY) > Math.abs(e.deltaX)) chipsRef.current.scrollLeft += e.deltaY;
+            if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY;
           }}
         >
           {chips.map((c) => (

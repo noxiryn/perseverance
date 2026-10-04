@@ -1,16 +1,30 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { CommandDef, ToolDef } from '../../registry';
 import { fuzzyMatch, wordsMatch } from './fuzzy';
-import { rankItems, type RankableItem } from './paletteRank';
+import { bareLabel, filterNamesCoveredByCommands, rankItems, type RankableItem } from './paletteRank';
 import { buildMenuTree, menuPathLabel, shortcutAlternatives, type MenuTreeNode } from './menuModel';
 import { buildToolSlots, nextInSlot, resolveToolShortcut, sectionOf } from './toolModel';
-import { docByteSizes, dropMode, formatBytes, formatZoom, isSupportedDrop, parseZoom, tabLabel, windowTitle } from './docInfo';
+import {
+  clientToViewport,
+  docByteSizes,
+  dropMode,
+  formatBytes,
+  formatZoom,
+  isSupportedDrop,
+  parseZoom,
+  tabLabel,
+  windowTitle,
+  zoomToApply,
+} from './docInfo';
 import { completedMessage, decideHistoryToast, type HistorySnapshot, type ToastDecisionState } from './historyToasts';
-import { movePanel, removePanel, sanitizeLayout, WORKSPACE_PRESETS } from './workspaces';
+import { cloneLayout, isPanelVisible, movePanel, removePanel, revealPanel, sanitizeLayout, WORKSPACE_PRESETS } from './workspaces';
+import { useShell } from './shellStore';
+import { submitTarget } from './dialogs/ChoiceDialog';
+import { applyUiScale, clampScale, cssZoom, nativeZoomSetter, shellPortalHost, toCss } from './uiScale';
 import { _resetPrefsCache, defaultBackgroundColor, getPref, PREFS_KEY, resetPrefs, setPref } from './prefs';
 import { shortcutKeys } from './Keys';
 import { fitScale } from './ViewportHost';
-import { DEFAULT_WORKSPACE } from '../../state/ui';
+import { DEFAULT_WORKSPACE, useUI } from '../../state/ui';
 
 const noop = () => {};
 const Icon = () => null;
@@ -96,6 +110,32 @@ describe('rankItems', () => {
     ];
     const g = rankItems(list, 'paste', opts);
     expect(g[0].items[0].item.key).toBe('b');
+  });
+
+  it('hides duplicate filter items in the All scope but keeps them under their chip', () => {
+    const list: RankableItem[] = [
+      { key: 'command:filter.apply.gaussian', kind: 'command', title: 'Gaussian Blur…', subtitle: 'Filter › Blur' },
+      { key: 'filter:gaussian', kind: 'filter', title: 'Gaussian Blur…', subtitle: 'Filter › Blur', onlyInKind: true },
+      { key: 'filter:hidden-gem', kind: 'filter', title: 'Gaussian Glow…', subtitle: 'Filter › Glow' },
+    ];
+    const all = rankItems(list, 'gauss', { kindOrder: ['command', 'filter'] }).flatMap((g) => g.items.map((i) => i.item.key));
+    expect(all).toEqual(['command:filter.apply.gaussian', 'filter:hidden-gem']);
+    const only = rankItems(list, 'gauss', { kindOrder: ['command', 'filter'], onlyKind: 'filter' }).flatMap((g) => g.items.map((i) => i.item.key));
+    expect(only.sort()).toEqual(['filter:gaussian', 'filter:hidden-gem']);
+  });
+
+  it('finds filters already exposed by Filter / Image ▸ Adjustments commands', () => {
+    const covered = filterNamesCoveredByCommands([
+      { label: 'Gaussian Blur…', menu: 'Filter/Blur' },
+      { label: 'Levels...', menu: 'Image/Adjustments' },
+      { label: 'Invert', menu: 'Image/Adjustments' },
+      { label: 'Curves', menu: 'Layer/New Adjustment Layer' },
+      { label: 'Filter Gallery…', menu: 'Filter' },
+      { label: 'Duotone', menu: undefined },
+    ]);
+    expect([...covered].sort()).toEqual(['filter gallery', 'gaussian blur', 'invert', 'levels']);
+    expect(covered.has(bareLabel('Curves'))).toBe(false);
+    expect(bareLabel('Gaussian Blur…')).toBe('gaussian blur');
   });
 });
 
@@ -262,6 +302,28 @@ describe('doc info', () => {
     expect(isSupportedDrop('notes.txt', 'text/plain')).toBe(false);
   });
 
+  it('only re-applies the zoom field when the value really changed', () => {
+    const z = 0.6046875;
+    const label = formatZoom(z); // '60.5%'
+    expect(zoomToApply(label, label, z)).toBeNull(); // focus + blur without editing
+    expect(zoomToApply(' 60.5% ', label, z)).toBeNull();
+    expect(zoomToApply('60.5', label, z)).toBeNull(); // same as shown
+    expect(zoomToApply('abc', label, z)).toBeNull();
+    expect(zoomToApply('300', label, z)).toBe(3);
+    expect(zoomToApply('50%', '—', 0)).toBe(0.5);
+  });
+
+  it('maps client coordinates to the element’s CSS px under a CSS zoom', () => {
+    // 125% zoom: rect is visual (1171.25 wide), the element is 937 CSS px wide.
+    const r = { left: 100, top: 50, width: 1171.25, height: 750 };
+    const p = clientToViewport(100 + 585.625, 50 + 375, r, 937, 600);
+    expect(p.x).toBeCloseTo(468.5);
+    expect(p.y).toBeCloseTo(300);
+    // No zoom: plain offsets; zero-sized elements fall back to 1:1.
+    expect(clientToViewport(30, 40, { left: 10, top: 10, width: 200, height: 100 }, 200, 100)).toEqual({ x: 20, y: 30 });
+    expect(clientToViewport(30, 40, { left: 10, top: 10, width: 0, height: 0 }, 0, 0)).toEqual({ x: 20, y: 30 });
+  });
+
   it('fits a document without upscaling', () => {
     expect(fitScale(1920, 1080, 1056, 636)).toBeCloseTo(0.5);
     expect(fitScale(100, 100, 1000, 1000)).toBe(1);
@@ -359,6 +421,98 @@ describe('workspaces', () => {
     expect(c.strip).not.toContain('fonts');
     // original untouched
     expect(w.groups[2].tabs).toEqual(['layers', 'properties', 'history']);
+  });
+
+  describe('panel visibility', () => {
+    beforeEach(() => {
+      useUI.setState({ workspace: cloneLayout(DEFAULT_WORKSPACE), flyoutPanel: null, dockVisible: true });
+      useShell.setState({ dockCollapsed: false });
+    });
+
+    it('toggles a docked panel', () => {
+      expect(isPanelVisible('layers')).toBe(true);
+      revealPanel('layers', true);
+      expect(isPanelVisible('layers')).toBe(false);
+      revealPanel('layers', true);
+      expect(isPanelVisible('layers')).toBe(true);
+      revealPanel('properties');
+      expect(isPanelVisible('properties')).toBe(true);
+      expect(isPanelVisible('layers')).toBe(false);
+    });
+
+    it('uses flyouts while the dock is collapsed to the strip', () => {
+      useShell.setState({ dockCollapsed: true });
+      // Groups are not rendered: nothing docked counts as visible.
+      expect(isPanelVisible('layers')).toBe(false);
+      revealPanel('layers', true);
+      expect(useUI.getState().flyoutPanel).toBe('layers');
+      expect(isPanelVisible('layers')).toBe(true);
+      // The hidden group was not collapsed behind the user's back.
+      expect(useUI.getState().workspace.groups.find((g) => g.slot === 'bottom')!.collapsed).toBe(false);
+      revealPanel('layers', true);
+      expect(useUI.getState().flyoutPanel).toBeNull();
+      revealPanel('looks');
+      revealPanel('looks');
+      expect(useUI.getState().flyoutPanel).toBe('looks');
+    });
+
+    it('brings hidden panels back instead of toggling them off', () => {
+      useUI.setState({ dockVisible: false });
+      expect(isPanelVisible('layers')).toBe(false);
+      revealPanel('layers', true);
+      expect(useUI.getState().dockVisible).toBe(true);
+      expect(isPanelVisible('layers')).toBe(true);
+    });
+  });
+});
+
+/* ------------------------------------------------------------------ */
+
+describe('choice dialog Enter', () => {
+  it('lets a focused button handle Enter itself, otherwise picks the primary', () => {
+    const btn = document.createElement('button');
+    expect(submitTarget(btn, 'save')).toBeUndefined();
+    expect(submitTarget(document.body, 'save')).toBe('save');
+    expect(submitTarget(null, 'save')).toBe('save');
+    expect(submitTarget(document.body, undefined)).toBeUndefined();
+  });
+});
+
+describe('ui scale', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="root"></div>';
+  });
+
+  it('detects a native zoom bridge', () => {
+    expect(nativeZoomSetter(null)).toBeNull();
+    expect(nativeZoomSetter({})).toBeNull();
+    const calls: number[] = [];
+    const bridge = { setZoomFactor(f: number) { calls.push(f); } };
+    nativeZoomSetter(bridge)!(1.25);
+    expect(calls).toEqual([1.25]);
+  });
+
+  it('clamps stored scales', () => {
+    expect(clampScale(1.25)).toBe(1.25);
+    expect(clampScale(9)).toBe(2);
+    expect(clampScale(0.1)).toBe(0.5);
+    expect(clampScale('x')).toBe(1);
+    expect(clampScale(-1)).toBe(1);
+  });
+
+  it('applies a CSS zoom fallback and converts visual px', () => {
+    applyUiScale(1.25);
+    expect(cssZoom()).toBe(1.25);
+    expect(toCss(250)).toBe(200);
+    const de = document.documentElement;
+    expect(de.style.getPropertyValue('--shell-css-zoom')).toBe('1.25');
+    expect(de.style.getPropertyValue('--shell-ui-scale')).toBe('1.25');
+    expect(de.hasAttribute('data-shell-css-zoom')).toBe(true);
+    expect(shellPortalHost().parentElement).toBe(document.body);
+    applyUiScale(1);
+    expect(cssZoom()).toBe(1);
+    expect(toCss(250)).toBe(250);
+    expect(de.hasAttribute('data-shell-css-zoom')).toBe(false);
   });
 });
 

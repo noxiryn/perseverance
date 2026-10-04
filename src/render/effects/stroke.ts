@@ -1,8 +1,6 @@
 /** Stroke: crisp anti-aliased outline from an exact distance transform (outside/inside/center). */
-import { ctx2d } from '../../core/canvas';
 import { fillWithPaint } from '../paint';
-import { acquire } from '../surface';
-import { DEFAULT_GRADIENT, P, defineEffect, finish, isGradient, num, readAlpha, regionOf, rgbOf, str, workRect } from './common';
+import { DEFAULT_GRADIENT, P, alphaOfColor, clamp01, defineEffect, isGradient, num, readAlpha, regionOf, rgbOf, str, workRect } from './common';
 import { strokeCoverage, type StrokePosition } from './math';
 
 function position(v: unknown): StrokePosition {
@@ -50,37 +48,39 @@ export const stroke = defineEffect(
       const pos = position(p.position);
       const r = workRect(args, size + 2);
       if (!r) return;
+      const opacity = clamp01(num(p.opacity, 1));
+      if (opacity <= 0) return;
       const a = readAlpha(args.content, r);
       const cov = strokeCoverage(a, r.w, r.h, size, pos);
       const gradient = str(p.fillType, 'color') === 'gradient' && isGradient(p.gradient) ? p.gradient : null;
-      const [cr, cg, cb] = gradient ? [255, 255, 255] : rgbOf(str(p.color, '#000000'));
+      const color = str(p.color, '#000000');
+      const [cr, cg, cb] = gradient ? [255, 255, 255] : rgbOf(color);
+      // Opacity (and the color's own alpha) folded into the coverage; the target is empty, so
+      // the stroke is written in place.
+      const k = gradient ? opacity : opacity * alphaOfColor(color);
       const img = new ImageData(r.w, r.h);
-      const d = img.data;
-      for (let i = 0, j = 0; i < cov.length; i++, j += 4) {
-        d[j] = cr;
-        d[j + 1] = cg;
-        d[j + 2] = cb;
-        d[j + 3] = cov[i];
+      // One 32-bit store per pixel (RGBA bytes in memory order = little-endian ABGR word).
+      const px32 = new Uint32Array(img.data.buffer);
+      const rgb = (cb << 16) | (cg << 8) | cr;
+      const alpha = new Uint32Array(256);
+      for (let v = 0; v < 256; v++) alpha[v] = ((Math.round(v * k) << 24) | rgb) >>> 0;
+      for (let i = 0; i < cov.length; i++) {
+        const v = cov[i];
+        if (v) px32[i] = alpha[v];
       }
-      const c = acquire(args.content.width, args.content.height);
-      const ctx = ctx2d(c);
-      ctx.putImageData(img, r.x, r.y);
+      const t = args.target;
+      t.putImageData(img, r.x, r.y);
       if (gradient) {
         const b = regionOf(args).bounds;
         const grow = pos === 'inside' ? 0 : pos === 'center' ? size / 2 : size;
-        ctx.globalCompositeOperation = 'source-in';
-        fillWithPaint(ctx, { type: 'gradient', gradient }, { x: b.x - grow, y: b.y - grow, width: b.w + 2 * grow, height: b.h + 2 * grow }, fullPath(c));
-        ctx.globalCompositeOperation = 'source-over';
-      } else {
-        const ca = alphaFromColor(str(p.color, '#000000'));
-        if (ca < 1) {
-          ctx.globalCompositeOperation = 'destination-in';
-          ctx.fillStyle = `rgba(0,0,0,${ca})`;
-          ctx.fillRect(0, 0, c.width, c.height);
-          ctx.globalCompositeOperation = 'source-over';
-        }
+        const area = new Path2D();
+        area.rect(r.x, r.y, r.w, r.h);
+        t.save();
+        t.setTransform(1, 0, 0, 1, 0, 0);
+        t.globalCompositeOperation = 'source-in';
+        fillWithPaint(t, { type: 'gradient', gradient }, { x: b.x - grow, y: b.y - grow, width: b.w + 2 * grow, height: b.h + 2 * grow }, area);
+        t.restore();
       }
-      finish(args.target, c, num(p.opacity, 1));
     },
   },
   {
@@ -94,15 +94,3 @@ export const stroke = defineEffect(
   },
 );
 
-function fullPath(c: HTMLCanvasElement): Path2D {
-  const path = new Path2D();
-  path.rect(0, 0, c.width, c.height);
-  return path;
-}
-
-function alphaFromColor(color: string): number {
-  const s = color.trim();
-  if (s[0] === '#' && s.length === 9) return parseInt(s.slice(7, 9), 16) / 255;
-  if (s[0] === '#' && s.length === 5) return parseInt(s[4] + s[4], 16) / 255;
-  return 1;
-}

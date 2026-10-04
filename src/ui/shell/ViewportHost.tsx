@@ -3,10 +3,11 @@
  * import.meta.glob so the app builds whether or not the file exists yet. While it loads (or if it
  * is missing) a static, fitted preview of the active document is shown on the dotted canvas.
  */
-import { lazy, Suspense, useEffect, useRef, useState, type ComponentType } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import { useActiveDoc } from '../../state/editor';
 import { renderDocument } from '../../render/compositor';
 import { ErrorBoundary } from './ErrorBoundary';
+import { useCssZoom } from './uiScale';
 
 const modules = import.meta.glob<{ Viewport?: ComponentType }>('../../viewport/Viewport.tsx');
 const loader = Object.values(modules)[0];
@@ -88,13 +89,35 @@ export function ViewportFallback({ message }: { message?: string }) {
   );
 }
 
-export function ViewportHost() {
-  if (!LazyViewport) return <ViewportFallback message="Preview only — the canvas viewport is not available in this build" />;
+/**
+ * Cancels the UI-scale CSS zoom for the canvas (see uiScale.ts): the viewport keeps an effective
+ * zoom of 1, so its pointer → document mapping (clientX - rect.left vs. its CSS size) is exact
+ * and the canvas renders 1:1 instead of being resampled.
+ */
+function UnzoomedLayer({ children }: { children: ReactNode }) {
+  const z = useCssZoom((s) => s.cssZoom);
   return (
-    <ErrorBoundary name="Canvas">
-      <Suspense fallback={<ViewportFallback />}>
-        <LazyViewport />
-      </Suspense>
-    </ErrorBoundary>
+    <div className="shell-viewport-layer" style={z === 1 ? undefined : { zoom: 1 / z }}>
+      {children}
+    </div>
+  );
+}
+
+export function ViewportHost() {
+  if (!LazyViewport) {
+    return (
+      <UnzoomedLayer>
+        <ViewportFallback message="Preview only — the canvas viewport is not available in this build" />
+      </UnzoomedLayer>
+    );
+  }
+  return (
+    <UnzoomedLayer>
+      <ErrorBoundary name="Canvas">
+        <Suspense fallback={<ViewportFallback />}>
+          <LazyViewport />
+        </Suspense>
+      </ErrorBoundary>
+    </UnzoomedLayer>
   );
 }

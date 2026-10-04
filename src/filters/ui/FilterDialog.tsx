@@ -13,6 +13,7 @@ import {
   SmartPreview,
   applySmart,
   effectiveMode,
+  lastModeFor,
   selectionAlpha,
   targetBitmapId,
   targetContext,
@@ -24,10 +25,13 @@ import { blendSelection } from './selectionBlend';
 import { cropCanvas, fitImage, paramsKey, runOnCopy } from './preview';
 import { rememberParams, rememberedParams, setLastFilter } from './memory';
 import { toast } from '../../state/ui';
+import { viewport } from '../../editor/viewport';
+import { getLayerBounds } from '../../render/compositor';
 import './fxfilters.css';
 
 const BOX_W = 480;
 const BOX_H = 360;
+const DIALOG_W = 860;
 
 export interface FilterDialogProps extends Record<string, unknown> {
   filterId: string;
@@ -46,6 +50,27 @@ interface Base {
   sel: Uint8ClampedArray | null;
 }
 
+/**
+ * Start the dialog beside the filtered layer (on the side of the screen it doesn't occupy), so
+ * the live on-canvas preview stays visible.
+ */
+function initialOffset(target: FilterTarget): { x: number; y: number } {
+  const room = Math.max(0, Math.round((window.innerWidth - DIALOG_W) / 2) - 12);
+  let side = 1;
+  try {
+    const b = target.kind === 'content' ? getLayerBounds(target.doc, target.layer.id) : null;
+    const el = viewport.element();
+    if (b && el) {
+      const r = el.getBoundingClientRect();
+      const c = viewport.docToScreen({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
+      if (r.left + c.x > window.innerWidth / 2) side = -1;
+    }
+  } catch {
+    /* viewport not mounted: default to the right */
+  }
+  return { x: room * side, y: 0 };
+}
+
 export function FilterDialog({ filterId, mode, target, initialParams, close }: FilterDialogProps & { close: (r?: unknown) => void }) {
   const def = filters.get(filterId) as FilterDef;
   const [params, setParams] = useState<ParamValues>(() => ({ ...rememberedParams(def), ...(initialParams ?? {}) }));
@@ -58,7 +83,7 @@ export function FilterDialog({ filterId, mode, target, initialParams, close }: F
   const [busy, setBusy] = useState(false);
   const [slow, setSlow] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [offset, setOffset] = useState(() => initialOffset(target));
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const finished = useRef(false);
   const applyMode: ApplyMode = smart ? 'smart' : 'destructive';
@@ -224,7 +249,7 @@ export function FilterDialog({ filterId, mode, target, initialParams, close }: F
         }
         finished.current = true;
         rememberParams(filterId, params);
-        setLastFilter({ filterId, params, mode: smart ? 'smart' : 'destructive' });
+        setLastFilter({ filterId, params, mode: lastModeFor(target, smart ? 'smart' : 'destructive') });
         close('ok');
       } catch (err) {
         console.error('[fx-filters] apply failed', err);
@@ -312,7 +337,7 @@ export function FilterDialog({ filterId, mode, target, initialParams, close }: F
             </span>
           </span>
         }
-        width={860}
+        width={DIALOG_W}
         onClose={cancel}
         onSubmit={ok}
         footer={

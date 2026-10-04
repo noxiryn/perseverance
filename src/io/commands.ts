@@ -184,7 +184,7 @@ export const ioCommands: CommandDef[] = [
   cmd({ id: 'image.cropToSelection', label: 'Crop', menu: 'Image', group: '50-crop', order: 10, icon: Crop, keywords: ['crop to selection'], enabled: hasSelection, run: cropToSelection }),
   cmd({ id: 'image.trim', label: 'Trim…', menu: 'Image', group: '50-crop', order: 20, icon: Shrink, keywords: ['transparent', 'remove borders', 'autocrop'], enabled: hasDoc, run: trimCommand }),
   cmd({ id: 'image.revealAll', label: 'Reveal All', menu: 'Image', group: '50-crop', order: 30, icon: Expand, keywords: ['expand canvas', 'show hidden'], enabled: hasDoc, run: revealAll }),
-  cmd({ id: 'image.duplicate', label: 'Duplicate…', menu: 'Image', group: '60-duplicate', order: 10, icon: FileImage, keywords: ['copy document', 'clone'], enabled: hasDoc, run: duplicateImage }),
+  cmd({ id: 'image.duplicate', label: 'Duplicate…', menu: 'Image', group: '60-duplicate', order: 10, icon: FileImage, keywords: ['copy document', 'clone'], enabled: hasDoc, run: () => duplicateImage() }),
 ];
 
 export function registerIoCommands() {

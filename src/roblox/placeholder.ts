@@ -110,8 +110,12 @@ export function renderPlaceholderCharacter(opts: PlaceholderOptions): HTMLCanvas
     g.stroke();
   };
 
-  /** Extruded box: local rect (x,y,w,h in px, y down) around pivot, rotated by `deg`. */
-  const block = (pivot: Pt, x: number, y: number, w: number, h: number, deg: number, color: string) => {
+  /**
+   * Extruded box: local rect (x,y,w,h in px, y down) around pivot, rotated by `deg`.
+   * `capTop: false` skips the face along the local top edge (used for hands drawn over the end
+   * of an arm, so they read as the skin-colored end of the limb instead of a separate slab).
+   */
+  const block = (pivot: Pt, x: number, y: number, w: number, h: number, deg: number, color: string, capTop = true) => {
     const t = tonesOf(color, flat);
     const a = (deg * Math.PI) / 180;
     const c = Math.cos(a),
@@ -120,6 +124,7 @@ export function renderPlaceholderCharacter(opts: PlaceholderOptions): HTMLCanvas
     const F: Pt[] = [rot(x, y), rot(x + w, y), rot(x + w, y + h), rot(x, y + h)];
     const B: Pt[] = F.map((p) => [p[0] + D[0], p[1] + D[1]] as Pt);
     for (let i = 0; i < 4; i++) {
+      if (!capTop && i === 0) continue; // edge F0→F1 is the local top edge
       const p0 = F[i],
         p1 = F[(i + 1) % 4];
       const nx = p1[1] - p0[1],
@@ -171,7 +176,7 @@ export function renderPlaceholderCharacter(opts: PlaceholderOptions): HTMLCanvas
   // Hands (skin) at the arm ends for a bit of readability in shaded mode.
   const hand = (pivotX: number, deg: number) => {
     if (flat) return;
-    block(P(pivotX, shoulderY), -u * 0.5, u * 1.25, u, u * 0.37, deg, skin);
+    block(P(pivotX, shoulderY), -u * 0.5, u * 1.25, u, u * 0.37, deg, skin, false);
   };
 
   // --- back arm (screen-left) ---
@@ -198,8 +203,8 @@ export function renderPlaceholderCharacter(opts: PlaceholderOptions): HTMLCanvas
     block(chest, -u * 1.35, -u * 0.36, u * 2.7, u * 0.72, -7, flat ? sil : shade(shirt, -0.18));
     block(chest, -u * 1.3, -u * 0.32, u * 2.6, u * 0.66, 9, shirt);
     if (!flat) {
-      block(P(-1.25, 3.05), -u * 0.32, -u * 0.34, u * 0.5, u * 0.62, 9, skin);
-      block(P(1.25, 3.05), -u * 0.18, -u * 0.36, u * 0.5, u * 0.66, -7, skin);
+      block(P(-1.25, 3.05), -u * 0.32, -u * 0.34, u * 0.5, u * 0.62, 9, skin, false);
+      block(P(1.25, 3.05), -u * 0.18, -u * 0.36, u * 0.5, u * 0.66, -7, skin, false);
     }
   } else {
     // --- sword (behind the front arm) ---
