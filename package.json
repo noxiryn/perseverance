@@ -1,0 +1,129 @@
+{
+  "name": "perseverance",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Perseverance — a Photoshop-style editor specialized for stylized Roblox thumbnails, icons and GFX.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "app": "concurrently -k -n vite,app \"vite\" \"node scripts/electron-dev.cjs\"",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "start": "electron .",
+    "icons": "node scripts/make-icon.mjs",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win nsis portable",
+    "dist:mac": "npm run build && electron-builder --mac dmg",
+    "dist:linux": "npm run build && electron-builder --linux AppImage"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@fontsource/inter": "^5.3.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/three": "^0.186.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "ag-psd": "^31.0.2",
+    "concurrently": "^10.0.5",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
+    "immer": "^10.2.0",
+    "jsdom": "^29.1.1",
+    "lucide-react": "^1.52.0",
+    "playwright-core": "^1.56.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "three": "^0.186.1",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.6",
+    "vitest": "^3.2.7",
+    "wait-on": "^9.5.1",
+    "zustand": "^5.0.15"
+  },
+  "productName": "Perseverance",
+  "author": {
+    "name": "noxiryn"
+  },
+  "homepage": "https://github.com/noxiryn/perseverance",
+  "main": "electron/main.cjs",
+  "build": {
+    "appId": "com.noxiryn.perseverance",
+    "productName": "Perseverance",
+    "copyright": "Copyright © 2026 noxiryn",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "asar": true,
+    "fileAssociations": [
+      {
+        "ext": "pgfx",
+        "name": "Perseverance Project",
+        "description": "Perseverance GFX project",
+        "role": "Editor"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Perseverance",
+      "artifactName": "Perseverance-Setup-${version}.${ext}",
+      "uninstallDisplayName": "Perseverance"
+    },
+    "portable": {
+      "artifactName": "Perseverance-Portable-${version}.${ext}"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.graphics-design",
+      "icon": "build/icon.png"
+    },
+    "dmg": {
+      "artifactName": "Perseverance-${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Graphics",
+      "icon": "build/icon.png",
+      "artifactName": "Perseverance-${version}.${ext}"
+    }
+  }
+}
