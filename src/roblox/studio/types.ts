@@ -110,7 +110,10 @@ export interface StudioPose {
 export interface LightSpec {
   color: string;
   intensity: number;
-  /** Degrees around the character: 0 = front, 90 = character's left, 180 = behind. */
+  /**
+   * Degrees around the subject RELATIVE TO THE CAMERA: 0 = from the camera, -90 = from the left of
+   * the frame, +90 = from the right, ±180 = from behind (rim). Lights follow the camera orbit.
+   */
   azimuth: number;
   /** Degrees above the horizon. */
   elevation: number;

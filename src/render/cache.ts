@@ -209,11 +209,18 @@ export class SlotCache {
   }
 }
 
-/** Generated assets / pattern tiles (keyed by content). */
-export const renderCache = new PixelLRU(16 * 1024 * 1024);
+/** Generated assets / pattern tiles (keyed by asset definition identity + size + params). */
+export const renderCache = new PixelLRU(24 * 1024 * 1024);
 
-/** Layer renders, text/shape rasters, masks, composites, thumbnails. */
-export const slots = new SlotCache(40 * 1024 * 1024, 2);
+/** `layerId` tag of asset-cache entries that must not survive a full invalidation (user images). */
+export const VOLATILE_ASSETS = '\u0000volatile-assets';
+
+/**
+ * Layer renders, text/shape rasters, masks, composites, thumbnails. 64M px (≈256 MB): enough
+ * for the working set of a heavy 1080p document (≈10 full-canvas layers with effects plus
+ * composites and adjustment snapshots) so live edits never thrash.
+ */
+export const slots = new SlotCache(64 * 1024 * 1024, 2);
 
 /** Font-load / global invalidation generation (part of text cache keys). */
 let generation = 0;

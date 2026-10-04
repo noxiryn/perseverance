@@ -19,6 +19,8 @@ import type {
   ParamValues,
   RasterLayer,
   Rect,
+  ShapeLayer,
+  TextLayer,
   Transform,
 } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
@@ -42,7 +44,15 @@ import { activeSession, useEditor } from '../state/editor';
 import { toast, useUI } from '../state/ui';
 import { effects, filters } from '../registry';
 import { defaultParams } from '../filters/engine';
-import { getLayerBounds, renderDocument, renderLayerContent, renderLayerToDoc } from '../render/compositor';
+import {
+  getLayerBounds,
+  getLayerSize,
+  renderDocument,
+  renderLayerContent,
+  renderLayerToDoc,
+  shapeLocalBounds,
+  textLocalBounds,
+} from '../render/compositor';
 import { selectionFromCanvas, setSelection, combine, type SelectionMode } from '../editor/selection';
 import { viewport } from '../editor/viewport';
 import {
@@ -55,7 +65,7 @@ import {
   soloVisibility,
   type ArrangeOp,
 } from './treeOps';
-import { alignDelta, distributeDeltas, unionRects, type AlignMode, type DistributeMode } from './geometryMath';
+import { alignDelta, distributeDeltas, pixelBox, reboxTransform, unionRects, type AlignMode, type DistributeMode } from './geometryMath';
 import { effectName, type StylePreset } from './effectPresets';
 
 /* ------------------------------------------------------------------ */
@@ -107,8 +117,28 @@ export function hasLayer(): boolean {
 
 const plural = (n: number, one: string, many: string) => (n > 1 ? many : one);
 
+/** True when a panel is currently on screen (active tab of an expanded dock group, or the flyout). */
+export function isPanelVisible(id: string): boolean {
+  const ui = useUI.getState();
+  return ui.flyoutPanel === id || ui.workspace.groups.some((g) => !g.collapsed && g.active === id && g.tabs.includes(id));
+}
+
+/** Show a panel unless it is already visible. */
 function showPanel(id: string) {
-  useUI.getState().showPanel(id);
+  if (!isPanelVisible(id)) useUI.getState().showPanel(id);
+}
+
+/**
+ * Reveal an editor for the active adjustment layer without hiding the Layers panel: Properties
+ * when it lives in another dock group, else the Adjustments panel (which embeds the editor).
+ */
+function revealAdjustmentEditor() {
+  if (isPanelVisible('properties') || isPanelVisible('adjustments')) return;
+  const ui = useUI.getState();
+  const propsGroup = ui.workspace.groups.find((g) => g.tabs.includes('properties'));
+  const layersGroup = ui.workspace.groups.find((g) => g.tabs.includes('layers'));
+  if (propsGroup && (propsGroup !== layersGroup || !isPanelVisible('layers'))) ui.showPanel('properties');
+  else ui.showPanel('adjustments');
 }
 
 /* ------------------------------------------------------------------ */
@@ -145,28 +175,46 @@ export function editDoc(label: string, recipe: (d: Document) => void, phase: Pha
 /**
  * Change the document WITHOUT creating a history step (UI-ish state stored in the document,
  * such as a group's collapsed flag). The current history entry is updated too so undo/redo and
- * cancelPreview keep the change.
+ * cancelPreview keep the change; with `allHistory` every entry is updated (so undo/redo never
+ * brings the old UI state back). `transform` must return its input when nothing changes.
  */
-export function editDocSilently(transform: (doc: Document) => Document) {
+export function editDocSilently(transform: (doc: Document) => Document, allHistory = false) {
   const st = useEditor.getState();
   const id = st.activeDocId;
   const s = id ? st.sessions[id] : null;
   if (!id || !s) return;
-  const entry = s.history.entries[s.history.index];
-  const entryDoc = transform(entry.doc);
-  const doc = s.doc === entry.doc ? entryDoc : transform(s.doc);
-  const entries = s.history.entries.slice();
-  entries[s.history.index] = { ...entry, doc: entryDoc };
+  const idx = s.history.index;
+  let changed = false;
+  const entries = s.history.entries.map((e, i) => {
+    if (!allHistory && i !== idx) return e;
+    const d = transform(e.doc);
+    if (d === e.doc) return e;
+    changed = true;
+    return { ...e, doc: d };
+  });
+  const current = s.history.entries[idx];
+  const doc = s.doc === current.doc ? entries[idx].doc : transform(s.doc);
+  if (!changed && doc === s.doc) return;
   useEditor.setState({ sessions: { ...st.sessions, [id]: { ...s, doc, history: { ...s.history, entries } } } });
 }
 
-/** Collapse / expand a group (not recorded in history). */
+/** Collapse / expand a group (UI state: not recorded in history, kept across undo/redo). */
 export function setGroupCollapsed(id: ID, collapsed: boolean) {
   editDocSilently((doc) => {
     const g = doc.layers[id];
     if (!g || g.type !== 'group' || g.collapsed === collapsed) return doc;
     return { ...doc, layers: { ...doc.layers, [id]: { ...g, collapsed } } };
-  });
+  }, true);
+}
+
+/** Expand every collapsed ancestor group of a layer so its row is visible in the panel. */
+export function revealLayer(id: ID) {
+  const s = activeSession();
+  if (!s) return;
+  for (const g of ancestorsOf(s.doc, id)) {
+    const l = s.doc.layers[g];
+    if (l?.type === 'group' && l.collapsed) setGroupCollapsed(g, false);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -247,9 +295,13 @@ export function newAdjustmentLayer(filterId: string, params?: ParamValues): ID |
     toast(`Adjustment “${filterId}” is not available`, 'warning');
     return null;
   }
-  const l = makeAdjustmentLayer({ name: def.name, filterId, params: { ...defaultParams(def.params), ...params } });
+  if (!def.adjustment) {
+    toast(`${def.name} can't be used as an adjustment layer — apply it from the Filter menu instead`, 'info');
+    return null;
+  }
+  const l = makeAdjustmentLayer({ name: nextLayerName(s.doc, def.name), filterId, params: { ...defaultParams(def.params), ...structuredClone(params ?? {}) } });
   insertNewLayer(l, `New ${def.name} Layer`);
-  showPanel('properties');
+  revealAdjustmentEditor();
   return l.id;
 }
 
@@ -259,17 +311,24 @@ export function newAdjustmentLayer(filterId: string, params?: ParamValues): ID |
 
 const newId = (prefix: string) => uid(prefix);
 
-/** Layer ▸ Duplicate (Ctrl+J). With an active pixel selection on a raster layer: Layer via Copy. */
-export function duplicateLayers(): ID[] {
+/**
+ * Layer ▸ Duplicate (Ctrl+J): deep copies (groups recursively, bitmaps and masks duplicated).
+ * With `viaCopy` (the Ctrl+J command) and a pixel selection on a single raster layer, it makes a
+ * "Layer via Copy" of the selected pixels instead, like Photoshop.
+ */
+export function duplicateLayers(opts: { viaCopy?: boolean; ids?: ID[] } = {}): ID[] {
   const s = needDoc();
   if (!s) return [];
-  const ids = selectedTopLevel(s);
+  const ids = opts.ids ? orderedTopLevel(s.doc, opts.ids) : selectedTopLevel(s);
   if (!ids.length) {
     toast('Select a layer to duplicate', 'info');
     return [];
   }
   const active = s.activeLayerId ? s.doc.layers[s.activeLayerId] : null;
-  if (s.doc.selection && ids.length === 1 && active?.type === 'raster') return [layerViaCopy(s, active)].filter(Boolean) as ID[];
+  if (opts.viaCopy && s.doc.selection && ids.length === 1 && active?.type === 'raster' && ids[0] === active.id) {
+    const id = layerViaCopy(s, active);
+    return id ? [id] : [];
+  }
 
   const clones = ids.map((id) => ({ id, ...cloneLayerTree(s.doc, id, { newId, dupBitmap: (b) => (bitmaps.has(b) ? bitmaps.duplicate(b) : b) }) }));
   const roots = clones.map((c) => c.rootId);
@@ -291,7 +350,10 @@ function layerViaCopy(s: DocSession, layer: RasterLayer): ID | null {
   const doc = s.doc;
   const content = renderLayerToDoc(doc, { ...layer, filters: [], effects: [], mask: null }, { effects: false, mask: false });
   const mask = doc.selection ? bitmaps.tryGet(doc.selection.bitmapId) : null;
-  if (!content || !mask) return null;
+  if (!content || !mask) {
+    toast('Nothing to copy — the selection is outside the layer pixels', 'info');
+    return null;
+  }
   const out = createCanvas(doc.width, doc.height);
   const ctx = ctx2d(out);
   ctx.drawImage(content, 0, 0);
@@ -875,12 +937,45 @@ function toRaster(old: Layer, bitmapId: ID, width: number, height: number, trans
   };
 }
 
-/** Rasterize one layer's content (no effects / smart filters baked). Null when unsupported. */
-function rasterizeContent(doc: Document, l: Layer): RasterLayer | null {
-  if (l.type === 'text' || l.type === 'shape') {
+/** Largest local raster we create when rasterizing text/shape layers (pixels). */
+const MAX_RASTER_PIXELS = 64e6;
+
+/**
+ * Rasterize a text/shape layer's local content at 1 px per local unit, INCLUDING everything
+ * that overflows its layout box (outline stroke, warp, glyph overhang): the content is rendered
+ * through the compositor into a temporary document the size of the padded local bounds, and the
+ * transform is adjusted so every pixel stays exactly where it was.
+ */
+function rasterizeLocal(doc: Document, l: TextLayer | ShapeLayer): RasterLayer {
+  const size = getLayerSize(l);
+  const layoutBox: Rect = { x: 0, y: 0, width: size.width, height: size.height };
+  const padded = l.type === 'text' ? textLocalBounds(l.text) : shapeLocalBounds(l.shape);
+  const box = pixelBox(unionRects([layoutBox, padded]) ?? layoutBox);
+  if (box.width * box.height > MAX_RASTER_PIXELS) {
+    // Absurdly large content: fall back to the (clipped) layout box.
     const c = renderLayerContent(doc, { ...l, filters: [] });
     return toRaster(l, bitmaps.add(c), c.width, c.height, l.transform);
   }
+  const temp = {
+    ...l,
+    filters: [],
+    effects: [],
+    mask: null,
+    clipped: false,
+    visible: true,
+    opacity: 1,
+    fillOpacity: 1,
+    blendMode: 'normal',
+    transform: { x: -box.x, y: -box.y, scaleX: 1, scaleY: 1, rotation: 0, skewX: 0 },
+  } as TextLayer | ShapeLayer;
+  const tempDoc: Document = { ...doc, width: box.width, height: box.height, background: null, selection: null, guides: [], layers: { [l.id]: temp }, rootIds: [l.id] };
+  const c = renderLayerToDoc(tempDoc, temp, { effects: false, mask: false }) ?? createCanvas(box.width, box.height);
+  return toRaster(l, bitmaps.add(c), box.width, box.height, reboxTransform(l.transform, size.width, size.height, box));
+}
+
+/** Rasterize one layer's content (no effects / smart filters baked). Null when unsupported. */
+function rasterizeContent(doc: Document, l: Layer): RasterLayer | null {
+  if (l.type === 'text' || l.type === 'shape') return rasterizeLocal(doc, l);
   if (l.type === 'fill') {
     const c =
       renderLayerToDoc(doc, { ...l, filters: [], effects: [], mask: null }, { effects: false, mask: false }) ?? createCanvas(doc.width, doc.height);
@@ -974,9 +1069,11 @@ export function mergeDown() {
   const below = doc.layers[belowId];
   if (below.type === 'adjustment') return void toast('Cannot merge into an adjustment layer — select the layers to merge instead', 'info');
   if (below.type === 'group') return void toast('Cannot merge down into a group — use Merge Group instead', 'info');
+  // When both layers are clipped to the same base further down, the upper one must not be
+  // clipped to the lower one during the merge (the result is clipped to the base afterwards).
   const canvas = renderSubset(doc, [belowId, layer.id], {
     [belowId]: { ...below, opacity: 1, blendMode: 'normal', clipped: false, visible: true } as Layer,
-    [layer.id]: { ...layer, visible: true } as Layer,
+    [layer.id]: { ...layer, visible: true, clipped: layer.clipped && !below.clipped } as Layer,
   });
   const r = mergedRaster(below, canvas, doc);
   r.opacity = below.opacity;

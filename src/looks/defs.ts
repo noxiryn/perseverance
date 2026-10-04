@@ -178,7 +178,7 @@ export const BUILTIN_LOOKS: LookDef[] = [
     swatch: ['#0a0414', '#3b1670', '#9b6bff', '#ffe29a'],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#b28cff', opacity: 0.6, size: 26, blendMode: 'screen' } }],
     overlays: [
-      { assetId: 'bokeh', params: { color: '#b28cff' }, blendMode: 'screen', opacity: 0.45, name: 'Bokeh' },
+      { assetId: 'bokeh', params: { color1: '#b28cff', color2: '#7a4dff', color3: '#ffe29a' }, blendMode: 'screen', opacity: 0.45, name: 'Bokeh' },
       { assetId: 'stars', params: { color: '#ffe29a' }, blendMode: 'screen', opacity: 0.7, name: 'Sparkles' },
       { assetId: 'vignette-overlay', params: { color: '#0a0414', amount: 0.55 }, blendMode: 'multiply', name: 'Vignette' },
     ],
@@ -357,7 +357,7 @@ export const BUILTIN_LOOKS: LookDef[] = [
       { effectId: 'stroke', params: { color: '#ff2bd6', size: 3, position: 'outside' } },
     ],
     overlays: [
-      { assetId: 'bokeh', params: { color: '#ff2bd6' }, blendMode: 'screen', opacity: 0.35, name: 'Neon Bokeh' },
+      { assetId: 'bokeh', params: { color1: '#ff2bd6', color2: '#00e5ff', color3: '#7a5cff' }, blendMode: 'screen', opacity: 0.35, name: 'Neon Bokeh' },
       { assetId: 'scanlines-overlay', params: {}, blendMode: 'overlay', opacity: 0.35, name: 'Scanlines' },
     ],
     adjustments: [{ filterId: 'split-toning', params: { shadowColor: '#2a0050', highlightColor: '#00e5ff', balance: -10, amount: 0.55 }, name: 'Neon Split' }],

@@ -115,7 +115,7 @@ export function alignLayers(kind: AlignKind) {
       height: Math.max(...all.map((b) => b.y + b.height)) - y,
     };
   }
-  const moves: { leaves: ID[]; dx: number; dy: number }[] = [];
+  const moves: { id: ID; leaves: ID[]; dx: number; dy: number }[] = [];
   for (const [id, b] of boxes) {
     let dx = 0;
     let dy = 0;
@@ -140,12 +140,20 @@ export function alignLayers(kind: AlignKind) {
         break;
     }
     if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) continue;
-    moves.push({ leaves: transformableLeaves(doc, [id]).movable, dx: round2(dx), dy: round2(dy) });
+    moves.push({ id, leaves: transformableLeaves(doc, [id]).movable, dx: round2(dx), dy: round2(dy) });
   }
   if (!moves.length) return;
+  const masks = moves.map((m) => linkedMasks(doc, m.id, m.dx, m.dy));
   useEditor.getState().commit(label, (d) => {
     for (const m of moves) offsetLayersDraft(d, m.leaves, m.dx, m.dy);
+    masks.forEach((r) => r?.(d));
   });
+}
+
+/** Recipe re-pointing the (linked) masks of a layer subtree at copies moved by (dx, dy). */
+function linkedMasks(doc: Document, id: ID, dx: number, dy: number): ((d: Document) => void) | null {
+  const f = MaskFollower.forLayers(doc, [id]);
+  return f ? f.update(translate(dx, dy)) : null;
 }
 
 /** Distribute the centers of 3+ selected layers evenly. */
@@ -168,12 +176,20 @@ export function distributeLayers(kind: DistributeKind) {
   const first = items[0].c;
   const last = items[items.length - 1].c;
   const step = (last - first) / (items.length - 1);
-  useEditor.getState().commit('Distribute Layers', (d) => {
-    items.forEach((it, i) => {
+  const moves = items
+    .map((it, i) => {
       const delta = round2(first + step * i - it.c);
-      if (Math.abs(delta) < 1e-6) return;
-      offsetLayersDraft(d, it.leaves, kind === 'horizontal' ? delta : 0, kind === 'vertical' ? delta : 0);
-    });
+      const dx = kind === 'horizontal' ? delta : 0;
+      const dy = kind === 'vertical' ? delta : 0;
+      return { it, dx, dy, masks: Math.abs(delta) < 1e-6 ? null : linkedMasks(doc, it.id, dx, dy) };
+    })
+    .filter((m) => Math.abs(m.dx) >= 1e-6 || Math.abs(m.dy) >= 1e-6);
+  if (!moves.length) return;
+  useEditor.getState().commit('Distribute Layers', (d) => {
+    for (const m of moves) {
+      offsetLayersDraft(d, m.it.leaves, m.dx, m.dy);
+      m.masks?.(d);
+    }
   });
 }
 

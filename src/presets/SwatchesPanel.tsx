@@ -350,7 +350,11 @@ export function SwatchesPanel() {
               { label: 'Extract Palette from Image…', run: () => void extractPaletteFlow() },
               { separator: true },
               { heading: true, label: 'Show Palette' },
-              ...list.slice(0, 40).map((p) => ({ label: p.name, checked: p.id === active?.id, run: () => choosePalette(p.id) })),
+              ...groups.map(([cat, pals]) => ({
+                label: cat,
+                checked: pals.some((p) => p.id === active?.id),
+                submenu: pals.map((p) => ({ label: `${p.name} (${p.colors.length})`, checked: p.id === active?.id, run: () => choosePalette(p.id) })),
+              })),
             ])
           }
         />

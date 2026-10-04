@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { about, apply, chain, decompose, fromTransform, invert, isIdentity, mul, rotate, scale, translate } from './affine';
 import { polygonArea, traceContours } from './contours';
 import { alphaBounds, borderAlpha, colorRangeAlpha, morphAlpha, smoothAlpha, squaredDistanceTransform } from './mask';
-import { clampZoom, fitZoom, formatZoom, nextZoomStep, wheelZoomFactor, zoomToRect } from './zoom';
+import { clampZoom, fitZoom, formatZoom, nextZoomStep, normalizePan, wheelZoomFactor, zoomToRect } from './zoom';
 import { boxFromDrag, fitRatio, resizeBox, roundCropRect } from './crop';
 import { averageColor, hexToRgb, rgbToHex } from './color';
 import { colorRangeWeights } from './colorRange';
@@ -221,5 +221,47 @@ describe('color helpers', () => {
     expect(sh[3]).toBe(0);
     const neg = colorRangeWeights(px, 4, { preset: 'sampled', samples: [{ r: 230, g: 20, b: 20 }], negatives: [{ r: 230, g: 20, b: 20 }], fuzziness: 40, invert: false });
     expect(neg[0]).toBe(0);
+  });
+});
+
+describe('view normalization', () => {
+  const origin = (v: { zoom: number; panX: number; panY: number }, dw: number, dh: number, W: number, H: number) => ({
+    x: W / 2 + v.panX - (dw * v.zoom) / 2,
+    y: H / 2 + v.panY - (dh * v.zoom) / 2,
+  });
+
+  it('keeps at least 64px of the document on screen', () => {
+    // Panned far off to the right/bottom.
+    const r = normalizePan({ zoom: 1, panX: 5000, panY: 5000 }, 1000, 800, 1200, 900);
+    const o = origin({ zoom: 1, ...r }, 1000, 800, 1200, 900);
+    expect(o.x).toBeCloseTo(1200 - 64, 6);
+    expect(o.y).toBeCloseTo(900 - 64, 6);
+    // Far off to the left/top: the right/bottom doc edge stays 64px inside.
+    const l = normalizePan({ zoom: 2, panX: -9000, panY: -9000 }, 1000, 800, 1200, 900);
+    const ol = origin({ zoom: 2, ...l }, 1000, 800, 1200, 900);
+    expect(ol.x + 2000).toBeCloseTo(64, 6);
+    expect(ol.y + 1600).toBeCloseTo(64, 6);
+  });
+
+  it('leaves in-range pans alone (apart from device-pixel snapping)', () => {
+    const r = normalizePan({ zoom: 0.5, panX: 10, panY: -20 }, 1920, 1080, 1400, 860);
+    expect(r.panX).toBeCloseTo(10, 6);
+    expect(r.panY).toBeCloseTo(-20, 6);
+  });
+
+  it('snaps the document origin to device pixels', () => {
+    for (const dpr of [1, 1.5, 2]) {
+      const v = { zoom: 0.4137, panX: 3.3, panY: -7.77 };
+      const r = normalizePan(v, 1920, 1080, 1301, 857, dpr);
+      const o = origin({ zoom: v.zoom, ...r }, 1920, 1080, 1301, 857);
+      expect(Math.abs(o.x * dpr - Math.round(o.x * dpr))).toBeLessThan(1e-6);
+      expect(Math.abs(o.y * dpr - Math.round(o.y * dpr))).toBeLessThan(1e-6);
+    }
+  });
+
+  it('small documents use half their size as the visible minimum', () => {
+    const r = normalizePan({ zoom: 1, panX: 4000, panY: 0 }, 40, 40, 800, 600);
+    const o = origin({ zoom: 1, ...r }, 40, 40, 800, 600);
+    expect(o.x).toBeCloseTo(800 - 20, 6);
   });
 });

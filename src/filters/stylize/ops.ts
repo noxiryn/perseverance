@@ -94,48 +94,6 @@ export function lineBoxBlurPlanes(p: Planes, w: number, h: number, angleDeg: num
   };
 }
 
-/** Bilinear sample of several planes at (fx, fy) into `res` (premultiplied → linear is correct). */
-function samplePlanesInto(planes: Float32Array[], w: number, h: number, fx: number, fy: number, edge: Edge, res: Float32Array) {
-  let x0 = Math.floor(fx),
-    y0 = Math.floor(fy);
-  const tx = fx - x0,
-    ty = fy - y0;
-  let x1 = x0 + 1,
-    y1 = y0 + 1;
-  let w00 = (1 - tx) * (1 - ty),
-    w10 = tx * (1 - ty),
-    w01 = (1 - tx) * ty,
-    w11 = tx * ty;
-  if (edge === 'clamp') {
-    x0 = x0 < 0 ? 0 : x0 >= w ? w - 1 : x0;
-    x1 = x1 < 0 ? 0 : x1 >= w ? w - 1 : x1;
-    y0 = y0 < 0 ? 0 : y0 >= h ? h - 1 : y0;
-    y1 = y1 < 0 ? 0 : y1 >= h ? h - 1 : y1;
-  } else if (edge === 'wrap') {
-    x0 = ((x0 % w) + w) % w;
-    x1 = ((x1 % w) + w) % w;
-    y0 = ((y0 % h) + h) % h;
-    y1 = ((y1 % h) + h) % h;
-  } else {
-    if (x0 < 0 || x0 >= w) w00 = w01 = 0;
-    if (x1 < 0 || x1 >= w) w10 = w11 = 0;
-    if (y0 < 0 || y0 >= h) w00 = w10 = 0;
-    if (y1 < 0 || y1 >= h) w01 = w11 = 0;
-    x0 = x0 < 0 ? 0 : x0 >= w ? w - 1 : x0;
-    x1 = x1 < 0 ? 0 : x1 >= w ? w - 1 : x1;
-    y0 = y0 < 0 ? 0 : y0 >= h ? h - 1 : y0;
-    y1 = y1 < 0 ? 0 : y1 >= h ? h - 1 : y1;
-  }
-  const i00 = y0 * w + x0,
-    i10 = y0 * w + x1,
-    i01 = y1 * w + x0,
-    i11 = y1 * w + x1;
-  for (let k = 0; k < planes.length; k++) {
-    const p = planes[k];
-    res[k] = p[i00] * w00 + p[i10] * w10 + p[i01] * w01 + p[i11] * w11;
-  }
-}
-
 /**
  * Average of `planes` over a uniformly spaced family of transforms about (cx, cy) (index space):
  *  - kind 'spin': rotations by angles in [-span/2, span/2] (radians) — or [0, span] if !centered;
@@ -165,10 +123,14 @@ export function radialAccumulate(
   const d = span / T;
   const start = centered ? (-(T - 1) * d) / 2 : 0;
   const k = planes.length;
-  let cur = planes;
-  const tmp = new Float32Array(k);
+  // interleaved ping-pong buffers: one bilinear fetch reads all channels from adjacent memory
+  let cur = new Float32Array(n * k);
+  let next = new Float32Array(n * k);
+  for (let c = 0; c < k; c++) {
+    const p = planes[c];
+    for (let i = 0, o = c; i < n; i++, o += k) cur[o] = p[i];
+  }
   for (let pass = 0; pass < passes; pass++) {
-    const next = planes.map(() => new Float32Array(n));
     // pass 0: taps at start and start + d (relative to the source); later: identity and +d·2^pass
     const offA = pass === 0 ? start : 0;
     const offB = pass === 0 ? start + d : d * (1 << pass);
@@ -177,24 +139,72 @@ export function radialAccumulate(
     const cb = kind === 'spin' ? Math.cos(offB) : Math.exp(offB),
       sb = kind === 'spin' ? Math.sin(offB) : 0;
     const identityA = Math.abs(offA) < 1e-12;
+    if (identityA) next.set(cur);
     for (let y = 0; y < h; y++) {
       const dy = y - cy;
-      for (let x = 0; x < w; x++) {
-        const i = y * w + x;
+      let o = y * w * k;
+      for (let x = 0; x < w; x++, o += k) {
         const dx = x - cx;
-        if (identityA) {
-          for (let c = 0; c < k; c++) next[c][i] = cur[c][i];
-        } else {
-          samplePlanesInto(cur, w, h, cx + dx * ca - dy * sa, cy + dx * sa + dy * ca, edge, tmp);
-          for (let c = 0; c < k; c++) next[c][i] = tmp[c];
-        }
-        samplePlanesInto(cur, w, h, cx + dx * cb - dy * sb, cy + dx * sb + dy * cb, edge, tmp);
-        for (let c = 0; c < k; c++) next[c][i] = (next[c][i] + tmp[c]) * 0.5;
+        if (!identityA) sampleInterleaved(cur, k, w, h, cx + dx * ca - dy * sa, cy + dx * sa + dy * ca, edge, next, o, false);
+        sampleInterleaved(cur, k, w, h, cx + dx * cb - dy * sb, cy + dx * sb + dy * cb, edge, next, o, true);
       }
     }
+    const t = cur;
     cur = next;
+    next = t;
   }
-  return cur;
+  return planes.map((_, c) => {
+    const p = new Float32Array(n);
+    for (let i = 0, o = c; i < n; i++, o += k) p[i] = cur[o];
+    return p;
+  });
+}
+
+/**
+ * Bilinear sample of interleaved data (k channels) at (fx, fy). Writes into dst[o..o+k) or, with
+ * `average`, replaces dst with the mean of its current value and the sample.
+ */
+function sampleInterleaved(src: Float32Array, k: number, w: number, h: number, fx: number, fy: number, edge: Edge, dst: Float32Array, o: number, average: boolean) {
+  let x0 = Math.floor(fx),
+    y0 = Math.floor(fy);
+  const tx = fx - x0,
+    ty = fy - y0;
+  let x1 = x0 + 1,
+    y1 = y0 + 1;
+  let w00 = (1 - tx) * (1 - ty),
+    w10 = tx * (1 - ty),
+    w01 = (1 - tx) * ty,
+    w11 = tx * ty;
+  if (x0 < 0 || y0 < 0 || x1 >= w || y1 >= h) {
+    if (edge === 'clamp') {
+      x0 = x0 < 0 ? 0 : x0 >= w ? w - 1 : x0;
+      x1 = x1 < 0 ? 0 : x1 >= w ? w - 1 : x1;
+      y0 = y0 < 0 ? 0 : y0 >= h ? h - 1 : y0;
+      y1 = y1 < 0 ? 0 : y1 >= h ? h - 1 : y1;
+    } else if (edge === 'wrap') {
+      x0 = ((x0 % w) + w) % w;
+      x1 = ((x1 % w) + w) % w;
+      y0 = ((y0 % h) + h) % h;
+      y1 = ((y1 % h) + h) % h;
+    } else {
+      if (x0 < 0 || x0 >= w) w00 = w01 = 0;
+      if (x1 < 0 || x1 >= w) w10 = w11 = 0;
+      if (y0 < 0 || y0 >= h) w00 = w10 = 0;
+      if (y1 < 0 || y1 >= h) w01 = w11 = 0;
+      x0 = x0 < 0 ? 0 : x0 >= w ? w - 1 : x0;
+      x1 = x1 < 0 ? 0 : x1 >= w ? w - 1 : x1;
+      y0 = y0 < 0 ? 0 : y0 >= h ? h - 1 : y0;
+      y1 = y1 < 0 ? 0 : y1 >= h ? h - 1 : y1;
+    }
+  }
+  const i00 = (y0 * w + x0) * k,
+    i10 = (y0 * w + x1) * k,
+    i01 = (y1 * w + x0) * k,
+    i11 = (y1 * w + x1) * k;
+  for (let c = 0; c < k; c++) {
+    const v = src[i00 + c] * w00 + src[i10 + c] * w10 + src[i01 + c] * w01 + src[i11 + c] * w11;
+    dst[o + c] = average ? (dst[o + c] + v) * 0.5 : v;
+  }
 }
 
 /** Box-average downsample by an integer factor. */

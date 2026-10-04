@@ -1,5 +1,5 @@
 /** Tonal adjustments: Brightness/Contrast, Levels, Curves, Exposure, Invert, Posterize, Threshold. */
-import { Aperture, ChartColumn, ChartSpline, Contrast, Layers3, SquareSplitHorizontal, SunMedium } from 'lucide-react';
+import { ChartColumn, ChartSpline, Contrast, Diff, Layers3, SquareSplitHorizontal, SunMedium } from 'lucide-react';
 import type { CurvesValue, ParamValues } from '../../../core/types';
 import type { FilterDef } from '../../../registry';
 import { curveLUT, IDENTITY_CURVES } from '../../../ui/controls/curves';
@@ -163,7 +163,7 @@ export const exposure: FilterDef = {
   category: 'Adjustments',
   description: 'Photographic exposure in linear light (stops), shadow offset and gamma correction.',
   keywords: ['exposure', 'stops', 'offset', 'gamma'],
-  icon: Aperture,
+  icon: Diff,
   adjustment: true,
   params: [
     numP('exposure', 'Exposure', -5, 5, 0, { step: 0.01 }),

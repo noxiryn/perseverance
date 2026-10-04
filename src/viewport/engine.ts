@@ -19,14 +19,15 @@ import { drawGrid, drawPixelGrid, drawSelection } from './overlays';
 import { drawRulers, rulerAt } from './rulers';
 import { beginMoveGuide, beginNewGuide, cancelGuideDrag, drawGuides, endGuideDrag, hitGuide, updateGuideDrag } from './guides';
 import { drawSmartGuides } from './snap';
-import { wheelZoomFactor } from './math/zoom';
+import { normalizePan, wheelZoomFactor } from './math/zoom';
 import { activeTransform } from './transform/controller';
-import { vpState } from './state';
+import { onInputOverrideChange, vpState, type InputOverride } from './state';
 
 type Drag =
   | { kind: 'pan'; pointerId: number; last: Point }
   | { kind: 'guide'; pointerId: number }
-  | { kind: 'tool'; pointerId: number; tool: ToolDef };
+  | { kind: 'tool'; pointerId: number; tool: ToolDef }
+  | { kind: 'override'; pointerId: number; override: InputOverride };
 
 const CHECKER_CELL = 8;
 const CHECKER_LIGHT = '#ffffff';
@@ -154,6 +155,17 @@ export class ViewportEngine {
     );
     this.disposers.push(tools.subscribe(() => this.requestOverlay()));
     this.disposers.push(viewOverlays.subscribe(() => this.requestOverlay()));
+    this.disposers.push(
+      onInputOverrideChange(() => {
+        // An override installed/removed mid-gesture: finish the gesture cleanly.
+        if (this.drag?.kind === 'override' && vpState.inputOverride !== this.drag.override) {
+          this.release(this.drag.pointerId);
+          this.drag = null;
+        }
+        this.updateCursor();
+        this.requestOverlay();
+      }),
+    );
 
     const ov = this.overlay;
     const opts: AddEventListenerOptions = { passive: false };
@@ -179,6 +191,7 @@ export class ViewportEngine {
     if (!this.mounted) return;
     this.mounted = false;
     if (this.drag?.kind === 'tool') safe('tool pointerup', () => this.drag && this.drag.kind === 'tool' && this.drag.tool.onPointerUp?.(this.syntheticEvent()));
+    if (this.drag?.kind === 'override') safe('override pointerup', () => this.drag && this.drag.kind === 'override' && this.drag.override.onPointerUp?.(this.syntheticEvent()));
     if (this.drag?.kind === 'guide') cancelGuideDrag();
     this.drag = null;
     this.disposers.forEach((d) => d());
@@ -226,7 +239,7 @@ export class ViewportEngine {
     if (s && s.view.zoom === 0 && this.cssW > 0 && this.cssH > 0) {
       viewport.fit();
     }
-    this.snapPan();
+    this.normalizeView();
     if (this.docPending) {
       this.docPending = false;
       safe('document draw', () => this.drawDoc());
@@ -237,16 +250,16 @@ export class ViewportEngine {
     }
   };
 
-  /** Keep the document origin on a device pixel so 100%/200%… views are perfectly crisp. */
-  private snapPan() {
+  /**
+   * Keep part of the document on screen (it can never be panned out of reach) and keep the
+   * document origin on a device pixel so 100%/200%… views are perfectly crisp.
+   */
+  private normalizeView() {
     const s = activeSession();
-    if (!s || !s.view.zoom || !this.cssW) return;
-    const o = viewport.origin();
-    const dpr = this.dpr;
-    const fx = o.x * dpr - Math.round(o.x * dpr);
-    const fy = o.y * dpr - Math.round(o.y * dpr);
-    if (Math.abs(fx) > 1e-3 || Math.abs(fy) > 1e-3) {
-      useEditor.getState().setView({ panX: s.view.panX - fx / dpr, panY: s.view.panY - fy / dpr });
+    if (!s || !s.view.zoom || !this.cssW || !this.cssH) return;
+    const r = normalizePan(s.view, s.doc.width, s.doc.height, this.cssW, this.cssH, this.dpr);
+    if (Math.abs(r.panX - s.view.panX) > 1e-6 || Math.abs(r.panY - s.view.panY) > 1e-6) {
+      useEditor.getState().setView({ panX: r.panX, panY: r.panY });
     }
   }
 
@@ -362,8 +375,10 @@ export class ViewportEngine {
     const comp = this.getComposite(doc);
     if (!comp) return;
     const cs = comp.width / Math.max(1, doc.width);
-    ctx.imageSmoothingEnabled = z < 2;
-    ctx.imageSmoothingQuality = z < 1 ? 'high' : 'low';
+    // Smoothing follows the device-pixel scale: high-quality minification below 1:1, crisp
+    // nearest-neighbour pixels once a document pixel covers 2+ device pixels (e.g. 100% on HiDPI).
+    ctx.imageSmoothingEnabled = k < 2;
+    ctx.imageSmoothingQuality = k < 1 ? 'high' : 'low';
     // Draw only the visible part (integer source pixels so nearest-neighbour stays aligned).
     const sx0 = Math.max(0, Math.floor((vx0 - x0) / k));
     const sy0 = Math.max(0, Math.floor((vy0 - y0) / k));
@@ -411,6 +426,8 @@ export class ViewportEngine {
     layer('guides', () => drawGuides(ctx, doc, size, view.extras && view.guides));
     const tool = tools.get(useEditor.getState().activeTool);
     if (tool?.renderOverlay) layer(`tool ${tool.id} overlay`, () => tool.renderOverlay!(ctx));
+    const ovr = vpState.inputOverride;
+    if (ovr?.renderOverlay) layer(`override ${ovr.id}`, () => ovr.renderOverlay!(ctx));
     layer('smart guides', () => drawSmartGuides(ctx));
     if (view.rulers) {
       layer('rulers', () =>
@@ -450,7 +467,14 @@ export class ViewportEngine {
       c = g?.remove && g.id !== null ? 'not-allowed' : g?.orientation === 'vertical' ? 'col-resize' : 'row-resize';
     } else if (p && !this.drag && rulerAt(p, ui.view.rulers)) c = 'default';
     else if (this.hoverGuide && !this.drag) c = this.hoverGuide === 'vertical' ? 'col-resize' : 'row-resize';
-    else if (this.cursorOverride) c = this.cursorOverride;
+    else if (this.activeOverride()) {
+      const n = this.lastNative;
+      try {
+        c = this.activeOverride()!.cursor?.({ altKey: !!n?.altKey, shiftKey: !!n?.shiftKey }) ?? 'crosshair';
+      } catch {
+        c = 'crosshair';
+      }
+    } else if (this.cursorOverride) c = this.cursorOverride;
     else {
       const tool = tools.get(useEditor.getState().activeTool);
       try {
@@ -468,6 +492,15 @@ export class ViewportEngine {
   /* ------------------------------------------------------------------ */
   /* input                                                               */
   /* ------------------------------------------------------------------ */
+
+  /** The input override, unless the user holds the temporary Hand tool (Space) to pan. */
+  private activeOverride(): InputOverride | null {
+    const o = vpState.inputOverride;
+    if (!o) return null;
+    const st = useEditor.getState();
+    if (st.activeTool === 'hand' && st.previousTool !== null) return null;
+    return o;
+  }
 
   private screenOf(e: MouseEvent): Point {
     const r = this.root.getBoundingClientRect();
@@ -567,6 +600,18 @@ export class ViewportEngine {
       return;
     }
 
+    const ovr = this.activeOverride();
+    if (ovr) {
+      e.preventDefault();
+      this.drag = { kind: 'override', pointerId: e.pointerId, override: ovr };
+      this.capture(e.pointerId);
+      const te = this.toolEvent(e);
+      safe(`${ovr.id} pointerdown`, () => ovr.onPointerDown?.(te));
+      this.updateCursor();
+      this.requestOverlay();
+      return;
+    }
+
     const toolId = useEditor.getState().activeTool;
     if (toolId === 'move' && !activeTransform() && ui.view.guides && ui.view.extras && !e.altKey && !(e.ctrlKey || e.metaKey)) {
       const g = hitGuide(s.doc, screen);
@@ -612,12 +657,26 @@ export class ViewportEngine {
         return;
       }
       const te = this.toolEvent(e);
+      if (d.kind === 'override') {
+        safe(`${d.override.id} pointermove`, () => d.override.onPointerMove?.(te));
+        return;
+      }
       safe(`${d.tool.id} pointermove`, () => d.tool.onPointerMove?.(te));
       return;
     }
     if (e.buttons && e.pointerType === 'mouse') return; // a drag that started elsewhere
     const s = activeSession();
     if (!s || !s.view.zoom) {
+      this.updateCursor();
+      return;
+    }
+    const ovr = this.activeOverride();
+    if (ovr) {
+      this.hoverGuide = null;
+      if (ovr.onHover && !rulerAt(screen, ui.view.rulers)) {
+        const te = this.toolEvent(e);
+        safe(`${ovr.id} hover`, () => ovr.onHover!(te));
+      }
       this.updateCursor();
       return;
     }
@@ -654,6 +713,9 @@ export class ViewportEngine {
     else if (d.kind === 'guide') {
       if (cancelled) cancelGuideDrag();
       else endGuideDrag();
+    } else if (d.kind === 'override') {
+      const te = this.toolEvent(e);
+      safe(`${d.override.id} pointerup`, () => d.override.onPointerUp?.(te));
     } else {
       const te = this.toolEvent(e);
       safe(`${d.tool.id} pointerup`, () => d.tool.onPointerUp?.(te));
@@ -685,6 +747,7 @@ export class ViewportEngine {
     if (!s || !s.view.zoom) return;
     const screen = this.screenOf(e);
     if (rulerAt(screen, useUI.getState().view.rulers)) return;
+    if (this.activeOverride()) return;
     const tool = tools.get(useEditor.getState().activeTool);
     if (!tool?.onDoubleClick) return;
     const te = this.toolEvent(e, this.lastNative ?? undefined);
@@ -692,6 +755,8 @@ export class ViewportEngine {
   };
 
   private onWheel = (e: WheelEvent) => {
+    // Floating UI inside the viewport (e.g. the Color Range panel) scrolls normally.
+    if ((e.target as HTMLElement | null)?.closest?.('[data-viewport-ui]')) return;
     e.preventDefault();
     const s = activeSession();
     if (!s || !s.view.zoom) return;

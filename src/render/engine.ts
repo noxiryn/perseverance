@@ -25,7 +25,7 @@ import { cacheGeneration, objId, px, slots } from './cache';
 import { applyMask, lerpInto, maskAlpha } from './mask';
 import { fillWithPaint } from './paint';
 import { renderShapeContent, shapeLocalBounds } from './shapes';
-import { layoutTextProps, renderTextContent, textLocalBounds, type LocalContent } from './text';
+import { layoutTextProps, renderTextContent, textFontReady, textLocalBounds, type LocalContent } from './text';
 import { MAX_SIDE, acquire, coverRect, expandRect, fresh, intersectRect, release, unionRect, type PxRect } from './surface';
 import { effectClips, effectReach, effectStage, type EffectArgsExt } from './effects';
 
@@ -87,6 +87,9 @@ interface Acc {
   clip: PxRect | null;
 }
 
+/** Canvases referenced by renders but owned elsewhere (bitmap store): not counted in budgets. */
+const borrowed = new WeakSet<HTMLCanvasElement>();
+
 /** Simple counters for profiling (window.__app tests read them). */
 export const renderStats = { layerRenders: 0, layerHits: 0, docRenders: 0, docHits: 0, adjustments: 0, snapshotHits: 0 };
 
@@ -126,7 +129,9 @@ export function layerSig(rc: RC, l: Layer): string {
   let s = String(objId(l));
   if (l.type === 'raster') s += `.${bitmaps.version(l.bitmapId)}`;
   if (l.mask) s += `m${bitmaps.version(l.mask.bitmapId)}`;
-  if (l.type === 'text') s += `g${cacheGeneration()}`;
+  // Text re-renders when fonts finish loading (generation bump) or its own face becomes ready
+  // (covers documents that are not open, e.g. template previews).
+  if (l.type === 'text') s += `g${cacheGeneration()}${textFontReady(l.text) ? 'r' : 'p'}`;
   if (l.type === 'group') s += `[${listSig(rc, l.childIds, { stopped: false })}]`;
   rc.sigMemo.set(l, s);
   return s;
@@ -327,7 +332,8 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
   if (r) {
     const seen = new Set<HTMLCanvasElement>();
     for (const c of [r.core, r.shape, ...r.behind.map((b) => b.canvas)]) {
-      if (c && !seen.has(c)) {
+      // Borrowed canvases (zero-copy bitmap renders) are owned by the bitmap store.
+      if (c && !seen.has(c) && !borrowed.has(c)) {
         seen.add(c);
         pixels += px(c);
       }
@@ -388,6 +394,7 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags): LayerRender | n
       const bmp = bitmaps.tryGet(l.bitmapId)!;
       const region = { x: ex, y: ey, w: bmp.width, h: bmp.height };
       if (!intersectRect(region, docR)) return null;
+      borrowed.add(bmp);
       return { region, core: bmp, shape: bmp, behind: [], bounds: region };
     }
   }

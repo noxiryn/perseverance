@@ -36,7 +36,7 @@ import {
 import { layerFrame, transformableLeaves } from '../layers';
 import { MaskFollower } from '../maskFollow';
 import { collectSnapTargets, clearSmartGuides, snapPoint, snapRect, type SnapTargets } from '../snap';
-import { selectionOutline, drawAnts } from '../outline';
+import { drawSelectionAnts } from '../outline';
 import { drawHandle, drawLabel, drawPivot, resizeCursorForAngle, rotateCursor } from '../draw';
 import { ACCENT, docToScreenMatrix, fmtPx } from '../state';
 
@@ -641,10 +641,7 @@ export class TransformSession {
 
   render(ctx: CanvasRenderingContext2D, opts: { handles?: boolean } = {}) {
     const F = this.frameMatrix();
-    if (this.kind === 'selection' && this.selection) {
-      const path = selectionOutline(this.selection);
-      if (path) drawAnts(ctx, path, mul(docToScreenMatrix(), this.D));
-    }
+    if (this.kind === 'selection' && this.selection) drawSelectionAnts(ctx, this.selection, mul(docToScreenMatrix(), this.D));
     const sc = this.cornersDoc(F).map((p) => this.toScreen(p));
     ctx.save();
     ctx.beginPath();

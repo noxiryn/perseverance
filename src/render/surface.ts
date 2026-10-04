@@ -78,7 +78,7 @@ interface PoolBucket {
 
 const pools = new Map<string, PoolBucket>();
 let pooledPixels = 0;
-const POOL_BUDGET = 24 * 1024 * 1024;
+const POOL_BUDGET = 16 * 1024 * 1024;
 const readable = new WeakSet<HTMLCanvasElement>();
 
 function resetCtx(ctx: CanvasRenderingContext2D, w: number, h: number) {

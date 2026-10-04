@@ -25,10 +25,9 @@ export function renderStrokePreview(settings: BrushSettings, w: number, h: numbe
   const H = Math.max(1, Math.round(h * ratio));
   const buffer = createCanvas(W, H);
   const bctx = ctx2d(buffer);
-  // Fit the brush into the preview height.
-  const pad = Math.min(h * 0.32, Math.max(4, Math.min(settings.size, h * 0.5) * 0.6));
-  const size = Math.max(1.5, Math.min(settings.size, h * 0.5));
-  const s: BrushSettings = { ...settings, size };
+  const s = previewSettings(settings, w, h);
+  const size = s.size;
+  const pad = Math.min(h * 0.32, Math.max(4, size * 0.6));
   const painter = new DabPainter({
     tip: tipForPreset(settings.presetId, settings.hardness),
     color: opts.color ?? PREVIEW_COLOR,
@@ -37,7 +36,8 @@ export function renderStrokePreview(settings: BrushSettings, w: number, h: numbe
   });
   const stroke = new BrushStroke({ ...strokeConfig(s, 0), seed: opts.seed ?? 7, curveStep: 1 });
   const N = 64;
-  const amp = Math.max(0, h / 2 - pad) * 0.62;
+  // Scattered brushes spread around the path on their own: flatten the curve for them.
+  const amp = Math.max(0, h / 2 - pad) * 0.62 * (1 - Math.min(0.8, s.scatter * 3));
   const point = (t: number) => ({
     x: pad + t * (w - pad * 2),
     y: h / 2 - Math.sin(t * Math.PI * 2) * amp,
@@ -55,6 +55,23 @@ export function renderStrokePreview(settings: BrushSettings, w: number, h: numbe
   octx.globalAlpha = settings.opacity;
   octx.drawImage(buffer, 0, 0);
   return out;
+}
+
+/**
+ * Settings adapted to a w×h preview: the tip is scaled to fit the height, scattered dabs are
+ * kept inside the box and sparse stamp brushes (stars, splatter…) show at least a few stamps.
+ * Only previews use this — real strokes paint exactly what the settings say.
+ */
+export function previewSettings(settings: BrushSettings, w: number, h: number): BrushSettings {
+  const sparse = settings.spacing >= 0.5;
+  const size = Math.max(1.5, Math.min(settings.size, h * (sparse ? 0.62 : 0.5)));
+  // Max scatter offset is 2·scatter·size (see computeDab): keep it within the free height.
+  const room = Math.max(0, h / 2 - size / 2 - 1);
+  const scatter = Math.min(settings.scatter, (room / (2 * size)) * 0.9);
+  // At least ~6 stamps across the preview.
+  const run = Math.max(1, w - size * 1.2);
+  const spacing = sparse ? Math.max(0.35, Math.min(settings.spacing, run / (size * 6))) : settings.spacing;
+  return { ...settings, size, scatter, spacing };
 }
 
 const presetCache = new Map<string, HTMLCanvasElement>();

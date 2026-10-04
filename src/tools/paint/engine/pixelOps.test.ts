@@ -91,6 +91,19 @@ describe('smudge', () => {
     expect(b.data[(5 * 40 + 15) * 4]).toBeGreaterThan(60);
   });
 
+  it('picks up new color so the smear fades with distance', () => {
+    const b = buf(200, 10, (x) => (x < 10 ? [255, 0, 0, 255] : [0, 0, 255, 255]));
+    const st = createSmudgeState(4);
+    primeSmudge(st, b, 6, 5, 4);
+    for (let x = 6; x <= 180; x += 1) smudgeDab(b, st, area(x, 5, 4, { hardness: 0.5 }), 0.8);
+    const near = b.data[(5 * 200 + 16) * 4];
+    const far = b.data[(5 * 200 + 170) * 4];
+    expect(near).toBeGreaterThan(far);
+    // Far along the stroke the carried red is gone (blue picked up instead).
+    expect(far).toBeLessThan(20);
+    expect(b.data[(5 * 200 + 170) * 4 + 2]).toBeGreaterThan(230);
+  });
+
   it('finger painting starts with the given color', () => {
     const b = buf(20, 20, () => [0, 0, 0, 255]);
     const st = createSmudgeState(5);

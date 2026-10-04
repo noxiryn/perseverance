@@ -155,19 +155,21 @@
 
 .viewport-cr {
   display: grid;
-  grid-template-columns: 300px 1fr;
+  grid-template-columns: auto 1fr;
   gap: 14px;
 }
 
 .viewport-cr-preview {
   position: relative;
-  width: 300px;
-  height: 240px;
+  box-sizing: content-box;
+  width: 216px;
+  height: 160px;
   border-radius: var(--radius);
   border: 1px solid var(--border-strong);
   background: #0e0e0e;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   overflow: hidden;
   cursor: crosshair;
 }
@@ -256,4 +258,50 @@
 
 .viewport-root:focus {
   outline: none;
+}
+
+/* ---------- floating Color Range panel (non-modal, inside the viewport) ---------- */
+
+.viewport-crp {
+  position: absolute;
+  z-index: 20;
+  width: 492px;
+  min-width: 0;
+  max-width: calc(100% - 24px);
+  max-height: calc(100% - 24px);
+  user-select: none;
+}
+
+.viewport-crp-head {
+  height: 34px;
+  cursor: grab;
+}
+
+.viewport-crp-head:active {
+  cursor: grabbing;
+}
+
+.viewport-crp-body {
+  padding: 12px 14px;
+}
+
+.viewport-crp-foot {
+  align-items: center;
+  padding: 8px 14px;
+}
+
+.viewport-crp-hint {
+  margin-right: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.viewport-crp .viewport-dlg-row > .ui-label {
+  width: 88px;
+}
+
+.viewport-crp .viewport-cr {
+  gap: 12px;
 }

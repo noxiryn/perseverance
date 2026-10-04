@@ -8,6 +8,7 @@ import { fonts, type FontCategory, type FontDef } from '../registry';
 import { openFiles, type OpenedFile } from '../platform';
 import { toast } from '../state/ui';
 import { parseFontFile, type FontFileInfo } from './sfnt';
+import { guessCategory } from './catalog';
 import { ensureFont } from './loader';
 
 const DB_NAME = 'perseverance-fonts';
@@ -21,6 +22,8 @@ export interface StoredFont {
   style: 'normal' | 'italic';
   fileName: string;
   format: string;
+  /** Category chosen at install time (older records: guessed from the family name). */
+  category?: FontCategory;
   data: ArrayBuffer;
   addedAt: number;
 }
@@ -72,19 +75,6 @@ function tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T
 
 /* ------------------------------ registration ------------------------------ */
 
-/** Guess a category for a user font from its name. */
-export function guessCategory(family: string): FontCategory {
-  const s = family.toLowerCase();
-  if (/fraktur|gothic|blackletter|old ?english|textura|unifraktur/.test(s)) return 'Blackletter';
-  if (/script|signature|calligraph|vibes|allura|hand(writ)?/.test(s)) return 'Script';
-  if (/mono|courier|typewriter|code/.test(s)) return 'Typewriter & Mono';
-  if (/condensed|narrow|compressed|bebas|anton|oswald/.test(s)) return 'Condensed';
-  if (/horror|blood|zombie|creep|grunge|dirt|distress/.test(s)) return 'Grunge & Horror';
-  if (/serif|garamond|times|roman|baskerville|bodoni/.test(s) && !/sans/.test(s)) return 'Serif';
-  if (/sans|grotesk|grotesque|helvetica|arial/.test(s)) return 'Sans';
-  if (/jp|japan|mincho|gothic jp|kanji/.test(s)) return 'Japanese';
-  return 'Display';
-}
 
 function syncRegistry(family: string) {
   const files = useUserFonts.getState().files.filter((f) => f.family === family);
@@ -97,7 +87,7 @@ function syncRegistry(family: string) {
   const def: FontDef = {
     id: family,
     family,
-    category: guessCategory(family),
+    category: files.find((f) => f.category)?.category ?? guessCategory(family),
     weights: weights.length ? weights : [files[0].weight],
     italic: files.some((f) => f.style === 'italic') || undefined,
     source: 'user',
@@ -165,6 +155,7 @@ export async function installFontFile(file: OpenedFile): Promise<string | null> 
     style,
     fileName: file.name,
     format: info.format,
+    category: guessCategory(info.family, info.classHint),
     data: file.data,
     addedAt: Date.now(),
   };

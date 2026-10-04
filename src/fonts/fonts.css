@@ -311,3 +311,26 @@
 .fc-fonts-foot .ui-btn.small {
   gap: 4px;
 }
+
+/* ---------------- Dialogs ---------------- */
+.fc-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+  line-height: 1.45;
+}
+.fc-confirm p {
+  margin: 0;
+  white-space: normal;
+}
+.fc-confirm b {
+  font-weight: 500;
+  font-size: 15px;
+  color: var(--text-strong);
+}
+.fc-confirm-warn {
+  color: var(--warning);
+  font-size: var(--fs-sm);
+}

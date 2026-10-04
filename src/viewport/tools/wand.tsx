@@ -20,6 +20,7 @@ import {
   pointInSelection,
   updateOutlineDrag,
   endOutlineDragVisual,
+  handleSelectionNudgeKey,
   type OutlineDrag,
 } from './selectCommon';
 import { SelectionModeButtons, Sep, setToolOptionSafe } from '../options/common';
@@ -83,6 +84,10 @@ export const magicWandTool: ToolDef = {
     const mode = modeFromEvent(e, o.mode);
     if (s && mode === 'new' && o.mode === 'new' && pointInSelection(s.doc, e.docX, e.docY)) viewport.setCursor('move');
     else viewport.setCursor(mode === 'new' ? null : cursorFor(mode));
+  },
+  onKeyDown(e) {
+    if (outline) return false;
+    return handleSelectionNudgeKey(e);
   },
   onDeactivate() {
     outline = null;

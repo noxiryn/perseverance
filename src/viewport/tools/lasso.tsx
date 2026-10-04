@@ -22,6 +22,7 @@ import {
   pointInSelection,
   updateOutlineDrag,
   endOutlineDragVisual,
+  handleSelectionNudgeKey,
   type OutlineDrag,
 } from './selectCommon';
 import { SelectionModeButtons, Sep, setToolOptionSafe } from '../options/common';
@@ -141,6 +142,7 @@ function makeLasso(): ToolDef {
         viewport.requestOverlay();
         return true;
       }
+      if (!pts && !outline) return handleSelectionNudgeKey(e);
       return false;
     },
     onDeactivate() {
@@ -266,7 +268,7 @@ function makePolyLasso(): ToolDef {
       else if (pts.length) cancel();
     },
     onKeyDown(e) {
-      if (!pts.length) return false;
+      if (!pts.length) return outline ? false : handleSelectionNudgeKey(e);
       if (e.key === 'Enter') {
         close();
         return true;

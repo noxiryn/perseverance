@@ -156,32 +156,51 @@ function gaussKernel(sigma: number): Float32Array {
   return k;
 }
 
+/**
+ * Separable small-kernel convolution of interleaved data (`ch` floats per pixel) in place.
+ * Clamp-to-edge. Interior pixels take a branch-free path; the vertical pass runs row by row so
+ * memory access stays sequential.
+ */
+function convolveSeparable(buf: Float32Array | Uint8ClampedArray, w: number, h: number, ch: number, k: Float32Array) {
+  const r = (k.length - 1) >> 1;
+  const K = k.length;
+  const stride = w * ch;
+  const tmp = new Float32Array(w * h * ch);
+  for (let y = 0; y < h; y++) {
+    const row = y * stride;
+    for (let x = 0; x < w; x++) {
+      const interior = x >= r && x < w - r;
+      for (let c = 0; c < ch; c++) {
+        let s = 0;
+        if (interior) {
+          let p = row + (x - r) * ch + c;
+          for (let i = 0; i < K; i++, p += ch) s += buf[p] * k[i];
+        } else {
+          for (let i = -r; i <= r; i++) {
+            const xx = x + i < 0 ? 0 : x + i >= w ? w - 1 : x + i;
+            s += buf[row + xx * ch + c] * k[i + r];
+          }
+        }
+        tmp[row + x * ch + c] = s;
+      }
+    }
+  }
+  const acc = new Float32Array(stride);
+  for (let y = 0; y < h; y++) {
+    acc.fill(0);
+    for (let i = -r; i <= r; i++) {
+      const yy = y + i < 0 ? 0 : y + i >= h ? h - 1 : y + i;
+      const src = yy * stride;
+      const kv = k[i + r];
+      for (let q = 0; q < stride; q++) acc[q] += tmp[src + q] * kv;
+    }
+    buf.set(acc, y * stride);
+  }
+}
+
 /** Exact separable gaussian on a float plane (for small sigmas). Clamp-to-edge. */
 function gaussSmallPlane(buf: Float32Array, w: number, h: number, sigma: number) {
-  const k = gaussKernel(sigma);
-  const r = (k.length - 1) >> 1;
-  const tmp = new Float32Array(buf.length);
-  for (let y = 0; y < h; y++) {
-    const row = y * w;
-    for (let x = 0; x < w; x++) {
-      let s = 0;
-      for (let i = -r; i <= r; i++) {
-        const xx = x + i < 0 ? 0 : x + i >= w ? w - 1 : x + i;
-        s += buf[row + xx] * k[i + r];
-      }
-      tmp[row + x] = s;
-    }
-  }
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let s = 0;
-      for (let i = -r; i <= r; i++) {
-        const yy = y + i < 0 ? 0 : y + i >= h ? h - 1 : y + i;
-        s += tmp[yy * w + x] * k[i + r];
-      }
-      buf[y * w + x] = s;
-    }
-  }
+  convolveSeparable(buf, w, h, 1, gaussKernel(sigma));
 }
 
 /** Gaussian-like blur of a float plane in place; `sigma` in px. */
@@ -206,55 +225,7 @@ export function blurPlanes(p: Planes, w: number, h: number, sigma: number) {
 
 /** Exact small-kernel gaussian on 8-bit RGBA (premultiplied by the caller). */
 function gaussSmallRGBA(img: Img, sigma: number) {
-  const k = gaussKernel(sigma);
-  const r = (k.length - 1) >> 1;
-  const { width: w, height: h, data } = img;
-  const tmp = new Float32Array(data.length);
-  for (let y = 0; y < h; y++) {
-    const row = y * w;
-    for (let x = 0; x < w; x++) {
-      let s0 = 0,
-        s1 = 0,
-        s2 = 0,
-        s3 = 0;
-      for (let i = -r; i <= r; i++) {
-        const xx = x + i < 0 ? 0 : x + i >= w ? w - 1 : x + i;
-        const j = (row + xx) * 4;
-        const kv = k[i + r];
-        s0 += data[j] * kv;
-        s1 += data[j + 1] * kv;
-        s2 += data[j + 2] * kv;
-        s3 += data[j + 3] * kv;
-      }
-      const o = (row + x) * 4;
-      tmp[o] = s0;
-      tmp[o + 1] = s1;
-      tmp[o + 2] = s2;
-      tmp[o + 3] = s3;
-    }
-  }
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let s0 = 0,
-        s1 = 0,
-        s2 = 0,
-        s3 = 0;
-      for (let i = -r; i <= r; i++) {
-        const yy = y + i < 0 ? 0 : y + i >= h ? h - 1 : y + i;
-        const j = (yy * w + x) * 4;
-        const kv = k[i + r];
-        s0 += tmp[j] * kv;
-        s1 += tmp[j + 1] * kv;
-        s2 += tmp[j + 2] * kv;
-        s3 += tmp[j + 3] * kv;
-      }
-      const o = (y * w + x) * 4;
-      data[o] = s0;
-      data[o + 1] = s1;
-      data[o + 2] = s2;
-      data[o + 3] = s3;
-    }
-  }
+  convolveSeparable(img.data, img.width, img.height, 4, gaussKernel(sigma));
 }
 
 export function premultiplyInPlace(d: Uint8ClampedArray) {
@@ -419,12 +390,100 @@ export function distanceTransform(seed: Uint8Array, w: number, h: number): Float
   return out;
 }
 
+/** Disc of integer offsets within radius R, sorted by distance. */
+const discCache = new Map<number, { dx: Int32Array; dy: Int32Array; d: Float32Array }>();
+function discOffsets(R: number) {
+  let c = discCache.get(R);
+  if (c) return c;
+  const pts: [number, number, number][] = [];
+  for (let dy = -R; dy <= R; dy++)
+    for (let dx = -R; dx <= R; dx++) {
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d <= R + 0.5) pts.push([dx, dy, d]);
+    }
+  pts.sort((a, b) => a[2] - b[2]);
+  c = { dx: Int32Array.from(pts, (p) => p[0]), dy: Int32Array.from(pts, (p) => p[1]), d: Float32Array.from(pts, (p) => p[2]) };
+  discCache.set(R, c);
+  return c;
+}
+
+/**
+ * Euclidean distance to the nearest seed, exact up to `maxD` (farther pixels get `maxD + 1`).
+ * Only seeds on the boundary of the seed set can be nearest to a non-seed pixel, so their discs
+ * are stamped; far cheaper than a full transform for thin outlines and small radii (falls back
+ * to the exact transform when stamping would cost more).
+ */
+export function boundedDistance(seed: Uint8Array, w: number, h: number, maxD: number): Float32Array {
+  const n = w * h;
+  const far = maxD + 1;
+  const out = new Float32Array(n).fill(far);
+  const R = Math.max(0, Math.ceil(maxD));
+  const bnd: number[] = [];
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      const i = row + x;
+      if (!seed[i]) continue;
+      out[i] = 0;
+      if ((x > 0 && !seed[i - 1]) || (x < w - 1 && !seed[i + 1]) || (y > 0 && !seed[i - w]) || (y < h - 1 && !seed[i + w])) bnd.push(i);
+    }
+  }
+  if (R === 0 || !bnd.length) return out;
+  const disc = discOffsets(R);
+  const m = disc.d.length;
+  if (bnd.length * m > Math.max(4e6, n * 6)) {
+    const dt = distanceTransform(seed, w, h);
+    for (let i = 0; i < n; i++) out[i] = dt[i] < far ? dt[i] : far;
+    return out;
+  }
+  const { dx, dy, d } = disc;
+  for (let b = 0; b < bnd.length; b++) {
+    const i = bnd[b];
+    const x = i % w,
+      y = (i - x) / w;
+    const inside = x >= R && y >= R && x < w - R && y < h - R;
+    for (let k = 1; k < m; k++) {
+      const dk = d[k];
+      if (dk > maxD + 0.5) break;
+      let q: number;
+      if (inside) q = i + dy[k] * w + dx[k];
+      else {
+        const xx = x + dx[k],
+          yy = y + dy[k];
+        if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        q = yy * w + xx;
+      }
+      if (dk < out[q]) out[q] = dk;
+    }
+  }
+  return out;
+}
+
 /**
  * Inside distance: distance from each pixel to the nearest "outside" pixel (alpha < 50%),
- * treating everything beyond the image border as outside.
+ * treating everything beyond the image border as outside when `borderIsOutside`.
+ * With `maxD`, distances are exact only up to maxD (farther = maxD + 1) — much faster.
  */
-export function insideDistance(img: Img, borderIsOutside = true): Float32Array {
+export function insideDistance(img: Img, borderIsOutside = true, maxD?: number): Float32Array {
   const { width: w, height: h, data } = img;
+  if (maxD !== undefined && isFinite(maxD)) {
+    const n = w * h;
+    const seed = new Uint8Array(n);
+    for (let i = 0, j = 3; i < n; i++, j += 4) seed[i] = data[j] < 128 ? 1 : 0;
+    const out = boundedDistance(seed, w, h, maxD);
+    if (borderIsOutside) {
+      // the virtual ring of outside pixels just beyond the border
+      for (let y = 0; y < h; y++) {
+        const dyb = Math.min(y + 1, h - y);
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+          const db = Math.min(dyb, x + 1, w - x);
+          if (db < out[row + x]) out[row + x] = db;
+        }
+      }
+    }
+    return out;
+  }
   // pad by 1 so the border counts as outside
   const pw = w + 2,
     ph = h + 2;

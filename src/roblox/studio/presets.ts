@@ -189,35 +189,36 @@ export const POSE_PRESETS: PosePreset[] = [
     joints: {
       root: [0, 15, 0],
       neck: [0, -12, 0],
-      rightShoulder: [-35, 0, -22],
-      rightElbow: [-125, 20, 0],
+      rightShoulder: [-30, 0, -9],
+      rightElbow: [2, -80, 117],
+      rightWrist: [-15, 60, -1],
       leftShoulder: [0, 0, 8],
       leftElbow: [-10, 0, 0],
       rightHip: [0, 0, -4],
       leftHip: [0, 0, 6],
     },
-    r6: { joints: { rightShoulder: [-160, 0, -12], rightElbow: [0, 0, 0] } },
+    r6: { joints: { rightShoulder: [-135, 0, -10], rightElbow: [0, 0, 0], rightWrist: [0, 0, 0] } },
   },
   {
     id: 'crossedArms',
     name: 'Crossed Arms',
     joints: {
       neck: [4, 0, 0],
-      rightShoulder: [-20, 0, 8],
-      rightElbow: [-100, 72, 0],
-      leftShoulder: [-22, 0, -8],
-      leftElbow: [-96, -72, 0],
+      rightShoulder: [-46, 1, 29],
+      rightElbow: [-30, 0, 41],
+      leftShoulder: [-35, -1, -26],
+      leftElbow: [-23, 0, -46],
     },
-    r6: { joints: { rightShoulder: [-85, 38, 0], leftShoulder: [-80, -38, 0], rightElbow: [0, 0, 0], leftElbow: [0, 0, 0] } },
+    r6: { joints: { rightShoulder: [-78, 45, 0], leftShoulder: [-70, -42, 0], rightElbow: [0, 0, 0], leftElbow: [0, 0, 0] } },
   },
   {
     id: 'handsOnHips',
     name: 'Hands on Hips',
     joints: {
-      rightShoulder: [12, 0, -42],
-      rightElbow: [-30, 0, 88],
-      leftShoulder: [12, 0, 42],
-      leftElbow: [-30, 0, -88],
+      rightShoulder: [7, -1, -39],
+      rightElbow: [0, -12, 91],
+      leftShoulder: [7, 1, 39],
+      leftElbow: [0, 12, -91],
       rightHip: [0, 0, -5],
       leftHip: [0, 0, 5],
     },
@@ -263,25 +264,25 @@ export const POSE_PRESETS: PosePreset[] = [
     id: 'lookingBack',
     name: 'Looking Back',
     joints: {
-      root: [0, 150, 0],
-      waist: [4, -20, 0],
-      neck: [18, -55, 0],
-      rightShoulder: [-8, 0, -6],
-      rightElbow: [-12, 0, 0],
-      leftShoulder: [-14, 0, 8],
-      leftElbow: [-25, 0, 0],
+      root: [0, 155, 0],
+      waist: [2, -25, 0],
+      neck: [12, -65, -6],
+      rightShoulder: [8, 0, -6],
+      rightElbow: [-10, 0, 0],
+      leftShoulder: [-10, 0, 6],
+      leftElbow: [-20, 0, 0],
     },
-    r6: { joints: { root: [0, 140, 0], neck: [15, -60, 0] } },
+    r6: { joints: { root: [0, 150, 0], waist: [0, 0, 0], neck: [12, -78, 0], rightElbow: [0, 0, 0], leftElbow: [0, 0, 0] } },
   },
   {
     id: 'thinking',
     name: 'Thinking',
     joints: {
       neck: [10, 14, 8],
-      rightShoulder: [-30, 28, 0],
-      rightElbow: [-135, 10, 0],
-      leftShoulder: [-30, -30, 0],
-      leftElbow: [-80, -55, 0],
+      rightShoulder: [-32, 1, 17],
+      rightElbow: [-1, -45, 103],
+      leftShoulder: [-18, 0, 3],
+      leftElbow: [1, 27, -87],
     },
     r6: { joints: { rightShoulder: [-118, 28, 0], leftShoulder: [-55, -35, 0], rightElbow: [0, 0, 0], leftElbow: [0, 0, 0] } },
   },
@@ -321,17 +322,18 @@ export const POSE_PRESETS: PosePreset[] = [
     joints: {
       root: [0, 25, 0],
       neck: [0, -22, 0],
-      rightShoulder: [-55, 28, 0],
-      rightElbow: [-55, 0, 0],
-      rightWrist: [40, 0, 0],
-      leftShoulder: [-55, -35, 0],
-      leftElbow: [-60, -20, 0],
+      rightShoulder: [-29, 0, 24],
+      rightElbow: [-55, 0, 44],
+      rightWrist: [38, -17, 0],
+      leftShoulder: [-25, 1, -23],
+      leftElbow: [-49, -1, -44],
       rightHip: [15, 0, -8],
       rightKnee: [15, 0, 0],
       leftHip: [-20, 0, 8],
       leftKnee: [15, 0, 0],
     },
     rootOffset: [0, -0.15, 0],
+    r6: { joints: { rightShoulder: [-45, 25, 0], leftShoulder: [-35, -20, 0], rightElbow: [0, 0, 0], leftElbow: [0, 0, 0], rightWrist: [0, 0, 0] } },
   },
 ];
 
@@ -362,19 +364,19 @@ export interface BodyColorPreset {
 }
 
 export const BODY_COLOR_PRESETS: BodyColorPreset[] = [
-  { id: 'skinBlack', name: 'Black Outfit', colors: { head: '#d9b38c', torso: '#151517', arms: '#d9b38c', legs: '#1c1c20' } },
-  { id: 'allBlack', name: 'All Black', colors: { head: '#e3b98f', torso: '#141416', arms: '#141416', legs: '#141416' } },
+  { id: 'skinBlack', name: 'Black Outfit', colors: { head: '#d9b38c', torso: '#2a2a2f', arms: '#d9b38c', legs: '#303036' } },
+  { id: 'allBlack', name: 'All Black', colors: { head: '#e3b98f', torso: '#2a2a2f', arms: '#2a2a2f', legs: '#2a2a2f' } },
   { id: 'classic', name: 'Classic', colors: { head: '#f5cd30', torso: '#0d69ac', arms: '#f5cd30', legs: '#a4bd47' } },
   { id: 'classicBlue', name: 'Classic Blue', colors: { head: '#f5cd30', torso: '#1b6fc7', arms: '#f5cd30', legs: '#28497a' } },
   { id: 'classicGreen', name: 'Classic Green', colors: { head: '#f5cd30', torso: '#4b974b', arms: '#f5cd30', legs: '#2c5c2c' } },
-  { id: 'crimson', name: 'Crimson Coat', colors: { head: '#d9b38c', torso: '#7a1214', arms: '#7a1214', legs: '#1a1a1c' } },
-  { id: 'whiteShirt', name: 'White Shirt', colors: { head: '#d9b38c', torso: '#e8e6e1', arms: '#e8e6e1', legs: '#2b2b30' } },
-  { id: 'violet', name: 'Violet', colors: { head: '#d9b38c', torso: '#3b2f6b', arms: '#3b2f6b', legs: '#18161f' } },
-  { id: 'guest', name: 'Guest', colors: { head: '#a3a2a5', torso: '#1f1f22', arms: '#a3a2a5', legs: '#1f1f22' } },
+  { id: 'crimson', name: 'Crimson Coat', colors: { head: '#d9b38c', torso: '#7a1214', arms: '#7a1214', legs: '#2a2a2f' } },
+  { id: 'whiteShirt', name: 'White Shirt', colors: { head: '#d9b38c', torso: '#e8e6e1', arms: '#e8e6e1', legs: '#34343a' } },
+  { id: 'violet', name: 'Violet', colors: { head: '#d9b38c', torso: '#3b2f6b', arms: '#3b2f6b', legs: '#2a2633' } },
+  { id: 'guest', name: 'Guest', colors: { head: '#a3a2a5', torso: '#2a2a2f', arms: '#a3a2a5', legs: '#2a2a2f' } },
 ];
 
 export const SKIN_TONES = ['#f5cd30', '#f1d2b5', '#e3b98f', '#d9b38c', '#b98a5e', '#8d5a3b', '#5c3a21', '#a3a2a5'];
-export const HAIR_COLORS = ['#15151a', '#3b2a20', '#6b5f8f', '#d9c27a', '#b31b1b', '#eeeeee', '#2f6fd6'];
+export const HAIR_COLORS = ['#35323f', '#15151a', '#4a3226', '#7d78a6', '#d9c27a', '#b31b1b', '#eeeeee', '#2f6fd6'];
 
 export const HAIR_STYLES: { value: 'spiky' | 'messy' | 'slick' | 'long' | 'none'; label: string }[] = [
   { value: 'spiky', label: 'Spiky Anime' },
@@ -402,14 +404,19 @@ export interface LightingPreset extends Omit<StudioLighting, 'preset'> {
   swatch: string[];
 }
 
+/**
+ * Light directions are relative to the camera (see LightSpec): 0° = from the camera, -90° = from
+ * the left of the frame, +90° = from the right, ±180° = from behind. Rims sit side-back (~125°) so
+ * they catch the side faces visible in 3/4 views.
+ */
 export const LIGHTING_PRESETS: LightingPreset[] = [
-  { id: 'studio', name: 'Studio', swatch: ['#f2f2f2', '#9aa7c7'], key: L('#ffffff', 2.6, 35, 40), rim: L('#ffffff', 1.4, 200, 30), fill: L('#dfe8ff', 0.7, -60, 10), ambient: 0.6, ambientColor: '#ffffff' },
-  { id: 'dramaticRim', name: 'Dramatic Rim', swatch: ['#ffffff', '#2a3350'], key: L('#fff2e0', 2.0, 60, 35), rim: L('#ffffff', 4.0, 165, 25), fill: L('#4a5a80', 0.3, -90, 5), ambient: 0.15, ambientColor: '#ffffff' },
-  { id: 'sunset', name: 'Sunset', swatch: ['#ffb35c', '#6a3a8a'], key: L('#ffb35c', 3.0, -50, 20), rim: L('#ff7a2e', 2.8, 150, 35), fill: L('#6a3a8a', 0.6, 80, 10), ambient: 0.35, ambientColor: '#ffcf99' },
-  { id: 'noir', name: 'Noir', swatch: ['#ffffff', '#000000'], key: L('#ffffff', 3.6, 55, 45), rim: L('#ffffff', 0, 180, 20), fill: L('#ffffff', 0, -60, 10), ambient: 0.06, ambientColor: '#ffffff' },
-  { id: 'crimson', name: 'Crimson', swatch: ['#ff1a1a', '#200004'], key: L('#ffe9e0', 1.7, 40, 35), rim: L('#ff1a1a', 5.0, 180, 20), fill: L('#5a000c', 0.5, -70, 5), ambient: 0.15, ambientColor: '#ff5050' },
-  { id: 'violetGothic', name: 'Violet Gothic', swatch: ['#f4f0ff', '#8b7cf6'], key: L('#f4f0ff', 2.5, -40, 45), rim: L('#8b7cf6', 3.4, 160, 30), fill: L('#3b2f6b', 0.6, 70, 5), ambient: 0.3, ambientColor: '#b8a8ff' },
-  { id: 'neon', name: 'Neon', swatch: ['#3cf2ff', '#ff2bd6'], key: L('#3cf2ff', 2.2, -70, 20), rim: L('#ff2bd6', 4.0, 120, 15), fill: L('#2b2bff', 0.9, 90, 0), ambient: 0.12, ambientColor: '#ffffff' },
+  { id: 'studio', name: 'Studio', swatch: ['#f2f2f2', '#9aa7c7'], key: L('#ffffff', 2.6, -40, 50), rim: L('#ffffff', 1.4, 140, 35), fill: L('#dfe8ff', 0.3, 60, 5), ambient: 0.55, ambientColor: '#ffffff' },
+  { id: 'dramaticRim', name: 'Dramatic Rim', swatch: ['#ffffff', '#2a3350'], key: L('#fff2e0', 3.2, -120, 32), rim: L('#ffffff', 4.2, 125, 26), fill: L('#4a5a80', 0.45, 0, 12), ambient: 0.1, ambientColor: '#ffffff' },
+  { id: 'sunset', name: 'Sunset', swatch: ['#ffb35c', '#6a3a8a'], key: L('#ffc46b', 2.5, -50, 22), rim: L('#ff7a2e', 4.2, 130, 34), fill: L('#6a3a8a', 0.7, 80, 0), ambient: 0.35, ambientColor: '#ffcf99' },
+  { id: 'noir', name: 'Noir', swatch: ['#ffffff', '#000000'], key: L('#ffffff', 3.6, -62, 48), rim: L('#ffffff', 0, 125, 20), fill: L('#ffffff', 0, 60, 10), ambient: 0.05, ambientColor: '#ffffff' },
+  { id: 'crimson', name: 'Crimson', swatch: ['#ff1a1a', '#200004'], key: L('#fff0e8', 2.3, -32, 38), rim: L('#ff1a1a', 5.5, 125, 20), fill: L('#5a000c', 0.6, 75, 0), ambient: 0.12, ambientColor: '#ff5050' },
+  { id: 'violetGothic', name: 'Violet Gothic', swatch: ['#f4f0ff', '#8b7cf6'], key: L('#f4f0ff', 2.6, -45, 48), rim: L('#8b7cf6', 4.0, 125, 26), fill: L('#3b2f6b', 0.7, 70, 0), ambient: 0.32, ambientColor: '#b8a8ff' },
+  { id: 'neon', name: 'Neon', swatch: ['#3cf2ff', '#ff2bd6'], key: L('#3cf2ff', 3.0, -100, 16), rim: L('#ff2bd6', 3.8, 105, 16), fill: L('#2b2bff', 0.6, 0, 0), ambient: 0.1, ambientColor: '#ffffff' },
 ];
 
 export function lightingFromPreset(id: string): StudioLighting {
@@ -479,14 +486,14 @@ export function defaultStudioState(): StudioState {
     appearance: {
       colors: { ...BODY_COLOR_PRESETS[0].colors },
       hair: 'spiky',
-      hairColor: '#2a2833',
+      hairColor: '#35323f',
       face: 'blank',
       accessories: { sword: false, katana: false, shield: false, crown: false, headphones: false, cape: false },
       accentColor: '#7a1214',
     },
     camera: defaultCamera(),
     lighting: lightingFromPreset('studio'),
-    shading: { mode: 'toon', toonSteps: 3, flatColor: '#0b0b0b', outline: true, outlineThickness: 3, outlineColor: '#000000' },
+    shading: { mode: 'toon', toonSteps: 4, flatColor: '#0b0b0b', outline: true, outlineThickness: 3, outlineColor: '#000000' },
     output: { size: 'document' },
   };
 }

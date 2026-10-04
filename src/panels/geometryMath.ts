@@ -5,6 +5,17 @@
 import type { Rect, Transform } from '../core/types';
 
 /* ------------------------------------------------------------------ */
+/* Integer pixel box                                                   */
+/* ------------------------------------------------------------------ */
+
+/** Smallest integer-aligned rect containing `r` (for rasterizing local content). */
+export function pixelBox(r: Rect): Rect {
+  const x = Math.floor(r.x);
+  const y = Math.floor(r.y);
+  return { x, y, width: Math.max(1, Math.ceil(r.x + r.width) - x), height: Math.max(1, Math.ceil(r.y + r.height) - y) };
+}
+
+/* ------------------------------------------------------------------ */
 /* Align & distribute                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -149,6 +160,32 @@ export function flippedTransform(t: Transform, axis: 'h' | 'v'): Transform {
 /** Identity scale/rotation/skew around the same center. */
 export function resetTransform(t: Transform): Transform {
   return { ...t, scaleX: 1, scaleY: 1, rotation: 0, skewX: 0 };
+}
+
+/**
+ * Linear part (rotation · skew · scale) of a layer transform applied to a vector — the same
+ * order as core/geometry.ts transformMatrix: M = T · R(rot) · SkewX(skew) · S(sx, sy) · T(-c).
+ */
+export function linearApply(t: Transform, dx: number, dy: number): { x: number; y: number } {
+  let x = dx * t.scaleX;
+  let y = dy * t.scaleY;
+  if (t.skewX) x += Math.tan((t.skewX * Math.PI) / 180) * y;
+  const a = ((t.rotation || 0) * Math.PI) / 180;
+  const c = Math.cos(a);
+  const s = Math.sin(a);
+  return { x: x * c - y * s, y: x * s + y * c };
+}
+
+/**
+ * Transform for a new local box that covers `box` (expressed in the OLD local coordinates, e.g.
+ * a text layer's padded bounds) such that every pixel lands exactly where it was:
+ * new local (u, v) ≡ old local (box.x + u, box.y + v). Rotation/scale/skew are unchanged.
+ */
+export function reboxTransform(t: Transform, w: number, h: number, box: Rect): Transform {
+  const d = linearApply(t, box.x + box.width / 2 - w / 2, box.y + box.height / 2 - h / 2);
+  const cx = t.x + w / 2 + d.x;
+  const cy = t.y + h / 2 + d.y;
+  return { ...t, x: cx - box.width / 2, y: cy - box.height / 2 };
 }
 
 /** Normalize an angle to (-180, 180]. */

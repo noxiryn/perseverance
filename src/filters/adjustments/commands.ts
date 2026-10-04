@@ -10,7 +10,7 @@ import { commands, filters, type CommandDef, type FilterDef } from '../../regist
 import { activeDoc, activeSession } from '../../state/editor';
 import { toast } from '../../state/ui';
 import { renderDocument } from '../../render/compositor';
-import { autoColorCurves, autoContrastParams, autoToneCurves } from './auto';
+import { analysisMask, autoColorCurves, autoContrastParams, autoToneCurves } from './auto';
 import { activeRasterTarget, editRasterPixels, readLayerPixels } from './apply';
 import { computeHistogram, readDownscaled } from './histogram';
 import { createAdjustmentLayer, layersAbove, NO_DOC_MESSAGE } from './layers';
@@ -40,10 +40,8 @@ function applyDestructive(def: FilterDef) {
   const layer = s.activeLayerId ? s.doc.layers[s.activeLayerId] : null;
   if (!layer) return toast(`Select a layer to apply ${def.name}.`, 'info');
   if (layer.type === 'adjustment' || layer.type === 'group' || layer.type === 'fill') {
-    return toast(
-      `${def.name} can't be applied to ${layer.type === 'group' ? 'a group' : `a ${layer.type} layer`}. Use Layer ▸ New Adjustment Layer ▸ ${def.name} instead.`,
-      'warning',
-    );
+    const what = layer.type === 'group' ? 'a group' : layer.type === 'adjustment' ? 'an adjustment layer' : 'a fill layer';
+    return toast(`${def.name} can't be applied to ${what}. Use Layer ▸ New Adjustment Layer ▸ ${def.name} instead.`, 'warning');
   }
   // Loaded lazily: the dialog (fx-filters module) is heavy and not needed at startup.
   void import('../ui/filterDialog')
@@ -70,7 +68,8 @@ export function syncAdjustmentCommands() {
       const order = ri * 100 + i * 10;
       next.push({
         id: `adjustments.newLayer.${def.id}`,
-        label: `${def.name}…`,
+        // No ellipsis: the layer is created immediately (its settings open in Properties).
+        label: def.name,
         menu: 'Layer/New Adjustment Layer',
         group: `20-fill${SUBGROUP[Math.min(ri, SUBGROUP.length - 1)]}`,
         order: 500 + order,
@@ -110,7 +109,12 @@ export function syncAdjustmentCommands() {
 type AutoKind = 'tone' | 'contrast' | 'color';
 const AUTO_LABEL: Record<AutoKind, string> = { tone: 'Auto Tone', contrast: 'Auto Contrast', color: 'Auto Color' };
 
-function autoParams(kind: AutoKind, img: ImageData, mask: ArrayLike<number> | null): { filterId: 'levels' | 'curves'; params: ParamValues } | null {
+function autoParams(
+  kind: AutoKind,
+  img: ImageData,
+  selection: ArrayLike<number> | null,
+): { filterId: 'levels' | 'curves'; params: ParamValues } | null {
+  const mask = analysisMask(img, selection);
   if (kind === 'contrast') {
     const p = autoContrastParams(computeHistogram(img, { mask }));
     return p ? { filterId: 'levels', params: { ...p } } : null;
@@ -204,8 +208,9 @@ export function registerStaticCommands() {
       id: 'adjustments.desaturate',
       label: 'Desaturate',
       menu: 'Image/Adjustments',
-      group: '10-adjustments-c',
-      order: 250,
+      // Own trailing group, like Photoshop (after the adjustment rows).
+      group: '10-adjustments-z',
+      order: 10,
       shortcut: 'Shift+Ctrl+U',
       icon: CircleSlash,
       keywords: ['desaturate', 'grayscale', 'gray', 'remove color'],

@@ -8,7 +8,7 @@ import { resolveParams } from '../filters/engine';
 import { toCss } from '../core/color';
 import { ctx2d } from '../core/canvas';
 import { diamondQuadrants, gradientGeometry, normalizedStops, reflectedStops, type StopSpec } from './gradientMath';
-import { px, renderCache } from './cache';
+import { VOLATILE_ASSETS, objId, px, renderCache } from './cache';
 import { acquire, release } from './surface';
 
 function cssColor(c: string): string {
@@ -117,12 +117,15 @@ export function assetImage(assetId: string, params: ParamValues | undefined, wid
   const W = Math.max(1, Math.round(width));
   const H = Math.max(1, Math.round(height));
   const p = resolveParams(def, params);
-  const key = `asset|${assetId}|${W}x${H}|${stableKey(p)}`;
+  // Keyed by definition identity: re-registering an asset (new def object) regenerates it.
+  const key = `asset|${assetId}|${objId(def)}|${W}x${H}|${stableKey(p)}`;
   const hit = renderCache.get<HTMLCanvasElement>(key);
   if (hit) return hit;
   try {
     const c = def.generate(p, { width: W, height: H });
-    renderCache.set(key, c, px(c));
+    // User images may still be decoding (blank result): those entries are dropped by every
+    // full invalidation, while procedural assets (pure functions of their params) survive.
+    renderCache.set(key, c, px(c), def.category === 'My Assets' ? VOLATILE_ASSETS : undefined);
     return c;
   } catch (err) {
     console.error(`[render] asset "${assetId}" failed to generate`, err);

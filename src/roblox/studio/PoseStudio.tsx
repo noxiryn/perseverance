@@ -55,7 +55,7 @@ const TABS: { value: Tab; label: string }[] = [
   { value: 'style', label: 'Render' },
 ];
 
-const STORAGE_KEY = 'perseverance.roblox.poseStudio.v1';
+const STORAGE_KEY = 'perseverance.roblox.poseStudio.v2';
 
 /** Last studio state used in this session (so reopening keeps your character). */
 let lastState: StudioState | null = null;

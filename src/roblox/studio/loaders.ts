@@ -9,13 +9,14 @@ import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { extOf } from '../../platform';
+import { isTextureName, mimeOf, mtlLibsOf, pickMainFile, resourceKey, type ModelFormat } from './modelFiles';
 
 import type { ModelFile } from './modelCache';
 
 export type { ModelFile } from './modelCache';
 export { cacheModelFiles, cachedModelFiles } from './modelCache';
+export { MODEL_EXTENSIONS, pickMainFile, resourceKey, mtlLibsOf, type ModelFormat } from './modelFiles';
 
-export type ModelFormat = 'obj' | 'glb' | 'gltf' | 'fbx';
 
 export interface LoadedModel {
   root: THREE.Object3D;
@@ -28,52 +29,9 @@ export interface LoadedModel {
   triangles: number;
 }
 
-export const MODEL_EXTENSIONS = ['obj', 'mtl', 'glb', 'gltf', 'bin', 'fbx', 'png', 'jpg', 'jpeg', 'webp', 'tga', 'bmp', 'gif'];
-const MAIN_PRIORITY: ModelFormat[] = ['glb', 'gltf', 'fbx', 'obj'];
-
 /** 1×1 white PNG used for textures that were not selected (keeps the material color visible). */
 const WHITE_PIXEL =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=';
-
-/** Case-insensitive base name of a path or URL ("textures\\Foo.PNG?x" → "foo.png"). */
-export function resourceKey(url: string): string {
-  let s = url.split(/[?#]/)[0];
-  try {
-    s = decodeURIComponent(s);
-  } catch {
-    /* keep raw */
-  }
-  return (s.split(/[\\/]/).pop() ?? s).trim().toLowerCase();
-}
-
-/** Choose the main model file among the selection (glb > gltf > fbx > obj). */
-export function pickMainFile<T extends { name: string }>(files: T[]): T | null {
-  for (const fmt of MAIN_PRIORITY) {
-    const f = files.find((x) => extOf(x.name) === fmt);
-    if (f) return f;
-  }
-  return null;
-}
-
-/** `mtllib` file names referenced by an OBJ file. */
-export function mtlLibsOf(objText: string): string[] {
-  const out: string[] = [];
-  const re = /^\s*mtllib\s+(.+?)\s*$/gm;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(objText))) out.push(m[1]);
-  return out;
-}
-
-function mimeOf(name: string): string {
-  const e = extOf(name);
-  if (e === 'png') return 'image/png';
-  if (e === 'jpg' || e === 'jpeg') return 'image/jpeg';
-  if (e === 'webp') return 'image/webp';
-  if (e === 'gif') return 'image/gif';
-  if (e === 'bmp') return 'image/bmp';
-  if (e === 'gltf') return 'model/gltf+json';
-  return 'application/octet-stream';
-}
 
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -112,7 +70,7 @@ export async function loadModel(files: ModelFile[]): Promise<LoadedModel> {
     if (hit) return hit;
     const key = resourceKey(url);
     if (key) missing.add(key);
-    return /\.(png|jpe?g|webp|gif|bmp|tga)$/i.test(key) ? WHITE_PIXEL : url;
+    return isTextureName(key) ? WHITE_PIXEL : url;
   });
   // Track outstanding resource loads (textures keep loading after OBJ/FBX parsing returns).
   let total = 0;

@@ -20,7 +20,8 @@ import { uid } from '../core/ids';
 import { deselect, invertSelection, selectAll } from '../editor/selection';
 import { activeDoc, activeSession, useEditor } from '../state/editor';
 import { openDialog, toast, useUI, type ViewToggles } from '../state/ui';
-import { AmountDialog, ColorRangeDialog, NewGuideDialog, type AmountDialogProps, type NewGuideResult } from './dialogs';
+import { AmountDialog, NewGuideDialog, type AmountDialogProps, type NewGuideResult } from './dialogs';
+import { openColorRange } from './colorRange';
 import { loadLayerSelection, modifySelection, reselect, selectAllLayers, type ModifyKind } from './selectOps';
 import { lastSelectionFor } from './lifecycle';
 import { actualPixels, fitOnScreen, zoomStep } from './tools/navigate';
@@ -154,9 +155,8 @@ const selectCommands: CommandDef[] = [
     order: 10,
     keywords: ['select color', 'fuzziness', 'select by color'],
     enabled: hasDoc,
-    run: async () => {
-      if (!requireDoc('Color Range')) return;
-      await openDialog(ColorRangeDialog);
+    run: () => {
+      if (requireDoc('Color Range')) void openColorRange();
     },
   },
   ...(Object.keys(MODIFY) as ModifyKind[]).map(

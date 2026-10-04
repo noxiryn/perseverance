@@ -13,15 +13,20 @@ import { historyIcon } from './icons';
 import { CanvasView } from './thumbs';
 import './panels.css';
 
-/** Snapshot thumbnails of first entries (rendered once, when first seen). */
-const snapshots = new WeakMap<HistoryEntry, HTMLCanvasElement>();
+/**
+ * Snapshot thumbnails of first entries, rendered once when first seen and keyed by entry id
+ * (entries may be re-created for silent UI changes; bitmaps may since have been painted on, so
+ * re-rendering later could show a newer state).
+ */
+const snapshots = new Map<string, HTMLCanvasElement>();
 
 function snapshotOf(e: HistoryEntry): HTMLCanvasElement | null {
-  let c = snapshots.get(e) ?? null;
+  let c = snapshots.get(e.id) ?? null;
   if (!c) {
     try {
       c = cloneCanvas(renderThumbnail(e.doc, null, 64));
-      snapshots.set(e, c);
+      snapshots.set(e.id, c);
+      if (snapshots.size > 40) snapshots.delete(snapshots.keys().next().value as string);
     } catch {
       return null;
     }

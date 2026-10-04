@@ -71,7 +71,7 @@ export const BUILTIN_PRESETS: PaintBrushPreset[] = [
   // ---- FX & particles ----
   { id: 'smoke', name: 'Smoke', category: 'FX & Particles', size: 220, hardness: 1, spacing: 0.18, flow: 0.18, angleJitter: 1, sizeJitter: 0.3, scatter: 0.15, tip: smokeTip, description: 'Billowing smoke wisps' },
   { id: 'sparkle-stars', name: 'Sparkle Stars', category: 'FX & Particles', size: 50, hardness: 1, spacing: 1.6, flow: 1, sizeJitter: 0.7, scatter: 1, angleJitter: 0.08, opacityJitter: 0.3, tip: sparkleTip, description: 'Twinkling 4-point stars' },
-  { id: 'glow-dot', name: 'Glow Dot', category: 'FX & Particles', size: 60, hardness: 1, spacing: 0.2, flow: 0.6, tip: glowDotTip, description: 'Bright core with a soft halo' },
+  { id: 'glow-dot', name: 'Glow Dot', category: 'FX & Particles', size: 60, hardness: 1, spacing: 0.05, flow: 0.22, tip: glowDotTip, description: 'Bright core with a soft halo' },
   { id: 'embers', name: 'Embers', category: 'FX & Particles', size: 30, hardness: 1, spacing: 1.4, flow: 1, scatter: 1, sizeJitter: 0.85, opacityJitter: 0.5, tip: glowDotTip, description: 'Scattered glowing sparks' },
   { id: 'scatter-dots', name: 'Scatter Dots', category: 'FX & Particles', size: 16, hardness: 0.9, spacing: 1.2, flow: 1, scatter: 1, sizeJitter: 0.7, description: 'Random dots / dust' },
 

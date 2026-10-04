@@ -6,6 +6,9 @@
 
 export type FontFileFormat = 'ttf' | 'otf' | 'ttc' | 'woff' | 'woff2' | 'unknown';
 
+/** Coarse design class from the OS/2 table (PANOSE / sFamilyClass). */
+export type FontClassHint = 'serif' | 'sans' | 'slab' | 'script' | 'decorative' | 'mono' | 'symbol';
+
 export interface FontFileInfo {
   family: string;
   subfamily: string;
@@ -13,6 +16,47 @@ export interface FontFileInfo {
   weight: number;
   italic: boolean;
   format: FontFileFormat;
+  /** Design class declared by the font (undefined when the font does not say). */
+  classHint?: FontClassHint;
+}
+
+/**
+ * Design class from OS/2 PANOSE (preferred) or sFamilyClass. `os2` must start at the table.
+ * PANOSE Latin Text: serif style 2–10 = serif, 11–13 = sans, 14/15 = flared/rounded (sans);
+ * proportion 9 = monospaced. Family kinds 3/4/5 = hand written / decorative / symbol.
+ */
+export function classFromOs2(os2: DataView): FontClassHint | undefined {
+  if (os2.byteLength < 42) return undefined;
+  const familyType = os2.getUint8(32);
+  const serifStyle = os2.getUint8(33);
+  const proportion = os2.getUint8(35);
+  if (familyType === 2) {
+    if (proportion === 9) return 'mono';
+    if (serifStyle >= 2 && serifStyle <= 10) return serifStyle === 6 ? 'slab' : 'serif';
+    if (serifStyle >= 11 && serifStyle <= 15) return 'sans';
+  } else if (familyType === 3) return 'script';
+  else if (familyType === 4) return 'decorative';
+  else if (familyType === 5) return 'symbol';
+  switch (os2.getUint8(30)) {
+    case 1:
+    case 2:
+    case 3:
+    case 7:
+      return 'serif';
+    case 4:
+    case 5:
+      return 'slab';
+    case 8:
+      return 'sans';
+    case 9:
+      return 'decorative';
+    case 10:
+      return 'script';
+    case 12:
+      return 'symbol';
+    default:
+      return undefined;
+  }
 }
 
 const tag = (dv: DataView, o: number) =>
@@ -223,6 +267,7 @@ export async function parseFontFile(buf: ArrayBuffer, fileName = 'Custom Font', 
     let italic = /italic|oblique/i.test(subfamily);
     if (os2 && os2.byteLength >= 64) italic = italic || (os2.getUint16(62) & 0x201) !== 0;
     if (head && head.byteLength >= 46) italic = italic || (head.getUint16(44) & 0x2) !== 0;
+    const classHint = os2 ? classFromOs2(os2) : undefined;
     return {
       family: family.trim(),
       subfamily: subfamily.trim(),
@@ -230,6 +275,7 @@ export async function parseFontFile(buf: ArrayBuffer, fileName = 'Custom Font', 
       weight: Math.round(weight / 100) * 100 || 400,
       italic,
       format,
+      ...(classHint ? { classHint } : {}),
     };
   } catch {
     return fallback;

@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { FontDef } from '../registry';
 import { detectFormat, infoFromFileName, parseFontFile, readNameTable, weightFromStyleName } from './sfnt';
-import { filterFonts, groupByCategory, previewWeight, scoreFont, weightsHint } from './search';
+import { filterFonts, groupByCategory, previewScale, previewWeight, scoreFont, weightName, weightsHint } from './search';
 import { groupLocalFonts } from './system';
 import { findIndex } from './VirtualList';
-import { CATALOG, POPULAR_FAMILIES } from './catalog';
+import { CATALOG, guessCategory, POPULAR_FAMILIES } from './catalog';
 import { BUNDLED_FAMILIES, LATIN_FACES } from './generated/faces';
 
 /* ---------------- a tiny synthetic TrueType file ---------------- */
@@ -18,7 +18,13 @@ function utf16be(s: string): number[] {
   return out;
 }
 
-function buildTtf(family: string, sub: string, weight: number, italic: boolean): ArrayBuffer {
+function buildTtf(
+  family: string,
+  sub: string,
+  weight: number,
+  italic: boolean,
+  os2Class?: { panose?: number[]; familyClass?: number },
+): ArrayBuffer {
   // name table: format 0, records for nameID 1, 2, 4 (platform 3, enc 1, lang 0x409)
   const names: [number, string][] = [
     [1, family],
@@ -45,6 +51,8 @@ function buildTtf(family: string, sub: string, weight: number, italic: boolean):
   const odv = new DataView(os2.buffer);
   odv.setUint16(4, weight);
   odv.setUint16(62, italic ? 1 : 0);
+  if (os2Class?.familyClass) odv.setUint8(30, os2Class.familyClass);
+  os2Class?.panose?.forEach((v, i) => odv.setUint8(32 + i, v));
 
   const tables: [string, Uint8Array][] = [
     ['OS/2', os2],
@@ -115,6 +123,21 @@ describe('sfnt parsing', () => {
     expect(reg).toMatchObject({ family: 'Roboto Condensed', subfamily: 'Regular', weight: 400 });
   });
 
+  it('reads the design class from PANOSE / sFamilyClass', async () => {
+    const sans = await parseFontFile(buildTtf('Plain', 'Regular', 400, false, { panose: [2, 11, 5, 3] }), 'x.ttf');
+    expect(sans.classHint).toBe('sans');
+    const mono = await parseFontFile(buildTtf('Term', 'Regular', 400, false, { panose: [2, 11, 5, 9] }), 'x.ttf');
+    expect(mono.classHint).toBe('mono');
+    const serif = await parseFontFile(buildTtf('Book', 'Regular', 400, false, { panose: [2, 2, 5, 3] }), 'x.ttf');
+    expect(serif.classHint).toBe('serif');
+    const script = await parseFontFile(buildTtf('Signy', 'Regular', 400, false, { panose: [3, 0, 0, 0] }), 'x.ttf');
+    expect(script.classHint).toBe('script');
+    // No PANOSE → sFamilyClass (10 = scripts, 5 = slab serifs).
+    expect((await parseFontFile(buildTtf('A', 'Regular', 400, false, { familyClass: 10 }), 'x.ttf')).classHint).toBe('script');
+    expect((await parseFontFile(buildTtf('A', 'Regular', 400, false, { familyClass: 5 }), 'x.ttf')).classHint).toBe('slab');
+    expect((await parseFontFile(buildTtf('A', 'Regular', 400, false), 'x.ttf')).classHint).toBeUndefined();
+  });
+
   it('weights from style names', () => {
     expect(weightFromStyleName('Thin')).toBe(100);
     expect(weightFromStyleName('ExtraLight Italic')).toBe(200);
@@ -176,6 +199,35 @@ describe('font search', () => {
     expect(weightsHint(LIST[3])).toBe('400–900 · 6');
     expect(previewWeight(def('X', 'Japanese', [], [700]))).toBe(700);
     expect(previewWeight(LIST[3])).toBe(400);
+  });
+});
+
+describe('user font categories', () => {
+  it('uses distinctive names first, then the declared class, then generic words', () => {
+    expect(guessCategory('Old London Fraktur')).toBe('Blackletter');
+    expect(guessCategory('Cloister Gothic')).toBe('Blackletter');
+    expect(guessCategory('Century Gothic')).toBe('Sans');
+    expect(guessCategory('League Gothic')).toBe('Condensed');
+    expect(guessCategory('Yu Gothic')).toBe('Japanese');
+    expect(guessCategory('Noto Sans JP')).toBe('Japanese');
+    expect(guessCategory('Bloody Halloween')).toBe('Grunge & Horror');
+    expect(guessCategory('Fira Code')).toBe('Typewriter & Mono');
+    expect(guessCategory('Arsenal SC', 'sans')).toBe('Sans');
+    expect(guessCategory('Lovely Lady', 'script')).toBe('Script');
+    expect(guessCategory('Gentium Book', 'serif')).toBe('Serif');
+    expect(guessCategory('Roboto Slab', 'slab')).toBe('Serif');
+    expect(guessCategory('Mystery Face')).toBe('Display');
+    expect(guessCategory('Source Serif')).toBe('Serif');
+  });
+});
+
+describe('weight helpers', () => {
+  it('names weights and scales thin scripts up in previews', () => {
+    expect(weightName(700)).toBe('Bold');
+    expect(weightName(600)).toBe('SemiBold');
+    expect(weightName(450)).toBe('Medium');
+    expect(previewScale('Script')).toBeGreaterThan(previewScale('Condensed'));
+    expect(previewScale('Condensed')).toBe(1);
   });
 });
 

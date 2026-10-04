@@ -35,7 +35,10 @@ function spike(base: THREE.Vector3, dir: THREE.Vector3, length: number, radius: 
   g.applyQuaternion(q);
   const c = base.clone().addScaledVector(d, length * 0.5 - radius * 0.35);
   g.translate(c.x, c.y, c.z);
-  return prep(g);
+  // Faceted spikes (flat face normals) read as cut hair locks under toon light; the cap stays smooth.
+  const n = prep(g);
+  n.computeVertexNormals();
+  return n;
 }
 
 function cap(sx: number, sy: number, sz: number, y: number, z: number, thetaLen = Math.PI * 0.56): THREE.BufferGeometry {

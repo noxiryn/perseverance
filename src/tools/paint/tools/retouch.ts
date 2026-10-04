@@ -72,6 +72,8 @@ function createRetouchTool(spec: RetouchSpec): ToolDef {
     tone: ToneOp | null;
     axis: AxisLock;
     finger: [number, number, number] | null;
+    /** Previous dab center (local px) — smudge pickup is distance based. */
+    lastDab: { x: number; y: number } | null;
   }
   let active: Active | null = null;
 
@@ -103,9 +105,16 @@ function createRetouchTool(spec: RetouchSpec): ToolDef {
         if (!a.smudge) {
           a.smudge = createSmudgeState(radius);
           primeSmudge(a.smudge, a.session.buf, c.x, c.y, radius, a.finger ?? undefined);
+          a.lastDab = c;
           return;
         }
-        rect = smudgeDab(a.session.buf, a.smudge, area, Math.min(0.98, strength));
+        // Strength = color kept per quarter-radius of travel, so the smear length does not
+        // depend on dab spacing or how the pointer was sampled.
+        const step = a.lastDab ? Math.hypot(c.x - a.lastDab.x, c.y - a.lastDab.y) : 0;
+        a.lastDab = c;
+        if (step < 0.05) return;
+        const keep = Math.pow(Math.min(0.98, strength), Math.min(4, step / Math.max(1, radius * 0.25)));
+        rect = smudgeDab(a.session.buf, a.smudge, area, keep);
         break;
       }
       default:
@@ -189,6 +198,7 @@ function createRetouchTool(spec: RetouchSpec): ToolDef {
         tone,
         axis: new AxisLock(),
         finger,
+        lastDab: null,
       };
       active = a;
       paint(a, stroke.begin(inputPoint(e)));

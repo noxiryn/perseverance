@@ -1,8 +1,8 @@
 /**
  * Editor for one adjustment layer (shared by the Adjustments panel and the Properties panel):
  * header (icon, name, clip / visibility / reset / delete), preset dropdown, then the params —
- * custom Levels and Curves editors with the histogram of the layers below, ParamEditor for the
- * rest. Edits preview live and commit as coalesced history steps.
+ * custom Levels and Curves editors with the histogram of the layers below, a Photoshop-style
+ * Color Balance editor, ParamEditor for the rest. Edits preview live and commit as coalesced history steps.
  */
 import { useMemo } from 'react';
 import { Eye, EyeOff, RotateCcw, SquareArrowDownLeft, Trash2, WandSparkles } from 'lucide-react';
@@ -17,7 +17,9 @@ import { autoContrastParams, autoToneCurves } from './auto';
 import { clippedBins } from './HistogramCanvas';
 import { isCurves } from './params';
 import { LevelsEditor } from './LevelsEditor';
-import { matchPreset, presetsFor } from './presets';
+import { ColorBalanceEditor } from './ColorBalanceEditor';
+import { presetSwatchCss } from './swatches';
+import { isCustomName, matchPreset, presetsFor } from './presets';
 import {
   commitAdjustmentParams,
   deleteAdjustmentLayer,
@@ -29,6 +31,15 @@ import {
 } from './layers';
 import { useBelowHistogram, useElementWidth } from './useBelowHistogram';
 import './adjustments.css';
+
+/** Palette preview of the selected Color Lookup look (sample colors through the look). */
+function LookStrip({ values }: { values: ParamValues }) {
+  const css = presetSwatchCss('color-lookup', values);
+  if (!css) return null;
+  return (
+    <div className="adjustments-look-strip" style={{ background: css }} title="Shadows · skin · red · foliage · sky · highlights through the look" />
+  );
+}
 
 function useLayer(layerId: ID): AdjustmentLayer | null {
   return useEditor((s) => {
@@ -69,9 +80,7 @@ export function AdjustmentEditor({ layerId, context = 'panel' }: { layerId: ID; 
   if (!layer) return <div className="ui-empty">Select an adjustment layer to edit its settings.</div>;
   if (!def) {
     return (
-      <div className="ui-empty">
-        The “{layer.adjustment.filterId}” adjustment is not available in this version. The layer is kept unchanged.
-      </div>
+      <div className="ui-empty">The “{layer.adjustment.filterId}” adjustment is not available in this version. The layer is kept unchanged.</div>
     );
   }
 
@@ -108,42 +117,63 @@ export function AdjustmentEditor({ layerId, context = 'panel' }: { layerId: ID; 
 
   const curvesValue: CurvesValue = isCurves(values.curves) ? values.curves : IDENTITY_CURVES;
 
+  const clipButton = (
+    <IconButton
+      icon={SquareArrowDownLeft}
+      size="sm"
+      active={layer.clipped}
+      title={layer.clipped ? 'Release clipping (affect all layers below)' : 'Clip to layer below (affect only that layer)'}
+      onClick={() => toggleClipped(layerId)}
+    />
+  );
+  const visibilityButton = (
+    <IconButton
+      icon={layer.visible ? Eye : EyeOff}
+      size="sm"
+      active={!layer.visible}
+      title={layer.visible ? 'Hide adjustment' : 'Show adjustment'}
+      onClick={() => toggleVisible(layerId)}
+    />
+  );
+  const resetButton = <IconButton icon={RotateCcw} size="sm" title="Reset to defaults" onClick={() => resetAdjustment(layerId)} />;
+  const deleteButton = <IconButton icon={Trash2} size="sm" title="Delete adjustment layer" onClick={() => deleteAdjustmentLayer(layerId)} />;
+  const clipText = layer.clipped ? `Clipped to ${clipBase ? `“${clipBase}”` : 'the layer below'}` : 'Affects all layers below';
+
   return (
     <div className={`adjustments-editor ${context}`}>
-      <div className="adjustments-editor-head">
-        <span className="adjustments-editor-icon">{Icon ? <Icon size={15} strokeWidth={1.7} /> : null}</span>
-        <span className="adjustments-editor-title" title={`${layer.name} — ${def.name}`}>
-          <span className="name">{def.name}</span>
-          {layer.name !== def.name && <span className="layer">{layer.name}</span>}
-        </span>
-        <IconButton
-          icon={SquareArrowDownLeft}
-          size="sm"
-          active={layer.clipped}
-          title={layer.clipped ? 'Release clipping (affect all layers below)' : 'Clip to layer below (affect only that layer)'}
-          onClick={() => toggleClipped(layerId)}
-        />
-        <IconButton
-          icon={layer.visible ? Eye : EyeOff}
-          size="sm"
-          active={!layer.visible}
-          title={layer.visible ? 'Hide adjustment' : 'Show adjustment'}
-          onClick={() => toggleVisible(layerId)}
-        />
-        <IconButton icon={RotateCcw} size="sm" title="Reset to defaults" onClick={() => resetAdjustment(layerId)} />
-        <IconButton icon={Trash2} size="sm" title="Delete adjustment layer" onClick={() => deleteAdjustmentLayer(layerId)} />
-      </div>
+      {context === 'panel' ? (
+        <>
+          <div className="adjustments-editor-head">
+            <span className="adjustments-editor-icon">{Icon ? <Icon size={15} strokeWidth={1.7} /> : null}</span>
+            <span className="adjustments-editor-title" title={`${layer.name} — ${def.name}`}>
+              <span className="name">{def.name}</span>
+              {isCustomName(layer.name, def.name) && <span className="layer">{layer.name}</span>}
+            </span>
+            {clipButton}
+            {visibilityButton}
+            {resetButton}
+            {deleteButton}
+          </div>
+          <div className="adjustments-editor-sub">
+            <span className={`clip${layer.clipped ? ' on' : ''}`}>{clipText}</span>
+            {!layer.visible && <span className="hidden-badge">Hidden</span>}
+          </div>
+        </>
+      ) : (
+        // Properties panel: its header already shows the layer name, icon and visibility.
+        <div className="adjustments-editor-head compact">
+          <span className="adjustments-editor-kind" title={clipText}>
+            {def.name}
+            <span className={`clip${layer.clipped ? ' on' : ''}`}>{layer.clipped ? 'Clipped' : ''}</span>
+          </span>
+          {clipButton}
+          {resetButton}
+          {deleteButton}
+        </div>
+      )}
 
-      <div className="adjustments-editor-sub">
-        {layer.clipped ? (
-          <span className="clip on">Clipped to {clipBase ? `“${clipBase}”` : 'the layer below'}</span>
-        ) : (
-          <span className="clip">Affects all layers below</span>
-        )}
-        {!layer.visible && <span className="hidden-badge">Hidden</span>}
-      </div>
-
-      {(presets.length > 0 || def.params.length > 0) && (
+      {/* Color Lookup's presets are exactly its Look list, so the dropdown would be redundant. */}
+      {(presets.length > 0 || def.params.length > 0) && def.id !== 'color-lookup' && (
         <div className="adjustments-preset-row">
           <span className="ui-label">Preset</span>
           <Select value={current ?? '__custom'} options={presetOptions} onChange={applyPreset} width="100%" title="Adjustment preset" />
@@ -169,8 +199,13 @@ export function AdjustmentEditor({ layerId, context = 'panel' }: { layerId: ID; 
             />
             <div className="adjustments-hint">Click to add a point · drag to move · drag off the grid to remove</div>
           </div>
+        ) : def.id === 'color-balance' ? (
+          <ColorBalanceEditor values={values} onChange={change} onCommit={commit} />
         ) : def.params.length ? (
-          <ParamEditor defs={def.params} values={values} onChange={onParam} onCommit={onParamCommit} />
+          <>
+            <ParamEditor defs={def.params} values={values} onChange={onParam} onCommit={onParamCommit} />
+            {def.id === 'color-lookup' && <LookStrip values={values} />}
+          </>
         ) : (
           <div className="adjustments-hint">{def.description ?? 'This adjustment has no settings.'}</div>
         )}

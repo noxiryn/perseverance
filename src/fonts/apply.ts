@@ -9,6 +9,7 @@ import { toast } from '../state/ui';
 import { viewport } from '../editor/viewport';
 import { ensureFont, fontWeightFor } from './loader';
 import { useFontPrefs } from './prefs';
+import { weightName } from './search';
 
 export function findFont(family: string): FontDef | undefined {
   return fonts.get(family) ?? fonts.list().find((f) => f.family.toLowerCase() === family.toLowerCase());
@@ -28,9 +29,10 @@ const withTimeout = (p: Promise<void>, ms: number) =>
 export type ApplyResult = 'layers' | 'tool' | 'none';
 
 /**
- * Apply `family`. Returns where it went. Locked layers are skipped with a message.
+ * Apply `family` (optionally with a specific `weight`; otherwise each layer keeps the available
+ * weight nearest to its current one). Returns where it went. Locked layers are skipped.
  */
-export async function applyFontFamily(family: string, opts: { quiet?: boolean } = {}): Promise<ApplyResult> {
+export async function applyFontFamily(family: string, opts: { quiet?: boolean; weight?: number } = {}): Promise<ApplyResult> {
   const def = findFont(family);
   const weights = def?.weights?.length ? def.weights : [400];
   useFontPrefs.getState().pushRecent(family);
@@ -43,7 +45,7 @@ export async function applyFontFamily(family: string, opts: { quiet?: boolean } 
       return 'none';
     }
     const plan = editable.map((l) => {
-      const weight = fontWeightFor(weights, l.text.fontWeight);
+      const weight = fontWeightFor(weights, opts.weight ?? l.text.fontWeight);
       const style: 'normal' | 'italic' = l.text.fontStyle === 'italic' && def?.italic ? 'italic' : 'normal';
       return { id: l.id, weight, style };
     });
@@ -66,12 +68,13 @@ export async function applyFontFamily(family: string, opts: { quiet?: boolean } 
   const st = useEditor.getState();
   st.setToolOption('type', 'fontFamily', family);
   const cur = Number(toolOptions('type', { fontWeight: 400 }).fontWeight) || 400;
-  const w = fontWeightFor(weights, cur);
+  const w = fontWeightFor(weights, opts.weight ?? cur);
   if (w !== cur) st.setToolOption('type', 'fontWeight', w);
   void ensureFont(family, w);
   if (!opts.quiet) {
+    const label = opts.weight ? `${family} ${weightName(w)}` : family;
     toast(
-      st.activeDocId ? `Type tool font set to ${family} — select a text layer to restyle it` : `Type tool font set to ${family}`,
+      st.activeDocId ? `Type tool font set to ${label} — select a text layer to restyle it` : `Type tool font set to ${label}`,
       'info',
     );
   }

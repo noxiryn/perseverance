@@ -91,7 +91,7 @@ export function registerLayerCommands() {
     icon: CopyPlus,
     keywords: ['copy layer', 'layer via copy', 'clone'],
     enabled: hasLayer,
-    run: () => void ops.duplicateLayers(),
+    run: () => void ops.duplicateLayers({ viaCopy: true }),
   });
   cmd({
     id: 'layer.delete',

@@ -10,6 +10,7 @@ import { ctx2d } from '../../core/canvas';
 import { useActiveDoc } from '../../state/editor';
 import { renderDocument } from '../../render/compositor';
 import { computeHistogram, type Histogram } from './histogram';
+import { analysisMask } from './auto';
 
 const MAX_SIDE = 420;
 
@@ -37,7 +38,7 @@ export function computeBelowHistogram(doc: Document, layerId: ID): Histogram {
   const scale = Math.min(1, MAX_SIDE / Math.max(doc.width, doc.height, 1));
   const c = renderDocument(doc, { below: layerId, scale });
   const img = ctx2d(c, { willReadFrequently: true }).getImageData(0, 0, c.width, c.height);
-  return computeHistogram(img);
+  return computeHistogram(img, { mask: analysisMask(img) });
 }
 
 export function useBelowHistogram(layerId: ID | null, enabled = true): Histogram | null {

@@ -19,7 +19,7 @@ import { cloneLayerTree, layerCorners, layersTopDown, pickLayer, safeBounds, top
 import { clearSmartGuides, collectSnapTargets, snapRect, type SnapTargets } from '../snap';
 import { MaskFollower } from '../maskFollow';
 import { translate } from '../math/affine';
-import { drawLabel } from '../draw';
+import { drawLabel, strokePoly } from '../draw';
 import { ACCENT, fmtPx, toastOnce, vpState } from '../state';
 import { nudgeLayers } from './moveOps';
 import { MoveOptionsBar } from '../options/MoveOptions';
@@ -73,11 +73,16 @@ function selectedIds(): ID[] {
   return s.selectedLayerIds.length ? s.selectedLayerIds : s.activeLayerId ? [s.activeLayerId] : [];
 }
 
+/** Selected layers that are visible (transform controls ignore hidden layers). */
+function controlIds(doc: Document): ID[] {
+  return selectedIds().filter((id) => isEffectivelyVisible(doc, id));
+}
+
 /** Transform-controls session for the current layer selection (cached per doc state). */
 function controlsSession(): TransformSession | null {
   const s = activeSession();
   if (!s || !useUI.getState().view.transformControls) return null;
-  const ids = selectedIds().filter((id) => isEffectivelyVisible(s.doc, id));
+  const ids = controlIds(s.doc);
   const key = ids.join(',');
   if (controls && controls.doc === s.doc && controls.key === key) return controls.session;
   const res = ids.length ? TransformSession.forLayers(s.doc, ids, 'immediate') : null;
@@ -173,7 +178,7 @@ function onPointerDown(e: ToolPointerEvent) {
     const hit: Hit = ctl.hitTest(screen);
     if (hit.kind === 'handle' || hit.kind === 'rotate') {
       // A fresh session so the snapshot matches the current document.
-      const fresh = TransformSession.forLayers(s.doc, selectedIds(), 'immediate');
+      const fresh = TransformSession.forLayers(s.doc, controlIds(s.doc), 'immediate');
       if (typeof fresh !== 'string' && fresh.begin(hit, e)) {
         drag = { kind: 'transform', session: fresh, persistent: false };
         return;
@@ -425,13 +430,8 @@ function onDeactivate() {
 
 function strokeLayerOutline(ctx: CanvasRenderingContext2D, l: Layer, color: string) {
   if (!isTransformable(l)) return;
-  const pts = layerCorners(l).map((p) => viewport.docToScreen(p));
-  ctx.beginPath();
-  pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-  ctx.closePath();
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = color;
-  ctx.stroke();
+  // strokePoly pixel-snaps axis-aligned boxes so the outline stays a crisp 1px line.
+  strokePoly(ctx, layerCorners(l).map((p) => viewport.docToScreen(p)), color);
 }
 
 function renderOverlay(ctx: CanvasRenderingContext2D) {

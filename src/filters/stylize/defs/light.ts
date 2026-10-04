@@ -3,7 +3,7 @@ import { Flame, Lightbulb, Sparkle, Sun, Sunrise, SunDim, Aperture } from 'lucid
 import type { FilterDef } from '../../../registry';
 import type { Img } from '../util';
 import { anchor, blurPlane, bool, clamp, hash, isEmpty, num, pt, rgb, sc, smoothstep, str, toPlanes } from '../util';
-import { blurPlaneMultires, radialAccumulate } from '../ops';
+import { blurPlaneMultires, downsamplePlane, radialAccumulate, upsamplePlane } from '../ops';
 import { hasTransparency } from '../edges';
 import { boolP, colorP, numP, pctP, pointP, pxP, seedP, selectP } from '../params';
 
@@ -374,7 +374,27 @@ export const godRays: FilterDef = {
     const bp = brightPass(img, clamp(num(p.threshold, 0.55), 0, 1), 0.15);
     // each pixel gathers light from the segment toward the source (scales 1 → 1 − len)
     const span = Math.log(1 - len * 0.92);
-    const res = radialAccumulate([bp.r, bp.g, bp.b], w, h, cx, cy, 'zoom', span, 'transparent', false, 10);
+    // shafts are soft: gather at reduced resolution on big images (~300k px) and upsample
+    const f = Math.max(1, Math.min(4, Math.ceil(Math.sqrt(n / 300000))));
+    let res: Float32Array[];
+    if (f > 1) {
+      const small = [bp.r, bp.g, bp.b].map((pl) => downsamplePlane(pl, w, h, f));
+      const sw = small[0].w,
+        sh = small[0].h;
+      const acc = radialAccumulate(
+        small.map((s0) => s0.buf),
+        sw,
+        sh,
+        (cx + 0.5) / f - 0.5,
+        (cy + 0.5) / f - 0.5,
+        'zoom',
+        span,
+        'transparent',
+        false,
+        10,
+      );
+      res = acc.map((pl) => upsamplePlane(pl, sw, sh, f, w, h));
+    } else res = radialAccumulate([bp.r, bp.g, bp.b], w, h, cx, cy, 'zoom', span, 'transparent', false, 10);
     const tint = rgb(p.color, '#fff4e0').map((v) => v / 255);
     for (let i = 0; i < n; i++) {
       res[0][i] *= tint[0];

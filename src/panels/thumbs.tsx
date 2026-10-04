@@ -226,6 +226,10 @@ export function useDocumentThumbnail(doc: Document | null, maxPx: number, thrott
   const [bmpTick, setBmpTick] = useState(0);
   const docRef = useRef(doc);
   docRef.current = doc;
+  const sizeRef = useRef(maxPx);
+  sizeRef.current = maxPx;
+  const timer = useRef(0);
+  const last = useRef(0);
 
   useEffect(() => {
     let t = 0;
@@ -242,22 +246,30 @@ export function useDocumentThumbnail(doc: Document | null, maxPx: number, thrott
     };
   }, [throttle]);
 
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+
+  // Throttle (not debounce): during continuous edits the thumbnail still refreshes every
+  // `throttle` ms; the scheduled render always picks up the latest document.
   useEffect(() => {
     if (!doc || maxPx < 4) {
+      window.clearTimeout(timer.current);
+      timer.current = 0;
       setCanvas(null);
       return;
     }
-    const t = window.setTimeout(() => {
+    if (timer.current) return;
+    const wait = Math.max(0, throttle - (performance.now() - last.current));
+    timer.current = window.setTimeout(() => {
+      timer.current = 0;
+      last.current = performance.now();
       const d = docRef.current;
-      if (!d) return;
+      if (!d || sizeRef.current < 4) return;
       try {
-        setCanvas(cloneCanvas(renderThumbnail(d, null, Math.round(maxPx))));
+        setCanvas(cloneCanvas(renderThumbnail(d, null, Math.round(sizeRef.current))));
       } catch (err) {
         console.warn('[panels] document thumbnail failed', err);
       }
-    }, canvas ? throttle : 0);
-    return () => window.clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, wait);
   }, [doc, bmpTick, maxPx, throttle]);
 
   return canvas;

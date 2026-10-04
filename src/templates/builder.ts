@@ -44,6 +44,7 @@ import { resolveParams } from '../filters/engine';
 import { measureText } from '../render/compositor';
 import { renderPlaceholderCharacter, type PlaceholderOptions } from '../roblox/placeholder';
 import { fitFontSize, segmentTransform } from './layout';
+import { smokeCanvas, type SmokeOptions } from './paint';
 
 export interface LayerOpts {
   name?: string;
@@ -314,6 +315,70 @@ export class DocBuilder {
     ctx.scale(c.width / b.width, c.height / b.height);
     draw(ctx, c.width / b.width);
     return this.add(this.scaledRaster(c, b, name), o);
+  }
+
+  /**
+   * Procedural billowing smoke (see paint.ts) as a document-sized raster layer. Used where the
+   * look must not depend on the asset library (e.g. the crimson reference's red smoke).
+   */
+  smoke(name: string, opts: SmokeOptions, o: LayerOpts = {}): RasterLayer | null {
+    try {
+      const w = Math.max(8, Math.round(this.W * this.preview));
+      const h = Math.max(8, Math.round(this.H * this.preview));
+      const canvas = smokeCanvas(w, h, opts);
+      return this.add(this.scaledRaster(canvas, { x: 0, y: 0, width: this.W, height: this.H }, name), o);
+    } catch (e) {
+      console.warn('[templates] smoke layer failed — skipped', e);
+      return null;
+    }
+  }
+
+  /* ---------------- masks ---------------- */
+
+  /**
+   * Attach a layer mask painted in document coordinates (white = visible, black = hidden).
+   * The mask starts black; `draw` paints the visible parts. Chainable on null.
+   */
+  mask<T extends Layer | null>(layer: T, draw: (ctx: CanvasRenderingContext2D, W: number, H: number) => void, o: { feather?: number; density?: number } = {}): T {
+    if (!layer) return layer;
+    try {
+      const w = Math.max(1, Math.round(this.W * this.preview));
+      const h = Math.max(1, Math.round(this.H * this.preview));
+      const c = createCanvas(w, h);
+      const ctx = c.getContext('2d');
+      if (!ctx) return layer;
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, w, h);
+      ctx.scale(w / this.W, h / this.H);
+      ctx.fillStyle = '#ffffff';
+      draw(ctx, this.W, this.H);
+      layer.mask = { bitmapId: bitmaps.add(c), enabled: true, density: o.density ?? 1, feather: o.feather ?? 0, inverted: false };
+    } catch (e) {
+      console.warn('[templates] mask failed — skipped', e);
+    }
+    return layer;
+  }
+
+  /** Linear fade mask: hidden at (x0, y0), fully visible at (x1, y1). */
+  fadeMask<T extends Layer | null>(layer: T, x0: number, y0: number, x1: number, y1: number): T {
+    return this.mask(layer, (ctx, W, H) => {
+      const g = ctx.createLinearGradient(x0, y0, x1, y1);
+      g.addColorStop(0, '#000000');
+      g.addColorStop(1, '#ffffff');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+    });
+  }
+
+  /** Radial mask: visible inside r0 around (cx, cy), fading out to hidden at r1. */
+  radialMask<T extends Layer | null>(layer: T, cx: number, cy: number, r0: number, r1: number): T {
+    return this.mask(layer, (ctx, W, H) => {
+      const g = ctx.createRadialGradient(cx, cy, Math.max(0, r0), cx, cy, Math.max(r0 + 1, r1));
+      g.addColorStop(0, '#ffffff');
+      g.addColorStop(1, '#000000');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+    });
   }
 
   /* ---------------- vector ---------------- */

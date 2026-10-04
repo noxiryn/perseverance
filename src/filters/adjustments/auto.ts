@@ -11,6 +11,37 @@ import type { Pixels } from './math';
 
 export const AUTO_CLIP = 0.001; // 0.1% — Photoshop's default shadow/highlight clipping
 
+/** Minimum alpha for a pixel to take part in tonal analysis. */
+export const ANALYSIS_MIN_ALPHA = 32;
+
+/**
+ * Per-pixel analysis mask (1 = analyse) combining an optional selection weight with an alpha
+ * threshold: nearly transparent pixels carry quantization-noise colors after un-premultiplying
+ * (alpha 2 can only store a handful of distinct values per channel), which would otherwise
+ * pollute the histogram ends and defeat the black/white point search. Falls back to every
+ * non-transparent pixel when too few pixels pass (e.g. a very faint glow layer).
+ */
+export function analysisMask(img: Pixels, selection: ArrayLike<number> | null = null, minAlpha = ANALYSIS_MIN_ALPHA): Uint8Array {
+  const d = img.data;
+  const n = img.width * img.height;
+  const mask = new Uint8Array(n);
+  let strict = 0;
+  let loose = 0;
+  for (let p = 0, i = 3; p < n; p++, i += 4) {
+    if (selection && !(selection[p] > 0)) continue;
+    const a = d[i];
+    if (a === 0) continue;
+    loose++;
+    if (a >= minAlpha) {
+      mask[p] = 2;
+      strict++;
+    } else mask[p] = 1;
+  }
+  const useStrict = strict >= Math.min(64, Math.max(1, loose * 0.02));
+  for (let p = 0; p < n; p++) mask[p] = mask[p] === 2 || (!useStrict && mask[p] === 1) ? 1 : 0;
+  return mask;
+}
+
 const line = (lo: number, hi: number): CurvePoints =>
   lo <= 0 && hi >= 255
     ? [

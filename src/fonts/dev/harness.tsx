@@ -1,4 +1,7 @@
-/** Temporary isolated dev harness for the fonts-color module (not part of the app build). */
+/**
+ * Isolated dev harness for the fonts-color module (not part of the app build). Open
+ * /src/fonts/dev/harness.html?panel=fontselect (FontSelect + picker) or ?panel=<panelId>[&demo=1].
+ */
 import { createRoot } from 'react-dom/client';
 import '@fontsource/inter/latin-400.css';
 import '@fontsource/inter/latin-500.css';

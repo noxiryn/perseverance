@@ -25,6 +25,7 @@ import {
   pointInSelection,
   updateOutlineDrag,
   endOutlineDragVisual,
+  handleSelectionNudgeKey,
   type OutlineDrag,
 } from './selectCommon';
 import { deselect } from '../../editor/selection';
@@ -48,8 +49,22 @@ interface MarqueeDrag {
   targets: SnapTargets | null;
   shift: boolean;
   alt: boolean;
+  /**
+   * Shift/Alt held at mouse-down chose the selection mode (add/subtract) — they only start
+   * constraining (square / from center) after being released and pressed again (Photoshop).
+   */
+  shiftLatch: boolean;
+  altLatch: boolean;
   /** Space-drag repositioning: last pointer position. */
   spaceLast: Point | null;
+}
+
+/** Update the constrain modifiers of a drag from the current key state. */
+function applyModifiers(d: MarqueeDrag, shiftKey: boolean, altKey: boolean) {
+  if (d.shiftLatch && !shiftKey) d.shiftLatch = false;
+  if (d.altLatch && !altKey) d.altLatch = false;
+  d.shift = shiftKey && !d.shiftLatch;
+  d.alt = altKey && !d.altLatch;
 }
 
 /** Compute the marquee rectangle from the anchor `a` and current point `b`. Pure. */
@@ -110,6 +125,8 @@ function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
     let a = { x: e.docX, y: e.docY };
     const sp = snapPoint(a, { targets });
     a = { x: sp.x, y: sp.y };
+    // With an existing selection, modifiers held at mouse-down pick add/subtract/intersect.
+    const hadSelection = !!s.doc.selection;
     drag = {
       a,
       b: a,
@@ -118,9 +135,12 @@ function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
       screen0: { x: e.screenX, y: e.screenY },
       targets,
       shift: false,
-      alt: o.style === 'size' ? e.altKey : false,
+      alt: false,
+      shiftLatch: e.shiftKey && hadSelection,
+      altLatch: e.altKey && hadSelection && o.style !== 'size',
       spaceLast: null,
     };
+    applyModifiers(drag, e.shiftKey, e.altKey);
     viewport.requestOverlay();
   };
 
@@ -152,8 +172,7 @@ function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
       b = { x: sp.x, y: sp.y };
     }
     d.b = b;
-    d.shift = e.shiftKey;
-    d.alt = e.altKey;
+    applyModifiers(d, e.shiftKey, e.altKey);
     viewport.requestOverlay();
   };
 
@@ -225,6 +244,12 @@ function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
       vpState.spaceHeld = true;
       return true;
     }
+    if (drag && (e.key === 'Shift' || e.key === 'Alt')) {
+      // Constrain / from-center react immediately, without waiting for the next mouse move.
+      applyModifiers(drag, e.shiftKey, e.altKey);
+      viewport.requestOverlay();
+      return true;
+    }
     if (e.key === 'Escape' && (drag || outline)) {
       drag = null;
       outline = null;
@@ -234,6 +259,7 @@ function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
       viewport.requestOverlay();
       return true;
     }
+    if (!drag && !outline) return handleSelectionNudgeKey(e);
     return false;
   };
 
@@ -241,6 +267,11 @@ function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
     if (e.code === 'Space' && vpState.spaceHeld) {
       vpState.spaceHeld = false;
       if (drag) drag.spaceLast = null;
+      return true;
+    }
+    if (drag && (e.key === 'Shift' || e.key === 'Alt')) {
+      applyModifiers(drag, e.shiftKey, e.altKey);
+      viewport.requestOverlay();
       return true;
     }
     return false;
@@ -282,7 +313,13 @@ function MarqueeOptions({ id, ellipse }: { id: string; ellipse: boolean }) {
       <SelectionModeButtons toolId={id} value={o.mode} />
       <Sep />
       <NumberField scrubLabel="Feather" value={o.feather} min={0} max={250} step={1} unit="px" width={56} onChange={(v) => setToolOptionSafe(id, 'feather', v)} />
-      {ellipse && <Checkbox checked={o.antiAlias} onChange={(v) => setToolOptionSafe(id, 'antiAlias', v)} label="Anti-alias" />}
+      <Checkbox
+        checked={ellipse ? o.antiAlias : true}
+        disabled={!ellipse}
+        onChange={(v) => setToolOptionSafe(id, 'antiAlias', v)}
+        label="Anti-alias"
+        title={ellipse ? 'Smooth the curved edge of the selection' : 'Rectangular selections are pixel-aligned (always crisp)'}
+      />
       <Sep />
       <Label>Style</Label>
       <Select

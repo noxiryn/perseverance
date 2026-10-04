@@ -13,7 +13,6 @@ import {
   isEmpty,
   lumaPlane,
   num,
-  prng,
   rgb,
   sampleBilinear,
   saturateInPlace,
@@ -65,47 +64,97 @@ export function fromOklab(L: number, A: number, B: number): [number, number, num
   ];
 }
 
+/** Lightness weight relative to chroma in palette distances (< 1 favours distinct hues). */
+const KM_LW = 0.8;
+
+/**
+ * Deterministic palette seeding: colors are binned in OKLab, bins covering a visible share of
+ * the image become candidates, and centroids are picked farthest-point first (weighted by how
+ * much of the image a bin covers). Unlike random k-means++ seeding this never drops a small but
+ * distinct color region (a red badge, a green tree) in favour of splitting a big gradient.
+ */
+function initCentroids(lab: Float32Array, idx: number[], K: number, LW: number, cent: Float32Array) {
+  const m = idx.length;
+  const bins = new Map<number, number>();
+  const sums: number[] = [];
+  for (let t = 0; t < m; t++) {
+    const i = idx[t] * 3;
+    const L = lab[i],
+      A = lab[i + 1],
+      B = lab[i + 2];
+    const key = (Math.floor(L * 20) + 64) * 16384 + (Math.floor(A / 0.03) + 64) * 128 + (Math.floor(B / 0.03) + 64);
+    let b = bins.get(key);
+    if (b === undefined) {
+      b = sums.length >> 2;
+      bins.set(key, b);
+      sums.push(0, 0, 0, 0);
+    }
+    sums[b * 4] += L;
+    sums[b * 4 + 1] += A;
+    sums[b * 4 + 2] += B;
+    sums[b * 4 + 3]++;
+  }
+  const nb = sums.length >> 2;
+  const minCount = Math.max(2, m * 0.003);
+  let cand: number[] = [];
+  for (let b = 0; b < nb; b++) if (sums[b * 4 + 3] >= minCount) cand.push(b);
+  if (cand.length < K) cand = Array.from({ length: nb }, (_, b) => b);
+  const nc = cand.length;
+  const cl = new Float32Array(nc),
+    ca = new Float32Array(nc),
+    cb = new Float32Array(nc),
+    wt = new Float32Array(nc);
+  let first = 0;
+  for (let q = 0; q < nc; q++) {
+    const b = cand[q];
+    const cnt = sums[b * 4 + 3];
+    cl[q] = sums[b * 4] / cnt;
+    ca[q] = sums[b * 4 + 1] / cnt;
+    cb[q] = sums[b * 4 + 2] / cnt;
+    wt[q] = Math.pow(cnt, 0.25);
+    if (cnt > sums[cand[first] * 4 + 3]) first = q;
+  }
+  const best = new Float32Array(nc).fill(Infinity);
+  let pick = first;
+  for (let c = 0; c < K; c++) {
+    cent[c * 3] = cl[pick];
+    cent[c * 3 + 1] = ca[pick];
+    cent[c * 3 + 2] = cb[pick];
+    const p0 = pick;
+    let bestScore = -1;
+    for (let q = 0; q < nc; q++) {
+      const dl = (cl[q] - cl[p0]) * LW,
+        da = ca[q] - ca[p0],
+        db = cb[q] - cb[p0];
+      const d = dl * dl + da * da + db * db;
+      if (d < best[q]) best[q] = d;
+      const sc0 = best[q] * wt[q];
+      if (sc0 > bestScore) {
+        bestScore = sc0;
+        pick = q;
+      }
+    }
+  }
+}
+
 /**
  * k-means palette of K colors over opaque pixels of `lab` (3 floats per pixel). Lightness is
  * weighted more than chroma so shading bands separate (cel-like flat tones). Deterministic.
  */
-export function kmeansPalette(lab: Float32Array, alpha: Uint8ClampedArray | null, n: number, K: number, seed = 1, iters = 10): Float32Array {
-  const LW = 1.6;
+export function kmeansPalette(lab: Float32Array, alpha: Uint8ClampedArray | null, n: number, K: number, iters = 10, LW = KM_LW): Float32Array {
   const idx: number[] = [];
   const step = Math.max(1, Math.floor(n / 24000));
   for (let i = 0; i < n; i += step) if (!alpha || alpha[i * 4 + 3] > 24) idx.push(i);
   const m = idx.length;
   const cent = new Float32Array(K * 3);
   if (!m) return cent;
-  const rnd = prng(seed);
   const dist2 = (i: number, c: number) => {
     const dl = (lab[i * 3] - cent[c * 3]) * LW,
       da = lab[i * 3 + 1] - cent[c * 3 + 1],
       db = lab[i * 3 + 2] - cent[c * 3 + 2];
     return dl * dl + da * da + db * db;
   };
-  // k-means++ initialization
-  const first = idx[Math.floor(rnd() * m)];
-  cent.set(lab.subarray(first * 3, first * 3 + 3), 0);
-  const best = new Float32Array(m).fill(Infinity);
-  for (let c = 1; c < K; c++) {
-    let sum = 0;
-    for (let t = 0; t < m; t++) {
-      const d = dist2(idx[t], c - 1);
-      if (d < best[t]) best[t] = d;
-      sum += best[t];
-    }
-    let r = rnd() * sum;
-    let pick = idx[m - 1];
-    for (let t = 0; t < m; t++) {
-      r -= best[t];
-      if (r <= 0) {
-        pick = idx[t];
-        break;
-      }
-    }
-    cent.set(lab.subarray(pick * 3, pick * 3 + 3), c * 3);
-  }
+  initCentroids(lab, idx, K, LW, cent);
   const acc = new Float64Array(K * 4);
   for (let it = 0; it < iters; it++) {
     acc.fill(0);
@@ -134,6 +183,106 @@ export function kmeansPalette(lab: Float32Array, alpha: Uint8ClampedArray | null
     }
   }
   return cent;
+}
+
+/**
+ * Cut-paper quantization: pixels are grouped into K color families (k-means weighted towards
+ * hue/chroma), then each family is split into T flat lightness tones (1-D k-means on OKLab L),
+ * so every material keeps its own light/mid/dark shades like a hand-cut poster.
+ * Returns per-pixel labels (family·T + tone, 255 = transparent) and the label palette in OKLab.
+ */
+export function cutoutQuantize(lab: Float32Array, alpha: Uint8ClampedArray | null, n: number, K: number, T: number): { lbl: Uint8Array; pal: Float32Array; count: number } {
+  const cent = kmeansPalette(lab, alpha, n, K, 10, 0.45);
+  const group = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (alpha && alpha[i * 4 + 3] === 0) {
+      group[i] = 255;
+      continue;
+    }
+    const L = lab[i * 3],
+      A = lab[i * 3 + 1],
+      B = lab[i * 3 + 2];
+    let bc = 0,
+      bd = Infinity;
+    for (let c = 0; c < K; c++) {
+      const dl = (L - cent[c * 3]) * 0.45,
+        da = A - cent[c * 3 + 1],
+        db = B - cent[c * 3 + 2];
+      const d = dl * dl + da * da + db * db;
+      if (d < bd) {
+        bd = d;
+        bc = c;
+      }
+    }
+    group[i] = bc;
+  }
+  // tone centers per family (1-D k-means on lightness, quantile-initialized)
+  const tones = new Float32Array(K * T);
+  const step = Math.max(1, Math.floor(n / 60000));
+  const samples: number[][] = Array.from({ length: K }, () => []);
+  for (let i = 0; i < n; i += step) if (group[i] !== 255) samples[group[i]].push(lab[i * 3]);
+  for (let c = 0; c < K; c++) {
+    const v = Float32Array.from(samples[c]).sort();
+    const m = v.length;
+    for (let t = 0; t < T; t++) tones[c * T + t] = m ? v[Math.min(m - 1, Math.floor(((t + 0.5) / T) * m))] : cent[c * 3];
+    if (m < 2 || T < 2) continue;
+    const sum = new Float64Array(T),
+      cnt = new Float64Array(T);
+    for (let it = 0; it < 8; it++) {
+      sum.fill(0);
+      cnt.fill(0);
+      for (let q = 0; q < m; q++) {
+        const L = v[q];
+        let bt = 0,
+          bd = Infinity;
+        for (let t = 0; t < T; t++) {
+          const d = Math.abs(L - tones[c * T + t]);
+          if (d < bd) {
+            bd = d;
+            bt = t;
+          }
+        }
+        sum[bt] += L;
+        cnt[bt]++;
+      }
+      for (let t = 0; t < T; t++) if (cnt[t]) tones[c * T + t] = sum[t] / cnt[t];
+    }
+  }
+  const count = K * T;
+  const lbl = new Uint8Array(n);
+  const acc = new Float64Array(count * 4);
+  for (let i = 0; i < n; i++) {
+    const c = group[i];
+    if (c === 255) {
+      lbl[i] = 255;
+      continue;
+    }
+    const L = lab[i * 3];
+    let bt = 0,
+      bd = Infinity;
+    for (let t = 0; t < T; t++) {
+      const d = Math.abs(L - tones[c * T + t]);
+      if (d < bd) {
+        bd = d;
+        bt = t;
+      }
+    }
+    const k = c * T + bt;
+    lbl[i] = k;
+    acc[k * 4] += L;
+    acc[k * 4 + 1] += lab[i * 3 + 1];
+    acc[k * 4 + 2] += lab[i * 3 + 2];
+    acc[k * 4 + 3]++;
+  }
+  const pal = new Float32Array(count * 3);
+  for (let k = 0; k < count; k++) {
+    const cn = acc[k * 4 + 3];
+    const c = Math.floor(k / T);
+    pal[k * 3] = cn ? acc[k * 4] / cn : tones[k];
+    pal[k * 3 + 1] = cn ? acc[k * 4 + 1] / cn : cent[c * 3 + 1];
+    pal[k * 3 + 2] = cn ? acc[k * 4 + 2] / cn : cent[c * 3 + 2];
+  }
+  return { lbl, pal, count };
 }
 
 /** 3×3 majority (mode) filter on a label map, ignoring pixels marked 255 (transparent). */
@@ -176,7 +325,8 @@ export const cutout: FilterDef = {
   description: 'Flat cut-paper color regions: simplified shapes with a few flat tones (great on Roblox renders).',
   keywords: ['posterize', 'flat', 'vector', 'paper cut', 'cel', 'simplify', 'poster'],
   params: [
-    numP('colors', 'Colors', 2, 16, 6, { step: 1 }),
+    numP('colors', 'Colors', 2, 16, 6, { step: 1, hint: 'Number of color families (materials)' }),
+    numP('tones', 'Tones per color', 1, 5, 3, { step: 1, hint: 'Flat light/mid/dark shades kept inside each color family' }),
     pxP('simplicity', 'Simplicity', 0, 12, 3, { step: 1 }),
     pctP('fidelity', 'Edge fidelity', 0.6),
     numP('saturation', 'Saturation', -100, 100, 0, { step: 1 }),
@@ -187,6 +337,7 @@ export const cutout: FilterDef = {
     const n = w * h;
     const s = ctx.scale > 0 ? ctx.scale : 1;
     const K = clamp(Math.round(num(p.colors, 6)), 2, 16);
+    const T = clamp(Math.round(num(p.tones, 3)), 1, 5);
     const simp = Math.max(0, num(p.simplicity, 3)) * s;
     const fid = clamp(num(p.fidelity, 0.6), 0, 1);
     const work = { data: new Uint8ClampedArray(data), width: w, height: h };
@@ -194,44 +345,22 @@ export const cutout: FilterDef = {
     const wd = work.data;
     const lab = new Float32Array(n * 3);
     for (let i = 0, j = 0; i < n; i++, j += 4) toOklab(wd[j], wd[j + 1], wd[j + 2], lab, i * 3);
-    const cent = kmeansPalette(lab, data, n, K, 1);
-    // assign
-    let lbl: Uint8Array = new Uint8Array(n);
-    for (let i = 0, j = 0; i < n; i++, j += 4) {
-      if (data[j + 3] === 0) {
-        lbl[i] = 255;
-        continue;
-      }
-      let bc = 0,
-        bd = Infinity;
-      const L = lab[i * 3],
-        A = lab[i * 3 + 1],
-        B = lab[i * 3 + 2];
-      for (let c = 0; c < K; c++) {
-        const dl = (L - cent[c * 3]) * 1.6,
-          da = A - cent[c * 3 + 1],
-          db = B - cent[c * 3 + 2];
-        const d = dl * dl + da * da + db * db;
-        if (d < bd) {
-          bd = d;
-          bc = c;
-        }
-      }
-      lbl[i] = bc;
-    }
+    const q = cutoutQuantize(lab, data, n, K, T);
+    let lbl = q.lbl;
     // smooth region outlines (fewer jaggies/specks at lower fidelity)
     const passes = Math.round((1 - fid) * 4 * Math.max(0.5, s)) + (simp > 0 ? 1 : 0);
-    for (let k = 0; k < passes; k++) lbl = modeFilter(lbl, w, h, K);
-    const pal = new Float32Array(K * 3);
-    for (let c = 0; c < K; c++) {
-      const [r, g, b] = fromOklab(cent[c * 3], cent[c * 3 + 1], cent[c * 3 + 2]);
+    for (let k = 0; k < passes; k++) lbl = modeFilter(lbl, w, h, q.count);
+    const NC = q.count;
+    const pal = new Float32Array(NC * 3);
+    for (let c = 0; c < NC; c++) {
+      const [r, g, b] = fromOklab(q.pal[c * 3], q.pal[c * 3 + 1], q.pal[c * 3 + 2]);
       pal[c * 3] = r;
       pal[c * 3 + 1] = g;
       pal[c * 3 + 2] = b;
     }
     const satK = 1 + num(p.saturation, 0) / 100;
     if (Math.abs(satK - 1) > 1e-3) {
-      for (let c = 0; c < K; c++) {
+      for (let c = 0; c < NC; c++) {
         const l = pal[c * 3] * 0.2126 + pal[c * 3 + 1] * 0.7152 + pal[c * 3 + 2] * 0.0722;
         for (let ch = 0; ch < 3; ch++) pal[c * 3 + ch] = clamp(l + (pal[c * 3 + ch] - l) * satK, 0, 255);
       }

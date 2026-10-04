@@ -3,7 +3,7 @@
  * slider), a "Popular for Roblox GFX" collection, favorites/recents, system and user fonts.
  * Click a font → applies it to the selected text layer(s), or sets the Type tool default.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Monitor, MousePointerClick, Plus, Type as TypeIcon } from 'lucide-react';
 import { fonts, useRegistry, type FontDef } from '../registry';
 import { useEditor } from '../state/editor';
@@ -13,9 +13,20 @@ import { applyFontFamily } from './apply';
 import { defaultPreviewText, POPULAR_FAMILIES } from './catalog';
 import { FontFaceText, StarButton } from './FontPicker';
 import { useFontPrefs } from './prefs';
-import { filterFonts, groupByCategory, presentCategories, SPECIAL_FILTERS, weightsHint, type FontFilter } from './search';
+import { fontWeightFor } from './loader';
+import {
+  filterFonts,
+  groupByCategory,
+  presentCategories,
+  previewScale,
+  SPECIAL_FILTERS,
+  weightName,
+  weightsHint,
+  type FontFilter,
+} from './search';
 import { loadSystemFonts, maybeLoadSystemFonts, useSystemFonts } from './system';
-import { addFontFiles, removeUserFamily } from './userFonts';
+import { addFontFiles } from './userFonts';
+import { confirmRemoveUserFamily } from './dialogs';
 import { VirtualList, type VirtualListHandle } from './VirtualList';
 import './fonts.css';
 
@@ -24,17 +35,19 @@ type Row = { kind: 'header'; key: string; label: string; hint?: string } | { kin
 const HEADER_H = 28;
 
 /** Primitive snapshot of what a click would target (keeps re-renders cheap). */
-function useTarget(): { count: number; name: string; family: string } {
+function useTarget(): { count: number; name: string; family: string; weight: number } {
   const sig = useEditor((s) => {
     const ss = s.activeDocId ? s.sessions[s.activeDocId] : null;
     if (!ss) return '0';
     const ids = ss.selectedLayerIds.length ? ss.selectedLayerIds : ss.activeLayerId ? [ss.activeLayerId] : [];
     const texts = ids.map((id) => ss.doc.layers[id]).filter((l) => l?.type === 'text');
     const first = texts[0];
-    return first && first.type === 'text' ? `${texts.length}\u0000${first.name}\u0000${first.text.fontFamily}` : '0';
+    return first && first.type === 'text'
+      ? `${texts.length}\u0000${first.name}\u0000${first.text.fontFamily}\u0000${first.text.fontWeight}`
+      : '0';
   });
-  const [count, name = '', family = ''] = sig.split('\u0000');
-  return { count: Number(count), name, family };
+  const [count, name = '', family = '', weight = '400'] = sig.split('\u0000');
+  return { count: Number(count), name, family, weight: Number(weight) || 400 };
 }
 
 export function FontsPanel() {
@@ -82,13 +95,18 @@ export function FontsPanel() {
   useEffect(() => listRef.current?.scrollToTop(), [filter, query]);
 
   const fontCount = rows.filter((r) => r.kind === 'font' && !r.key.startsWith('p:')).length;
-  const cardH = Math.round(size * 1.34) + 34;
+  /** Card height grows with the (optically scaled) preview size. */
+  const itemHeight = useCallback(
+    (r: Row) => (r.kind === 'header' ? HEADER_H : Math.round(size * previewScale(r.font.category) * 1.34) + 34),
+    [size],
+  );
   const textFor = (f: FontDef) => preview.text || defaultPreviewText(f.category, f.sample);
 
   const apply = (f: FontDef) => void applyFontFamily(f.family);
 
   const contextMenu = (e: React.MouseEvent, f: FontDef) => {
     const fav = favorites.includes(f.family);
+    const weights = [...(f.weights?.length ? f.weights : [400])].sort((a, b) => a - b);
     const items: MenuItem[] = [
       {
         label: target.count > 1 ? `Apply to ${target.count} Text Layers` : 'Apply to Text Layer',
@@ -98,10 +116,26 @@ export function FontsPanel() {
       {
         label: 'Set as Type Tool Default',
         run: () => {
-          useEditor.getState().setToolOption('type', 'fontFamily', f.family);
+          const st = useEditor.getState();
+          st.setToolOption('type', 'fontFamily', f.family);
+          const cur = Number(st.toolOptions.type?.fontWeight) || 400;
+          const w = fontWeightFor(weights, cur);
+          if (w !== cur) st.setToolOption('type', 'fontWeight', w);
           toast(`Type tool font set to ${f.family}`, 'info');
         },
       },
+    ];
+    if (weights.length > 1) {
+      items.push({
+        label: target.count ? 'Apply with Weight' : 'Set Type Tool Weight',
+        submenu: weights.map((w) => ({
+          label: `${weightName(w)} (${w})`,
+          checked: target.count ? target.family === f.family && target.weight === w : false,
+          run: () => void applyFontFamily(f.family, { weight: w }),
+        })),
+      });
+    }
+    items.push(
       { separator: true },
       { label: fav ? 'Remove from Favorites' : 'Add to Favorites', run: () => useFontPrefs.getState().toggleFavorite(f.family) },
       {
@@ -113,8 +147,8 @@ export function FontsPanel() {
           );
         },
       },
-    ];
-    if (f.source === 'user') items.push({ separator: true }, { label: 'Remove Font…', run: () => void removeUserFamily(f.family) });
+    );
+    if (f.source === 'user') items.push({ separator: true }, { label: 'Remove Font…', run: () => void confirmRemoveUserFamily(f.family) });
     showContextMenu(e, items);
   };
 
@@ -175,8 +209,8 @@ export function FontsPanel() {
         className="fc-fonts-list"
         items={rows}
         listRef={listRef}
-        overscan={cardH * 3}
-        itemHeight={(r) => (r.kind === 'header' ? HEADER_H : cardH)}
+        overscan={Math.round(size * 1.34 + 34) * 3}
+        itemHeight={itemHeight}
         itemKey={(r) => r.key}
         empty={
           <div className="ui-empty">
@@ -257,7 +291,7 @@ function FontCard({
         </span>
         <StarButton family={font.family} />
       </div>
-      <div className="fc-card-preview" style={{ fontSize: size, lineHeight: 1.25 }}>
+      <div className="fc-card-preview" style={{ fontSize: Math.round(size * previewScale(font.category)), lineHeight: 1.25 }}>
         <FontFaceText font={font} text={text} />
       </div>
     </div>

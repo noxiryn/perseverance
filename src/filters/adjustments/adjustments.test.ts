@@ -5,10 +5,11 @@ import { defaultParams } from '../engine';
 import { TONAL_DEFS, brightnessContrastLut, curvesLuts, exposureLut, levelsLutFromParams, posterizeLut } from './defs/tonal';
 import { COLOR_DEFS, blackWhiteGray, BW_DEFAULTS } from './defs/color';
 import { MAPPING_DEFS, DEFAULT_MAP_GRADIENT } from './defs/mapping';
-import { autoContrastParams, autoToneCurves, autoColorCurves } from './auto';
+import { analysisMask, autoContrastParams, autoToneCurves, autoColorCurves } from './auto';
 import { clipRange, computeHistogram, percentile } from './histogram';
-import { isIdentityLut, levelsValue } from './math';
-import { STATIC_PRESETS } from './presets';
+import { isIdentityLut, levelsValue, lum3, setLumInto, setSatInto } from './math';
+import { STATIC_PRESETS, isCustomName } from './presets';
+import { presetSwatchCss } from './swatches';
 
 const ALL: FilterDef[] = [...TONAL_DEFS, ...COLOR_DEFS, ...MAPPING_DEFS];
 const byId = (id: string) => {
@@ -24,7 +25,7 @@ function testImage(): ImageData {
     h = 8;
   const data = new Uint8ClampedArray(w * h * 4);
   let s = 12345;
-  const rnd = () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) % 256);
+  const rnd = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) % 256;
   for (let i = 0; i < w * h; i++) {
     data[i * 4] = rnd();
     data[i * 4 + 1] = rnd();
@@ -368,7 +369,13 @@ describe('mapping adjustments', () => {
   it('dithered gradient map stays within one level of the plain result', () => {
     const a = testImage();
     const b = testImage();
-    const gradient = { ...DEFAULT_MAP_GRADIENT, stops: [{ offset: 0, color: '#200010' }, { offset: 1, color: '#ffd080' }] };
+    const gradient = {
+      ...DEFAULT_MAP_GRADIENT,
+      stops: [
+        { offset: 0, color: '#200010' },
+        { offset: 1, color: '#ffd080' },
+      ],
+    };
     run('gradient-map', a, { gradient });
     run('gradient-map', b, { gradient, dither: true });
     for (let i = 0; i < a.data.length; i++) expect(Math.abs(a.data[i] - b.data[i])).toBeLessThanOrEqual(3);
@@ -403,6 +410,39 @@ describe('mapping adjustments', () => {
     run('solid-tint', t, { color: '#c4141c', mode: 'color', amount: 1 });
     expect(t.data[0]).toBeLessThan(t.data[4]);
   });
+
+  it('solid tint color/hue fast paths match the W3C reference formulas', () => {
+    const ref = (r: number, g: number, b: number, tint: [number, number, number], mode: 'color' | 'hue') => {
+      const out = new Float64Array(3);
+      const [tr, tg, tb] = tint.map((v) => v / 255);
+      const L = lum3(r / 255, g / 255, b / 255);
+      if (mode === 'hue') {
+        setSatInto(tr, tg, tb, (Math.max(r, g, b) - Math.min(r, g, b)) / 255, out);
+        setLumInto(out[0], out[1], out[2], L, out);
+      } else setLumInto(tr, tg, tb, L, out);
+      return Array.from(out, (v) => Math.round(v * 255));
+    };
+    const tints: [number, number, number][] = [
+      [196, 20, 28],
+      [31, 111, 138],
+      [240, 160, 64],
+      [128, 128, 128],
+    ];
+    for (const mode of ['color', 'hue'] as const) {
+      for (const tint of tints) {
+        const img = testImage();
+        const src = Array.from(img.data);
+        const hex = `#${tint.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+        run('solid-tint', img, { color: hex, mode, amount: 1 });
+        for (let p = 0; p < img.width * img.height; p++) {
+          const [r, g, b, a] = src.slice(p * 4, p * 4 + 4);
+          if (a === 0) continue;
+          const want = ref(r, g, b, tint, mode);
+          for (let c = 0; c < 3; c++) expect(Math.abs(img.data[p * 4 + c] - want[c]), `${mode} ${hex} px${p}`).toBeLessThanOrEqual(1);
+        }
+      }
+    }
+  });
 });
 
 describe('histogram + auto', () => {
@@ -423,6 +463,26 @@ describe('histogram + auto', () => {
     bins[255] = 1;
     expect(clipRange(bins, 0.001)).toEqual([50, 200]);
     expect(clipRange(new Uint32Array(256), 0.001)).toEqual([0, 255]);
+  });
+
+  it('analysis mask ignores near-transparent noise so auto contrast still finds the range', () => {
+    // A soft red glow: solid-ish core (200,20,30) plus many faint pixels whose colors are
+    // un-premultiply quantization noise (0 / 255 extremes).
+    const rows: number[][] = [];
+    for (let i = 0; i < 400; i++) rows.push([200, 20, 30, 120 + (i % 100)]);
+    for (let i = 0; i < 600; i++) rows.push(i % 2 ? [255, 0, 0, 2] : [0, 255, 255, 1]);
+    rows.push([0, 0, 0, 0]);
+    const img = pixels(...rows);
+    expect(autoContrastParams(computeHistogram(img))).toBeNull(); // noise spans 0..255
+    const mask = analysisMask(img);
+    expect(mask.reduce((a, b) => a + b, 0)).toBe(400);
+    expect(autoContrastParams(computeHistogram(img, { mask }))).toEqual({ inBlack: 20, inWhite: 200 });
+    // Selection restricts the sample; a faint-only layer falls back to every visible pixel.
+    const sel = new Uint8Array(rows.length);
+    sel.fill(255, 0, 10);
+    expect(analysisMask(img, sel).reduce((a, b) => a + b, 0)).toBe(10);
+    const faint = pixels([10, 10, 10, 5], [200, 200, 200, 6], [0, 0, 0, 0]);
+    expect(Array.from(analysisMask(faint))).toEqual([1, 1, 0]);
   });
 
   it('auto contrast and auto tone stretch the used range', () => {
@@ -486,5 +546,31 @@ describe('tone LUT behaviour', () => {
     expect(l[0]).toBe(0);
     expect(l[100]).toBeGreaterThan(130);
     expect(l[255]).toBe(255);
+  });
+});
+
+describe('preset swatches', () => {
+  it('builds CSS previews for color-based presets only', () => {
+    const gm = presetSwatchCss('gradient-map', { gradient: DEFAULT_MAP_GRADIENT, reverse: true });
+    expect(gm).toBe('linear-gradient(90deg, #ffffff 0.0%, #000000 100.0%)');
+    expect(presetSwatchCss('duotone', { shadow: '#101010', highlight: '#fafafa' })).toContain('#101010');
+    expect(presetSwatchCss('solid-tint', { color: '#c4141c' })).toBe('#c4141c');
+    expect(presetSwatchCss('hue-saturation', { colorize: false })).toBeNull();
+    expect(presetSwatchCss('hue-saturation', { colorize: true, hue: 0, saturation: 100 })).toMatch(/^linear-gradient/);
+    expect(presetSwatchCss('levels', { inBlack: 10 })).toBeNull();
+    for (const preset of ['teal-orange', 'noir', 'crimson']) {
+      const css = presetSwatchCss('color-lookup', { preset, intensity: 1 });
+      expect(css).toMatch(/^linear-gradient\(90deg, #[0-9a-f]{6} 0\.0%/);
+    }
+    expect(presetSwatchCss('color-lookup', { preset: 'nope' })).toBeNull();
+  });
+});
+
+describe('layer naming', () => {
+  it('detects auto-generated adjustment layer names', () => {
+    expect(isCustomName('Levels', 'Levels')).toBe(false);
+    expect(isCustomName('Levels 3', 'Levels')).toBe(false);
+    expect(isCustomName('Levels copy', 'Levels')).toBe(true);
+    expect(isCustomName('Sunset Amber', 'Gradient Map')).toBe(true);
   });
 });

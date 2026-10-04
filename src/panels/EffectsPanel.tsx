@@ -2,28 +2,19 @@
  * Effects panel (id 'effects'): layer style editor for the active layer — list of effects with
  * enable toggles, expandable ParamEditors (live preview + coalesced commits), drag reorder,
  * duplicate/delete, "Add effect" menu, style presets and copy/paste/clear style.
+ *
+ * The list is shown like the layer stack: the TOP row is drawn last (on top). LayerEffect arrays
+ * are stored bottom → top, so rows are rendered in reverse array order.
  */
 import { useRef, useState } from 'react';
-import {
-  ChevronDown,
-  ChevronRight,
-  ClipboardCopy,
-  ClipboardPaste,
-  CopyPlus,
-  Eraser,
-  GripVertical,
-  Plus,
-  RotateCcw,
-  Sparkle,
-  Trash2,
-} from 'lucide-react';
+import { ChevronDown, ChevronRight, ClipboardCopy, ClipboardPaste, CopyPlus, Eraser, GripVertical, Plus, RotateCcw, Sparkle, Trash2 } from 'lucide-react';
 import type { Layer, LayerEffect } from '../core/types';
 import { useEditor } from '../state/editor';
 import { effects, useRegistry } from '../registry';
 import { defaultParams, resolveParams } from '../filters/engine';
 import { Checkbox, IconButton, ParamEditor, Section, showContextMenu, showMenuAt, type MenuItem } from '../ui/controls';
 import * as ops from './layerOps';
-import { STYLE_PRESETS, effectMenuIds, effectName } from './effectPresets';
+import { STYLE_PRESETS, effectMenuIds, effectName, type StylePreset } from './effectPresets';
 import './panels.css';
 
 const cls = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
@@ -38,7 +29,8 @@ export function EffectsPanel() {
 
   if (!doc) return <Empty title="No document open" note="Open a document and select a layer to edit its layer style." />;
   if (!layer) return <Empty title="No layer selected" note="Select a layer in the Layers panel to add strokes, shadows and glows." />;
-  if (layer.type === 'adjustment') return <Empty title="Adjustment layer" note="Adjustment layers can't have layer styles. Select a pixel, text, shape, fill layer or group." />;
+  if (layer.type === 'adjustment')
+    return <Empty title="Adjustment layer" note="Adjustment layers can't have layer styles. Select a pixel, text, shape, fill layer or group." />;
   return <EffectsEditor layer={layer} />;
 }
 
@@ -58,42 +50,58 @@ function addEffectItems(): MenuItem[] {
   return effectMenuIds().map((id) => ({ label: effectName(id), run: () => void ops.addEffect(id, undefined, { showPanel: false }) }));
 }
 
+/** Drag state in DISPLAY rows (0 = top row). */
+interface DragRows {
+  from: number;
+  to: number;
+}
+
 function EffectsEditor({ layer }: { layer: Layer }) {
   const expanded = ops.useLayersUI((s) => s.expandedEffect);
   const clip = ops.useLayersUI((s) => s.styleClipboard);
   const setExpanded = ops.useLayersUI((s) => s.setExpandedEffect);
   const listRef = useRef<HTMLDivElement>(null);
-  const [drag, setDrag] = useState<{ from: number; to: number } | null>(null);
+  const [drag, setDrag] = useState<DragRows | null>(null);
   const list = layer.effects;
+  const n = list.length;
+  /** display row ↔ array index */
+  const toIndex = (row: number) => n - 1 - row;
 
   const startDrag = (e: React.PointerEvent, from: number) => {
     if (e.button !== 0) return;
     e.preventDefault();
     let to = from;
-    setDrag({ from, to });
+    let moved = false;
+    const startY = e.clientY;
     const move = (ev: PointerEvent) => {
-      const items = [...(listRef.current?.querySelectorAll<HTMLElement>('[data-fx-index]') ?? [])];
-      let idx = items.length;
+      if (!moved && Math.abs(ev.clientY - startY) < 3) return;
+      moved = true;
+      const items = [...(listRef.current?.querySelectorAll<HTMLElement>('[data-fx-row]') ?? [])];
+      let slot = items.length;
       for (let i = 0; i < items.length; i++) {
         const r = items[i].getBoundingClientRect();
         if (ev.clientY < r.top + r.height / 2) {
-          idx = i;
+          slot = i;
           break;
         }
       }
-      // Convert an insertion slot into a final index.
-      to = idx > from ? idx - 1 : idx;
+      // Insertion slot → final row.
+      to = slot > from ? slot - 1 : slot;
       setDrag({ from, to });
     };
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
       setDrag(null);
-      if (to !== from) ops.moveEffect(layer.id, from, to);
+      if (moved && to !== from) ops.moveEffect(layer.id, toIndex(from), toIndex(to));
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
   };
+
+  const rows = list.map((fx, i) => ({ fx, index: i })).reverse();
 
   return (
     <div className="layers-fx">
@@ -102,12 +110,12 @@ function EffectsEditor({ layer }: { layer: Layer }) {
           Style of <b>{layer.name}</b>
         </span>
         <IconButton icon={Plus} size="sm" title="Add effect" onClick={(e) => showMenuAt(e.currentTarget, addEffectItems(), 170)} />
-        <IconButton icon={ClipboardCopy} size="sm" title="Copy layer style" disabled={!list.length} onClick={ops.copyStyle} />
+        <IconButton icon={ClipboardCopy} size="sm" title="Copy layer style" disabled={!n} onClick={ops.copyStyle} />
         <IconButton icon={ClipboardPaste} size="sm" title="Paste layer style" disabled={!clip} onClick={ops.pasteStyle} />
-        <IconButton icon={Eraser} size="sm" title="Clear layer style" disabled={!list.length} onClick={ops.clearStyle} />
+        <IconButton icon={Eraser} size="sm" title="Clear layer style" disabled={!n} onClick={ops.clearStyle} />
       </div>
       <div className="layers-props-scroll">
-        {list.length === 0 ? (
+        {n === 0 ? (
           <div className="layers-empty" style={{ paddingBottom: 12 }}>
             <div>No effects on this layer</div>
             <button className="ui-btn small" onClick={(e) => showMenuAt(e.currentTarget, addEffectItems(), 170)}>
@@ -116,18 +124,19 @@ function EffectsEditor({ layer }: { layer: Layer }) {
           </div>
         ) : (
           <div className="layers-fx-list" ref={listRef}>
-            {list.map((fx, i) => (
+            {rows.map(({ fx, index }, row) => (
               <EffectItem
                 key={fx.id}
                 layer={layer}
                 fx={fx}
-                index={i}
+                index={index}
+                row={row}
                 open={expanded === fx.id}
                 onToggleOpen={() => setExpanded(expanded === fx.id ? null : fx.id)}
-                onGrip={(e) => startDrag(e, i)}
-                dragging={drag?.from === i}
-                dropBefore={!!drag && drag.to !== drag.from && drag.to === i && drag.to < drag.from}
-                dropAfter={!!drag && drag.to !== drag.from && drag.to === i && drag.to > drag.from}
+                onGrip={(e) => startDrag(e, row)}
+                dragging={drag?.from === row}
+                dropBefore={!!drag && drag.to !== drag.from && drag.to === row && drag.to < drag.from}
+                dropAfter={!!drag && drag.to !== drag.from && drag.to === row && drag.to > drag.from}
               />
             ))}
           </div>
@@ -135,23 +144,29 @@ function EffectsEditor({ layer }: { layer: Layer }) {
         <Section title="Style Presets">
           <div className="layers-presets">
             {STYLE_PRESETS.map((p) => (
-              <button
-                key={p.id}
-                className="layers-preset"
-                title={`${p.description}\nClick to add · Alt-click to replace the current style`}
-                onClick={(e) => ops.applyStylePreset(p, e.altKey)}
-              >
-                <span className="layers-preset-chip" style={{ background: p.swatch[1], color: p.swatch[0], boxShadow: `inset 0 0 0 2px ${p.swatch[0]}` }}>
-                  A
-                </span>
-                <span>{p.name}</span>
-              </button>
+              <PresetTile key={p.id} preset={p} />
             ))}
           </div>
-          <div className="layers-note">Presets add their effects to the current style. Alt-click replaces it.</div>
+          <div className="layers-note">Click a preset to add its effects to the current style · Alt-click replaces the style.</div>
         </Section>
       </div>
     </div>
+  );
+}
+
+function PresetTile({ preset: p }: { preset: StylePreset }) {
+  const missing = effects.list().length > 0 && p.effects.some((e) => !effects.has(e.effectId));
+  return (
+    <button
+      className="layers-preset"
+      title={`${p.name}\n${p.description}${missing ? '\n(Some effects of this preset are not available in this build.)' : ''}\nClick: add · Alt-click: replace the current style`}
+      onClick={(e) => ops.applyStylePreset(p, e.altKey)}
+    >
+      <span className="layers-preset-sample" style={{ background: p.preview.background }}>
+        <span style={{ color: p.preview.color, textShadow: p.preview.textShadow }}>Aa</span>
+      </span>
+      <span className="layers-preset-name">{p.name}</span>
+    </button>
   );
 }
 
@@ -159,6 +174,7 @@ function EffectItem({
   layer,
   fx,
   index,
+  row,
   open,
   onToggleOpen,
   onGrip,
@@ -168,7 +184,10 @@ function EffectItem({
 }: {
   layer: Layer;
   fx: LayerEffect;
+  /** Index in layer.effects (0 = bottom). */
   index: number;
+  /** Display row (0 = top). */
+  row: number;
   open: boolean;
   onToggleOpen: () => void;
   onGrip: (e: React.PointerEvent) => void;
@@ -194,8 +213,8 @@ function EffectItem({
       run: () => def && ops.updateEffect(layer.id, fx.id, (e) => (e.params = defaultParams(def.params)), 'commit', `Reset ${name}`),
     },
     { separator: true },
-    { label: 'Move Up', disabled: index === 0, run: () => ops.moveEffect(layer.id, index, index - 1) },
-    { label: 'Move Down', disabled: index >= n - 1, run: () => ops.moveEffect(layer.id, index, index + 1) },
+    { label: 'Move Up', disabled: index >= n - 1, run: () => ops.moveEffect(layer.id, index, index + 1) },
+    { label: 'Move Down', disabled: index <= 0, run: () => ops.moveEffect(layer.id, index, index - 1) },
     { separator: true },
     { label: 'Delete', icon: Trash2, run: () => ops.removeEffect(layer.id, fx.id) },
   ];
@@ -203,11 +222,11 @@ function EffectItem({
   return (
     <div
       className={cls('layers-fx-item', open && 'open', !fx.enabled && 'off', dragging && 'dragging', dropBefore && 'drop-before', dropAfter && 'drop-after')}
-      data-fx-index={index}
+      data-fx-row={row}
       onContextMenu={(e) => showContextMenu(e, menu())}
     >
       <div className="layers-fx-item-head">
-        <span className="layers-fx-grip" title="Drag to reorder" onPointerDown={onGrip}>
+        <span className="layers-fx-grip" title="Drag to reorder (rows higher in the list are drawn on top)" onPointerDown={onGrip}>
           <GripVertical size={13} />
         </span>
         <Checkbox checked={fx.enabled} onChange={() => ops.toggleEffect(layer.id, fx.id)} title={fx.enabled ? 'Hide effect' : 'Show effect'} />

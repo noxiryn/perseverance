@@ -15,7 +15,7 @@ import { bitmaps } from '../core/bitmaps';
 import { createCanvas, ctx2d } from '../core/canvas';
 import { transformedBounds } from '../core/geometry';
 import { applyFilterStack, makeFilterContext } from '../filters/engine';
-import { bumpGeneration, px, renderCache, slots } from './cache';
+import { VOLATILE_ASSETS, bumpGeneration, px, renderCache, slots } from './cache';
 import {
   compositeDocument,
   effectsReachOf,
@@ -312,7 +312,9 @@ export function invalidateRenderCache(layerId?: ID) {
     return;
   }
   slots.clear();
-  renderCache.clear();
+  // Procedural asset tiles are pure functions of (definition, size, params) and stay cached;
+  // user-image assets may have been generated before their image decoded, so they go.
+  renderCache.clear(VOLATILE_ASSETS);
   resetTextCaches();
   clearPool();
   bumpGeneration();

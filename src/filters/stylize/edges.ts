@@ -4,7 +4,7 @@
  * given thickness with an exact Euclidean distance transform (round, even-width strokes).
  */
 import type { Img } from './util';
-import { blurPlane, distanceTransform, edgeSeeds, insideDistance, sobel } from './util';
+import { blurPlane, boundedDistance, edgeSeeds, insideDistance, sobel } from './util';
 
 export interface OutlineOptions {
   /** Line width in image px. */
@@ -99,15 +99,15 @@ export function outlineCoverage(img: Img, o: OutlineOptions): Float32Array {
   const lum = o.luma ? Float32Array.from(o.luma) : edgeLuma(img);
   blurPlane(lum, w, h, o.smooth ?? 1);
   const seeds = detectEdges(lum, w, h, o.threshold, o.minLength ?? 3);
-  const dEdge = distanceTransform(seeds, w, h);
   const half = T * 0.5;
+  const dEdge = boundedDistance(seeds, w, h, half + 1);
   const faint = Math.min(1, T); // sub-pixel lines fade instead of thinning further
   for (let i = 0; i < n; i++) {
     const c = half + 0.5 - dEdge[i];
     if (c > 0) cov[i] = (c >= 1 ? 1 : c) * faint;
   }
   if (o.silhouette !== false && hasTransparency(img)) {
-    const dIn = insideDistance(img, false);
+    const dIn = insideDistance(img, false, T + 1);
     const d = img.data;
     for (let i = 0; i < n; i++) {
       if (d[i * 4 + 3] === 0) continue;

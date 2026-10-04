@@ -1,5 +1,6 @@
 /** Module-local shared state + small helpers for the viewport & its tools. */
 import type { Document, Point } from '../core/types';
+import type { ToolPointerEvent } from '../registry';
 import { viewport } from '../editor/viewport';
 import { activeDoc, activeSession } from '../state/editor';
 import { toast } from '../state/ui';
@@ -21,7 +22,24 @@ export interface GuideDrag {
   remove: boolean;
 }
 
+/**
+ * Temporarily routes left-button canvas input away from the active tool (e.g. the Color Range
+ * panel sampling colors from the canvas). Middle-button panning and the temporary Hand tool
+ * (Space) keep working.
+ */
+export interface InputOverride {
+  id: string;
+  cursor?(e: { altKey: boolean; shiftKey: boolean }): string | null;
+  onPointerDown?(e: ToolPointerEvent): void;
+  onPointerMove?(e: ToolPointerEvent): void;
+  onPointerUp?(e: ToolPointerEvent): void;
+  onHover?(e: ToolPointerEvent): void;
+  /** Drawn above the tool overlay (screen space). */
+  renderOverlay?(ctx: CanvasRenderingContext2D): void;
+}
+
 export const vpState = {
+  inputOverride: null as InputOverride | null,
   /** Last pointer position in viewport CSS px (null when outside). */
   pointer: null as Point | null,
   spaceHeld: false,
@@ -32,6 +50,21 @@ export const vpState = {
   /** A tool draws the selection outline itself (e.g. while dragging it) → skip the default ants. */
   suppressAnts: false,
 };
+
+const overrideListeners = new Set<() => void>();
+
+/** Install (or clear with null) the canvas input override. */
+export function setInputOverride(o: InputOverride | null) {
+  vpState.inputOverride = o;
+  overrideListeners.forEach((l) => l());
+  viewport.requestOverlay();
+}
+
+/** Notified whenever the input override changes (the viewport refreshes its cursor). */
+export function onInputOverrideChange(l: () => void): () => void {
+  overrideListeners.add(l);
+  return () => overrideListeners.delete(l);
+}
 
 /** doc → screen (CSS px) matrix for the active view. */
 export function docToScreenMatrix(): Affine {

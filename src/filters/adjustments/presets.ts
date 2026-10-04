@@ -207,6 +207,13 @@ export function matchPreset(def: FilterDef, params: ParamValues, presets: Adjust
   return null;
 }
 
+/** False for auto-generated names ("Levels", "Levels 2"), true for custom/preset names. */
+export function isCustomName(layerName: string, defName: string): boolean {
+  if (layerName === defName) return false;
+  if (!layerName.startsWith(`${defName} `)) return true;
+  return !/^\d+$/.test(layerName.slice(defName.length + 1));
+}
+
 /* ---------------- ordering ---------------- */
 
 /** Panel rows / menu groups (Photoshop order). Unknown adjustment filters go in a last row. */

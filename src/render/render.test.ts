@@ -9,6 +9,69 @@ import { PixelLRU, SlotCache, objId } from './cache';
 import { maskLUT, maskValue } from './mask';
 import { alignedOrigin } from './text';
 import { coverRect, expandRect, intersectRect, unionRect } from './surface';
+import { buildGrid, warpImage } from './meshWarp';
+
+describe('mesh warp', () => {
+  /** Opaque w×h image whose red channel encodes x and green encodes y. */
+  function ramp(w: number, h: number): Uint8ClampedArray {
+    const d = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * 4;
+        d[o] = x * 8;
+        d[o + 1] = y * 8;
+        d[o + 3] = 255;
+      }
+    return d;
+  }
+
+  it('identity mesh reproduces the image exactly', () => {
+    const w = 24,
+      h = 16;
+    const src = ramp(w, h);
+    const dst = new Uint8ClampedArray(src.length);
+    warpImage(src, w, h, dst, w, h, buildGrid(w, h, 5, 3, (x, y) => [x, y]));
+    expect(Array.from(dst)).toEqual(Array.from(src));
+  });
+
+  it('a strongly non-linear warp leaves no uncovered pixels (seamless)', () => {
+    const w = 64,
+      h = 32;
+    const src = new Uint8ClampedArray(w * h * 4).fill(255);
+    const dw = 90,
+      dh = 70;
+    const grid = buildGrid(w, h, 9, 5, (x, y) => [x + 12 + 6 * Math.sin(y / 5), y + 18 + 14 * Math.sin(x / 9)]);
+    const dst = new Uint8ClampedArray(dw * dh * 4);
+    warpImage(src, w, h, dst, dw, dh, grid);
+    // Every destination pixel whose center lies well inside the warped image must be opaque.
+    let holes = 0;
+    for (let y = 0; y < dh; y++)
+      for (let x = 0; x < dw; x++) {
+        const sx = x + 0.5 - 12;
+        if (sx < 8 || sx > w - 8) continue; // x shift is at most ±6
+        const top = 18 + 14 * Math.sin(sx / 9);
+        if (y + 0.5 < top + 11 || y + 0.5 > top + h - 11) continue; // y offset varies ≤ 9.4 over ±6 px
+        if (dst[(y * dw + x) * 4 + 3] < 250) holes++;
+      }
+    expect(holes).toBe(0);
+  });
+
+  it('translation shifts the content and samples bilinearly in premultiplied space', () => {
+    const w = 4,
+      h = 1;
+    const src = new Uint8ClampedArray(w * h * 4);
+    // one opaque red pixel next to a transparent (black) one
+    src.set([255, 0, 0, 255], 0);
+    const dst = new Uint8ClampedArray(src.length);
+    warpImage(src, w, h, dst, w, h, buildGrid(w, h, 2, 1, (x, y) => [x + 0.5, y]));
+    // half-pixel shift: pixel 0 = 50% of red at (0) and nothing on the left; colour stays pure red
+    expect(dst[0]).toBe(255);
+    expect(dst[3]).toBeGreaterThan(120);
+    expect(dst[3]).toBeLessThan(135);
+    expect(dst[4]).toBe(255); // pixel 1: half red, half transparent → still pure red, never darkened
+    expect(dst[5]).toBe(0);
+  });
+});
 
 /** Monospace fake measure: every code unit is 10px wide. */
 const mono: Measure = (s) => s.length * 10;

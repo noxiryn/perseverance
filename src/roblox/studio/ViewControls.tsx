@@ -70,7 +70,7 @@ function LightEditor({ title, light, onChange }: { title: string; light: LightSp
     >
       <SwatchRow colors={LIGHT_SWATCHES} value={light.color} onPick={(color) => onChange({ ...light, color })} size={14} />
       <SliderRow label="Intensity" value={light.intensity} min={0} max={8} step={0.05} onChange={(intensity) => onChange({ ...light, intensity })} />
-      <SliderRow label="Direction" value={light.azimuth} min={-180} max={180} unit="°" onChange={(azimuth) => onChange({ ...light, azimuth })} hint="0° = from the front, 90° = from the character's left, 180° = from behind" />
+      <SliderRow label="Direction" value={light.azimuth} min={-180} max={180} unit="°" onChange={(azimuth) => onChange({ ...light, azimuth })} hint="Relative to the camera: 0° = from the camera, −90° = from the frame's left, +90° = from the right, 180° = from behind (rim)" />
       <SliderRow label="Elevation" value={light.elevation} min={-30} max={90} unit="°" onChange={(elevation) => onChange({ ...light, elevation })} />
     </Group>
   );

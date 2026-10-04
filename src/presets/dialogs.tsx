@@ -119,7 +119,7 @@ export function readSourcePixels(source: Source): PixelSource | null {
 function ExtractPaletteDialog({ close }: { close: (id?: string) => void }) {
   const doc = activeDoc();
   const layer = activeLayer();
-  const layerOk = !!layer && layer.type !== 'adjustment' && layer.type !== 'group';
+  const layerOk = !!layer && layer.type !== 'adjustment';
   const [source, setSource] = useState<Source>(layerOk ? 'layer' : 'composite');
   const [count, setCount] = useState(8);
   const [method, setMethod] = useState<ExtractMethod>('kmeans');
@@ -189,7 +189,13 @@ function ExtractPaletteDialog({ close }: { close: (id?: string) => void }) {
             ))
           ) : (
             <div className="ui-empty" style={{ width: '100%' }}>
-              {source === 'layer' ? 'The active layer has no visible pixels to sample.' : 'Nothing to sample — the image is empty.'}
+              {source !== 'layer'
+                ? 'Nothing to sample — the image is empty.'
+                : !layer
+                  ? 'No layer is selected — pick a layer or use Whole Image.'
+                  : !layerOk
+                    ? `“${layer.name}” is an adjustment layer and has no pixels of its own — select a pixel, text or shape layer, or use Whole Image.`
+                    : 'The active layer has no visible pixels to sample.'}
             </div>
           )}
         </div>

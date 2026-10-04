@@ -22,7 +22,7 @@ import {
   blurPlane,
   bool,
   clamp,
-  distanceTransform,
+  boundedDistance,
   hash,
   insideDistance,
   isEmpty,
@@ -186,9 +186,9 @@ export const posterizeEdges: FilterDef = {
           if ((x < w - 1 && band[i] !== band[i + 1] && data[i * 4 + 7] !== 0) || (y < h - 1 && band[i] !== band[i + w] && data[(i + w) * 4 + 3] !== 0))
             seeds[i] = 1;
         }
-      const dt = distanceTransform(seeds, w, h);
       const half = lw * 0.5,
         faint = Math.min(1, lw);
+      const dt = boundedDistance(seeds, w, h, half + 1);
       for (let i = 0, j = 0; i < n; i++, j += 4) {
         const c = half + 0.5 - dt[i];
         if (c <= 0 || data[j + 3] === 0) continue;
@@ -765,7 +765,7 @@ export const roughEdges: FilterDef = {
     const nz = simplex(seed);
     const octaves = 2 + Math.round(detail * 4);
     const gain = 0.35 + detail * 0.3;
-    const dIn = insideDistance(img, true);
+    const dIn = insideDistance(img, true, amt + rim + 2);
     const reach = amt + rim + 1.5;
     for (let y = 0; y < h; y++) {
       const dy = (y + 0.5 + ay) / s / scale;

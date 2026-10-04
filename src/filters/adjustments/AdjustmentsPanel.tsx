@@ -13,6 +13,7 @@ import { AdjustmentEditor } from './AdjustmentEditor';
 import { createAdjustmentLayer } from './layers';
 import { orderAdjustments, presetsFor } from './presets';
 import { useAdjustmentsPrefs } from './prefs';
+import { presetSwatchCss } from './swatches';
 import './adjustments.css';
 
 function useAdjustmentRows(): FilterDef[][] {
@@ -20,10 +21,20 @@ function useAdjustmentRows(): FilterDef[][] {
   return useMemo(() => orderAdjustments(list.filter((f) => f.adjustment)), [list]);
 }
 
-function AddGrid({ rows, activeFilterId, disabled }: { rows: FilterDef[][]; activeFilterId: string | null; disabled: boolean }) {
+function AddGrid({
+  rows,
+  activeFilterId,
+  disabled,
+  onHover,
+}: {
+  rows: FilterDef[][];
+  activeFilterId: string | null;
+  disabled: boolean;
+  onHover: (def: FilterDef | null) => void;
+}) {
   const clipDefault = useAdjustmentsPrefs((s) => s.clipByDefault);
   return (
-    <div className={`adjustments-grid${disabled ? ' disabled' : ''}`}>
+    <div className={`adjustments-grid${disabled ? ' disabled' : ''}`} onMouseLeave={() => onHover(null)}>
       {rows.map((row, i) => (
         <div className="adjustments-grid-row" key={i}>
           {row.map((def) => {
@@ -35,6 +46,9 @@ function AddGrid({ rows, activeFilterId, disabled }: { rows: FilterDef[][]; acti
                 title={`${def.name}\n${clipDefault ? 'Click: clipped to the layer below · Alt-click: unclipped' : 'Click: new adjustment layer · Alt-click: clipped to the layer below'}`}
                 aria-label={`Add ${def.name} adjustment`}
                 onClick={(e) => createAdjustmentLayer(def.id, { clipped: e.altKey ? !clipDefault : clipDefault })}
+                onMouseEnter={() => onHover(def)}
+                onFocus={() => onHover(def)}
+                onBlur={() => onHover(null)}
               >
                 <Icon size={17} strokeWidth={1.6} />
               </button>
@@ -61,28 +75,32 @@ function PresetList({ rows }: { rows: FilterDef[][] }) {
             <button className="adjustments-preset-head" onClick={() => setOpen(isOpen ? null : def.id)}>
               {isOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
               <Icon size={13} strokeWidth={1.7} />
-              <span>{def.name}</span>
+              <span className="name">{def.name}</span>
               <span className="count">{presetsFor(def.id).length}</span>
             </button>
             {isOpen && (
               <div className="adjustments-preset-items">
-                {presetsFor(def.id).map((p) => (
-                  <button
-                    key={p.name}
-                    className="adjustments-preset-item"
-                    title={`New ${def.name} layer: ${p.name} (Alt-click: ${clipDefault ? 'unclipped' : 'clipped'})`}
-                    onClick={(e) =>
-                      createAdjustmentLayer(def.id, {
-                        params: p.params,
-                        name: p.name,
-                        label: `New ${def.name} Layer`,
-                        clipped: e.altKey ? !clipDefault : clipDefault,
-                      })
-                    }
-                  >
-                    {p.name}
-                  </button>
-                ))}
+                {presetsFor(def.id).map((p) => {
+                  const swatch = presetSwatchCss(def.id, p.params);
+                  return (
+                    <button
+                      key={p.name}
+                      className="adjustments-preset-item"
+                      title={`New ${def.name} layer: ${p.name} (Alt-click: ${clipDefault ? 'unclipped' : 'clipped'})`}
+                      onClick={(e) =>
+                        createAdjustmentLayer(def.id, {
+                          params: p.params,
+                          name: p.name,
+                          label: `New ${def.name} Layer`,
+                          clipped: e.altKey ? !clipDefault : clipDefault,
+                        })
+                      }
+                    >
+                      {swatch && <span className="adjustments-preset-swatch" style={{ background: swatch }} />}
+                      <span className="label">{p.name}</span>
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -98,16 +116,17 @@ export function AdjustmentsPanel() {
   const rows = useAdjustmentRows();
   const showPresets = useAdjustmentsPrefs((s) => s.showPresets);
   const [presetsOpen, setPresetsOpen] = useState(false);
+  const [hovered, setHovered] = useState<FilterDef | null>(null);
   const adj = layer && layer.type === 'adjustment' ? layer : null;
 
   return (
     <div className="adjustments-panel">
       <div className="adjustments-scroll">
         <div className="adjustments-section">
-          <div className="adjustments-heading">
-            <span>Add an adjustment</span>
+          <div className={`adjustments-heading${hovered ? ' hover' : ''}`}>
+            <span>{hovered ? hovered.name : 'Add an adjustment'}</span>
           </div>
-          <AddGrid rows={rows} activeFilterId={adj?.adjustment.filterId ?? null} disabled={!session} />
+          <AddGrid rows={rows} activeFilterId={adj?.adjustment.filterId ?? null} disabled={!session} onHover={setHovered} />
           {!session && <div className="adjustments-hint center">Open or create a document to add adjustments.</div>}
         </div>
 

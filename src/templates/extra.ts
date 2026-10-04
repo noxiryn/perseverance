@@ -351,7 +351,7 @@ export const showcase = defineTemplate({
       ),
       { blendMode: 'screen', opacity: 0.85 },
     );
-    b.asset('bokeh', { color: '#8b7cf6', seed: 3 }, { name: 'Bokeh', blendMode: 'screen', opacity: 0.3 });
+    b.asset('bokeh', { color1: '#8b7cf6', color2: '#5a5aa8', color3: '#c9c2ff', seed: 3 }, { name: 'Bokeh', blendMode: 'screen', opacity: 0.3 });
 
     const ch = b.character({ cx: 1440, top: 180, height: 940, pose: 'arms-crossed', style: 'shaded', shirt: '#22222e', pants: '#15151c', hair: '#0f0f14' });
     b.smartFilter(ch, 'rim-light', { color: '#b9b2ff', width: 14, angle: 135, intensity: 0.85 });
@@ -395,7 +395,7 @@ export const groupBanner = defineTemplate({
         0,
       ),
     );
-    b.asset('ornate-corners', { color: '#c9a24a', seed: 2 }, { name: 'Ornate Corners', opacity: 0.85 });
+    b.asset('ornate-corners', { color: '#c9a24a', size: 220, thickness: 5, inset: 22 }, { name: 'Ornate Corners', opacity: 0.85 });
 
     b.group('Members', () => {
       const members: { cx: number; top: number; pose: 'hero' | 'arms-crossed'; shirt: string; name: string }[] = [

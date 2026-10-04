@@ -3,6 +3,7 @@
  * Weights/italics come from the generated manifest (src/fonts/generated/faces.ts).
  */
 import type { FontCategory } from '../registry';
+import type { FontClassHint } from './sfnt';
 
 export interface CatalogEntry {
   category: FontCategory;
@@ -206,4 +207,38 @@ export function defaultPreviewText(category: FontCategory, sample?: string): str
     default:
       return 'The quick brown fox';
   }
+}
+
+/**
+ * Guess a category for a user font: distinctive name patterns first (blackletter, Japanese,
+ * horror…), then the design class the font declares (OS/2 PANOSE / family class), then generic
+ * name words. Falls back to 'Display'.
+ */
+export function guessCategory(family: string, hint?: FontClassHint): FontCategory {
+  const s = family.toLowerCase();
+  if (/\b(jp|japan(ese)?|mincho|kanji|kaku|maru|meiryo|hiragino|yu gothic|ms gothic|ms mincho|cjk)\b/.test(s)) return 'Japanese';
+  // "Gothic" alone usually means blackletter here, but American "gothics" are sans serifs.
+  const sansGothic = /(century|league|franklin|trade|news|highway|alternate) gothic|gothic a1/.test(s);
+  if (/fraktur|blackletter|old ?english|textura|gotisch/.test(s) || (/\bgothic\b/.test(s) && !sansGothic)) return 'Blackletter';
+  if (/horror|blood|zombie|creep|grunge|dirt|distress|scary|halloween/.test(s)) return 'Grunge & Horror';
+  if (/mono|courier|typewriter|\bcode\b|consol/.test(s) || hint === 'mono') return 'Typewriter & Mono';
+  if (/condensed|narrow|compressed|bebas|anton|oswald|league gothic/.test(s)) return 'Condensed';
+  if (/script|signature|calligraph|vibes|allura/.test(s)) return 'Script';
+  if (/hand(writ)?|marker|scribble|brush/.test(s)) return 'Handwritten';
+  if (/comic|cartoon|bubble|toon|chunky/.test(s)) return 'Cartoon';
+  switch (hint) {
+    case 'script':
+      return 'Script';
+    case 'serif':
+    case 'slab':
+      return 'Serif';
+    case 'sans':
+      return 'Sans';
+    case 'decorative':
+    case 'symbol':
+      return 'Display';
+  }
+  if (/serif|garamond|times|roman|baskerville|bodoni|didot|caslon/.test(s) && !/sans/.test(s)) return 'Serif';
+  if (/sans|grotesk|grotesque|helvetica|arial|gothic/.test(s)) return 'Sans';
+  return 'Display';
 }

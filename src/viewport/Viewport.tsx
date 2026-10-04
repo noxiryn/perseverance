@@ -2,10 +2,12 @@
  * <Viewport/> — the canvas viewport (fills its parent). Two stacked DPR-aware canvases
  * (document + overlay) over a dotted canvas background; all drawing and input is handled by
  * ViewportEngine. Mounted by the shell (src/ui/shell/ViewportHost.tsx) and the ?view=1 harness.
+ * Non-modal canvas UI (the Color Range panel) floats inside it.
  */
 import { useEffect, useRef } from 'react';
 import { useEditor } from '../state/editor';
 import { ViewportEngine } from './engine';
+import { ColorRangePanel } from './colorRange';
 import './lifecycle';
 import './viewport.css';
 
@@ -34,6 +36,7 @@ export function Viewport() {
           <span>No document open — create one with Ctrl+N or open an image with Ctrl+O</span>
         </div>
       )}
+      <ColorRangePanel />
     </div>
   );
 }

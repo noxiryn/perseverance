@@ -8,6 +8,7 @@ import { ensureFont, isFontReady } from '../fonts/loader';
 import { cacheGeneration, objId, px, slots } from './cache';
 import { layoutText, lineIndexForCaret, type Measure } from './textLayout';
 import { isWarpActive, warpPoint } from './warpMath';
+import { buildGrid, warpImage } from './meshWarp';
 import { fillWithPaint } from './paint';
 import { acquire, release } from './surface';
 
@@ -79,6 +80,11 @@ export function requestTextFont(t: TextProps) {
   if (!isFontReady(fam, w, st)) void ensureFont(fam, w, st);
 }
 
+/** Whether the face of a text layer is loaded (part of text cache signatures). */
+export function textFontReady(t: TextProps): boolean {
+  return isFontReady(cleanFamily(t.fontFamily), Math.round(Number(t.fontWeight) || 400), t.fontStyle === 'italic' ? 'italic' : 'normal');
+}
+
 export function displayContent(t: TextProps): string {
   const c = t.content ?? '';
   return t.uppercase ? c.toUpperCase() : c;
@@ -122,13 +128,14 @@ function fontMetrics(t: TextProps): { ascent: number; descent: number } {
   return { ascent: a, descent: d };
 }
 
-let layoutCache = new WeakMap<TextProps, { gen: number; layout: TextLayout }>();
+let layoutCache = new WeakMap<TextProps, { gen: number; ready: boolean; layout: TextLayout }>();
 
 /** Lay out text (wrapping when boxWidth is set). Identical to what the renderer draws. */
 export function layoutTextProps(t: TextProps): TextLayout {
   const gen = cacheGeneration();
+  const ready = textFontReady(t);
   const hit = layoutCache.get(t);
-  if (hit && hit.gen === gen) return hit.layout;
+  if (hit && hit.gen === gen && hit.ready === ready) return hit.layout;
   const sy = Math.abs(Number(t.scaleY) || 1);
   const size = Math.max(0.5, Number(t.fontSize) || 12);
   const met = fontMetrics(t);
@@ -155,7 +162,7 @@ export function layoutTextProps(t: TextProps): TextLayout {
     lineHeight,
     content,
   };
-  layoutCache.set(t, { gen, layout });
+  layoutCache.set(t, { gen, ready, layout });
   return layout;
 }
 
@@ -374,85 +381,51 @@ function hardenAlpha(c: HTMLCanvasElement) {
   ctx.putImageData(img, 0, 0);
 }
 
+/** Source px per warp-mesh cell (affine per triangle; 8px keeps the error far below a pixel). */
+const WARP_CELL = 8;
+
 /**
- * Warp a flat local content through the text warp mapping using an affine-per-cell mesh.
- * Cells overlap by half a pixel to hide seams.
+ * Warp a flat local content through the text warp mapping with a seamless software triangle
+ * mesh (see meshWarp.ts): exact per-triangle inverse mapping + premultiplied bilinear sampling.
  */
 function warpContent(flat: LocalContent, t: TextProps, layout: TextLayout): LocalContent {
   const { canvas: src, k, ox, oy } = flat;
   const a = layout.width / 2;
   const c = layout.height / 2;
   const w = t.warp;
-  const map = (lx: number, ly: number): [number, number] => {
-    const [X, Y] = warpPoint(w, lx - a, ly - c, a, c);
+  const cols = Math.max(4, Math.min(320, Math.round(src.width / WARP_CELL)));
+  const rows = Math.max(2, Math.min(160, Math.round(src.height / WARP_CELL)));
+  // Mesh in LOCAL coordinates first (to find the warped extent), then convert to output px.
+  const grid = buildGrid(src.width, src.height, cols, rows, (sx, sy) => {
+    const [X, Y] = warpPoint(w, ox + sx / k - a, oy + sy / k - c, a, c);
     return [X + a, Y + c];
-  };
-  const cell = 20; // target cell size in source px
-  const N = Math.max(4, Math.min(160, Math.round(src.width / cell)));
-  const M = Math.max(2, Math.min(64, Math.round(src.height / cell)));
-  const sw = src.width / N;
-  const sh = src.height / M;
-  // Destination vertices (local coords)
-  const vx = new Float64Array((N + 1) * (M + 1));
-  const vy = new Float64Array((N + 1) * (M + 1));
+  });
   let minX = Infinity,
     minY = Infinity,
     maxX = -Infinity,
     maxY = -Infinity;
-  for (let j = 0; j <= M; j++) {
-    for (let i = 0; i <= N; i++) {
-      const [X, Y] = map(ox + (i * sw) / k, oy + (j * sh) / k);
-      const idx = j * (N + 1) + i;
-      vx[idx] = X;
-      vy[idx] = Y;
-      if (X < minX) minX = X;
-      if (Y < minY) minY = Y;
-      if (X > maxX) maxX = X;
-      if (Y > maxY) maxY = Y;
-    }
+  for (let i = 0; i < grid.dx.length; i++) {
+    const X = grid.dx[i];
+    const Y = grid.dy[i];
+    if (X < minX) minX = X;
+    if (Y < minY) minY = Y;
+    if (X > maxX) maxX = X;
+    if (Y > maxY) maxY = Y;
   }
+  if (!Number.isFinite(minX + minY + maxX + maxY)) return flat;
   const nox = Math.floor(minX - 2);
   const noy = Math.floor(minY - 2);
-  const outW = Math.min(MAX_TEXT_SIDE, Math.ceil((maxX + 2 - nox) * k));
-  const outH = Math.min(MAX_TEXT_SIDE, Math.ceil((maxY + 2 - noy) * k));
-  const out = createCanvas(outW, outH);
-  const ctx = ctx2d(out);
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'medium';
-  const ov = 0.5;
-  for (let j = 0; j < M; j++) {
-    for (let i = 0; i < N; i++) {
-      const i00 = j * (N + 1) + i;
-      const i10 = i00 + 1;
-      const i01 = i00 + N + 1;
-      const i11 = i01 + 1;
-      // Destination corners in output px
-      const x00 = (vx[i00] - nox) * k,
-        y00 = (vy[i00] - noy) * k;
-      const x10 = (vx[i10] - nox) * k,
-        y10 = (vy[i10] - noy) * k;
-      const x01 = (vx[i01] - nox) * k,
-        y01 = (vy[i01] - noy) * k;
-      const x11 = (vx[i11] - nox) * k,
-        y11 = (vy[i11] - noy) * k;
-      // Least-squares affine of the bilinear patch: unit-square axes.
-      const ax = (x10 - x00 + x11 - x01) / 2;
-      const ay = (y10 - y00 + y11 - y01) / 2;
-      const bx = (x01 - x00 + x11 - x10) / 2;
-      const by = (y01 - y00 + y11 - y10) / 2;
-      const cx = (x00 + x10 + x01 + x11) / 4 - (ax + bx) / 2;
-      const cy = (y00 + y10 + y01 + y11) / 4 - (ay + by) / 2;
-      // Map source cell (sx..sx+sw, sy..sy+sh) → unit square → destination.
-      const sx0 = i * sw;
-      const sy0 = j * sh;
-      ctx.setTransform(ax / sw, ay / sw, bx / sh, by / sh, cx, cy);
-      const ex0 = Math.max(0, sx0 - ov);
-      const ey0 = Math.max(0, sy0 - ov);
-      const ex1 = Math.min(src.width, sx0 + sw + ov);
-      const ey1 = Math.min(src.height, sy0 + sh + ov);
-      ctx.drawImage(src, ex0, ey0, ex1 - ex0, ey1 - ey0, ex0 - sx0, ey0 - sy0, ex1 - ex0, ey1 - ey0);
-    }
+  const outW = Math.max(1, Math.min(MAX_TEXT_SIDE, Math.ceil((maxX + 2 - nox) * k)));
+  const outH = Math.max(1, Math.min(MAX_TEXT_SIDE, Math.ceil((maxY + 2 - noy) * k)));
+  for (let i = 0; i < grid.dx.length; i++) {
+    grid.dx[i] = (grid.dx[i] - nox) * k;
+    grid.dy[i] = (grid.dy[i] - noy) * k;
   }
+  const srcData = ctx2d(src, { willReadFrequently: true }).getImageData(0, 0, src.width, src.height).data;
+  const out = createCanvas(outW, outH);
+  const img = new ImageData(outW, outH);
+  warpImage(srcData, src.width, src.height, img.data, outW, outH, grid);
+  ctx2d(out).putImageData(img, 0, 0);
   return { canvas: out, k, ox: nox, oy: noy };
 }
 
@@ -499,7 +472,7 @@ export function renderTextContent(t: TextProps, kRequested: number, fx = 0, fy =
   const k = Math.max(0.01, Math.min(kRequested, MAX_TEXT_SIDE / Math.max(1, maxDim)));
   if (warp || k !== kRequested) fx = fy = 0;
   const key = `text|${objId(t)}`;
-  const sig = `${k.toFixed(5)}|${fx.toFixed(4)}|${fy.toFixed(4)}|${cacheGeneration()}`;
+  const sig = `${k.toFixed(5)}|${fx.toFixed(4)}|${fy.toFixed(4)}|${cacheGeneration()}|${textFontReady(t) ? 'r' : 'p'}`;
   const hit = slots.get<LocalContent>(key, sig);
   if (hit) return hit;
   let content = renderFlat(t, layout, k, P, fx, fy);

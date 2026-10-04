@@ -8,7 +8,8 @@ import { OutlineEffect } from 'three/examples/jsm/effects/OutlineEffect.js';
 import { createCanvas, ctx2d } from '../../core/canvas';
 import { applyPose, buildRig, type PartRole, type RigBuild } from './rig';
 import { buildAccessories, buildFaceTexture, buildHairGeometry, type PartsFactory, type SurfaceKind } from './parts';
-import type { Framing, JointId, LightSpec, ShadingMode, StudioCamera, StudioShading, StudioState, Vec3, ViewSettings } from './types';
+import type { Framing, JointId, LightSpec, ShadingMode, StudioCamera, StudioLighting, StudioShading, StudioState, Vec3, ViewSettings } from './types';
+import { GRADIENT_RES, lightDirection, toonGradient, yawOf } from './toon';
 
 const DEG = Math.PI / 180;
 
@@ -46,6 +47,9 @@ export class StudioScene {
   private model: { pivot: THREE.Group; root: THREE.Object3D; originals: Map<THREE.Mesh, THREE.Material | THREE.Material[]>; key: string } | null = null;
   private modelResources = new Set<Disposable>();
   private cam: StudioCamera | null = null;
+  private lighting: StudioLighting | null = null;
+  /** Current look-at point (mirrors the orbit controls target). */
+  private viewTarget = new THREE.Vector3(0, 2.6, 0);
   private dragging = false;
   private frame = 0;
   private disposed = false;
@@ -125,11 +129,11 @@ export class StudioScene {
     const n = Math.max(2, Math.min(6, Math.round(steps)));
     let t = this.gradientMaps.get(n);
     if (!t) {
-      const data = new Uint8Array(n);
-      for (let i = 0; i < n; i++) data[i] = Math.round(255 * (0.28 + 0.72 * Math.pow(i / (n - 1), 0.9)));
-      t = new THREE.DataTexture(data, n, 1, THREE.RedFormat);
-      t.minFilter = THREE.NearestFilter;
-      t.magFilter = THREE.NearestFilter;
+      const data = toonGradient(n, GRADIENT_RES);
+      t = new THREE.DataTexture(data, GRADIENT_RES, 1, THREE.RedFormat);
+      // Linear filtering over a high-res ramp: crisp band edges without per-pixel band flicker.
+      t.minFilter = THREE.LinearFilter;
+      t.magFilter = THREE.LinearFilter;
       t.generateMipmaps = false;
       t.needsUpdate = true;
       this.gradientMaps.set(n, t);
@@ -145,7 +149,6 @@ export class StudioScene {
     opts: { doubleSide?: boolean; map?: THREE.Texture | null } = {},
   ): THREE.Material {
     const side = opts.doubleSide ? THREE.DoubleSide : THREE.FrontSide;
-    const faceted = kind === 'hair';
     let m: THREE.Material;
     if (mode === 'flat') {
       m = new THREE.MeshBasicMaterial({ color: shading.flatColor, side });
@@ -156,8 +159,6 @@ export class StudioScene {
         gradientMap: this.gradientMap(shading.toonSteps),
         side,
       });
-      // The toon shader honours FLAT_SHADED (from `material.flatShading`), but the typings omit it.
-      if (faceted) Object.assign(m, { flatShading: true });
     } else {
       const metal = kind === 'metal' || kind === 'gold';
       m = new THREE.MeshStandardMaterial({
@@ -165,7 +166,6 @@ export class StudioScene {
         map: opts.map ?? null,
         roughness: metal ? 0.35 : kind === 'hair' ? 0.75 : 0.62,
         metalness: metal ? 0.45 : 0,
-        flatShading: faceted,
         side,
       });
     }
@@ -339,12 +339,20 @@ export class StudioScene {
   /* Lights, outline, camera                                           */
   /* ---------------------------------------------------------------- */
 
-  applyView(view: ViewSettings) {
-    const L = view.lighting;
+  /**
+   * Position the key/rim/fill lights relative to the current camera orbit angle (studio style:
+   * a lighting preset keeps its look from every camera angle). Called before every render so the
+   * lights follow the camera while orbiting.
+   */
+  private placeLights() {
+    const L = this.lighting;
+    if (!L) return;
+    const target = this.controls?.target ?? this.viewTarget;
+    const yaw = yawOf(this.camera.position, target);
+    this.lightTarget.position.set(target.x, target.y, target.z);
     const place = (light: THREE.DirectionalLight, s: LightSpec) => {
-      const az = s.azimuth * DEG,
-        el = s.elevation * DEG;
-      light.position.set(Math.sin(az) * Math.cos(el) * 30, 2.6 + Math.sin(el) * 30, Math.cos(az) * Math.cos(el) * 30);
+      const [x, y, z] = lightDirection(yaw, s.azimuth, s.elevation);
+      light.position.set(target.x + x * 40, target.y + y * 40, target.z + z * 40);
       light.color.set(s.color);
       light.intensity = Math.max(0, s.intensity);
       light.visible = s.intensity > 0.001;
@@ -354,6 +362,10 @@ export class StudioScene {
     place(this.fillLight, L.fill);
     this.ambient.color.set(L.ambientColor);
     this.ambient.intensity = Math.max(0, L.ambient);
+  }
+
+  applyView(view: ViewSettings) {
+    this.lighting = view.lighting;
 
     const sh = view.shading;
     this.outline.enabled = sh.outline && sh.outlineThickness > 0;
@@ -390,6 +402,7 @@ export class StudioScene {
     this.camera.aspect = this.aspect;
     this.camera.updateProjectionMatrix();
     this.camera.lookAt(t);
+    this.viewTarget.copy(t);
     if (this.controls) {
       this.controls.target.copy(t);
       this.controls.update();
@@ -402,9 +415,15 @@ export class StudioScene {
     this.content.updateMatrixWorld(true);
     let box = new THREE.Box3();
     if (this.rig) {
-      for (const m of this.rig.meshes) box.expandByObject(m);
-      if (framing === 'head') box = new THREE.Box3().setFromObject(this.rig.head).expandByScalar(0.25);
-      else if (framing === 'waist') {
+      // Whole figure including hair, weapons and cape.
+      box.setFromObject(this.rig.figure);
+      if (framing === 'head') {
+        // Head + hair + head accessories, with the top of the shoulders (icon close-up).
+        box = new THREE.Box3().setFromObject(this.rig.joints.neck ?? this.rig.head);
+        const h = box.max.y - box.min.y;
+        box.min.y -= h * 0.32;
+        box.expandByScalar(0.08);
+      } else if (framing === 'waist') {
         const hipY = (this.rig.joints.root ?? this.rig.figure).getWorldPosition(new THREE.Vector3()).y - (this.rig.type === 'R6' ? 1 : 0.2);
         box.min.y = Math.max(box.min.y, hipY - 0.1);
       }
@@ -420,7 +439,7 @@ export class StudioScene {
     const size = box.getSize(new THREE.Vector3());
     const half = Math.tan((Math.max(5, fov) * DEG) / 2);
     const horiz = Math.max(size.x, size.z);
-    const margin = framing === 'head' ? 1.25 : 1.12;
+    const margin = framing === 'head' ? 1.12 : 1.08;
     const dist = Math.max((size.y / 2) / half, (horiz / 2) / (half * Math.max(0.2, aspect))) * margin + horiz / 2;
     return { target: [c.x, c.y, c.z], baseDistance: Math.max(1, dist) };
   }
@@ -454,6 +473,7 @@ export class StudioScene {
 
   render() {
     if (this.disposed) return;
+    this.placeLights();
     this.outline.render(this.scene, this.camera);
     this.onRender?.();
   }
@@ -482,6 +502,7 @@ export class StudioScene {
     this.renderer.setSize(rw, rh, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    this.placeLights();
     this.outline.render(this.scene, this.camera);
     const out = createCanvas(w, h);
     const ctx = ctx2d(out);

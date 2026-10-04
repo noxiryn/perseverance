@@ -26,7 +26,7 @@ import type { BlendMode, Document, FillContent, Gradient, GradientKind, Layer, T
 import { isTransformable } from '../core/document';
 import { useEditor } from '../state/editor';
 import { useUI } from '../state/ui';
-import { commands, filters, propertiesSections, runCommand, useRegistry, type FilterCategory } from '../registry';
+import { commands, filters, panels, propertiesSections, runCommand, useRegistry, type FilterCategory } from '../registry';
 import { resolveParams } from '../filters/engine';
 import { getLayerSize } from '../render/compositor';
 import { openFilterDialog } from '../filters/ui/filterDialog';
@@ -261,7 +261,18 @@ function LayerProps({ doc, layer }: { doc: Document; layer: Layer }) {
       {layer.type === 'fill' && <FillSection layer={layer} />}
       {layer.type === 'adjustment' && !applicable.length && (
         <Section title="Adjustment">
-          <AdjustmentFallback layer={layer} />
+          <div className="layers-note">
+            {filters.get(layer.adjustment.filterId)
+              ? 'The settings of this adjustment are edited in the Adjustments panel.'
+              : `The “${layer.adjustment.filterId}” adjustment is not available in this build.`}
+          </div>
+          {panels.has('adjustments') && (
+            <div className="layers-btnrow">
+              <Button size="small" onClick={() => useUI.getState().showPanel('adjustments')}>
+                Open Adjustments
+              </Button>
+            </div>
+          )}
         </Section>
       )}
       <MaskSection doc={doc} layer={layer} />
@@ -498,18 +509,6 @@ function FillSection({ layer }: { layer: Extract<Layer, { type: 'fill' }> }) {
       {fill.type === 'pattern' && <PatternFillEditor value={fill} onChange={(f) => set(f, 'preview')} onCommit={(f) => set(f, 'commit')} />}
     </Section>
   );
-}
-
-/** Minimal param editor for adjustment layers when the adjustments module hasn't registered its section. */
-function AdjustmentFallback({ layer }: { layer: Extract<Layer, { type: 'adjustment' }> }) {
-  const def = filters.get(layer.adjustment.filterId);
-  if (!def) return <div className="layers-note">The “{layer.adjustment.filterId}” adjustment is not available in this build.</div>;
-  const values = resolveParams(def, layer.adjustment.params);
-  const set = (all: typeof values, phase: ops.Phase) =>
-    ops.editLayers([layer.id], `Edit ${def.name}`, (l) => {
-      if (l.type === 'adjustment') l.adjustment.params = all;
-    }, phase);
-  return <ParamEditor defs={def.params} values={values} onChange={(_k, _v, all) => set(all, 'preview')} onCommit={(_k, _v, all) => set(all, 'commit')} />;
 }
 
 /* ---------------- Mask ---------------- */

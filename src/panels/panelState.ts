@@ -5,7 +5,8 @@ import type { LayerKind } from './treeOps';
 
 export type ThumbSize = 'none' | 'small' | 'medium' | 'large';
 
-export const THUMB_PX: Record<ThumbSize, number> = { none: 0, small: 22, medium: 28, large: 42 };
+/** Thumbnail edge per size (rows are thumb + 8 px tall: medium → the reference's ~32px rows). */
+export const THUMB_PX: Record<ThumbSize, number> = { none: 0, small: 18, medium: 24, large: 40 };
 
 const STORAGE_KEY = 'perseverance.layersPanel';
 

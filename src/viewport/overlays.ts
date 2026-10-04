@@ -1,7 +1,7 @@
 /** Built-in overlay layers drawn by the viewport: grid, pixel grid, selection ants. Screen space. */
 import type { Document } from '../core/types';
 import { viewport } from '../editor/viewport';
-import { selectionOutline, drawAnts } from './outline';
+import { drawSelectionAnts } from './outline';
 import { docToScreenMatrix } from './state';
 
 interface Size {
@@ -83,7 +83,5 @@ export function drawPixelGrid(ctx: CanvasRenderingContext2D, doc: Document, size
 
 /** Marching ants for the document selection. */
 export function drawSelection(ctx: CanvasRenderingContext2D, doc: Document) {
-  const path = selectionOutline(doc.selection);
-  if (!path) return;
-  drawAnts(ctx, path, docToScreenMatrix());
+  drawSelectionAnts(ctx, doc.selection, docToScreenMatrix());
 }

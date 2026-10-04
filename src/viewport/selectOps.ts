@@ -171,18 +171,3 @@ export function readComposite(source: HTMLCanvasElement, w: number, h: number): 
   ctx.drawImage(source, 0, 0, w, h);
   return ctx.getImageData(0, 0, w, h).data;
 }
-
-/** Draw a grayscale preview of an alpha array into a canvas of the same size. */
-export function paintAlphaPreview(target: HTMLCanvasElement, alpha: Uint8ClampedArray) {
-  const ctx = ctx2d(target);
-  const img = ctx.createImageData(target.width, target.height);
-  const d = img.data;
-  for (let i = 0, j = 0; i < alpha.length; i++, j += 4) {
-    const v = alpha[i];
-    d[j] = v;
-    d[j + 1] = v;
-    d[j + 2] = v;
-    d[j + 3] = 255;
-  }
-  ctx.putImageData(img, 0, 0);
-}

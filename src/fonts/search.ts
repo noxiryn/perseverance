@@ -122,6 +122,40 @@ export function weightsHint(f: FontDef): string {
   return `${base}${w.length > 2 ? ` · ${w.length}` : ''}${f.italic ? ' · i' : ''}`;
 }
 
+const WEIGHT_NAMES: Record<number, string> = {
+  100: 'Thin',
+  200: 'ExtraLight',
+  300: 'Light',
+  400: 'Regular',
+  500: 'Medium',
+  600: 'SemiBold',
+  700: 'Bold',
+  800: 'ExtraBold',
+  900: 'Black',
+};
+
+/** "Bold", "SemiBold"… (falls back to the number for unusual weights). */
+export function weightName(w: number): string {
+  return WEIGHT_NAMES[Math.round(w / 100) * 100] ?? String(w);
+}
+
+/**
+ * Optical size multiplier for previews: thin signature scripts read much smaller than a
+ * condensed headline at the same px size, so lists scale them up a little.
+ */
+export function previewScale(category: FontCategory): number {
+  switch (category) {
+    case 'Script':
+      return 1.3;
+    case 'Handwritten':
+      return 1.12;
+    case 'Blackletter':
+      return 1.06;
+    default:
+      return 1;
+  }
+}
+
 /** Default weight to preview/apply a family with (400 when available). */
 export function previewWeight(f: FontDef | undefined): number {
   const w = f?.weights?.length ? f.weights : [400];

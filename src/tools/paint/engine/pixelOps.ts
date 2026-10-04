@@ -196,7 +196,11 @@ export function primeSmudge(st: SmudgeState, buf: PixelBuf, cx: number, cy: numb
   st.primed = true;
 }
 
-/** Smear the carried color into the pixels under the dab and pick up new color. */
+/**
+ * Smear the carried color into the pixels under the dab and pick up new color. Like Photoshop,
+ * the finger then carries the smudged result, so each dab keeps `strength` of the carried color:
+ * high strength drags color far, low strength fades quickly into the local pixels.
+ */
 export function smudgeDab(buf: PixelBuf, st: SmudgeState, a: DabArea, strength: number) {
   const rect = dabRect(buf, a.cx, a.cy, a.radius);
   if (!rect) return null;
@@ -204,7 +208,7 @@ export function smudgeDab(buf: PixelBuf, st: SmudgeState, a: DabArea, strength: 
   const oy = Math.floor(a.cy - a.radius);
   const d = buf.data;
   const W = buf.width;
-  const pickup = 1 - Math.max(0, Math.min(1, strength));
+  const k = Math.max(0.05, Math.min(1, strength));
   for (let y = rect.y; y < rect.y + rect.height; y++) {
     const cy = y - oy;
     if (cy < 0 || cy >= st.size) continue;
@@ -220,16 +224,16 @@ export function smudgeDab(buf: PixelBuf, st: SmudgeState, a: DabArea, strength: 
       const pr = d[i] * af,
         pg = d[i + 1] * af,
         pb = d[i + 2] * af;
-      const t = w * Math.max(0.05, strength);
+      const t = w * k;
       const nr = pr + (st.carry[ci] - pr) * t;
       const ng = pg + (st.carry[ci + 1] - pg) * t;
       const nb = pb + (st.carry[ci + 2] - pb) * t;
       const na = al + (st.carry[ci + 3] - al) * t;
-      // Pick up some of the result for the next dab.
-      st.carry[ci] += (nr - st.carry[ci]) * pickup * w;
-      st.carry[ci + 1] += (ng - st.carry[ci + 1]) * pickup * w;
-      st.carry[ci + 2] += (nb - st.carry[ci + 2]) * pickup * w;
-      st.carry[ci + 3] += (na - st.carry[ci + 3]) * pickup * w;
+      // The finger now holds the smudged result (edges pick up the local color).
+      st.carry[ci] = nr;
+      st.carry[ci + 1] = ng;
+      st.carry[ci + 2] = nb;
+      st.carry[ci + 3] = na;
       if (na > 0.5) {
         const inv = 255 / na;
         d[i] = nr * inv;

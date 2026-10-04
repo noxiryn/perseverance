@@ -55,6 +55,36 @@ export function zoomToRect(
   return { zoom: z, panX: (docW / 2 - cx) * z, panY: (docH / 2 - cy) * z };
 }
 
+/**
+ * Clamp a pan so at least `keep` CSS px (or half the document, when smaller) of the document
+ * stays inside the viewport on each axis, then nudge it so the document origin lands on a device
+ * pixel. `view.panX/Y` is the offset of the document center from the viewport center.
+ */
+export function normalizePan(
+  view: { zoom: number; panX: number; panY: number },
+  docW: number,
+  docH: number,
+  viewW: number,
+  viewH: number,
+  dpr = 1,
+  keep = 64,
+): { panX: number; panY: number } {
+  const z = view.zoom || 1;
+  const dw = docW * z;
+  const dh = docH * z;
+  const mx = Math.min(keep, dw / 2, viewW / 2);
+  const my = Math.min(keep, dh / 2, viewH / 2);
+  const clampV = (v: number, lo: number, hi: number) => (lo > hi ? (lo + hi) / 2 : v < lo ? lo : v > hi ? hi : v);
+  let panX = clampV(view.panX, mx - viewW / 2 - dw / 2, viewW / 2 - mx + dw / 2);
+  let panY = clampV(view.panY, my - viewH / 2 - dh / 2, viewH / 2 - my + dh / 2);
+  const d = dpr > 0 ? dpr : 1;
+  const ox = viewW / 2 + panX - dw / 2;
+  const oy = viewH / 2 + panY - dh / 2;
+  panX -= (ox * d - Math.round(ox * d)) / d;
+  panY -= (oy * d - Math.round(oy * d)) / d;
+  return { panX, panY };
+}
+
 /** Human label for a zoom value (e.g. 0.461 → "46.1%"). */
 export function formatZoom(z: number): string {
   const p = z * 100;

@@ -155,7 +155,11 @@ export function bevelMaps(a: Uint8Array | Uint8ClampedArray, w: number, h: numbe
       cov[i] = 1;
     }
   }
-  if (o.soften > 0.5) blurChannel(H, w, h, o.soften);
+  // A distance field has pixel-level noise along curved/diagonal edges; differentiating it
+  // shows up as ridges across the bevel slope. A light intrinsic blur (≈ Photoshop "Smooth")
+  // removes them; `soften` adds on top.
+  const smooth = Math.min(4, Math.max(1, Math.round(size / 6)));
+  blurChannel(H, w, h, smooth + (o.soften > 0.5 ? o.soften : 0));
   const DEG = Math.PI / 180;
   const alt = Math.max(0, Math.min(90, o.altitude)) * DEG;
   const lx = Math.cos(o.angle * DEG) * Math.cos(alt);

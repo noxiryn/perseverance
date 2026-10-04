@@ -131,9 +131,11 @@ function buildR15(mats: RigMaterials): RigBuild {
   const arm = (side: 1 | -1) => {
     const p = side < 0 ? 'right' : 'left';
     const P = side < 0 ? 'Right' : 'Left';
-    const shoulder = pivot(waist, 1.5 * side, 1.2, 0, `${p}Shoulder`);
-    part(shoulder, upper, mats.part('arms'), -0.02, `${p}Shoulder` as JointId, meshes, `${P}UpperArm`);
-    const elbow = pivot(shoulder, 0, -0.45, 0, `${p}Elbow`);
+    // Shoulder pivot near the top of the upper arm (like Roblox's R15 shoulder attachment), so
+    // raised arms swing from the shoulder and the elbow sits 0.7 studs below it.
+    const shoulder = pivot(waist, 1.5 * side, 1.45, 0, `${p}Shoulder`);
+    part(shoulder, upper, mats.part('arms'), -0.27, `${p}Shoulder` as JointId, meshes, `${P}UpperArm`);
+    const elbow = pivot(shoulder, 0, -0.7, 0, `${p}Elbow`);
     part(elbow, lower, mats.part('arms'), -0.42, `${p}Elbow` as JointId, meshes, `${P}LowerArm`);
     const wrist = pivot(elbow, 0, -0.85, 0, `${p}Wrist`);
     part(wrist, end, mats.part('arms'), -0.15, `${p}Wrist` as JointId, meshes, `${P}Hand`);

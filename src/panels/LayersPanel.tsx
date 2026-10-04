@@ -181,16 +181,11 @@ function LayersHeader({ doc }: { doc: Document | null }) {
           ))}
         </div>
         <span style={{ flex: 1 }} />
-        <IconButton icon={Search} size="sm" iconSize={12} title="Search layers by name" active={searchOpen} disabled={!doc} onClick={() => setSearchOpen(!searchOpen)} />
-        <IconButton
-          icon={X}
-          size="sm"
-          iconSize={12}
-          title="Clear layer filter"
-          disabled={!filterOn}
-          className={filterOn ? 'layers-filter-on' : undefined}
-          onClick={clearFilter}
-        />
+        {filterOn ? (
+          <IconButton icon={X} size="sm" iconSize={12} title="Clear layer filter" className="layers-filter-on" onClick={clearFilter} />
+        ) : (
+          <IconButton icon={Search} size="sm" iconSize={12} title="Search layers by name" active={searchOpen} disabled={!doc} onClick={() => setSearchOpen(!searchOpen)} />
+        )}
       </div>
       {searchOpen && (
         <div className="layers-head-row">
@@ -369,12 +364,22 @@ function LayersPanelBody({ doc }: { doc: Document }) {
   const anchorRef = useRef<ID | null>(null);
   const eyeDrag = useRef<{ value: boolean; ids: Set<ID> } | null>(null);
 
-  // Keep the active row visible (e.g. after Alt+[ / Alt+]).
+  // When the active layer changes (Alt+[ / Alt+], auto-select on canvas…): expand collapsed
+  // groups around it and scroll its row into view once it is rendered.
+  const pendingScroll = useRef<ID | null>(null);
   useEffect(() => {
-    if (!activeId || !listRef.current) return;
-    const el = listRef.current.querySelector<HTMLElement>(`[data-row-id="${CSS.escape(activeId)}"]`);
-    el?.scrollIntoView({ block: 'nearest' });
+    if (!activeId) return;
+    pendingScroll.current = activeId;
+    if (!filteringRef.current && !rowsRef.current.some((r) => r.id === activeId)) ops.revealLayer(activeId);
   }, [activeId]);
+  useEffect(() => {
+    const id = pendingScroll.current;
+    if (!id || !listRef.current) return;
+    const el = listRef.current.querySelector<HTMLElement>(`[data-row-id="${CSS.escape(id)}"]`);
+    if (!el) return;
+    pendingScroll.current = null;
+    el.scrollIntoView({ block: 'nearest' });
+  }, [activeId, rows]);
 
   const computeDrop = useCallback((clientX: number, clientY: number, moving: ID[]): DropTarget => {
     const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
@@ -471,10 +476,7 @@ function LayersPanelBody({ doc }: { doc: Document }) {
         if (!s || !lastTarget) return;
         if (lastTarget.kind === 'action') {
           if (lastTarget.action === 'delete') ops.deleteLayers(st.ids);
-          else if (lastTarget.action === 'duplicate') {
-            ed().setSelectedLayers(st.ids, st.ids[st.ids.length - 1]);
-            ops.duplicateLayers();
-          }
+          else if (lastTarget.action === 'duplicate') ops.duplicateLayers({ ids: st.ids });
           return;
         }
         if (lastTarget.kind === 'end') return ops.moveLayers(st.ids, null, 0);
@@ -963,7 +965,8 @@ function EffectRows({ layer, indent, h }: { layer: Layer; indent: number; h: Row
           <span className="layers-sub-title">Effects</span>
         </div>
       </div>
-      {layer.effects.map((fx: LayerEffect) => (
+      {/* Top row = drawn on top (arrays are stored bottom → top). */}
+      {[...layer.effects].reverse().map((fx: LayerEffect) => (
         <div
           key={fx.id}
           className={cls('layers-subrow', !fx.enabled && 'off')}
