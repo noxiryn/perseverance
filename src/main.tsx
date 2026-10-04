@@ -11,6 +11,7 @@ import { useEditor } from './state/editor';
 import { useUI } from './state/ui';
 import { bitmaps } from './core/bitmaps';
 import * as documentUtils from './core/document';
+import { openDemoDocument } from './dev/demo';
 
 // Automation/debug handle (used by scripts/shot.mjs and tests).
 (window as unknown as { __app: unknown }).__app = {
@@ -19,6 +20,7 @@ import * as documentUtils from './core/document';
   useUI,
   bitmaps,
   documentUtils,
+  openDemoDocument,
 };
 
 createRoot(document.getElementById('root')!).render(
