@@ -183,6 +183,7 @@ function MenuDropdown({ rows, anchor, keyboard, onClose, onNavigate }: DropdownP
   const items = useRef(new Map<string, HTMLDivElement>());
   const hoverTimer = useRef(0);
   const [, force] = useState(0);
+  const forced = useRef('');
 
   const levelRows = useCallback(
     (level: number): Row[] | null => {
@@ -325,8 +326,12 @@ function MenuDropdown({ rows, anchor, keyboard, onClose, onNavigate }: DropdownP
   }, []);
 
   // Submenu positions depend on item elements; re-render once after they mount.
+  const pathKey = path.join(',');
   useLayoutEffect(() => {
-    if (levels.length < path.length) force((n) => n + 1);
+    if (levels.length < path.length && forced.current !== pathKey) {
+      forced.current = pathKey;
+      force((n) => n + 1);
+    }
   });
 
   return createPortal(

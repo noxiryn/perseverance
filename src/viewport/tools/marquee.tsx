@@ -1,0 +1,291 @@
+/**
+ * Rectangular & Elliptical Marquee tools (M). Drag to select; Shift = square / add, Alt = from
+ * center / subtract, Shift+Alt = intersect; Space while dragging repositions; fixed ratio/size
+ * styles; feather + anti-alias; drag inside a selection moves its outline; click deselects.
+ */
+import { Circle, SquareDashed } from 'lucide-react';
+import type { Point, Rect } from '../../core/types';
+import type { ToolDef, ToolPointerEvent } from '../../registry';
+import { ellipseMask, rectMask, type SelectionMode } from '../../editor/selection';
+import { viewport } from '../../editor/viewport';
+import { activeSession, toolOptions, useToolOptions } from '../../state/editor';
+import { Checkbox, NumberField, Select, IconButton } from '../../ui/controls';
+import { ArrowRightLeft } from 'lucide-react';
+import { clearSmartGuides, collectSnapTargets, snapPoint, type SnapTargets } from '../snap';
+import { strokeAnts } from '../outline';
+import { drawLabel } from '../draw';
+import { fmtPx, vpState } from '../state';
+import {
+  beginOutlineDrag,
+  commitOutlineDrag,
+  commitSelectionMask,
+  drawOutlineDrag,
+  hardenMask,
+  modeFromEvent,
+  pointInSelection,
+  updateOutlineDrag,
+  type OutlineDrag,
+} from './selectCommon';
+import { deselect } from '../../editor/selection';
+import { Label, SelectionModeButtons, Sep, setToolOptionSafe } from '../options/common';
+
+export const MARQUEE_DEFAULTS = {
+  mode: 'new' as SelectionMode,
+  feather: 0,
+  style: 'normal' as 'normal' | 'ratio' | 'size',
+  width: 1,
+  height: 1,
+  antiAlias: true,
+};
+
+interface MarqueeDrag {
+  a: Point;
+  b: Point;
+  mode: SelectionMode;
+  moved: boolean;
+  screen0: Point;
+  targets: SnapTargets | null;
+  shift: boolean;
+  alt: boolean;
+  /** Space-drag repositioning: last pointer position. */
+  spaceLast: Point | null;
+}
+
+/** Compute the marquee rectangle from the anchor `a` and current point `b`. Pure. */
+export function marqueeRect(
+  a: Point,
+  b: Point,
+  o: { shift: boolean; alt: boolean; style: 'normal' | 'ratio' | 'size'; width: number; height: number },
+): Rect {
+  if (o.style === 'size') {
+    const w = Math.max(1, o.width);
+    const h = Math.max(1, o.height);
+    return o.alt ? { x: b.x - w / 2, y: b.y - h / 2, width: w, height: h } : { x: b.x, y: b.y, width: w, height: h };
+  }
+  let dx = b.x - a.x;
+  let dy = b.y - a.y;
+  if (o.style === 'ratio' && o.width > 0 && o.height > 0) {
+    const ratio = o.width / o.height;
+    if (Math.abs(dx) / ratio >= Math.abs(dy)) dy = (Math.sign(dy) || 1) * (Math.abs(dx) / ratio);
+    else dx = (Math.sign(dx) || 1) * Math.abs(dy) * ratio;
+  } else if (o.shift) {
+    const s = Math.max(Math.abs(dx), Math.abs(dy));
+    dx = (Math.sign(dx) || 1) * s;
+    dy = (Math.sign(dy) || 1) * s;
+  }
+  if (o.alt) return { x: a.x - Math.abs(dx), y: a.y - Math.abs(dy), width: Math.abs(dx) * 2, height: Math.abs(dy) * 2 };
+  return { x: Math.min(a.x, a.x + dx), y: Math.min(a.y, a.y + dy), width: Math.abs(dx), height: Math.abs(dy) };
+}
+
+function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
+  const id = kind === 'rect' ? 'marquee-rect' : 'marquee-ellipse';
+  let drag: MarqueeDrag | null = null;
+  let outline: OutlineDrag | null = null;
+
+  const currentRect = (d: MarqueeDrag): Rect => {
+    const o = toolOptions(id, MARQUEE_DEFAULTS);
+    let r = marqueeRect(d.a, d.b, { shift: d.shift, alt: d.alt, style: o.style, width: o.width, height: o.height });
+    if (kind === 'rect') {
+      // pixel aligned
+      const x0 = Math.round(r.x);
+      const y0 = Math.round(r.y);
+      const x1 = Math.round(r.x + r.width);
+      const y1 = Math.round(r.y + r.height);
+      r = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+    }
+    return r;
+  };
+
+  const onPointerDown = (e: ToolPointerEvent) => {
+    const s = activeSession();
+    if (!s || e.button !== 0) return;
+    const o = toolOptions(id, MARQUEE_DEFAULTS);
+    const mode = modeFromEvent(e, o.mode);
+    if (mode === 'new' && o.mode === 'new' && o.style !== 'size' && pointInSelection(s.doc, e.docX, e.docY)) {
+      outline = beginOutlineDrag(e);
+      return;
+    }
+    const targets = collectSnapTargets(s.doc);
+    let a = { x: e.docX, y: e.docY };
+    const sp = snapPoint(a, { targets });
+    a = { x: sp.x, y: sp.y };
+    drag = {
+      a,
+      b: a,
+      mode,
+      moved: o.style === 'size',
+      screen0: { x: e.screenX, y: e.screenY },
+      targets,
+      shift: false,
+      alt: o.style === 'size' ? e.altKey : false,
+      spaceLast: null,
+    };
+    viewport.requestOverlay();
+  };
+
+  const onPointerMove = (e: ToolPointerEvent) => {
+    if (outline) {
+      updateOutlineDrag(outline, e);
+      return;
+    }
+    const d = drag;
+    if (!d) return;
+    if (!d.moved && Math.hypot(e.screenX - d.screen0.x, e.screenY - d.screen0.y) < 3) return;
+    d.moved = true;
+    let b = { x: e.docX, y: e.docY };
+    if (vpState.spaceHeld) {
+      // reposition the whole marquee while Space is held
+      if (d.spaceLast) {
+        const dx = b.x - d.spaceLast.x;
+        const dy = b.y - d.spaceLast.y;
+        d.a = { x: d.a.x + dx, y: d.a.y + dy };
+        d.b = { x: d.b.x + dx, y: d.b.y + dy };
+      }
+      d.spaceLast = b;
+      viewport.requestOverlay();
+      return;
+    }
+    d.spaceLast = null;
+    if (d.targets) {
+      const sp = snapPoint(b, { targets: d.targets });
+      b = { x: sp.x, y: sp.y };
+    }
+    d.b = b;
+    d.shift = e.shiftKey;
+    d.alt = e.altKey;
+    viewport.requestOverlay();
+  };
+
+  const onPointerUp = () => {
+    clearSmartGuides();
+    if (outline) {
+      const o = outline;
+      outline = null;
+      if (!commitOutlineDrag(o)) {
+        // a click inside the selection without dragging deselects (Photoshop behaviour)
+        deselect();
+      }
+      viewport.requestOverlay();
+      return;
+    }
+    const d = drag;
+    drag = null;
+    viewport.requestOverlay();
+    const s = activeSession();
+    if (!d || !s) return;
+    const r = currentRect(d);
+    if (!d.moved || r.width < 1 || r.height < 1) {
+      if (d.mode === 'new') deselect();
+      return;
+    }
+    const o = toolOptions(id, MARQUEE_DEFAULTS);
+    let mask = kind === 'rect' ? rectMask(s.doc, r) : ellipseMask(s.doc, r);
+    if (kind === 'ellipse' && !o.antiAlias) mask = hardenMask(mask);
+    commitSelectionMask(s.doc, mask, d.mode, kind === 'rect' ? 'Rectangular Marquee' : 'Elliptical Marquee', {
+      feather: o.feather,
+      shape: { type: kind, rect: r },
+    });
+  };
+
+  const renderOverlay = (ctx: CanvasRenderingContext2D) => {
+    if (outline) {
+      drawOutlineDrag(ctx, outline);
+      return;
+    }
+    const d = drag;
+    if (!d || !d.moved) return;
+    const r = currentRect(d);
+    const p0 = viewport.docToScreen({ x: r.x, y: r.y });
+    const p1 = viewport.docToScreen({ x: r.x + r.width, y: r.y + r.height });
+    const path = new Path2D();
+    if (kind === 'rect') {
+      const x0 = Math.round(p0.x) + 0.5;
+      const y0 = Math.round(p0.y) + 0.5;
+      path.rect(x0, y0, Math.round(p1.x) - Math.round(p0.x), Math.round(p1.y) - Math.round(p0.y));
+    } else {
+      path.ellipse((p0.x + p1.x) / 2, (p0.y + p1.y) / 2, Math.abs(p1.x - p0.x) / 2, Math.abs(p1.y - p0.y) / 2, 0, 0, Math.PI * 2);
+    }
+    strokeAnts(ctx, path);
+    drawLabel(ctx, [`W: ${fmtPx(r.width)} px`, `H: ${fmtPx(r.height)} px`], viewport.docToScreen(d.b));
+  };
+
+  const onDeactivate = () => {
+    drag = null;
+    outline = null;
+    clearSmartGuides();
+  };
+
+  const onHover = (e: ToolPointerEvent) => {
+    const s = activeSession();
+    const o = toolOptions(id, MARQUEE_DEFAULTS);
+    const mode = modeFromEvent(e, o.mode);
+    const inside = s && mode === 'new' && o.mode === 'new' && o.style !== 'size' && pointInSelection(s.doc, e.docX, e.docY);
+    viewport.setCursor(inside ? 'move' : null);
+  };
+
+  return {
+    id,
+    name: kind === 'rect' ? 'Rectangular Marquee Tool' : 'Elliptical Marquee Tool',
+    shortcut: 'M',
+    icon: kind === 'rect' ? SquareDashed : Circle,
+    group: 'marquee',
+    order: 20,
+    cursor: 'crosshair',
+    OptionsBar: () => <MarqueeOptions id={id} ellipse={kind === 'ellipse'} />,
+    defaultOptions: { ...MARQUEE_DEFAULTS },
+    onPointerDown,
+    onPointerMove,
+    onPointerUp,
+    onHover,
+    onDeactivate,
+    renderOverlay,
+  };
+}
+
+function MarqueeOptions({ id, ellipse }: { id: string; ellipse: boolean }) {
+  const o = useToolOptions(id, MARQUEE_DEFAULTS);
+  return (
+    <div className="viewport-opts">
+      <SelectionModeButtons toolId={id} value={o.mode} />
+      <Sep />
+      <NumberField scrubLabel="Feather" value={o.feather} min={0} max={250} step={1} unit="px" width={56} onChange={(v) => setToolOptionSafe(id, 'feather', v)} />
+      {ellipse && <Checkbox checked={o.antiAlias} onChange={(v) => setToolOptionSafe(id, 'antiAlias', v)} label="Anti-alias" />}
+      <Sep />
+      <Label>Style</Label>
+      <Select
+        value={o.style}
+        width={104}
+        options={[
+          { value: 'normal', label: 'Normal' },
+          { value: 'ratio', label: 'Fixed Ratio' },
+          { value: 'size', label: 'Fixed Size' },
+        ]}
+        onChange={(v) => {
+          setToolOptionSafe(id, 'style', v);
+          if (v === 'size' && o.width <= 1 && o.height <= 1) {
+            setToolOptionSafe(id, 'width', 512);
+            setToolOptionSafe(id, 'height', 512);
+          }
+        }}
+      />
+      {o.style !== 'normal' && (
+        <>
+          <NumberField scrubLabel="W" value={o.width} min={o.style === 'size' ? 1 : 0.01} max={30000} step={o.style === 'size' ? 1 : 0.01} unit={o.style === 'size' ? 'px' : undefined} width={60} onChange={(v) => setToolOptionSafe(id, 'width', v)} />
+          <IconButton
+            icon={ArrowRightLeft}
+            size="sm"
+            title="Swap width and height"
+            onClick={() => {
+              setToolOptionSafe(id, 'width', o.height);
+              setToolOptionSafe(id, 'height', o.width);
+            }}
+          />
+          <NumberField scrubLabel="H" value={o.height} min={o.style === 'size' ? 1 : 0.01} max={30000} step={o.style === 'size' ? 1 : 0.01} unit={o.style === 'size' ? 'px' : undefined} width={60} onChange={(v) => setToolOptionSafe(id, 'height', v)} />
+        </>
+      )}
+    </div>
+  );
+}
+
+export const marqueeRectTool = makeMarquee('rect');
+export const marqueeEllipseTool = makeMarquee('ellipse');
