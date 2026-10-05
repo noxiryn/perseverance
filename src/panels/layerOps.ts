@@ -16,6 +16,7 @@ import type {
   Layer,
   LayerEffect,
   LayerMask,
+  ParamDef,
   ParamValues,
   RasterLayer,
   Rect,
@@ -145,19 +146,34 @@ function revealAdjustmentEditor() {
 /* Generic live editing (preview while dragging, coalesced commit)     */
 /* ------------------------------------------------------------------ */
 
-export type Phase = 'preview' | 'commit';
+/**
+ * How an edit reaches the document:
+ *  - 'preview'  — live change without a history step (call on every move of a drag);
+ *  - 'commit'   — one discrete history step (buttons, toggles, selects, menu commands);
+ *  - 'coalesce' — a history step that merges into the previous one when it has the same label and
+ *                 is < 1 s old. Only for the END of continuous controls (slider / scrub release,
+ *                 typed values, arrow-key nudges), so a burst of small adjustments is one step.
+ */
+export type Phase = 'preview' | 'commit' | 'coalesce';
 
-/** Apply `fn` to the given layers: live preview, or a (coalesced) history commit. */
+function applyPhase(label: string, recipe: (d: Document) => void, phase: Phase) {
+  if (phase === 'preview') ed().preview(recipe);
+  else ed().commit(label, recipe, phase === 'coalesce' ? { coalesce: true } : undefined);
+}
+
+/** Apply `fn` to the given layers: live preview or a history step (see Phase). */
 export function editLayers(ids: ID[], label: string, fn: (l: Layer) => void, phase: Phase = 'commit') {
   if (!activeSession() || !ids.length) return;
-  const recipe = (d: Document) => {
-    for (const id of ids) {
-      const l = d.layers[id];
-      if (l) fn(l);
-    }
-  };
-  if (phase === 'preview') ed().preview(recipe);
-  else ed().commit(label, recipe, { coalesce: true });
+  applyPhase(
+    label,
+    (d) => {
+      for (const id of ids) {
+        const l = d.layers[id];
+        if (l) fn(l);
+      }
+    },
+    phase,
+  );
 }
 
 /** Same as editLayers for the current selection. */
@@ -165,11 +181,59 @@ export function editSelected(label: string, fn: (l: Layer) => void, phase: Phase
   editLayers(selectedIds(), label, fn, phase);
 }
 
-/** Generic document change, live or committed. */
+/** Generic document change: live preview or a history step (see Phase). */
 export function editDoc(label: string, recipe: (d: Document) => void, phase: Phase = 'commit') {
   if (!activeSession()) return;
-  if (phase === 'preview') ed().preview(recipe);
-  else ed().commit(label, recipe, { coalesce: true });
+  applyPhase(label, recipe, phase);
+}
+
+/**
+ * Phase for the onCommit of a generated ParamEditor control: continuous controls (sliders,
+ * angles, colors, gradients, curves, points, text) coalesce; discrete ones (checkboxes, selects,
+ * fonts, seed randomize) are their own history step.
+ */
+export function paramCommitPhase(defs: readonly ParamDef[] | undefined, key: string): Phase {
+  const t = defs?.find((d) => d.key === key)?.type;
+  return t === 'boolean' || t === 'select' || t === 'font' ? 'commit' : 'coalesce';
+}
+
+/** History label for a ParamEditor edit, e.g. "Stroke Size" — distinct per parameter. */
+export function paramLabel(prefix: string, defs: readonly ParamDef[] | undefined, key: string): string {
+  const d = defs?.find((x) => x.key === key);
+  return d?.label ? `${prefix} ${d.label}` : prefix;
+}
+
+/* ------------------------------------------------------------------ */
+/* Locks                                                               */
+/* ------------------------------------------------------------------ */
+
+/** The lock (on the layer itself or a fully locked parent group) that blocks an edit, if any. */
+export function blockingLock(doc: Document, id: ID, what: 'pixels' | 'all'): Layer | null {
+  const l = doc.layers[id];
+  if (!l) return null;
+  if (l.locks.all || (what === 'pixels' && l.locks.pixels)) return l;
+  for (const g of ancestorsOf(doc, id)) if (doc.layers[g]?.locks.all) return doc.layers[g];
+  return null;
+}
+
+/**
+ * True when every given layer may be edited; otherwise toasts which layer is locked.
+ * 'pixels' blocks on "Lock image pixels" or "Lock all"; 'all' only on "Lock all".
+ */
+export function assertEditable(doc: Document, ids: ID[], what: 'pixels' | 'all'): boolean {
+  for (const id of ids) {
+    const lock = blockingLock(doc, id, what);
+    if (!lock) continue;
+    const name = doc.layers[id]?.name ?? 'The layer';
+    toast(
+      lock.id === id
+        ? `“${name}” is locked — unlock it first (Lock buttons in the Layers panel)`
+        : `“${name}” is inside the locked group “${lock.name}” — unlock the group first`,
+      'info',
+    );
+    return false;
+  }
+  return true;
 }
 
 /**

@@ -8,8 +8,13 @@ import { MAPPING_DEFS, DEFAULT_MAP_GRADIENT } from './defs/mapping';
 import { analysisMask, autoContrastParams, autoToneCurves, autoColorCurves } from './auto';
 import { clipRange, computeHistogram, percentile } from './histogram';
 import { isIdentityLut, levelsValue, lum3, setLumInto, setSatInto } from './math';
-import { STATIC_PRESETS, isCustomName } from './presets';
+import { STATIC_PRESETS, isCustomName, matchPreset, sameParams } from './presets';
 import { presetSwatchCss } from './swatches';
+import { LOOK_PRESETS, LUT_SIZE, applyLookRgb, lookCube } from './looks';
+import { apply3DLut } from './math';
+import { blendMasked } from './apply';
+import { initialRange } from './SelectiveColorEditor';
+import { gammaToSlider, sliderToGamma } from './ExposureEditor';
 
 const ALL: FilterDef[] = [...TONAL_DEFS, ...COLOR_DEFS, ...MAPPING_DEFS];
 const byId = (id: string) => {
@@ -572,5 +577,100 @@ describe('layer naming', () => {
     expect(isCustomName('Levels 3', 'Levels')).toBe(false);
     expect(isCustomName('Levels copy', 'Levels')).toBe(true);
     expect(isCustomName('Sunset Amber', 'Gradient Map')).toBe(true);
+  });
+});
+
+describe('param comparison', () => {
+  it('fills defaults and ignores key order', () => {
+    const lv = byId('levels');
+    expect(sameParams(lv, {}, { inBlack: 0, gamma: 1 })).toBe(true);
+    expect(sameParams(lv, { gamma: 1, inWhite: 255 }, { inWhite: 255, gamma: 1 })).toBe(true);
+    expect(sameParams(lv, {}, { gamma: 1.01 })).toBe(false);
+  });
+
+  it("ignores Selective Color's viewed range (presets match whatever range is shown)", () => {
+    const sc = byId('selective-color');
+    expect(sameParams(sc, { range: 'reds' }, { range: 'blues' })).toBe(true);
+    expect(sameParams(sc, { range: 'reds', redsC: 10 }, { range: 'reds' })).toBe(false);
+    const deeper = STATIC_PRESETS['selective-color'].find((p) => p.name === 'Deeper Blacks')!;
+    expect(matchPreset(sc, { ...deeper.params, range: 'greens' }, STATIC_PRESETS['selective-color'])).toBe('Deeper Blacks');
+    expect(matchPreset(sc, { range: 'whites' }, STATIC_PRESETS['selective-color'])).toBe('Default');
+  });
+
+  it('opens Selective Color on the stored range if edited, else the first edited range', () => {
+    expect(initialRange({ range: 'reds' })).toBe('reds');
+    expect(initialRange({ range: 'reds', blacksK: 30 })).toBe('blacks');
+    expect(initialRange({ range: 'blues', bluesC: 5, redsC: 5 })).toBe('blues');
+    expect(initialRange({ range: 'bogus' })).toBe('reds');
+  });
+});
+
+describe('exposure gamma slider', () => {
+  it('is logarithmic and centred on 1.0', () => {
+    expect(gammaToSlider(1)).toBeCloseTo(0.5, 6);
+    expect(gammaToSlider(0.1)).toBeCloseTo(0, 6);
+    expect(gammaToSlider(10)).toBeCloseTo(1, 6);
+    expect(gammaToSlider(0.01)).toBe(0); // below the track: clamped, still reachable via the field
+    expect(sliderToGamma(0.5)).toBe(1);
+    expect(sliderToGamma(0.505)).toBe(1); // snaps near the centre
+    expect(sliderToGamma(1)).toBe(9.99);
+    expect(sliderToGamma(gammaToSlider(2.5))).toBeCloseTo(2.5, 2);
+    expect(sliderToGamma(gammaToSlider(0.4))).toBeCloseTo(0.4, 2);
+  });
+});
+
+describe('color lookup cubes', () => {
+  it('match the exact look functions closely', () => {
+    const out = new Float64Array(3);
+    for (const [id] of LOOK_PRESETS) {
+      const N = 12;
+      const data = new Uint8ClampedArray(N * N * N * 4);
+      let k = 0;
+      for (let r = 0; r < N; r++)
+        for (let g = 0; g < N; g++)
+          for (let b = 0; b < N; b++) {
+            data[k++] = Math.round((r * 255) / (N - 1));
+            data[k++] = Math.round((g * 255) / (N - 1));
+            data[k++] = Math.round((b * 255) / (N - 1));
+            data[k++] = 255;
+          }
+      const orig = data.slice();
+      apply3DLut({ data, width: N * N * N, height: 1 }, lookCube(id), LUT_SIZE, 1);
+      let sum = 0;
+      let max = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        applyLookRgb(id, orig[i], orig[i + 1], orig[i + 2], 1, out);
+        for (let c = 0; c < 3; c++) {
+          const e = Math.abs(data[i + c] - out[c]);
+          sum += e;
+          max = Math.max(max, e);
+        }
+      }
+      expect(sum / (N * N * N * 3), id).toBeLessThan(0.6);
+      expect(max, id).toBeLessThan(12);
+    }
+  });
+
+  it('applyLookRgb mixes with the original by intensity', () => {
+    const a = new Float64Array(3);
+    applyLookRgb('noir', 200, 40, 40, 0, a);
+    expect([...a]).toEqual([200, 40, 40]);
+    const full = new Float64Array(3);
+    const half = new Float64Array(3);
+    applyLookRgb('noir', 200, 40, 40, 1, full);
+    applyLookRgb('noir', 200, 40, 40, 0.5, half);
+    for (let c = 0; c < 3; c++) expect(half[c]).toBeCloseTo(([200, 40, 40][c] + full[c]) / 2, 6);
+  });
+});
+
+describe('selection blending', () => {
+  it('keeps the edit at 255, restores at 0 and blends in between', () => {
+    const orig = new Uint8ClampedArray([10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255]);
+    const out = new Uint8ClampedArray([110, 120, 130, 255, 110, 120, 130, 255, 110, 120, 130, 255]);
+    blendMasked(orig, out, [255, 0, 128]);
+    expect([...out.slice(0, 4)]).toEqual([110, 120, 130, 255]);
+    expect([...out.slice(4, 8)]).toEqual([10, 20, 30, 255]);
+    expect(out[8]).toBe(60);
+    expect(out[9]).toBe(70);
   });
 });

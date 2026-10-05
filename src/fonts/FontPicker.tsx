@@ -50,6 +50,8 @@ export function StarButton({ family, size = 12 }: { family: string; size?: numbe
         toggle(family);
       }}
       onPointerDown={(e) => e.stopPropagation()}
+      // Keep keyboard focus where it is (e.g. the picker's search field).
+      onMouseDown={(e) => e.preventDefault()}
     >
       <Star size={size} strokeWidth={1.8} fill={fav ? 'currentColor' : 'none'} />
     </button>
@@ -185,7 +187,12 @@ export function FontPicker({ value, onPick, onClose }: { value: string; onPick: 
         }}
       >
         {chips.map((c) => (
-          <button key={c.value} className={`fc-chip${activeFilter === c.value ? ' active' : ''}`} onClick={() => setFilter(c.value)}>
+          <button
+            key={c.value}
+            className={`fc-chip${activeFilter === c.value ? ' active' : ''}`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => setFilter(c.value)}
+          >
             {c.label}
           </button>
         ))}
@@ -198,11 +205,16 @@ export function FontPicker({ value, onPick, onClose }: { value: string; onPick: 
         itemKey={rowKey}
         empty={
           <div className="ui-empty">
-            {activeFilter === 'favorites'
+            {activeFilter === 'favorites' && !query.trim()
               ? 'No favorites yet — click ☆ next to a font.'
-              : activeFilter === 'recent'
+              : activeFilter === 'recent' && !query.trim()
                 ? 'Fonts you use will show up here.'
                 : 'No fonts match your search.'}
+            {activeFilter !== 'all' && query.trim() && (
+              <button className="ui-btn small ghost fc-picker-all" onMouseDown={(e) => e.preventDefault()} onClick={() => setFilter('all')}>
+                Search all fonts
+              </button>
+            )}
           </div>
         }
         renderItem={(r, i) =>

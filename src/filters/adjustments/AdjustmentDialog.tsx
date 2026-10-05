@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from 'react';
 import { RotateCcw, SlidersHorizontal, WandSparkles } from 'lucide-react';
-import type { Document, Layer, ParamValues } from '../../core/types';
+import type { Document, ParamValues, ShapeLayer, TextLayer } from '../../core/types';
 import { filters, type FilterDef } from '../../registry';
 import { activeSession } from '../../state/editor';
 import { openDialog, toast } from '../../state/ui';
@@ -52,7 +52,7 @@ const IDENTITY_AT_DEFAULTS = new Set([
   'selective-color',
 ]);
 
-export type DialogTarget = { mode: 'pixels'; target: RasterTarget } | { mode: 'smart'; doc: Document; layer: Layer };
+export type DialogTarget = { mode: 'pixels'; target: RasterTarget } | { mode: 'smart'; doc: Document; layer: TextLayer | ShapeLayer };
 
 /**
  * What the dialog edits for the active layer: its pixels or mask (destructive), or — for text and

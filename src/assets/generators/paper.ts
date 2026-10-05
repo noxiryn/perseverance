@@ -524,6 +524,74 @@ function measureFit(ctx: CanvasRenderingContext2D, text: string, font: (size: nu
   return (target / w) * 100;
 }
 
+let dotTile: HTMLCanvasElement | null = null;
+
+/** A newsprint-style halftoned photo: gradient backdrop + blurry subject + dot screen. */
+function drawFakePhoto(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: Rand, u: number, ink: RGB) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+  const v1 = 70 + r() * 70;
+  const v2 = 140 + r() * 80;
+  const g = ctx.createLinearGradient(x, y, x + w * (r() - 0.3), y + h);
+  g.addColorStop(0, `rgb(${v2},${v2},${v2})`);
+  g.addColorStop(1, `rgb(${v1},${v1},${v1})`);
+  ctx.fillStyle = g;
+  ctx.fillRect(x, y, w, h);
+  ctx.filter = `blur(${Math.max(0.5, w * 0.025)}px)`;
+  if (r() < 0.6) {
+    // portrait: head + shoulders
+    const cx = x + w * (0.35 + r() * 0.3);
+    const tone = 25 + r() * 40;
+    ctx.fillStyle = `rgb(${tone},${tone},${tone})`;
+    ctx.beginPath();
+    ctx.ellipse(cx, y + h * 0.42, w * 0.15, h * 0.2, 0, 0, TAU);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(cx, y + h * 1.02, w * 0.42, h * 0.42, 0, Math.PI, TAU);
+    ctx.fill();
+  } else {
+    // landscape / street: horizon + a few dark masses
+    const hy = y + h * (0.45 + r() * 0.25);
+    ctx.fillStyle = 'rgb(48,48,48)';
+    ctx.fillRect(x, hy, w, h);
+    for (let i = 0; i < 4; i++) {
+      const bw = w * (0.08 + r() * 0.2);
+      const bh = h * (0.15 + r() * 0.4);
+      const bx = x + r() * w;
+      const t = 30 + r() * 60;
+      ctx.fillStyle = `rgb(${t},${t},${t})`;
+      ctx.fillRect(bx, hy - bh, bw, bh);
+    }
+  }
+  ctx.filter = 'none';
+  // coarse dot screen
+  if (!dotTile) {
+    dotTile = document.createElement('canvas');
+    dotTile.width = dotTile.height = 8;
+    const d = dotTile.getContext('2d');
+    if (d) {
+      d.fillStyle = 'rgba(0,0,0,0.55)';
+      d.beginPath();
+      d.arc(4, 4, 2.2, 0, TAU);
+      d.fill();
+    }
+  }
+  const pat = ctx.createPattern(dotTile, 'repeat');
+  if (pat) {
+    pat.setTransform(new DOMMatrix().translate(x, y).rotate(45).scale(Math.max(0.35, u * 0.42)));
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = pat;
+    ctx.fillRect(x, y, w, h);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  ctx.restore();
+  ctx.strokeStyle = rgba(ink, 0.8);
+  ctx.lineWidth = Math.max(0.5, 0.6 * u);
+  ctx.strokeRect(x, y, w, h);
+}
+
 /** Draws justified fake body text in a column; returns the y where it stopped. */
 function drawColumn(
   ctx: CanvasRenderingContext2D,
@@ -538,6 +606,9 @@ function drawColumn(
 ) {
   const lineH = fs * 1.2;
   const bodyFont = `${fs}px ${FONT.body}`;
+  ctx.font = bodyFont;
+  const spaceW = ctx.measureText(' ').width;
+  const widths = new Map<string, number>();
   let y = y0 + fs;
   let firstLine = true;
   let paraLeft = r.int(3, 11);
@@ -557,23 +628,9 @@ function drawColumn(
       continue;
     }
     if (roll < 0.06 && colW > 50 * u && y < yMax - colW) {
-      // photo block (halftoned gray)
+      // photo block: a halftoned gray picture (portrait silhouette or landscape)
       const ph = colW * (0.55 + r() * 0.35);
-      const g = ctx.createLinearGradient(x0, y, x0 + colW, y + ph);
-      const v1 = 60 + r() * 80;
-      const v2 = 120 + r() * 90;
-      g.addColorStop(0, `rgb(${v1},${v1},${v1})`);
-      g.addColorStop(1, `rgb(${v2},${v2},${v2})`);
-      ctx.fillStyle = g;
-      ctx.fillRect(x0, y - fs * 0.6, colW, ph);
-      // a dark silhouette-ish mass to read as a photo
-      ctx.fillStyle = rgba('#141414', 0.55);
-      ctx.beginPath();
-      ctx.ellipse(x0 + colW * (0.3 + r() * 0.4), y - fs * 0.6 + ph * 0.75, colW * 0.28, ph * 0.5, 0, 0, TAU);
-      ctx.fill();
-      ctx.strokeStyle = rgba(ink, 0.8);
-      ctx.lineWidth = Math.max(0.5, 0.6 * u);
-      ctx.strokeRect(x0, y - fs * 0.6, colW, ph);
+      drawFakePhoto(ctx, x0, y - fs * 0.6, colW, ph, r, u, ink);
       y += ph + fs * 0.3;
       ctx.font = `italic ${fs * 0.85}px ${FONT.body}`;
       ctx.fillStyle = rgba(ink, 0.85);
@@ -586,17 +643,19 @@ function drawColumn(
     ctx.font = bodyFont;
     const indent = firstLine ? fs * 1.4 : 0;
     const avail = colW - indent;
-    const space = fs * 0.26;
+    const space = spaceW;
     const line: string[] = [];
-    const widths: number[] = [];
     let w = 0;
     for (;;) {
       if (!words.length) words = fakeSentence(r, 60);
       const word = words[0];
-      const ww = ctx.measureText(word).width;
+      let ww = widths.get(word);
+      if (ww === undefined) {
+        ww = ctx.measureText(word).width;
+        widths.set(word, ww);
+      }
       if (line.length && w + space + ww > avail) break;
       line.push(word);
-      widths.push(ww);
       w += (line.length > 1 ? space : 0) + ww;
       words.shift();
       if (w > avail) break;
@@ -606,12 +665,11 @@ function drawColumn(
     ctx.fillStyle = rgba(ink, 0.78 + r() * 0.17);
     const gaps = line.length - 1;
     const extra = !lastOfPara && gaps > 0 ? (avail - w) / gaps : 0;
-    let x = x0 + indent;
     const drawCount = lastOfPara ? Math.max(1, Math.ceil(line.length * (0.3 + r() * 0.6))) : line.length;
-    for (let i = 0; i < drawCount; i++) {
-      ctx.fillText(line[i], x, y);
-      x += widths[i] + space + extra;
-    }
+    // one fillText per line: justification through word spacing
+    ctx.wordSpacing = `${extra.toFixed(2)}px`;
+    ctx.fillText(line.slice(0, drawCount).join(' '), x0 + indent, y);
+    ctx.wordSpacing = '0px';
     firstLine = false;
     if (lastOfPara) {
       paraLeft = r.int(3, 12);
@@ -622,7 +680,7 @@ function drawColumn(
   return y;
 }
 
-function renderClipping(r: Rand, cw: number, ch: number, u: number, cols: number, tone: RGB, headlines: boolean, textSize: number, seed: number) {
+function renderClipping(r: Rand, cw: number, ch: number, u: number, cols: number, tone: RGB, headlines: boolean, textSize: number, seed: number, paperTex: HTMLCanvasElement) {
   const pad = Math.ceil(10 * u);
   const [c, ctx] = newCanvas(cw + pad * 2, ch + pad * 2);
   ctx.translate(pad, pad);
@@ -656,7 +714,12 @@ function renderClipping(r: Rand, cw: number, ch: number, u: number, cols: number
   ctx.clip(path);
   ctx.save();
   ctx.translate(-pad, -pad);
-  paintPaper(ctx, cw + pad * 2, ch + pad * 2, u, tone, seed, { mottle: 0.7, grain: 0.6, fibers: 0.25, specks: 0.25 });
+  // shared paper texture (rendered once per asset) at a random offset, slightly re-toned
+  const ox = r() * Math.max(0, paperTex.width - (cw + pad * 2));
+  const oy = r() * Math.max(0, paperTex.height - (ch + pad * 2));
+  ctx.drawImage(paperTex, -ox, -oy);
+  ctx.fillStyle = rgba(tone, 0.35);
+  ctx.fillRect(0, 0, cw + pad * 2, ch + pad * 2);
   ctx.restore();
   const ink: RGB = { r: 24, g: 22, b: 20 };
   const m = (8 + r() * 6) * u;
@@ -786,13 +849,16 @@ const newspaperClippings = defineAsset(
         slots = order.slice(0, count);
       }
       const [c, ctx] = newCanvas(W, H);
+      const texSide = Math.ceil(M * 0.86 + 24 * u);
+      const [paperTex, ptx] = newCanvas(texSide, texSide);
+      paintPaper(ptx, texSide, texSide, u, tone, seed, { mottle: 0.7, grain: 0.6, fibers: 0.25, specks: 0.25 });
       slots.forEach((slot, idx) => {
         const vertical = (slot.side === 'l' || slot.side === 'r') && r() < 0.45;
         let cw = M * (0.26 + r() * 0.2);
         let ch = M * (0.42 + r() * 0.4);
         if (slot.side === 't' || slot.side === 'b') [cw, ch] = [ch * 0.9, cw * 0.95];
         const colsHere = Math.max(1, Math.min(cols, Math.round((cw / M) * cols * 2.6)));
-        const { canvas: clip, pad } = renderClipping(r, Math.round(cw), Math.round(ch), u, colsHere, shade(tone, (r() - 0.5) * 0.1), headlines, textSize, seed * 7 + idx);
+        const { canvas: clip, pad } = renderClipping(r, Math.round(cw), Math.round(ch), u, colsHere, shade(tone, (r() - 0.5) * 0.1), headlines, textSize, seed * 7 + idx, paperTex);
         let angle = (r() - 0.5) * 2 * rot;
         if (vertical) angle += (r() < 0.5 ? 1 : -1) * Math.PI / 2;
         // visual (rotated) extents
@@ -825,10 +891,16 @@ const newspaperClippings = defineAsset(
         ctx.translate(x, y);
         ctx.rotate(angle);
         if (shadow > 0) {
-          ctx.shadowColor = rgba('#000000', 0.55 * shadow);
-          ctx.shadowBlur = 14 * u * shadow;
-          ctx.shadowOffsetX = 3 * u;
-          ctx.shadowOffsetY = 4 * u;
+          // cheap soft shadow: blur a quarter-resolution silhouette, then scale it up
+          const q = 0.25;
+          const [sh, sctx] = newCanvas(Math.ceil(clip.width * q) + 8, Math.ceil(clip.height * q) + 8);
+          sctx.filter = `blur(${Math.max(0.5, 14 * u * shadow * q * 0.6)}px)`;
+          sctx.drawImage(clip, 4, 4, clip.width * q, clip.height * q);
+          sctx.filter = 'none';
+          sctx.globalCompositeOperation = 'source-in';
+          sctx.fillStyle = rgba('#000000', 0.6 * shadow);
+          sctx.fillRect(0, 0, sh.width, sh.height);
+          ctx.drawImage(sh, -cw / 2 - pad + 3 * u - 4 / q, -ch / 2 - pad + 4 * u - 4 / q, sh.width / q, sh.height / q);
         }
         ctx.drawImage(clip, -cw / 2 - pad, -ch / 2 - pad);
         ctx.restore();

@@ -16,6 +16,7 @@ import { AdjustmentEditor } from './AdjustmentEditor';
 import { registerStaticCommands, syncAdjustmentCommands } from './commands';
 import { deleteAdjustmentLayer, resetAdjustment } from './layers';
 import { useAdjustmentsPrefs } from './prefs';
+import { prewarmLook } from './looks';
 
 export const ADJUSTMENT_DEFS = [...TONAL_DEFS, ...COLOR_DEFS, ...MAPPING_DEFS];
 
@@ -58,9 +59,13 @@ registerStaticCommands();
 syncAdjustmentCommands();
 filters.subscribe(syncAdjustmentCommands);
 
+// Build the default Color Lookup cube while the app is idle, so adding the layer is instant.
+prewarmLook('teal-orange');
+
 /* Public API for other modules (e.g. the Layers panel's adjustment button, looks). */
 export { createAdjustmentLayer, revealEditor } from './layers';
 export { AdjustmentEditor } from './AdjustmentEditor';
+export { openAdjustmentDialog } from './AdjustmentDialog';
 export { runAuto } from './commands';
 export { presetsFor } from './presets';
 export * from './histogram';

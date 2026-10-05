@@ -334,3 +334,8 @@
   color: var(--warning);
   font-size: var(--fs-sm);
 }
+
+.fc-picker-all {
+  display: block;
+  margin: 8px auto 0;
+}
