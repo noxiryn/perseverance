@@ -380,6 +380,58 @@ async function rendererPart(opts) {
     d.__base = d.layers[d.rootIds[0]].bitmapId;
     return d;
   }, { strokes: (d) => [{ target: d.__paint }, { target: d.__base, erase: true }] });
+  /** Content with soft edges (a blurred disc; the filter is reset so strokes stay sharp). */
+  const softDisc = (color) => canvas(W, H, (g) => ((g.filter = 'blur(14px)'), (g.fillStyle = color), g.beginPath(), g.arc(W / 2, H / 2, 280, 0, 7), g.fill(), (g.filter = 'none')));
+  await run('clipped-fill', () => {
+    // Base below 100% fill: clipped layers also cover the part of its shape the stack does not.
+    const d = doc0();
+    const base = addRaster(d, { name: 'base', canvas: softDisc('#335'), props: { fillOpacity: 0.4 } });
+    const k = addRaster(d, { name: 'clipped', seed: 6, props: { clipped: true } });
+    addRaster(d, { name: 'clipped 2', seed: 8, props: { clipped: true, blendMode: 'screen', opacity: 0.7 } });
+    d.__paint = k.bitmapId;
+    d.__base = base.bitmapId;
+    return d;
+  }, { strokes: (d) => [{ target: d.__paint, erase: true }, { target: d.__base, erase: true }] });
+  await run('clipped-mixed', () => {
+    // Base core reaching beyond its shape (centre stroke) at partial fill with an overlay; a
+    // clipped layer with a behind effect and a blend mode, a clipped adjustment.
+    const d = doc0();
+    const effects = [fx('stroke', { size: 6, position: 'center', color: '#0c0' }), fx('color-overlay', { color: '#2040ff', opacity: 0.5 })];
+    const base = addRaster(d, { name: 'base', canvas: softDisc('#555'), props: { fillOpacity: 0.7, effects } });
+    const k = addRaster(d, { name: 'clipped', seed: 7, props: { clipped: true, blendMode: 'multiply', effects: [fx('drop-shadow', { distance: 12, size: 10 })] } });
+    addAdj(d, 'invert', {}, { clipped: true, opacity: 0.5 });
+    d.__paint = k.bitmapId;
+    d.__base = base.bitmapId;
+    return d;
+  }, { strokes: (d) => [{ target: d.__paint }, { target: d.__base, erase: true }], frames: 12 });
+  // Above effects over soft edges only recolour the content (see FxCore in src/render/engine.ts).
+  await run('fx-soft-atop', () => {
+    // Full fill, normal blending: drawn 'source-atop' onto the core.
+    const d = doc0(null);
+    const effects = [fx('color-overlay', { color: '#ff3040', opacity: 0.7 }), fx('stroke', { size: 5, position: 'inside', color: '#ff0' })];
+    d.__paint = addRaster(d, { canvas: softDisc('#246'), props: { effects } }).bitmapId;
+    return d;
+  }, { strokes: [{}, { erase: true }] });
+  await run('fx-soft-fill', () => {
+    // Below full fill, a blend mode: drawn on the normalized core.
+    const d = doc0(null);
+    const effects = [fx('color-overlay', { color: '#3060ff', opacity: 0.8, blendMode: 'multiply' }), fx('stroke', { size: 4, position: 'inside', color: '#fff' })];
+    d.__paint = addRaster(d, { canvas: softDisc('#c84'), props: { fillOpacity: 0.5, effects } }).bitmapId;
+    return d;
+  }, { strokes: [{}, { erase: true }] });
+  await run('fx-soft-mixed', () => {
+    // Clipped effects after an unclipped one (emboss): the core is split at its content's share.
+    // (Emboss + stroke share distance fields: mid-stroke frames are inexact, settled afterwards.)
+    const d = doc0(null);
+    const effects = [
+      fx('gradient-overlay', { opacity: 0.5 }),
+      fx('inner-glow', { size: 12 }),
+      fx('bevel', { style: 'emboss', size: 10 }),
+      fx('stroke', { size: 4, position: 'inside', color: '#0ff' }),
+    ];
+    d.__paint = addRaster(d, { canvas: softDisc('#777'), props: { fillOpacity: 0.7, effects } }).bitmapId;
+    return d;
+  }, { strokes: [{}, { erase: true }], frames: 12 });
   await run('masked', () => {
     const d = doc0();
     d.__paint = addRaster(d, { mask: { feather: 0 } }).bitmapId;

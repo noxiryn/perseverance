@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
  * End-to-end smoke test: drives the editor in headless Chromium against a running dev server
- * (or `vite preview`), exercising templates, every command, every tool and every panel while
- * collecting console errors and exceptions. Screenshots go to --out (default screenshots-tmp/).
+ * (or `vite preview`), checking a few compositing pixels (clipping groups, layer effects) and
+ * exercising templates, every command, every tool and every panel while collecting console errors
+ * and exceptions. Screenshots go to --out (default screenshots-tmp/).
  *
  *   npx vite --port 5300 &   node scripts/smoke.mjs --url http://localhost:5300 [--out dir] [--quick]
  *
- * Exit code 1 if any page error / console error was captured.
+ * Exit code 1 if any render check failed or any page error / console error was captured.
  */
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
@@ -50,6 +51,56 @@ const wait = (ms) => page.waitForTimeout(ms);
 await page.goto(url, { waitUntil: 'networkidle' });
 await wait(1500);
 await shot('01-start');
+
+/* ---------- render checks (compositing pixels) ---------- */
+const renderFailures = await run('render-checks', () => {
+  const { bitmaps, documentUtils: D, renderDocument } = window.__app;
+  const failures = [];
+  const raster = (doc, color, props = {}) => {
+    const c = document.createElement('canvas');
+    c.width = doc.width;
+    c.height = doc.height;
+    const g = c.getContext('2d');
+    g.fillStyle = color;
+    g.fillRect(0, 0, c.width, c.height);
+    const l = D.makeRasterLayer({ name: 'L', bitmapId: bitmaps.add(c), width: c.width, height: c.height });
+    Object.assign(l, props);
+    D.insertLayerDraft(doc, l, { parentId: null });
+  };
+  const check = (name, doc, want) => {
+    const got = Array.from(renderDocument(doc, { background: false }).getContext('2d').getImageData(doc.width >> 1, doc.height >> 1, 1, 1).data);
+    if (got.some((v, k) => Math.abs(v - want[k]) > 1)) failures.push(`${name}: got [${got}], expected [${want}]`);
+  };
+  const halfGray = 'rgba(128,128,128,0.5)';
+  const clip = (name, base, clipped, want) => {
+    const doc = D.createDocument({ name, width: 400, height: 300, background: null });
+    raster(doc, halfGray, base);
+    raster(doc, '#ff0000', { clipped: true, ...clipped });
+    check(name, doc, want);
+  };
+  // A clipping group covers what its base covers (like Photoshop): an opaque layer clipped to a
+  // 50%-alpha base shows its own colour at 50% alpha, whatever its blend mode or the base's fill.
+  clip('clip onto 50% base', {}, {}, [255, 0, 0, 128]);
+  clip('clip at 50% opacity', {}, { opacity: 0.5 }, [191, 64, 64, 128]);
+  clip('clip multiply', {}, { blendMode: 'multiply' }, [128, 0, 0, 128]);
+  clip('clip onto 0% fill base', { fillOpacity: 0 }, {}, [255, 0, 0, 128]);
+  const overlay = (name, layer, params, want) => {
+    const doc = D.createDocument({ name, width: 100, height: 100, background: null });
+    raster(doc, halfGray, { ...layer, effects: [{ id: 'fx1', effectId: 'color-overlay', enabled: true, params: { color: '#ff0000', opacity: 1, ...params } }] });
+    check(name, doc, want);
+  };
+  // Effects clipped to the content (overlays, inner shadow/glow, satin, inside stroke, bevel)
+  // only recolour it, like Photoshop: a 50%-alpha pixel with an opaque colour overlay shows the
+  // overlay's colour at 50% alpha, whatever the fill opacity or the overlay's blend mode.
+  overlay('overlay on 50% pixel', {}, {}, [255, 0, 0, 128]);
+  overlay('overlay at 50% opacity', {}, { opacity: 0.5 }, [191, 64, 64, 128]);
+  overlay('overlay multiply', {}, { blendMode: 'multiply' }, [128, 0, 0, 128]);
+  overlay('overlay at 50% fill', { fillOpacity: 0.5 }, {}, [255, 0, 0, 128]);
+  overlay('overlay at 0% fill', { fillOpacity: 0 }, {}, [255, 0, 0, 128]);
+  return failures;
+});
+for (const f of renderFailures ?? []) errors.push(`[render-checks] ${f}`);
+console.log(`render checks: ${!renderFailures ? 'not run' : renderFailures.length ? `${renderFailures.length} FAILED` : 'ok'}`);
 
 /* ---------- registry inventory ---------- */
 const inventory = await run('inventory', () => {

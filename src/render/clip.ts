@@ -13,8 +13,8 @@
  * Base pieces (see LayerRender): `shape` = the base's content (smart filters + mask) at full
  * alpha, `core` = what the base itself draws (content at fill opacity + above-stage effects).
  *   - Coverage A = max(α_shape, α_core): normally α_shape (α_core only exceeds it where an
- *     above-stage effect reaches beyond the content — a centered stroke, an emboss — or adds
- *     coverage over soft edges).
+ *     unclipped above-stage effect reaches beyond the content — a centered stroke, an emboss;
+ *     clipped ones never add coverage, see normalizeCore).
  *   - Normalized base = core / A: the core's straight colour with alpha α_core / A — opaque inside
  *     the content at 100% fill; the fill opacity where the base is drawn at a lower fill (clipped
  *     layers still show at 0% fill, like Photoshop).
@@ -77,4 +77,42 @@ export function opaqueWhereCovered(src: Uint8ClampedArray, coverage: Uint8Clampe
     out[i - 1] = src[i - 1];
     out[i] = 255;
   }
+}
+
+/**
+ * Layer effects follow the same rule (runEffects in ./engine.ts): above-stage effects clipped to
+ * the content (overlays, inner shadow / glow, satin, inside stroke, bevel) only recolour it and
+ * never add coverage, like Photoshop. Their outputs are relative to the content's shape (full
+ * strength wherever it covers anything), so they composite on the NORMALIZED core — the core
+ * divided by the content's alpha — with plain blending, and the content's alpha is applied
+ * afterwards (destination-in).
+ *
+ * Normalize a layer render's core in place: `core` (RGBA, straight alpha, e.g. ImageData.data)
+ * becomes its colour with alpha round(k·255·min(α_core, α_shape) / α_shape) (0,0,0,0 where the
+ * shape is empty). Where the core covers more than the shape (an unclipped effect reaching
+ * beyond the content: centre stroke, emboss), the excess goes to `ext` (RGBA, same length: the
+ * core's colour, alpha α_core − α_shape) when given; returns whether there was any. `shape` null:
+ * the core IS the shape (alpha round(k·255) wherever covered) — with `k` = the fill opacity for
+ * a core that is the content at that fill.
+ */
+export function normalizeCore(core: Uint8ClampedArray, shape: Uint8ClampedArray | null, ext: Uint8ClampedArray | null, k = 1): boolean {
+  const n = shape ? Math.min(core.length, shape.length) : core.length;
+  const full = Math.round(255 * Math.max(0, Math.min(1, k)));
+  let excess = false;
+  for (let i = 3; i < n; i += 4) {
+    const ak = core[i];
+    const as = shape ? shape[i] : ak;
+    if (ak > as && ext) {
+      ext[i - 3] = core[i - 3];
+      ext[i - 2] = core[i - 2];
+      ext[i - 1] = core[i - 1];
+      ext[i] = ak - as;
+      excess = true;
+    }
+    if (ak === 0 || as === 0) {
+      core[i - 3] = core[i - 2] = core[i - 1] = 0;
+      core[i] = 0;
+    } else core[i] = ak >= as ? full : Math.round((full * ak) / as);
+  }
+  return excess;
 }

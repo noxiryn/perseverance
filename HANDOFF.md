@@ -74,11 +74,10 @@ starting point; don't rewrite modules from scratch.
     ±50 % = edge; ours is ±1 = edge). ag-psd stores scale/offset as whole percents: a fill that needs
     rounding stays an editable fill only if the rounded gradient renders within 2 levels, otherwise
     it is written as pixels ("gradient fills exported as pixels"); such overlays are baked.
-  - Known gap (renderer, not io): our clip stacks composite clipped layers with destination-in +
-    source-over, so over a semi-transparent base pixel they add coverage (50 % base + clipped red →
-    alpha 192; Photoshop keeps the base's 128). Any clipped layer over soft base edges therefore
-    looks slightly different in Photoshop, and a re-import of a clipped baked adjustment is not
-    exact at those edges.
+  - (renderer, was a known gap) clip stacks used to add coverage over semi-transparent base pixels
+    (50 % base + clipped red → alpha 192; Photoshop keeps the base's 128). They now keep the base's
+    coverage like Photoshop (compositeClipStack on a normalized clip base, `src/render/clip.ts`);
+    the `scripts/smoke.mjs` render checks cover it. Layer effects: see "Layer effects like Photoshop".
 - **Free Transform on tab switch** (`src/viewport/transform/controller.ts commitTransformInOwnDoc`):
   applied in its own document (with a toast) instead of being dropped.
 - **CI / installers**: Build installers is green since f6ce5d3 (Windows case-clash rename b4d8728 +
@@ -91,6 +90,33 @@ starting point; don't rewrite modules from scratch.
   on disk is a local build of the current electron/ code (`WINEDEBUG=-all npx electron-builder --win
   nsis --x64 --publish never`, with embedded asar integrity), not a release artifact. README: sharing
   leads with sending the Setup .exe itself.
+
+## Layer effects like Photoshop (src/render/engine.ts runEffects / FxCore)
+- Above-stage effects clipped to the content (colour/gradient/pattern overlay, inner shadow/glow,
+  satin, inside stroke, bevel) only recolour it and never add coverage, also over semi-transparent
+  pixels: a 50%-alpha pixel with an opaque red Color Overlay renders [255,0,0,128] (it used to be
+  [212,42,42,192]: each effect was clipped with destination-in and then drawn source-over).
+- Their outputs are relative to the content's shape and are drawn unclipped (`drawAbove`): at
+  full fill normal-blend pieces go `source-atop` onto the core (no readback); otherwise (blend
+  mode, fill below 100%) they composite on the normalized core — core ÷ content alpha, i.e. opaque
+  at full fill, the fill opacity below it — with plain blending, and the content's alpha is applied
+  afterwards (`normalizeCore` in `src/render/clip.ts`, CPU readback: canvas-op un-premultiplies
+  round differently on GPU canvases of different sizes). Below 100% fill clipped effects still
+  reach the content's full coverage (0% fill + opaque overlay → the overlay at the content's alpha).
+- Unclipped effects (centre stroke, emboss) still draw over the core as they are and extend beyond
+  the content; clipped pieces after them (inside stroke after emboss) act on the content's share
+  only (the excess is split off on the CPU and added back with 'lighter').
+- Cached effect outputs (`FxEntry`) now hold the unclipped pieces; reuse and in-place region updates
+  (`updateRenderRegion`) go through the same `drawAbove` path, so partial == full.
+- Opaque interior pixels are unchanged within rounding; only semi-transparent content changes.
+  Cost: one CPU readback of the content rect per layer render when a clipped effect has a blend
+  mode or the fill is below 100% (none for normal-blend effects at full fill).
+- Checks: `scripts/smoke.mjs` render checks (overlay on a 50% pixel: normal, 50% opacity, multiply,
+  50% / 0% fill), dirty-rect scenarios `fx-soft-atop`, `fx-soft-fill`, `fx-soft-mixed` (plus the
+  clip scenarios `clipped-fill` / `clipped-mixed`), `src/render/clip.test.ts`.
+- Pre-existing (not from this change): two distance-field effects (stroke + bevel, two strokes)
+  on soft-edged content give live mid-stroke frames that are off by up to ~250 levels until the
+  settle (`fx-soft-mixed` shows it; the same numbers before this change).
 
 ## Desktop hardening (electron/, checked with scripts/electron-desktop-check.mjs — 52 checks)
 - Security: sandbox + contextIsolation, no Node in the renderer, IPC sender-frame + type checks.

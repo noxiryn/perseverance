@@ -5,7 +5,8 @@
  * px × render scale), cropped to the layer's padded region:
  *   - `shape`: the layer content with smart filters and mask applied, full alpha (used for
  *     clipping masks, above-effect clipping and hit testing),
- *   - `core`: content at fill opacity + above-stage effects (clipped to the content alpha),
+ *   - `core`: content at fill opacity + above-stage effects (those clipped to the content only
+ *     recolour it, like Photoshop: they never add coverage, see FxCore),
  *   - `behind`: behind-stage effects, each composited with its own blend mode.
  * The accumulator then draws behind pieces and the core with the layer opacity/blend mode.
  *
@@ -33,7 +34,7 @@ import { applyFilterStack, compositeOp, makeFilterContext, resolveParams, runFil
 import { cacheGeneration, objId, slots, type Resource } from './cache';
 import { edgeDistance } from './distance';
 import { applyMask, lerpInto, maskAlpha } from './mask';
-import { coreExceedsShape, normalizeClipBase, opaqueWhereCovered } from './clip';
+import { coreExceedsShape, normalizeClipBase, normalizeCore, opaqueWhereCovered } from './clip';
 import { cropExactBackend } from './backendProbe';
 import { alignGrid, alignRect, changesSince, effectInfluence, effectUsesFields, fieldBucket, filtersLocal, isPixelExact, mapDirtyRect, type ChangeEntry } from './region';
 import { fillWithPaint } from './paint';
@@ -1487,6 +1488,130 @@ interface EffectsResult {
 type ActiveEffect = ReturnType<typeof activeEffects>[number];
 
 /**
+ * The core of a layer render while its above effects are drawn onto it (see runEffects). Like
+ * Photoshop, effects clipped to the content (overlays, inner shadow / glow, satin, inside stroke,
+ * bevel) only recolour it and never add coverage, also over semi-transparent pixels: an opaque
+ * colour overlay on a 50%-alpha pixel shows its colour at 50% alpha. Their outputs are relative
+ * to the content's shape (full strength wherever it covers anything) and are drawn unclipped:
+ *   - at full fill, normal-blend pieces recolour the core with 'source-atop' (the core's alpha IS
+ *     the content's, and stays);
+ *   - otherwise they composite on the normalized core (`norm`, see normalizeCore in ./clip.ts):
+ *     the core divided by the content's alpha (opaque at full fill, the fill opacity below it),
+ *     where plain blending gives Photoshop's result; the content's alpha is applied when the core
+ *     is updated from it (leaveNorm).
+ * Unclipped effects (centre stroke, emboss) are drawn over the core as they are and may reach
+ * beyond the content; clipped pieces after them act on the content's share of the core only
+ * (the excess is set aside in `ext` and added back afterwards).
+ * The normalized core comes from a CPU readback: an un-premultiply through canvas ops (a colour-
+ * dodge by 1 − alpha) rounds differently on GPU canvases of different sizes, and in-place region
+ * updates (live painting) run the effects on smaller canvases than full renders.
+ */
+interface FxCore {
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  /** The content (masked + filtered, full alpha): its alpha is the coverage. */
+  C: HTMLCanvasElement;
+  fill: number;
+  /** Canvas-relative rect outside of which the content is empty. */
+  bounds: LocalRect;
+  /** Normalized core over `nr` while clipped pieces are drawn (null: `canvas` is up to date). */
+  norm: HTMLCanvasElement | null;
+  nr: LocalRect;
+  /** Core coverage beyond the content's, set aside while clipped pieces are drawn (canvas-sized). */
+  ext: HTMLCanvasElement | null;
+  /** An unclipped piece was drawn: the core may cover more (or, below 100% fill, less) than the content's share. */
+  mixed: boolean;
+}
+
+/** Start drawing clipped pieces on the normalized core. False when the core can't be read. */
+function enterNorm(k: FxCore): boolean {
+  const W = k.canvas.width;
+  const H = k.canvas.height;
+  // After an unclipped piece the core can reach beyond the content anywhere: split all of it.
+  const r: LocalRect = k.mixed ? { x: 0, y: 0, w: W, h: H } : k.bounds;
+  const full = k.fill >= 0.999;
+  let K: ImageData;
+  let S: ImageData | null = null;
+  try {
+    // Not mixed, below full fill: the core is the content at fill opacity (normalized: the fill).
+    K = readImage(k.mixed || full ? k.canvas : k.C, r);
+    if (k.mixed) S = readImage(k.C, r);
+  } catch (err) {
+    warnOnce('effects readback failed', err);
+    return false;
+  }
+  const E = S ? new ImageData(r.w, r.h) : null;
+  const excess = normalizeCore(K.data, S && S.data, E && E.data, k.mixed || full ? 1 : k.fill);
+  if (excess && E) {
+    k.ext = acquire(W, H);
+    ctx2d(k.ext).putImageData(E, 0, 0);
+  }
+  // Mixed: the core is now held by the normalized core (the content's share) and `ext`.
+  if (k.mixed) k.ctx.clearRect(0, 0, W, H);
+  k.norm = acquire(r.w, r.h);
+  ctx2d(k.norm).putImageData(K, 0, 0);
+  k.nr = r;
+  k.mixed = false;
+  return true;
+}
+
+/** Update the core from the normalized core (content's alpha applied). */
+function leaveNorm(k: FxCore) {
+  const N = k.norm;
+  if (!N) return;
+  const r = k.nr;
+  const n = ctx2d(N);
+  n.globalCompositeOperation = 'destination-in';
+  n.drawImage(k.C, -r.x, -r.y);
+  n.globalCompositeOperation = 'source-over';
+  k.ctx.clearRect(r.x, r.y, r.w, r.h);
+  k.ctx.drawImage(N, r.x, r.y);
+  release(N);
+  k.norm = null;
+}
+
+/** Add the coverage set aside by enterNorm back to the core. */
+function addExt(k: FxCore) {
+  if (!k.ext) return;
+  k.ctx.globalCompositeOperation = 'lighter';
+  k.ctx.drawImage(k.ext, 0, 0);
+  k.ctx.globalCompositeOperation = 'source-over';
+  release(k.ext);
+  k.ext = null;
+}
+
+/** Draw an above-stage piece (canvas-sized, unclipped output) onto the core, see FxCore. */
+function drawAbove(k: FxCore, piece: HTMLCanvasElement, op: GlobalCompositeOperation, clips: boolean) {
+  const g = k.ctx;
+  if (!clips) {
+    leaveNorm(k);
+    addExt(k);
+    g.globalCompositeOperation = op;
+    g.drawImage(piece, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+    k.mixed = true;
+    return;
+  }
+  // No content: nothing to recolour.
+  if (!(k.bounds.w > 0 && k.bounds.h > 0)) return;
+  if (!k.norm) {
+    // Full fill, normal blending: straight onto the core, 'source-atop' (so is everything when
+    // the core can't be read; other blend modes then add some coverage over soft edges).
+    const atop = !k.mixed && k.fill >= 0.999 && op === 'source-over';
+    if (atop || !enterNorm(k)) {
+      g.globalCompositeOperation = op === 'source-over' ? 'source-atop' : op;
+      g.drawImage(piece, 0, 0);
+      g.globalCompositeOperation = 'source-over';
+      return;
+    }
+  }
+  const n = ctx2d(k.norm!);
+  n.globalCompositeOperation = op;
+  n.drawImage(piece, -k.nr.x, -k.nr.y);
+  n.globalCompositeOperation = 'source-over';
+}
+
+/**
  * Stage 5 of a layer render: run the layer effects over the content canvas C (masked + filtered,
  * positioned at `region`). Returns the core (content at fill opacity + above effects) and the
  * behind pieces. `extent` is the content's raster extent, `layoutBox` its layout box (output px).
@@ -1530,12 +1655,8 @@ function runEffects(
     k.drawImage(C, 0, 0);
     k.globalCompositeOperation = 'source-over';
   };
-  const clipTo = (c: HTMLCanvasElement) => {
-    const k = ctx2d(c);
-    k.globalCompositeOperation = 'destination-in';
-    k.drawImage(C, 0, 0);
-    k.globalCompositeOperation = 'source-over';
-  };
+  // Above pieces go through drawAbove: clipped ones never add coverage beyond the content's.
+  const fc: FxCore = { canvas: core, ctx: kctx, C, fill, bounds: effectBounds, norm: null, nr: effectBounds, ext: null, mixed: false };
   const fxOut: FxEntry[] = [];
   const contentRect = (fieldsP.tight === undefined ? extent : fieldsP.tight) ?? null;
   for (const e of sorted) {
@@ -1555,11 +1676,7 @@ function runEffects(
         renderStats.fxReuse++;
         for (const pc of pieces) {
           if (isBehind) behind.push(pc);
-          else {
-            kctx.globalCompositeOperation = pc.op;
-            kctx.drawImage(pc.canvas, 0, 0);
-            kctx.globalCompositeOperation = 'source-over';
-          }
+          else drawAbove(fc, pc.canvas, pc.op, clips);
         }
         continue;
       }
@@ -1583,12 +1700,8 @@ function runEffects(
         if (isBehind) {
           if (knock) knockOut(copy);
           behind.push({ canvas: copy, op: pop });
-        } else {
-          if (clips) clipTo(copy);
-          kctx.globalCompositeOperation = pop;
-          kctx.drawImage(copy, 0, 0);
-          kctx.globalCompositeOperation = 'source-over';
-        }
+        } else drawAbove(fc, copy, pop, clips);
+        // Above pieces are kept unclipped (drawAbove clips them, also on reuse).
         recorded.push({ canvas: copy, op: pop });
       },
     };
@@ -1601,10 +1714,7 @@ function runEffects(
       if (knock) knockOut(target);
       behind.push({ canvas: target, op });
     } else {
-      if (clips) clipTo(target);
-      kctx.globalCompositeOperation = op;
-      kctx.drawImage(target, 0, 0);
-      kctx.globalCompositeOperation = 'source-over';
+      drawAbove(fc, target, op, clips);
       if (!cacheable) release(target);
     }
     if (cacheable) {
@@ -1612,6 +1722,8 @@ function runEffects(
       fxOut.push({ key, region, pieces: recorded });
     }
   }
+  leaveNorm(fc);
+  addExt(fc);
   return {
     core,
     behind,
