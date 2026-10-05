@@ -1,0 +1,563 @@
+[
+ {
+  "id": "ux-polish-1",
+  "severity": "blocker",
+  "area": "Menu bar / Layer menu",
+  "issue": "When the window is shorter than about 836px, clicking the Layer menu runs \"New Layer\" right away and the menu closes. The Layer menu is about 800px tall. It no longer fits below the menu bar, so it is moved up to top: 8px and covers the bar. Its first item, \"New Layer\", ends up under the cursor, and items run on pointerup, so the same click that opened the menu runs that item. Affected setups include 1366x768, 1600x800, 1024x640 (the Electron minimum), 1920x1080 at 125% scaling maximized, and any UI scale above 100%.",
+  "evidence": "Playwright, crimson template open, 1366x768 and again at 1600x800. Mouse down on \"Layer\": the .shell-menu rect is {top: 8, height: 756, scrollHeight: 800}, sitting over the menu bar. Mouse up: the layer count goes 23 -> 24, the menu disappears and the toast \"New Layer completed.\" appears (screenshot menu-b-1366-Layer.png). Expected: the menu opens below the menu bar and scrolls, and nothing runs until the user picks an item.",
+  "files": [
+   "src/ui/shell/MenuBar.tsx"
+  ],
+  "fix": "In MenuLevel's useLayoutEffect (around lines 127-135), never move a top-level menu (level 0) above its anchor. Keep top = y and set maxHeight = innerHeight - top - 8; .shell-menu already scrolls with overflow-y. Apply the same height cap to submenus instead of shifting them upward. Also make onPointerUp (around line 158) ignore a release that is not preceded by a pointerdown or pointermove on that item, or that comes less than about 150ms after the menu opened."
+ },
+ {
+  "id": "ux-polish-2",
+  "severity": "major",
+  "area": "Dialogs / keyboard flow",
+  "issue": "Modal dialogs don't move focus into themselves, don't keep Tab inside, and don't restore focus when they close. Tab walks through the panels behind the backdrop, and Space activates whatever is focused there, so the document can be changed behind an open modal. A keyboard user also can't start typing in New Document (Name/Width) without clicking first. Enter and Esc do work.",
+  "evidence": "After Ctrl+N, document.activeElement is BODY. The first 10 Tab presses focus Layers panel controls behind the modal (layers-badge, fx, layers-disclosure, \"Add layer mask\", \"Create a new group\", \"Create a new layer\", \"Delete layer\") before reaching the dialog's close button. Export and the Filter dialog behave the same. With the Export dialog open, I tabbed to \"Delete layer \u2014 or drop layers here\" and pressed Space: the layer count went 23 -> 22 while the dialog stayed open (screenshot space-behind-modal.png).",
+  "files": [
+   "src/ui/controls/Dialog.tsx",
+   "src/io (New Document dialog)"
+  ],
+  "fix": "In Dialog: on mount, save document.activeElement and focus the first [autofocus], then the first input, then the primary button inside .ui-dialog; fall back to the container with tabIndex=-1. Handle Tab and Shift+Tab in the existing capture keydown listener so focus wraps between the first and last focusable elements inside ref.current. Restore the saved focus on unmount. Add role=\"dialog\", aria-modal=\"true\" and aria-labelledby on the title. Make the New Document Name field autoFocus with its text selected. Optionally set `inert` on #root's shell while a dialog is open."
+ },
+ {
+  "id": "ux-polish-3",
+  "severity": "major",
+  "area": "Dock layout on laptop screens (Libraries, Looks, Color, Navigator)",
+  "issue": "The default three-group dock gives the app's key panels too little height. Their fixed headers (tabs, a segmented toggle, the target line, search, and up to two rows of chips) use almost all of it. At 1366x768 the Looks thumbnails show as roughly 10px slivers and Libraries shows one row with its labels cut off. At 1600x960 Libraries still shows only one row with labels clipped, and Looks shows only the top ~55px of its cards. The Color panel has 715px of content in a 223px slot, so the sliders and hex field are out of view. The Navigator thumbnail shrinks to about 24px, and the Fit/100/150/200 pill covers its \"No document open\" text. The GFX Artist workspace has the same problem at 1366 (group heights 218/190/284px).",
+  "evidence": "Screenshots v2-dock-1366-looks.png, v2-dock-1366-nav.png, dock-1600-top-libraries.png, dock-1600-middle-looks.png, gfx-1366.png, start-1366.png (the Navigator pill sits over \"No document open\"), min-tpl.png at 1024x640 (Swatches shows one row, Layers three rows). DOM check: in the middle group, .fc-color has clientHeight 223 and scrollHeight 715.",
+  "files": [
+   "src/state/ui.ts",
+   "src/ui/shell/workspaces.ts",
+   "src/ui/shell/Dock.tsx",
+   "src/looks",
+   "src/assets",
+   "src/panels/NavigatorPanel.tsx",
+   "src/panels/panels.css"
+  ],
+  "fix": "1. In Dock, give each group a minimum body height of about 170px. When the dock is too short to honour it, collapse the lowest-priority group (Navigator) to its header automatically, or let the dock scroll.\n2. Compact the Looks and Libraries headers: put the chips in a single horizontally scrolling row, and merge the Active layer / Whole document toggle and the target line into one row.\n3. Navigator: when the stage is under about 120px, hide the zoom pill or move it below the stage, and give the empty-state text room.\n4. Consider making GFX Artist (Libraries/Looks first) the default workspace for this app, or picking it automatically when innerHeight is below about 900px."
+ },
+ {
+  "id": "ux-polish-4",
+  "severity": "major",
+  "area": "Start screen",
+  "issue": "The template cards on the start screen show CSS gradients with the template name stamped in big letters, not the real template. For example, Gothic Paper Poster shows a violet/grey gradient, while the actual template is off-white paper with a torn black border. Each name therefore appears twice. Real rendered previews already exist and are used by New from Template (useTemplatePreview). Square icon templates also get a taller art box (155px vs 113px), so card titles sit at different heights (y=641 vs y=598) and the grid looks ragged. The Quick Start card descriptions are cut off (\"Experience icon (512 \u00d7 \u2026\") and the cards have no tooltip. This is the first screen users see, and it looks unfinished.",
+  "evidence": "start-1600.png and start-1366.png compared with dlg-c-1600-template.png, where New from Template shows the real Birdcage, Sunburst, Exterminator and Eternity previews. DOM measurement: Gothic/Sunburst cards have art 155px and name at y=641; Noir/Crimson/Versus cards have art 113px and name at y=598. StartScreen.tsx TemplateCard renders .shell-tpl-frame with templateBackground() and .shell-tpl-glyph text and never calls useTemplatePreview.",
+  "files": [
+   "src/ui/shell/StartScreen.tsx",
+   "src/templates/previews.ts"
+  ],
+  "fix": "In TemplateCard, call `useTemplatePreview(t.id, visible)`, with visible driven by an IntersectionObserver, and render an <img> with object-fit: contain (letterboxed) inside a fixed 16:9 art box for every card. Keep the gradient only as the loading placeholder and remove the stamped glyph. Add title={q.description} to the quick cards, or let the description wrap to two lines."
+ },
+ {
+  "id": "ux-polish-5",
+  "severity": "minor",
+  "area": "Panel strip / Window menu icons",
+  "issue": "The Character and Fonts panels use the same CaseSensitive (\"Aa\") icon, so the strip shows two identical icons stacked a few rows apart. Only the hover tooltip tells them apart, which goes against the \"simple and easy to understand UI\" goal.",
+  "evidence": "In the strip, data-strip-panel=\"character\" and data-strip-panel=\"fonts\" both render svg.lucide-case-sensitive (screenshots hover-strip-character.png and hover-strip-fonts.png). Window menu rows show the same icon twice.",
+  "files": [
+   "src/tools/type/index.ts",
+   "src/fonts/index.ts",
+   "src/ui/shell/panelMeta.ts"
+  ],
+  "fix": "Give Fonts a different glyph, for example lucide `ALargeSmall` or `BookType`. Alternatively give Character `Type`/`Baseline` and leave Fonts as is. Check the name exists in lucide-react v1 before using it. Update panelMeta.ts:37 to match."
+ },
+ {
+  "id": "ux-polish-6",
+  "severity": "minor",
+  "area": "Type menu",
+  "issue": "The Type menu's text-only items stay enabled when the active layer isn't text, and running one only shows a toast. This is inconsistent with the Layer and Edit menus, which grey out items that don't apply.",
+  "evidence": "With the raster layer \"Your Character (replace me)\" active, enabled() returns true for type.fauxBold, fauxItalic, uppercase, warp, rasterize, convertToShape, toggleParagraph and editText (menu-a-1600-Type.png). Running type.fauxBold shows the toast \"Select a text layer to turn Faux Bold on or off\".",
+  "files": [
+   "src/tools/type/commands.ts"
+  ],
+  "fix": "Make enabled() return true only when the selection contains a text layer or on-canvas text editing is active. Keep the toast as a fallback for shortcuts."
+ },
+ {
+  "id": "ux-polish-7",
+  "severity": "minor",
+  "area": "History panel",
+  "issue": "The first History row (the snapshot) cuts the document name down to one or a few characters (\"C.\", \"Got\u2026\"). The secondary span .layers-hist-time holds the full label \"New from \u201cCrimson Film Thumbnail\u201d\" and is set to flex: none, so it takes the whole width. The class name suggests it was meant to show a time.",
+  "evidence": "Screenshots history-panel.png and dock-1600-bottom-history.png: the row reads \"C.  New from \u201cCrimson Film Thumbnail\u201d\". Relevant code: HistoryPanel.tsx lines 128-131 and panels.css .layers-hist-time { flex: none }.",
+  "files": [
+   "src/panels/HistoryPanel.tsx",
+   "src/panels/panels.css"
+  ],
+  "fix": "Show only the document name in the row and put the label in the title tooltip, or show the time. Alternatively stack the name and label vertically in the 40px row and give .layers-hist-time `flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis`."
+ },
+ {
+  "id": "ux-polish-8",
+  "severity": "minor",
+  "area": "Strip flyouts",
+  "issue": "Flyouts are a fixed 620px tall. At 1366x768 the Character, Brushes, Fonts and Roblox flyouts run past the status bar and cover Units/Pixels/Fit. Esc doesn't close an open flyout. Short panels (Effects with no effects, Roblox) leave about 300px of empty space below their content.",
+  "evidence": "Measured at 1366x768: flyout bottom is 760 while the status bar top is 744 (screenshot fly-roblox-1366b.png). After clicking the Effects strip button and pressing Escape, flyoutPanel is still 'effects'. Empty space is visible in flyout-1600-roblox.png and empty-fly-effects.png.",
+  "files": [
+   "src/ui/shell/Dock.tsx"
+  ],
+  "fix": "In Flyout's layout effect (around lines 409-420), measure the available height from the visible strip area above the status bar instead of the full side column, and keep top + h within it. Add a keydown listener: Escape calls setFlyout(null) when focus isn't in a text field. Use max-height in place of a fixed height, so the flyout can shrink to its content."
+ },
+ {
+  "id": "ux-polish-9",
+  "severity": "minor",
+  "area": "Dock tab overflow",
+  "issue": "If a group has more tabs than fit in the 268px dock, the extra tabs render past the dock's right edge with no scroll or overflow menu. This happens after dragging panels into a group or using \"Dock in Panel Group\". The active tab can end up off-screen.",
+  "evidence": "With 6 tabs in the bottom group, .shell-group-tab elements end at x=1659 and x=1705 in a 1600px window. With Brushes active, its tab is not visible (docked-brushes.png).",
+  "files": [
+   "src/ui/shell/Dock.tsx",
+   "src/ui/shell/shell.css"
+  ],
+  "fix": "Make the tab strip scroll horizontally, with scrollbars hidden and the wheel mapped to horizontal scroll, and call scrollIntoView on the active tab. Alternatively add a chevron menu that lists the hidden tabs."
+ },
+ {
+  "id": "ux-polish-10",
+  "severity": "minor",
+  "area": "Empty states",
+  "issue": "With no document open, the Adjustments panel shows two empty-state messages one after the other: \"Open or create a document to add adjustments.\" under the icon grid, and then an icon with \"No document open.\"",
+  "evidence": "Screenshot empty-fly-adjustments.png.",
+  "files": [
+   "src/filters/adjustments"
+  ],
+  "fix": "Keep a single empty state: either dim the icon grid with one hint line, or show only the centered \"No document open\" block. Hide the empty Adjustment Presets section until a document is open."
+ },
+ {
+  "id": "ux-polish-11",
+  "severity": "minor",
+  "area": "Contrast / theme tokens",
+  "issue": "--text-faint (#6a6a6a) on the panel background (#1a1a1a) has a contrast ratio of about 3.2:1. It is used for 10px informational text: template sizes (\"Thumbnail \u00b7 1920\u00d71080\"), \"1 / 1 states\", \"60 colors\", Quick Start descriptions, the Fonts hint \"Click sets the Type tool font\", and the RGB/8 badge on document tabs. At that size it is hard to read, and it looks the same as disabled text.",
+  "evidence": "Computed relative luminance is about 0.144 for #6a6a6a and 0.0103 for #1a1a1a, giving roughly 3.2:1, below 4.5:1 for small text. Visible in start-1600.png, dock-1600-bottom-history.png and flyout-1600-fonts.png.",
+  "files": [
+   "src/styles/theme.css"
+  ],
+  "fix": "Add a --text-muted token of about #858585 (around 4.6:1 on #1a1a1a) for informational secondary text. Keep #6a6a6a only for disabled controls."
+ },
+ {
+  "id": "ux-polish-12",
+  "severity": "minor",
+  "area": "New Document dialog",
+  "issue": "Field spacing in the New Document dialog is uneven. The Width/Height labels sit about 3px under the Name input, while the other field groups are separated by about 14px. For a square preset, neither orientation button looks selected, and the plain word \"Square\" next to them reads like a label rather than a state.",
+  "evidence": "Label positions: Name y=301-315, Width y=341-355, Orientation y=391, Background y=443. The Name input ends at about y=338 (screenshot new-zoom.png).",
+  "files": [
+   "src/io"
+  ],
+  "fix": "Use a consistent 12px gap between field groups. Show the active orientation, or show both as neutral with a \"Square\" badge styled as a state chip."
+ },
+ {
+  "id": "workflow-1",
+  "severity": "blocker",
+  "area": "Roblox \u25b8 Remove Background \u2192 Character Styler (core documented workflow)",
+  "issue": "With Remove Background's default output (\"Layer mask\", non-destructive), every Character Styler style is computed on the unmasked pixels, including the background. A green-screen render styled with Gothic Poster becomes a flat green silhouette. On a sky+baseplate screenshot, Crimson Rim's rim light lands on the hidden rectangle edges and the halftone draws the leftover horizon line. The Styler's safety check treats an enabled mask as already cut out, so it never warns.",
+  "evidence": "In a 1024 doc I dropped char-green.png, chose Remove Background \u25b8 Green screen \u25b8 Apply as Mask, then Styler \u25b8 Gothic Poster: the whole character turned flat green (screenshot g4.png). Undoing and redoing the cut with Output = \"Delete pixels\", then the same style, gave a correct posterized character with a violet rim (g5b.png). Code: src/render/engine.ts runs applyFilterStack at ~line 1417 and applyMask only at ~line 1425 (filters before mask). src/roblox/styler/StylerPanel.tsx hasOpaqueBackground() returns false whenever layer.mask is enabled. RemoveBgDialog.tsx sets lastOutput = 'mask' by default. README step 3 tells users to do exactly Remove Background \u2192 choose a style.",
+  "fix": "Feed the layer mask into the smart-filter input: when a layer has an enabled mask, multiply mask alpha into the content before applyFilterStack (at least for alpha-dependent filters: rim-light, top-shade, toon-roblox, silhouette, cel-shade outline, ink-outline, rough-edges, halftone with transparentPaper), or pass the mask in FilterContext. As a stopgap: (a) in StylerPanel apply, if the target has a Remove-BG mask, apply/bake it first or show \"Character filters need a cut-out \u2014 Apply mask?\"; (b) default RemoveBgDialog output to 'delete' when the layer has no filters.",
+  "files": [
+   "src/render/engine.ts",
+   "src/roblox/styler/StylerPanel.tsx",
+   "src/roblox/bg/RemoveBgDialog.tsx",
+   "src/roblox/bg/apply.ts"
+  ]
+ },
+ {
+  "id": "workflow-2",
+  "severity": "major",
+  "area": "Remove Background (Auto mode) on a typical Roblox Studio screenshot",
+  "issue": "Auto defaults (tolerance 18, softness 12 on a 0-100 redmean scale) leave the character partly transparent, because the border flood leaks inside the outlined character, and they leave a full-width line where sky meets ground. No single tolerance gives both a solid subject and a clean background.",
+  "evidence": "Test image: sky gradient plus green baseplate plus character (char-studio.png). Mask values with defaults: shirt 125/255, face 70, hand 57, sword blade 1. Pants stayed 253, background 0 (bgtest.js; the dialog's Mask view showed a grey shirt). Tolerance 10 / softness 6 gives a clean 255 subject, but the antialiased horizon row survives with alpha up to 98/255 across all 1280 px. After filling the background black it showed as a visible red-tinted line through the composition (s6b.png, final-crimson.png). The dialog footer only says \"93% of the layer removed\". Green-screen mode on a #00b140 background is clean.",
+  "fix": "In src/roblox/bg/core.ts:\n- Lower the Auto defaults to about tolerance 8-10 and softness 6.\n- Make the flood fill gradient-aware: grow when a pixel is close to its already-reached neighbour, not only close to the global border palette. This handles sky gradients and fog.\n- After computing the mask, fill holes enclosed by the kept area (so the interior can't go semi-transparent) and drop kept islands and thin strips not connected to the largest component (kills horizon lines).\n- Show a warning in the dialog when more than about 5% of interior pixels end up partially transparent.",
+  "files": [
+   "src/roblox/bg/core.ts",
+   "src/roblox/bg/RemoveBgDialog.tsx"
+  ]
+ },
+ {
+  "id": "workflow-3",
+  "severity": "major",
+  "area": "Templates: replacing the placeholder character with your own",
+  "issue": "There is no Replace Contents or Replace Character command. Templates say \"replace the placeholder character with yours\" but give no path. Dropping your own image with the placeholder selected adds a raw new layer centred on the canvas (over the title). It doesn't take the placeholder's position, size or flip, doesn't get its smart filters (gradient-map, halftone) or effects (outer-glow), and the placeholder stays. Copy Layer Style copies only effects, not smart filters, and there is no way to copy smart filters between layers.",
+  "evidence": "tpl-crimson-thumbnail opens with \"Your Character (replace me)\" active (gradient-map + halftone filters, outer-glow, scaleX -1, at 1023,93, 774x1066). Dropping char-transp.png produced a new layer \"my-avatar\" at 563,54, 795x972, with no filters or effects, overlapping \"YOUR NAME\" (t3.png). The command registry (315 commands) has no replace command. src/panels/layerOps.ts copyStyle() clones only layer.effects. grep finds no copy or paste for filters. The builder marks placeholders with meta {placeholder:true}, but nothing uses that marker for replacement.",
+  "fix": "Add Layer \u25b8 Replace Contents\u2026 (and a button in Properties and the layer context menu for meta.placeholder layers), plus drop-onto-a-selected-placeholder behaviour: decode the image, cut out the background if it is opaque, fit it to the placeholder's box (keeping its transform incl. flip), and keep its filters, effects and mask (swap only the bitmap). Also add Copy/Paste Smart Filters (or make Copy Layer Style include filters as an option).",
+  "files": [
+   "src/io/open.ts",
+   "src/ui/shell/DropOverlay.tsx",
+   "src/panels/layerOps.ts",
+   "src/panels/menus.ts",
+   "src/templates/builder.ts"
+  ]
+ },
+ {
+  "id": "workflow-4",
+  "severity": "major",
+  "area": "Looks applied to an existing composition",
+  "issue": "Looks always put their overlays in a group at the very top of the document, including the subject-covering atmosphere. Crimson Film adds a \"Red Smoke\" layer (Screen, 85%) above the character and titles, plus duplicate scratches, dust and creases. In whole-document mode its gradient map also turns the white titles pink. The user's character ends up buried in smoke instead of standing in front of it as in ref4. Sunburst Halftone likewise lays its rays across the character's body.",
+  "evidence": "My 1920x1080 crimson composition already had smoke behind the character, my own scratches, dust and creases, and the titles. Applying Looks \u25b8 Crimson Film (Whole document) gave a top group of Gradient Map, Halftone, Red Smoke (Screen 0.85), Film Scratches, Dust, Fold Creases, Vignette and Contrast. The character became nearly invisible in the smoke (s13b.png). Active-layer mode put the same smoke group on top again (s13c.png). Source: src/looks/defs.ts crimson-film overlays[0] = billow-smoke, Screen, 0.85. The engine doc comment says overlays live \"in a pass-through group at the top\".",
+  "fix": "Add an overlay placement option (e.g. placement: 'behind-target' | 'top') to LookOverlayDef. Use 'behind-target' for smoke, glow, rays and backdrops when a target layer is set, and for whole-document mode when the doc has a character (doc.meta.characterId or a detected cut-out layer). Skip or replace overlays whose assetId already exists as a layer, to avoid duplicate scratches and creases. Optionally let the gradient map skip text layers.",
+  "files": [
+   "src/looks/engine.ts",
+   "src/looks/defs.ts"
+  ]
+ },
+ {
+  "id": "workflow-5",
+  "severity": "major",
+  "area": "Filter stacking between Character Styler, Looks and templates",
+  "issue": "The Styler only replaces what the Styler added, and Looks only replace what a Look added, so their filters pile up on the same layer. A template placeholder plus a Styler style, or a Styler style plus an active-layer Look, ends up with double gradient maps and double halftones, and the character becomes a dark or red blob.",
+  "evidence": "Crimson template placeholder + Styler \u25b8 Comic Halftone gave filters [gradient-map, halftone, top-shade, cel-shade, gradient-map, halftone]; the character turned into an almost invisible dark mass (st.png). Styler Crimson Rim followed by Looks \u25b8 Crimson Film (Active layer) gave [top-shade, toon-roblox, rim-light, halftone, gradient-map, halftone] and two outer-glow effects; the character became a flat red silhouette (s13c.png).",
+  "fix": "Use one ownership model for character styling. Record template-authored filters in meta (e.g. meta.styler or meta.look) so applying a Styler style or a Look replaces them. Or have the Styler and Looks detect existing stylizing filters (gradient-map, halftone, cel-shade, toon-roblox) and ask whether to replace or stack, defaulting to replace.",
+  "files": [
+   "src/roblox/styler/StylerPanel.tsx",
+   "src/roblox/styler/styles.ts",
+   "src/looks/engine.ts",
+   "src/templates/builder.ts",
+   "src/templates/reference.ts"
+  ]
+ },
+ {
+  "id": "workflow-6",
+  "severity": "major",
+  "area": "Libraries panel: placing assets",
+  "issue": "The tile tooltip says \"click for settings, double-click to place\", but in the default layout double-click never places. The first click opens a settings drawer that covers the whole panel (the compact layout applies below 520 px panel height), so the second click lands on the drawer. It is also inconsistent with the Shapes and My Assets tabs, where a single click places.",
+  "evidence": "At 1600x960, in both the Essentials and GFX Artist workspaces, a real page.mouse.dblclick on the Film Scratches tile left the layer count unchanged (7 \u2192 7). The settings drawer was open in overlay mode (s12d.png). Dust & Specks and Fold Creases failed the same way, and Playwright reported that \".assets-drawer overlay intercepts pointer events\". Code: LibrariesPanel.tsx OVERLAY_BELOW = 520. AssetGrid.tsx uses onClick=onSelect plus onDoubleClick=onActivate. MyAssetsTab and ShapesTab place on click.",
+  "fix": "Delay opening the drawer until the double-click window has passed (about 250 ms; cancel it if a dblclick arrives), or detect e.detail === 2 on pointerdown and place. Better: make a single click place (consistent with Shapes and My Assets) and open settings from a small gear button or right-click on the tile.",
+  "files": [
+   "src/assets/ui/AssetGrid.tsx",
+   "src/assets/ui/LibrariesPanel.tsx"
+  ]
+ },
+ {
+  "id": "workflow-7",
+  "severity": "major",
+  "area": "Saving and reusing styles across a thumbnail series",
+  "issue": "A GFX artist can't save their own style for reuse. There are no user layer-style presets (the Effects panel shows only built-in STYLE_PRESETS), no \"Save as Look\", no saved Character Styler presets, and no \"Save as Template\". Only brush presets can be saved. Matching the next game's thumbnail means rebuilding every filter and effect by hand.",
+  "evidence": "grep across src finds a SavePresetDialog only in src/tools/paint (BrushesPanel \"Save as Preset\"). EffectsPanel.tsx renders STYLE_PRESETS read-only. Looks persist only UI state (src/looks/store.ts: target, previews, category). No command for saving looks, styles or templates exists among the 315 registered commands.",
+  "fix": "Add \"Save Style Preset\u2026\" in the Effects panel (stores effects plus optionally smart filters in localStorage/IndexedDB and lists them under My Styles). Add \"Save as Look\u2026\" from the current target's filters plus the look group. Add File \u25b8 Save as Template (stores a .pgfx in user templates and marks the selected layer as the placeholder).",
+  "files": [
+   "src/panels/EffectsPanel.tsx",
+   "src/panels/effectPresets.ts",
+   "src/looks/LooksPanel.tsx",
+   "src/looks/store.ts",
+   "src/templates/index.ts"
+  ]
+ },
+ {
+  "id": "workflow-8",
+  "severity": "minor",
+  "area": "Positioning a cut-out character",
+  "issue": "After Remove Background the layer keeps the full source-image box, so the transform handles sit far from the character and run off-canvas. There is no Trim Layer command and no automatic trim to the subject.",
+  "evidence": "After removing the background from a 1280x720 screenshot, the layer stayed 1280x720 (mask added). Scaling it to fit, the box ran past the canvas edge on the right (s8b.png), and the corner handles were hundreds of pixels from the visible character.",
+  "fix": "After Remove Background (both outputs), offer or perform a trim of the bitmap and mask to the subject's opaque bounds while keeping its on-canvas position. Add Layer \u25b8 Trim Transparent Pixels.",
+  "files": [
+   "src/roblox/bg/apply.ts",
+   "src/panels/layerOps.ts"
+  ]
+ },
+ {
+  "id": "workflow-9",
+  "severity": "minor",
+  "area": "Asset defaults vs default documents",
+  "issue": "Sunburst Rays places in Screen blend with light rays, so it is invisible on the white background that New Game Icon and New Thumbnail create. The user sees nothing happen.",
+  "evidence": "Roblox \u25b8 New Game Icon (white background), then Libraries \u25b8 Sunburst Rays \u25b8 Place: the layer was added (Screen, 0.9) but nothing was visible on the canvas (r2.png). It only appeared after the Sunburst Halftone look recoloured everything.",
+  "fix": "Choose blend mode and colour at placement from the luminance of the content below (Screen on dark, Multiply or Normal with dark rays on light, like ref2's dark rays on orange), or show a toast: \"Placed in Screen mode \u2014 not visible on white; switch to Multiply\".",
+  "files": [
+   "src/assets/place.ts",
+   "src/assets/generators"
+  ]
+ },
+ {
+  "id": "workflow-10",
+  "severity": "minor",
+  "area": "Layer style presets on titles",
+  "issue": "Style presets use fixed colours. \"Long Shadow Title\" adds a black stroke and a black long shadow, so on a black blackletter title (the ref1/ref2 look) the result is an illegible black blob.",
+  "evidence": "Birdcage title (UnifrakturMaguntia, #0b0b0b) + Effects \u25b8 Long Shadow Title gave stroke #000000 size 5 + long-shadow #000000 length 90; the title merged into a solid black shape (ef2.png).",
+  "fix": "Derive preset stroke and shadow colours from the layer's fill luminance (light shadow and stroke for dark text), or show the preset previews on the actual layer colour and offer a light/dark variant.",
+  "files": [
+   "src/panels/effectPresets.ts",
+   "src/panels/layerOps.ts"
+  ]
+ },
+ {
+  "id": "workflow-11",
+  "severity": "minor",
+  "area": "Default workspace for asset and look browsing",
+  "issue": "The core creative panels are cramped. At 1600x960, both Essentials and GFX Artist give Libraries about 250 px (one row of thumbnails) and Looks one row of two cards, while the Layers group takes the largest share. This small height is also what triggers the compact drawer behind workflow-6.",
+  "evidence": "s5.png (Essentials): Libraries shows 3 thumbnails. s5b.png (GFX Artist): Libraries about 2 rows partially visible, Looks 2 cards visible with 22 looks.",
+  "fix": "In the GFX Artist workspace make Libraries and Looks the tall group (or give them a resizable wide flyout or bottom drawer), and collapse Navigator by default. Keep the panel height for Libraries at or above 520 px on 900+ px tall windows.",
+  "files": [
+   "src/state/ui.ts",
+   "src/ui/shell/Dock.tsx"
+  ]
+ },
+ {
+  "id": "workflow-12",
+  "severity": "minor",
+  "area": "Start screen: choosing a style",
+  "issue": "The start screen's template cards show swatch gradients with the template name instead of real previews, so users can't see which card matches which reference style. The New from Template dialog does render real previews.",
+  "evidence": "start.png and reload.png (taken more than 2.5 s after load) show gradient plus halftone-dot cards labelled GOTHIC PAPER, SUNBURST HALFTONE and so on. src/ui/shell/StartScreen.tsx builds a linear-gradient from t.swatch, while the dialog (t1-dialog.png) renders the actual Birdcage previews.",
+  "fix": "Use useTemplatePreview / loadTemplatePreview from src/templates in the StartScreen template cards, keeping the gradient as the loading placeholder.",
+  "files": [
+   "src/ui/shell/StartScreen.tsx",
+   "src/templates/previews.ts"
+  ]
+ },
+ {
+  "id": "workflow-13",
+  "severity": "minor",
+  "area": "Photoshop muscle memory",
+  "issue": "With the Move tool active, number keys don't set layer opacity (in Photoshop, 3 = 30%, 0 = 100%). This is a common quick step when making the faint offset duplicate title in ref1.",
+  "evidence": "Selected \"Birdcage copy\" with the Move tool and pressed \"3\": opacity stayed 1 (g7.js).",
+  "fix": "In the shell's global key handler, when no text input is focused and the Move tool (or any non-paint tool) is active, map 1-9/0 to 10-90%/100% opacity of the selected layers (coalesced into one history step).",
+  "files": [
+   "src/ui/shell"
+  ]
+ },
+ {
+  "id": "first-run-1",
+  "severity": "blocker",
+  "area": "Distribution / installer docs",
+  "issue": "The README tells users to get the installer from the Releases page or Actions artifacts, but every CI run has failed, so neither exists. The Windows compiler breaks on two filter files whose names differ only in case. The same problem breaks building on Windows (`npm run dist:win`, `npm run app`). The only local installer is out of date.",
+  "evidence": "`gh run list -R noxiryn/perseverance`: all 15 recent 'Build installers' runs ended in failure or were cancelled, including 'Handoff: all modules done' (run 37276429322). The failing step is 'Typecheck, test and build the app'. Its annotations say: \"File name '.../src/filters/ui/FilterDialog.ts' differs from already included file name '.../src/filters/ui/filterDialog.ts' only in casing\", plus \"'./FilterDialog' has no exported member named 'FilterDialog'\" and \"Circular definition of import alias 'FilterDialogProps'\". `filterDialog.ts` line 15 imports `./FilterDialog`. On a case-insensitive disk that path resolves back to `filterDialog.ts` itself, so a Vite build made on Windows would also produce a filter dialog that is undefined. `gh api repos/noxiryn/perseverance/releases` returns no releases. `release/Perseverance-Setup-0.1.0.exe` is dated 2026-10-04 22:25, before the module commits (last commit 2026-10-05 07:12). A scan of git ls-files found no other case collision that affects imports.",
+  "fix": "Rename `src/filters/ui/FilterDialog.tsx` to e.g. `FilterDialogView.tsx` and update the import in `filterDialog.ts`. The other importers (`menu.ts`, `FilterGallery.tsx`, `PropertiesPanel.tsx`, `paletteSources.ts`) use `filterDialog` and can stay; update ARCHITECTURE.md if it names the file. Coordinate with the engineers working on filter performance. Add a small CI step that runs on all OSes and fails on case-insensitive duplicate module paths. Re-run CI until the Windows job is green, then push tag v0.1.0 so the workflow publishes a Release. Until a Release exists, the README should not send friends to Releases or Actions.",
+  "files": [
+   "src/filters/ui/FilterDialog.tsx",
+   "src/filters/ui/filterDialog.ts",
+   ".github/workflows/release.yml",
+   "README.md",
+   "ARCHITECTURE.md"
+  ]
+ },
+ {
+  "id": "first-run-2",
+  "severity": "major",
+  "area": "Templates \u2192 your character (core workflow)",
+  "issue": "Every template opens with \"Created \u2026 \u2014 replace the placeholder character with yours\", but no command replaces it. A dropped or placed render becomes a plain new layer without the template's character treatment, and the placeholder stays visible. Following the README steps produces an export with two characters, and the user can't recreate the template's character look on their own render.",
+  "evidence": "In the live app I followed README steps 1\u20136 with the Crimson Film template: File \u25b8 New from Template, dropped avatar-render.png on the canvas, applied Remove Background, applied the Styler's 'Crimson Rim', edited the title, then Export As. The new layer 'my-avatar' had no filters and no effects. The placeholder 'Your Character (replace me)' kept its gradient-map and halftone filters plus an outer-glow effect and stayed visible, so the export preview (flow5-export.png) shows both characters overlapping. The builder tags placeholders with `meta = { placeholder: true, kind: 'character' }` (`src/templates/builder.ts:406`), but nothing in the codebase reads that flag. Searching 'replace' in the command palette returns nothing. Copy Layer Style copies effects only, not smart filters (`layerOps.ts` copyStyle). Pose Studio's replace path (`commitRender` with replaceLayerId) only re-edits layers it rendered itself.",
+  "fix": "Add a 'Replace Character\u2026' command and button, shown in Properties, the Roblox panel and as an action on the template-open toast whenever the active layer has meta.placeholder. Place Image, a drop, Pose Studio 'Add to Document' and Fetch Avatar should also replace the placeholder when it is the active layer. To replace: swap bitmapId, width and height into the placeholder layer and fit the new content to the old box (contain, bottom/center aligned). Keep its smart filters, effects, mask, blend mode and clipping, rename it after the source, and clear meta.placeholder. Remove-BG then works directly on that layer. Optionally make Copy/Paste Layer Style include smart filters. Update README step 2 to describe replacing the placeholder.",
+  "files": [
+   "src/templates/builder.ts",
+   "src/templates/open.ts",
+   "src/io/open.ts",
+   "src/roblox/studio/output.ts",
+   "src/roblox/avatar/AvatarDialog.tsx",
+   "src/roblox/styler/StylerPanel.tsx",
+   "src/panels/layerOps.ts",
+   "README.md"
+  ]
+ },
+ {
+  "id": "first-run-3",
+  "severity": "major",
+  "area": "Start screen",
+  "issue": "The start screen's template cards are CSS gradients with the template name on top, not previews, so the four reference styles look nothing like what they create. For example, 'Gothic Paper Poster' shows a purple-to-blue gradient for an off-white paper poster. The New from Template dialog already renders real previews.",
+  "evidence": "01-start.png: the Gothic Paper card is a violet/blue gradient. Opening it gives the off-white torn-paper 'Birdcage' poster (tpl-gothic.png). `TemplateCard` in `StartScreen.tsx` uses `templateBackground(t.swatch)`, while `NewFromTemplateDialog` uses `useTemplatePreview`, which `src/templates/index.ts` exports (tpl-dialog.png shows real art). The cards are also uneven: icon templates get taller frames, so in row 1 'Gothic Paper Poster' and 'Sunburst Halftone Icon' sit about 43px lower than 'Noir Newspaper Thumbnail'.",
+  "fix": "In `StartScreen.tsx` TemplateCard, call `useTemplatePreview(t.id, visible)` and keep the gradient only as a loading fallback. Better: ship pre-rendered PNGs (e.g. `public/templates/<id>.png`, generated by a script at build time) so the first screen is right instantly. Give all cards a fixed 16:9 frame, with icon templates centered inside it, so rows line up.",
+  "files": [
+   "src/ui/shell/StartScreen.tsx",
+   "src/templates/previews.ts",
+   "src/ui/shell/shell.css"
+  ]
+ },
+ {
+  "id": "first-run-4",
+  "severity": "major",
+  "area": "Onboarding guide (Help \u25b8 Make Your First Roblox Thumbnail)",
+  "issue": "The 7-step guide isn't usable as a guided flow. Each step's action button closes the dialog, and reopening it starts again at step 1. The guide is also hard to find, leaves out Remove Background and the Character Styler, and wrongly disables Pose Studio when no document is open.",
+  "evidence": "tips.mjs: opened the guide from the lightbulb, clicked 'New Thumbnail', and the dialog closed. Reopening via Help showed 'Step 1 of 7' (`TipsDialog` keeps the step in `useState(0)`, and every action calls `close()`). In step 2, 'Open Pose Studio' is gated on `needDoc()`, but Roblox \u25b8 Pose Studio\u2026 opens fine with no document ('No document open \u2014 a 1024\u00d71024 document will be created', pose-nodoc.png). Step 6 tells the user to turn on safe zones but offers no button for it. The steps never mention Remove Background or the Character Styler, which are README steps 3 and 5. The only entry points are an unlabeled lightbulb icon in the title bar and a small link at the bottom of the start screen, which is below the fold at 1600\u00d7960 and 1366\u00d7768. The README never mentions the guide.",
+  "fix": "Keep the current step in module state or localStorage and reopen at the next step after an action. Better: turn it into a small non-modal 'coach' card docked bottom-left that stays visible while the user works. Show it automatically once on first launch (localStorage flag). Add a primary hero button 'Make a Roblox thumbnail' next to New/Open. Add a 'Browse templates' action to step 1, a step for 'Remove Background + Character Styler' (with a 'Replace placeholder' hint once first-run-2 exists), and a 'Show Safe Zones' action to step 6. Remove the `needDoc()` gate from Pose Studio. Mention the guide in the README.",
+  "files": [
+   "src/ui/shell/dialogs/TipsDialog.tsx",
+   "src/ui/shell/StartScreen.tsx",
+   "src/ui/shell/TitleBar.tsx",
+   "README.md"
+  ]
+ },
+ {
+  "id": "first-run-5",
+  "severity": "major",
+  "area": "Default workspace / discoverability of Looks, Libraries, Roblox panels",
+  "issue": "In the default 'Essentials' layout, the panels this app is built around are squeezed into small slots. Looks shows one cropped row of 22 looks at 1600\u00d7960 and no complete tile at 1366\u00d7768 (a common laptop size; the packaged app opens maximized). Libraries shows 3 thumbnails with cut-off names. The Roblox, Effects, Fonts and Character panels are unlabeled icons in the collapsed strip.",
+  "evidence": "panel-looks.png (1600\u00d7960): the Looks panel shows two partly cropped look thumbnails above 'Remove look \u00b7 22 looks'. small-doc.png (1366\u00d7768): the Looks grid is a strip about 15px tall. panel-libraries.png: 3 asset tiles, labels cut off ('Paper Texture', 'Crumpled P\u2026'). Guide step 'Show Libraries' reveals the panel in that same small top slot (tips-libraries.png). The 'GFX Artist' workspace has the same Looks problem at 1366\u00d7768 (ws-gfx.png). `DEFAULT_WORKSPACE` puts navigator/libraries at size 0.9, swatches/color/looks at 1, and the roblox panel only in the strip.",
+  "fix": "Make the Looks and Libraries panel headers compact: put the category chips in a dropdown or one scrolling row, and fold the target row into the header. Give panels a minimum content height, and grow the group automatically when a content-heavy panel (looks, libraries, roblox, fonts) is revealed or selected. Shrink the Navigator default (about 0.6). Consider a first-run workspace choice on the start screen ('Photoshop-like' vs 'GFX Artist' vs 'Roblox').",
+  "files": [
+   "src/state/ui.ts",
+   "src/ui/shell/workspaces.ts",
+   "src/ui/shell/Dock.tsx",
+   "src/looks/LooksPanel.tsx",
+   "src/assets/index.ts"
+  ]
+ },
+ {
+  "id": "first-run-6",
+  "severity": "minor",
+  "area": "Panel strip icons",
+  "issue": "The Character and Fonts panels use the same icon (lucide `CaseSensitive`, drawn as 'Aa'), so they look identical in the collapsed strip.",
+  "evidence": "strip.png shows two identical 'Aa' buttons (tooltips 'Character' at y=152 and 'Fonts' at y=208). `src/tools/type/index.ts:50` and `src/fonts/index.ts:21` both set `icon: CaseSensitive`.",
+  "fix": "Give one of them a different icon, e.g. `Type` or `ALargeSmall` for Character and `CaseSensitive` or `LetterText` for Fonts.",
+  "files": [
+   "src/tools/type/index.ts",
+   "src/fonts/index.ts"
+  ]
+ },
+ {
+  "id": "first-run-7",
+  "severity": "minor",
+  "area": "Naming consistency (menus, panels, docs)",
+  "issue": "The same features go by different names in different places, which confuses non-technical users following the README or the guide.",
+  "evidence": "Panel id 'roblox' is called 'Roblox' in its header and the Window menu, but 'Character Styler' in the Roblox menu, the README and the guide. 'Fetch Roblox Avatar\u2026' (File) vs 'Fetch Avatar by Username\u2026' (Roblox menu) vs 'Fetch Avatar' (panel button). 'Show Safe Zones' (Roblox menu) vs 'Roblox Safe Zones' (View) vs 'Safe Zones' (panel). 'Remove BG' (panel button) vs 'Remove Background\u2026'. README says 'Roblox \u2192 Preview', the menu says 'Roblox Preview\u2026'. README says 'Export As\u2026 \u2192 Roblox Thumbnail 1920\u00d71080 (or Icon 512\u00d7512)', the dialog presets say 'Thumbnail 1920\u00d71080' and 'Roblox Icon 512\u00d7512'. The 1920\u00d71080 size is 'Game Thumbnail' on the start screen, 'New Thumbnail (1920\u00d71080)' in the Roblox menu and 'Game Thumbnail 1920' among the templates. Tool tooltips mix 'Move Tool' and 'Type Tool' with 'Brush', 'Eraser' and 'Gradient'.",
+  "fix": "Choose one label per feature and use it everywhere (registry labels, panel titles, panel buttons, README, TipsDialog). Suggested: panel title 'Character Styler' (or 'Roblox Tools'); 'Fetch Roblox Avatar\u2026'; 'Roblox Safe Zones'; 'Remove Background'; export presets 'Roblox Thumbnail 1920\u00d71080' and 'Roblox Icon 512\u00d7512'; and tool names either all with 'Tool' or none.",
+  "files": [
+   "src/roblox/index.ts",
+   "src/roblox/commands.ts",
+   "src/roblox/styler/StylerPanel.tsx",
+   "src/io/dialogs",
+   "src/tools/paint/index.ts",
+   "README.md",
+   "src/ui/shell/dialogs/TipsDialog.tsx"
+  ]
+ },
+ {
+  "id": "first-run-8",
+  "severity": "minor",
+  "area": "Text editing (README step 4)",
+  "issue": "While editing text on the canvas, pressing Esc throws away the edit with no notice. The README's step 'Double-click the title text to edit it' doesn't say how to finish an edit, and current Photoshop commits text on Esc, so users coming from it will lose their typing.",
+  "evidence": "textesc.mjs on the Crimson template: double-clicked 'YOUR NAME', selected all, typed 'ESC TEST', pressed Esc. The layer still read 'YOUR NAME' and no message appeared. Clicking elsewhere on the canvas or a panel does commit ('CLICK TEST' / 'LAYER CLICK'). The only hint is the small options-bar text 'Ctrl+Enter commits \u00b7 Esc cancels'.",
+  "fix": "Make Esc commit, as Photoshop does, and use another key (or an undoable commit) for cancel. Or at least show a toast such as 'Text edit discarded \u2014 press Ctrl+Enter or click outside to keep changes'. Add 'click outside or press Ctrl+Enter to finish' to README step 4.",
+  "files": [
+   "src/tools/type/typeTool.ts",
+   "src/tools/type/session.ts",
+   "README.md"
+  ]
+ },
+ {
+  "id": "first-run-9",
+  "severity": "minor",
+  "area": "README install/build/sharing text",
+  "issue": "Several README instructions are out of date or incomplete.",
+  "evidence": "(a) macOS: 'right-click the app \u2192 Open' no longer bypasses Gatekeeper on macOS 15 Sequoia; users must use System Settings \u25b8 Privacy & Security \u25b8 Open Anyway. (b) 'apt install wine wine32:i386' fails without `dpkg --add-architecture i386 && apt update` first (HANDOFF.md step 6 has the full commands). (c) Actions artifacts need a GitHub login and download as a zip, which doesn't suit sharing with friends. (d) 'Double-clicking a .pgfx opens it in the app' is written right after the portable .exe, but only the NSIS installer registers the `fileAssociations`. (e) The README never mentions Help \u25b8 Make Your First Roblox Thumbnail or the placeholder-replace step. (f) Explorer will show the type as 'Perseverance GFX project' (package.json fileAssociations description), while Open/Save dialogs say 'Perseverance Project'.",
+  "fix": "Update the macOS step for Sequoia. Add the i386 architecture commands. Point friends only to Releases, once first-run-1 is fixed. Say that .pgfx double-click works after installing with the Setup .exe. Add a 'New here?' line pointing to the in-app guide. Use the same file-type description in package.json and `src/io/save.ts` / `src/io/commands.ts`.",
+  "files": [
+   "README.md",
+   "package.json"
+  ]
+ },
+ {
+  "id": "first-run-10",
+  "severity": "minor",
+  "area": "Sharing .pgfx projects",
+  "issue": "The README says shared .pgfx projects open in any copy of Perseverance. But fonts added with 'Add font file\u2026', and system fonts, are not saved into the project, and opening a project with a missing font gives no warning. The text just renders in a fallback font.",
+  "evidence": "`src/io/project.ts` and `container.ts` contain no font handling; `loadProject` simply calls openDocument. User fonts live only in the local store (`src/fonts/userFonts.ts`). The only missing-font hint in the code is a tooltip in `fontSelect.tsx:45` ('\u2026 is not installed \u2014 text renders with a fallback font').",
+  "fix": "When saving, embed the user-added font files used by text layers in the .pgfx (they are already stored locally) and register them on open. On open, check the document's families against the installed ones and show a toast like 'Missing fonts: X \u2014 using fallback', with a link to the Fonts panel. Add a README note that system fonts aren't embedded.",
+  "files": [
+   "src/io/project.ts",
+   "src/io/container.ts",
+   "src/fonts/userFonts.ts",
+   "src/fonts/loader.ts",
+   "README.md"
+  ]
+ },
+ {
+  "id": "first-run-11",
+  "severity": "minor",
+  "area": "Navigator empty state",
+  "issue": "With no document open, the Navigator's 'No document open' text is covered by the Fit/100%/150%/200% zoom buttons at laptop height.",
+  "evidence": "nav-crop.png at 1366\u00d7768: the text sits at y=142 and the zoom-preset pill is drawn over it.",
+  "fix": "Hide the zoom-preset pill when there is no document, or stack the empty-state text and the pill vertically.",
+  "files": [
+   "src/panels"
+  ]
+ },
+ {
+  "id": "first-run-12",
+  "severity": "minor",
+  "area": "Start screen \u2013 Roblox entry points",
+  "issue": "The start screen offers Roblox document sizes but no way to bring in a character (Pose Studio, Fetch Avatar, Import 3D Model, an image render), even though that is the user's first step.",
+  "evidence": "The start screen sections are hero (New/Open), Quick start (sizes), Templates, Recent and Tips (StartScreen.tsx); none of them links to roblox.poseStudio, roblox.fetchAvatar or roblox.importModel. Pose Studio already works with no document and creates a 1024\u00d71024 one (pose-nodoc.png).",
+  "fix": "Add a 'Start from your character' row with four cards: Pose Studio, Fetch Avatar, Import 3D Model, and 'Open a render (then Remove Background)'. Each runs the existing command and creates a document if needed.",
+  "files": [
+   "src/ui/shell/StartScreen.tsx"
+  ]
+ },
+ {
+  "id": "correctness-1",
+  "severity": "major",
+  "area": "Memory / bitmap GC (src/state/editor.ts)",
+  "issue": "The bitmap store is only garbage-collected when a document closes or history passes 80 steps (gcBitmaps), and anything created in the last 30 s is spared (retainOnly grace). So pixels from documents closed soon after opening, and from discarded redo branches, stay alive indefinitely. Nothing else ever triggers GC, so canvas memory grows until the Electron renderer runs out.",
+  "evidence": "mem1.mjs: opened and closed tpl-crimson-thumbnail 10 times (about 1 s each). Afterwards 0 sessions were open but the store held 64 bitmaps / 468 MB of canvas pixels; they were freed only after I faked +120 s and closed another document. mem2.mjs (10 different templates): 55 bitmaps left with every document closed. The render cache was correctly emptied (0 slots), so the store is the leak. leak2.mjs: 2048\u00b2 document with 4 layers, three rounds of Image Size 4096 \u2192 undo \u2192 opacity change (which discards the redo branch). The store grew from 4 bitmaps / 64 MB to 16 / 832 MB, unchanged with the clock moved 10 minutes ahead (only 4 bitmaps still referenced).",
+  "fix": "In closeDocument, compute the bitmaps referenced by the closing session (docs + patches) minus those referenced by the remaining sessions, and delete them immediately with no grace. The tool's in-flight young bitmaps aren't in that set, so they stay safe. In commit, when entries after history.index are dropped, do the same for bitmaps referenced only by the dropped entries. Also schedule a deferred gcBitmaps (setTimeout of about grace + 1 s, debounced) after any close, trim or branch discard, so the grace window can't make bitmaps permanent.",
+  "files": [
+   "src/state/editor.ts",
+   "src/core/bitmaps.ts"
+  ]
+ },
+ {
+  "id": "correctness-2",
+  "severity": "major",
+  "area": "Save / autosave consistency (src/io/project.ts)",
+  "issue": "encodeProject takes the document JSON once but reads layer pixels one bitmap at a time across awaits (about 2.7 s for the noir template; autosave also yields with idle() between bitmaps). Pixels edited or undone during the save come from a different state than the JSON, yet saveDocument marks the history step it started on as saved. This is a data-loss window: Ctrl+S, then Ctrl+Z while encoding, then Ctrl+Y leaves the tab showing clean while the file lacks the change, so closing won't prompt. Autosave recovery files routinely mix states the same way.",
+  "evidence": "race1.mjs: committed a magenta fill on the last raster layer (state N), called encodeProject(N), then undo() on the next tick. The decoded file matched state N-1 exactly (diff 0) and differed from N on 64% of pixels (max 189). race2.mjs, end to end through saveDocument with the browser download captured: saveDocument() \u2192 undo() during encode \u2192 redo(). Result: saveOk = true, session.dirty = false after redo, and the saved file differs from the current document on 64.2% of pixels.",
+  "fix": "Snapshot everything synchronously before the first await. For each bitmap id, record bitmaps.version(id) and either reuse a pngCache hit (same canvas + version) or copy the canvas (drawImage into a new canvas) synchronously, then encode the copies. Or, as a cheaper guard, re-check after encoding that every id's version and the session's current history entry are unchanged; if not, re-encode or don't call markSavedAt. Apply the same snapshot in autosaveTick.",
+  "files": [
+   "src/io/project.ts",
+   "src/io/save.ts",
+   "src/io/autosave.ts"
+  ]
+ },
+ {
+  "id": "correctness-3",
+  "severity": "major",
+  "area": "Keyboard focus trap (native <select>)",
+  "issue": "After picking a value in any native <select> (the shared Select control is used about 60 times: Layers blend/kind, options-bar selects such as brush Mode, ParamEditor selects in filter/effect/asset params, swatch set, status bar units), focus stays on the select. focusKind treats it as a text field (isTypingTarget returns true for SELECT), so every global shortcut is ignored, including Ctrl+Z and tool letters. Meanwhile the browser's type-to-search on the select changes the value on letter keys and commits a new history step.",
+  "evidence": "focus1.mjs on the demo document, Red Glow layer: chose 'Screen' in the Layers panel blend select (history: 'Blend Mode', focus SELECT.ui-select). Pressing M, meaning to pick the marquee tool, changed the layer to multiply and added a new 'Blend Mode' step while the tool stayed move. B did not select the brush, Ctrl+Z did not undo (history index unchanged at 2) and D did nothing. Focus stayed on the select throughout. By contrast, text fields behave correctly: focus3.mjs checked 77 panel text inputs with b / Delete / Escape and found no problems.",
+  "fix": "In keyboard.ts focusKind, classify SELECT as 'control', so arrows, Enter, Space, Home, End and PageUp/PageDown stay with the select while letters, Delete and Ctrl/Alt combos reach the global handler. When the focused element is a SELECT and a global shortcut or tool letter handles the key, call preventDefault so type-to-search doesn't fire. Additionally, in ui/controls Select (and the raw selects in StatusBar.tsx and SwatchesPanel.tsx), blur after onChange so focus returns to the canvas, as in Photopea.",
+  "files": [
+   "src/ui/shell/keyboard.ts",
+   "src/ui/shortcuts.ts",
+   "src/ui/controls/basic.tsx",
+   "src/ui/shell/StatusBar.tsx",
+   "src/presets/SwatchesPanel.tsx"
+  ]
+ },
+ {
+  "id": "correctness-4",
+  "severity": "major",
+  "area": "PSD export (src/io/psd.ts)",
+  "issue": "toPsdAdjustment only maps brightness-contrast, levels, curves, exposure, vibrance, hue-saturation (without colorize), invert, posterize and threshold. Gradient map, black & white, color balance, photo filter, channel mixer and selective color are dropped even though ag-psd can write them ('gradient map', 'black & white', 'color balance', 'photo filter', 'channel mixer', 'selective color'). Adjustments with no PSD equivalent (vignette, duotone, split toning, color lookup, colorize hue/sat) are skipped rather than baked into pixels. These are exactly the layers that create the reference looks, so a PSD opened in Photoshop or Photopea looks clearly different. Every other layer type round-trips exactly.",
+  "evidence": "psd3.mjs exported every template with buildPsd, wrote and read it with ag-psd, rebuilt it with psdToDocument and compared renders. tpl-sunburst-icon skipped 'Amber Gradient Map' and 'Vignette': mean diff 15.9, 52% of pixels off by more than 8 levels. tpl-noir-thumbnail skipped 'Black & White' and 'Vignette': 45%. Templates that skipped only Vignette: crimson 20%, versus 40%, horror 42%, showcase 43%, group-banner 22%. Templates with no skipped adjustments were exact (max 0\u20133). psd2.mjs with GradMap and Vignette removed from my all-layer-types document: max diff 1.",
+  "fix": "Add native mappings: gradient-map \u2192 {type:'gradient map', gradient:{colorStops,\u2026}, reverse, dither}; black-white \u2192 {type:'black & white', reds\u2026magentas, useTint, tintColor}; color-balance, photo-filter, channel-mixer, selective-color; and the reverse mappings in fromPsdAdjustment. For adjustments with no PSD equivalent, bake rather than skip: render the composite below the layer (renderDocument with below: layerId, restricted to the same parent), apply the adjustment, export it as a pixel layer with the adjustment's mask, opacity and blend, and report it under 'baked' instead of 'skipped'.",
+  "files": [
+   "src/io/psd.ts"
+  ]
+ },
+ {
+  "id": "correctness-5",
+  "severity": "minor",
+  "area": "NumberField Escape (src/ui/controls/basic.tsx)",
+  "issue": "Pressing Escape in any number field (layer opacity/fill, Properties X/Y/W/H, Character panel, filter params\u2026) commits the typed value instead of reverting it. The Escape handler calls setText(fmt(shown)) and then blur(); onBlur runs commitText(), which still sees the old, unflushed typed text.",
+  "evidence": "focus2.mjs: clicked the Layers panel Opacity field (a .ui-num input), typed '20' and pressed Escape. The layer opacity became 0.2 and a new 'Opacity' history step was added (history 0 \u2192 1). Expected: revert to 100% with no history step.",
+  "fix": "Keep a cancelRef: on Escape set cancelRef.current = true and reset the text, then blur. In onBlur, skip commitText when cancelRef is set (then clear it). Alternatively keep the edited text in a ref so commitText never reads stale state.",
+  "files": [
+   "src/ui/controls/basic.tsx"
+  ]
+ },
+ {
+  "id": "correctness-6",
+  "severity": "minor",
+  "area": "Multi-document: Free Transform on tab switch",
+  "issue": "A live Free Transform is silently discarded when the user switches document tabs: the viewport watchdog calls abandonTransform. Text being typed on the canvas, by contrast, is committed on switch. The user loses the transform they dragged, with no commit and no prompt.",
+  "evidence": "multi1.mjs: DocA with a rectangle shape layer, Ctrl+T, then dragged the bottom-right handle 120/80 px. The session doc was then a preview not yet in history. Clicked the DocB tab, pressed Enter, switched back to DocA. DocA history stayed 'New Document|New Layer' with no preview and the shape was untransformed. In the same run, text typed with the type tool in DocA was committed as 'Type Tool' on switching to DocB.",
+  "fix": "In the lifecycle watchdog, when the active document changes under a live transform, commit the session into its own document's history (as absorbForeignCommit does for foreign commits) instead of abandoning it, or show an 'Apply the transformation?' prompt like Photoshop.",
+  "files": [
+   "src/viewport/lifecycle.ts",
+   "src/viewport/transform/controller.ts"
+  ]
+ },
+ {
+  "id": "correctness-7",
+  "severity": "minor",
+  "area": "PSD export: document background colour",
+  "issue": "buildPsd writes no layer for doc.background, and psdToDocument always sets background to null. Templates set doc.background (for example #e9e8e4, #070707), so any area not covered by layers turns transparent in the PSD. Today's templates all cover the canvas, but documents made from templates or looks that leave gaps lose the colour.",
+  "evidence": "psd2.mjs: an 800\u00d7600 document with background #ffffff whose only layer is hidden rendered white before export and fully transparent after the PSD round trip (diff max 255 on 100% of values); the reimported doc has background null.",
+  "fix": "When doc.background is set, add a bottom 'Background' pixel layer filled with that colour in buildPsd (and on import keep it as a raster layer), so the PSD matches the app's composite.",
+  "files": [
+   "src/io/psd.ts"
+  ]
+ }
+]

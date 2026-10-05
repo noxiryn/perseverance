@@ -12,7 +12,7 @@ import type { ParamValues } from '../../core/types';
 import { filters } from '../../registry';
 import { openDialog, toast } from '../../state/ui';
 import { applyFilterNow, resolveTarget, type ApplyMode } from './apply';
-import { FilterDialog, type FilterDialogProps } from './FilterDialog';
+import { FilterDialog, type FilterDialogProps } from './FilterDialogView';
 import { rememberedParams, setLastFilter } from './memory';
 
 export async function openFilterDialog(filterId: string, opts: { mode?: 'auto' | 'smart' | 'destructive' } = {}): Promise<void> {
