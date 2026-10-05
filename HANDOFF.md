@@ -74,11 +74,27 @@ starting point; don't rewrite modules from scratch.
     ±50 % = edge; ours is ±1 = edge). ag-psd stores scale/offset as whole percents: a fill that needs
     rounding stays an editable fill only if the rounded gradient renders within 2 levels, otherwise
     it is written as pixels ("gradient fills exported as pixels"); such overlays are baked.
-  - Known gap (renderer, not io): our clip stacks composite clipped layers with destination-in +
-    source-over, so over a semi-transparent base pixel they add coverage (50 % base + clipped red →
-    alpha 192; Photoshop keeps the base's 128). Any clipped layer over soft base edges therefore
-    looks slightly different in Photoshop, and a re-import of a clipped baked adjustment is not
-    exact at those edges.
+  - Clip stacks now use Photoshop's semantics (renderer, see below), so clipped layers look the same
+    in Photoshop over soft base edges too, and a clipped baked adjustment re-imports exactly (runtime
+    round trip over a soft-edged base: before 28 % of values off, max 19–44 levels; now exact for a
+    plain clipped bake, ≤ 3 levels (rounding) with an opacity or a clipped layer below it; on the
+    gothic template's character: max 64 → 0).
+- **Clipping masks** (`src/render/clip.ts`, `compositeClipStack` / `clipBaseFor` in `engine.ts`):
+  a clip stack's coverage is its base's — clipped layers never add coverage (50 % base + clipped red
+  used to come out at alpha 192, now 128 like Photoshop) — and each clipped layer blends "atop":
+  Co = αs·B(Cb, Cs) + (1 − αs)·Cb, αo = αb. Canvas 2D can't blend atop, so the stack is composited
+  over the base made opaque (its core un-premultiplied by the coverage, computed on the CPU once per
+  base render and cached per core/shape canvas; live painting recomputes only the changed area,
+  zero-copy raster bases follow `bitmaps.dirtySince`), with plain source-over blending, then the
+  base's alpha is applied with destination-in. 0 % fill bases still clip (Photoshop); where an
+  above-stage effect of the base reaches beyond its content (centered stroke, emboss, overlays over
+  soft edges), clipped layers get only the content's share of the coverage. Adjustment layers with a
+  blend mode keep the backdrop's alpha too (they squared it over soft pixels). Every path goes
+  through `compositeClipStack` (full / live / below-cache composites, thumbnails, renderLayerToDoc,
+  merged copies, PSD bakes). Tests: `src/render/clip.test.ts` runs the real compositor on a
+  test-only software canvas (`src/render/softCanvas.ts`, jsdom has none); `dirty-rect-check.mjs`
+  gained `clipped-soft`, `clipped-group-base` and `clipped-fx-base`. None of the 23 templates uses
+  clipping: their renders are bit-identical.
 - **Free Transform on tab switch** (`src/viewport/transform/controller.ts commitTransformInOwnDoc`):
   applied in its own document (with a toast) instead of being dropped.
 - **CI / installers**: Build installers is green since f6ce5d3 (Windows case-clash rename b4d8728 +

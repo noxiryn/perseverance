@@ -25,7 +25,7 @@
   font-size: var(--fs-sm);
 }
 .paint-opt-hint {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -182,7 +182,7 @@
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-faint);
+  color: var(--text-muted);
   background: var(--bg-panel);
 }
 .paint-presets-list {
@@ -229,7 +229,7 @@
 }
 .paint-preset-size {
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
@@ -279,7 +279,7 @@
 .paint-empty {
   padding: 18px 12px;
   text-align: center;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
 }
 

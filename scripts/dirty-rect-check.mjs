@@ -380,6 +380,43 @@ async function rendererPart(opts) {
     d.__base = d.layers[d.rootIds[0]].bitmapId;
     return d;
   }, { strokes: (d) => [{ target: d.__paint }, { target: d.__base, erase: true }] });
+  await run('clipped-soft', () => {
+    // Soft-edged base (radial alpha falloff) at 70% fill under a mask; clipped layers with a drop
+    // shadow (behind pieces), multiply, and an adjustment with a blend mode. Transparent document.
+    const d = doc0(null);
+    const soft = canvas(W, H, (g) => {
+      const rg = g.createRadialGradient(W / 2, H / 2, 80, W / 2, H / 2, 360);
+      rg.addColorStop(0, 'rgba(200,120,60,1)');
+      rg.addColorStop(1, 'rgba(200,120,60,0)');
+      g.fillStyle = rg;
+      g.fillRect(0, 0, W, H);
+    });
+    const base = addRaster(d, { name: 'base', canvas: soft, props: { fillOpacity: 0.7 }, mask: { feather: 0 } });
+    const k = addRaster(d, { name: 'clip-fx', seed: 6, props: { clipped: true, effects: [fx('drop-shadow', { distance: 14, size: 10 })] } });
+    addRaster(d, { name: 'clip-mul', seed: 8, props: { clipped: true, blendMode: 'multiply', opacity: 0.8 } });
+    addAdj(d, 'hue-saturation', { hue: -50, saturation: 20 }, { clipped: true, blendMode: 'color' });
+    d.__paint = k.bitmapId;
+    d.__base = base.bitmapId;
+    return d;
+  }, { strokes: (d) => [{ target: d.__paint }, { target: d.__base, erase: true }] });
+  await run('clipped-group-base', () => {
+    const d = doc0();
+    const g = addGroup(d, { blendMode: 'normal' });
+    const a = addRaster(d, { parent: g.id, name: 'g1', canvas: canvas(W, H, (c) => ((c.fillStyle = 'rgba(40,160,90,0.6)'), c.beginPath(), c.arc(W * 0.4, H * 0.5, 260, 0, 7), c.fill())) });
+    addRaster(d, { parent: g.id, name: 'g2', seed: 11, props: { opacity: 0.5 } });
+    addRaster(d, { name: 'clip', seed: 12, props: { clipped: true, blendMode: 'screen' } });
+    d.__paint = a.bitmapId;
+    return d;
+  });
+  await run('clipped-fx-base', () => {
+    // Base whose above-stage effects reach beyond its shape (centered stroke) / add coverage over
+    // soft edges (overlay): clipped layers only get the shape's share of the coverage.
+    const d = doc0();
+    const base = addRaster(d, { name: 'base', seed: 13, props: { effects: [fx('color-overlay', { color: '#ffcc00', opacity: 0.5 }), fx('stroke', { size: 6, position: 'center', color: '#ff00aa' })] } });
+    addRaster(d, { name: 'clip', seed: 14, props: { clipped: true } });
+    d.__paint = base.bitmapId;
+    return d;
+  }, { strokes: [{ erase: true }] });
   await run('masked', () => {
     const d = doc0();
     d.__paint = addRaster(d, { mask: { feather: 0 } }).bitmapId;

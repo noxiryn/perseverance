@@ -12,9 +12,10 @@
  * is bit-identical — src/core/wasm/blurWasm.test.ts compares the two on random inputs.
  *
  * Kernels (all addresses are byte offsets in the module's exported memory):
- *  - hrow1/hrow2/hrow3/hrow4(src, dst, w, stride, r, inv, alpha): one row of the (extended) box blur
- *    of src/filters/stylize/util.ts `hRow` for 1–4 interleaved channels at once (channel pairs as
+ *  - hrow1..hrow4(src, dst, w, stride, r, inv, alpha): one row of the (extended) box blur of
+ *    src/filters/stylize/util.ts `hRow` for 1–4 interleaved channels at once (channel pairs as
  *    f64x2 lanes); `stride` = bytes per pixel, so hrow1 also serves any channel of a wider pixel.
+ *    hrow1x2..hrow4x2(src, dst, src2, dst2, …): the same for two rows at once (interleaved chains).
  *  - vrow / vrowext / addrow: the vertical steps of util.ts BoxStream (`vRow`, `vRowExt`, the
  *    initial window sums), f64x2 SIMD.
  *  - premul_row / unpremul_row / rgb_in / rgb_out: util.ts row I/O of blurImage (premultiplyRow,
@@ -166,11 +167,64 @@ const F64X2 = {
   /** two f32 (low half) → two f64 */
   promoteLow: (a) => [a, ...simd(0x5f)],
 };
-const F32X4 = { demoteZero: (a) => [a, ...simd(0x5e)] };
+Object.assign(V, {
+  bytes: (lanes) => [...simd(0x0c), ...lanes], // v128.const
+  or: (a, b) => [a, b, ...simd(0x50)],
+  load32z: (p, off = 0) => [p, ...simd(0x5c), 2, ...uleb(off)],
+  store32lane0: (p, v, off = 0) => [p, v, ...simd(0x5a), 2, ...uleb(off), 0],
+  /** i8x16.shuffle: result byte i = (a ++ b)[lanes[i]] */
+  shuffle: (a, b, lanes) => [a, b, ...simd(0x0d), ...lanes],
+});
+Object.assign(F64X2, {
+  nearest: (a) => [a, ...simd(0x94)],
+  /** two u32 (low half) → two f64 (exact) */
+  fromLowU32: (a) => [a, ...simd(0xff)],
+  replaceLane: (a, lane, v) => [a, v, ...simd(0x22), lane],
+});
+const F32X4 = {
+  demoteZero: (a) => [a, ...simd(0x5e)],
+  nearest: (a) => [a, ...simd(0x6a)],
+  extract: (a, lane) => [a, ...simd(0x1f), lane],
+  fromU32: (a) => [a, ...simd(0xfb)],
+};
+const I32X4 = {
+  splat: (a) => [a, ...simd(0x11)],
+  minS: (a, b) => [a, b, ...simd(0xb6)],
+  extract: (a, lane) => [a, ...simd(0x1b), lane],
+  /** u16 (low half) → u32 */
+  extendLowU16: (a) => [a, ...simd(0xa9)],
+  /** saturating, NaN → 0 */
+  truncSatF32S: (a) => [a, ...simd(0xf8)],
+  /** two f64 → two i32 in the low lanes (saturating, NaN → 0), high lanes 0 */
+  truncSatF64SZero: (a) => [a, ...simd(0xfc)],
+};
+const I16X8 = {
+  /** u8 (low half) → u16 */
+  extendLowU8: (a) => [a, ...simd(0x89)],
+  /** signed i32 → u16 with saturation (negative → 0) */
+  narrowI32U: (a, b) => [a, b, ...simd(0x86)],
+};
+const I8X16 = {
+  /** signed i16 → u8 with saturation */
+  narrowI16U: (a, b) => [a, b, ...simd(0x66)],
+};
 const U8X16 = {
   min: (a, b) => [a, b, ...simd(0x77)],
   max: (a, b) => [a, b, ...simd(0x79)],
 };
+/** Shuffle lanes: bytes of 32-bit lanes (a: 0–3, b: 4–7) */
+const lanes32 = (...ls) => ls.flatMap((l) => [l * 4, l * 4 + 1, l * 4 + 2, l * 4 + 3]);
+/**
+ * ToUint8Clamp of the four lanes of an i32x4 that holds nearest-rounded, saturated values: clamp
+ * to ≤ 255 (the unsigned narrowing turns negatives into 0). `k255` = local with i32x4.splat(255).
+ */
+const clampI = (t) => I32X4.minS(t, g('k255'));
+/** f32x4 → i32x4 of ToUint8Clamp(lane) (round half to even, NaN → 0, clamped to 0..255). */
+const u8f32x4 = (v) => clampI(I32X4.truncSatF32S(F32X4.nearest(v)));
+/** Pack four clamped i32x4 into 16 bytes (lanes in order). */
+const pack16 = (t0, t1, t2, t3) => I8X16.narrowI16U(I16X8.narrowI32U(t0, t1), I16X8.narrowI32U(t2, t3));
+/** Pack one clamped i32x4 into its low 4 bytes. */
+const pack4 = (t) => [set('pk', t), I8X16.narrowI16U(I16X8.narrowI32U(g('pk'), g('pk')), I16X8.narrowI32U(g('pk'), g('pk')))];
 
 // shorthands
 const g = get;
@@ -179,7 +233,10 @@ const i32min = (a, b) => I32.select(a, b, I32.lt_s(a, b)); // a, b must be side-
 const i32max = (a, b) => I32.select(a, b, I32.gt_s(a, b));
 /** Math.fround */
 const fround = (v) => F64.promote(F32.demote(v));
-/** Uint8ClampedArray store conversion (ToUint8Clamp): NaN → 0, clamp to 0..255, round half to even. */
+/**
+ * Uint8ClampedArray store conversion (ToUint8Clamp): NaN → 0, clamp to 0..255, round half to even.
+ * Scalar form for row tails and the integer box blur; the hot rows use the SIMD forms above.
+ */
 const u8 = (v) => I32.truncSatF64U(F64.min(F64.nearest(v), F64.c(255)));
 
 /* ------------------------------------------------------------------ */
@@ -252,43 +309,62 @@ function laneOps(kind) {
 }
 
 /**
- * hRow of util.ts for the channels in `plan` (each { kind: 's' | 'v', off: byte offset in the pixel }).
- * Same phases and the same float64 operations per channel as the JS:
+ * hRow of util.ts for the channels in `plan` (each { kind: 's' | 'v', off: byte offset in the pixel }),
+ * for one row or two rows at once (`rows` = 2: two independent rows interleaved in one loop, so the
+ * two running-sum dependency chains overlap — the loop is otherwise bound by the add latency).
+ * Same phases and the same float64 operations per channel and row as the JS:
  *   sum = Σ taps (clamped), then per x: dst = sum·inv (or (sum + α·(left + right))·inv) and
  *   sum += add − rem.
  */
-function hrowFn(fname, plan) {
-  const locals = { x: 'i32', k: 'i32', p: 'i32', pa: 'i32', pr: 'i32', pd: 'i32', xAdd: 'i32', xRem: 'i32', xm: 'i32', lastp: 'i32', invv: 'v128', alphav: 'v128' };
-  const G = plan.map((q, i) => {
-    const o = laneOps(q.kind);
-    for (const n of ['f', 'l', 's', 'a', 'm', 'v', 'c']) locals[n + i] = o.t;
-    return { ...o, off: q.off, f: 'f' + i, l: 'l' + i, s: 's' + i, a: 'a' + i, m: 'm' + i, v: 'v' + i, c: 'c' + i };
-  });
+function hrowFn(fname, plan, rows = 1) {
+  const locals = { x: 'i32', k: 'i32', xAdd: 'i32', xRem: 'i32', xm: 'i32', invv: 'v128', alphav: 'v128' };
+  const params = { src: 'i32', dst: 'i32' };
+  if (rows === 2) Object.assign(params, { src2: 'i32', dst2: 'i32' });
+  Object.assign(params, { w: 'i32', st: 'i32', r: 'i32', inv: 'f64', alpha: 'f64' });
+  const RW = [];
+  for (let ri = 0; ri < rows; ri++) {
+    const sfx = ri ? '2' : '';
+    const R = { src: 'src' + sfx, dst: 'dst' + sfx, p: 'p' + sfx, pa: 'pa' + sfx, pr: 'pr' + sfx, pd: 'pd' + sfx, lastp: 'lastp' + sfx };
+    for (const n of ['p', 'pa', 'pr', 'pd', 'lastp']) locals[R[n]] = 'i32';
+    RW.push(R);
+  }
+  const G = [];
+  RW.forEach((R, ri) =>
+    plan.forEach((q, i) => {
+      const o = laneOps(q.kind);
+      const id = `${i}_${ri}`;
+      for (const n of ['f', 'l', 's', 'a', 'm', 'v', 'c']) locals[n + id] = o.t;
+      G.push({ ...o, R, off: q.off, f: 'f' + id, l: 'l' + id, s: 's' + id, a: 'a' + id, m: 'm' + id, v: 'v' + id, c: 'c' + id });
+    }),
+  );
   const each = (fn) => G.map(fn);
-  const step = (...ptrs) => [inc('x'), ...ptrs.map((n) => inc(n, g('st')))];
-  const at = (n) => I32.add(g('src'), I32.mul(n, g('st'))); // src + n·stride
+  const eachRow = (fn) => RW.map(fn);
+  /** x += 1 and the named pointers of every row += stride */
+  const step = (...ptrs) => [inc('x'), ...RW.flatMap((R) => ptrs.map((n) => inc(R[n], g('st'))))];
+  const at = (R, n) => I32.add(g(R.src), I32.mul(n, g('st'))); // src + n·stride
   const xr = I32.sub(g('x'), g('r')); // x − r
-  const storeOut = (val) => each((q) => q.store(g('pd'), val(q), q.off));
+  const storeOut = (val) => each((q) => q.store(g(q.R.pd), val(q), q.off));
   const plain = (q) => q.mul(g(q.s), q.inv());
   const ext = (left, right) => (q) => q.mul(q.add(g(q.s), q.mul(q.alpha(), q.add(left(q), right(q)))), q.inv());
   const pick = (q, c, a) => cond(q.t, c, [q.load(a, q.off)], [g(q.f)]); // c ? src[a] : first
+  const setPr = () => eachRow((R) => set(R.pr, at(R, xr)));
 
   const alpha0 = [
     // x < xm: add tap inside, rem tap = first
-    whileDo(I32.lt_s(g('x'), g('xm')), storeOut(plain), each((q) => set(q.s, q.add(g(q.s), q.sub(q.load(g('pa'), q.off), g(q.f))))), step('pd', 'pa')),
+    whileDo(I32.lt_s(g('x'), g('xm')), storeOut(plain), each((q) => set(q.s, q.add(g(q.s), q.sub(q.load(g(q.R.pa), q.off), g(q.f))))), step('pd', 'pa')),
     when(
       I32.ge_s(g('xAdd'), g('xRem')),
-      [set('pr', at(xr)), whileDo(I32.lt_s(g('x'), g('xAdd')), storeOut(plain), each((q) => set(q.s, q.add(g(q.s), q.sub(q.load(g('pa'), q.off), q.load(g('pr'), q.off))))), step('pd', 'pa', 'pr'))],
+      [setPr(), whileDo(I32.lt_s(g('x'), g('xAdd')), storeOut(plain), each((q) => set(q.s, q.add(g(q.s), q.sub(q.load(g(q.R.pa), q.off), q.load(g(q.R.pr), q.off))))), step('pd', 'pa', 'pr'))],
       [each((q) => set(q.c, q.sub(g(q.l), g(q.f)))), whileDo(I32.lt_s(g('x'), g('xRem')), storeOut(plain), each((q) => set(q.s, q.add(g(q.s), g(q.c)))), step('pd'))],
     ),
-    set('pr', at(xr)),
-    whileDo(I32.lt_s(g('x'), g('w')), storeOut(plain), each((q) => set(q.s, q.add(g(q.s), q.sub(g(q.l), pick(q, I32.gt_s(xr, I32.c(0)), g('pr')))))), step('pd', 'pr')),
+    setPr(),
+    whileDo(I32.lt_s(g('x'), g('w')), storeOut(plain), each((q) => set(q.s, q.add(g(q.s), q.sub(g(q.l), pick(q, I32.gt_s(xr, I32.c(0)), g(q.R.pr)))))), step('pd', 'pr')),
   ];
 
   const alphaExt = [
     whileDo(
       I32.lt_s(g('x'), g('xm')),
-      each((q) => set(q.a, q.load(g('pa'), q.off))),
+      each((q) => set(q.a, q.load(g(q.R.pa), q.off))),
       storeOut(ext((q) => g(q.f), (q) => g(q.a))),
       each((q) => set(q.s, q.add(g(q.s), q.sub(g(q.a), g(q.f))))),
       step('pd', 'pa'),
@@ -296,12 +372,12 @@ function hrowFn(fname, plan) {
     when(
       I32.ge_s(g('xAdd'), g('xRem')),
       [
-        set('pr', at(xr)),
+        setPr(),
         // prevRem = x − r − 1 > 0 ? src[x − r − 1] : first
-        each((q) => set(q.v, pick(q, I32.gt_s(I32.sub(xr, I32.c(1)), I32.c(0)), I32.sub(g('pr'), g('st'))))),
+        each((q) => set(q.v, pick(q, I32.gt_s(I32.sub(xr, I32.c(1)), I32.c(0)), I32.sub(g(q.R.pr), g('st'))))),
         whileDo(
           I32.lt_s(g('x'), g('xAdd')),
-          each((q) => [set(q.a, q.load(g('pa'), q.off)), set(q.m, q.load(g('pr'), q.off))]),
+          each((q) => [set(q.a, q.load(g(q.R.pa), q.off)), set(q.m, q.load(g(q.R.pr), q.off))]),
           storeOut(ext((q) => g(q.v), (q) => g(q.a))),
           each((q) => [set(q.s, q.add(g(q.s), q.sub(g(q.a), g(q.m)))), set(q.v, g(q.m))]),
           step('pd', 'pa', 'pr'),
@@ -317,28 +393,33 @@ function hrowFn(fname, plan) {
         ),
       ],
     ),
-    set('pr', at(xr)),
+    setPr(),
     whileDo(
       I32.lt_s(g('x'), g('w')),
       // left = rem − 1 > 0 ? src[rem − 1] : first   (rem = x − r)
-      each((q) => set(q.v, pick(q, I32.gt_s(I32.sub(xr, I32.c(1)), I32.c(0)), I32.sub(g('pr'), g('st'))))),
+      each((q) => set(q.v, pick(q, I32.gt_s(I32.sub(xr, I32.c(1)), I32.c(0)), I32.sub(g(q.R.pr), g('st'))))),
       storeOut(ext((q) => g(q.v), (q) => g(q.l))),
-      each((q) => set(q.s, q.add(g(q.s), q.sub(g(q.l), pick(q, I32.gt_s(xr, I32.c(0)), g('pr')))))),
+      each((q) => set(q.s, q.add(g(q.s), q.sub(g(q.l), pick(q, I32.gt_s(xr, I32.c(0)), g(q.R.pr)))))),
       step('pd', 'pr'),
     ),
   ];
 
-  func(fname, { src: 'i32', dst: 'i32', w: 'i32', st: 'i32', r: 'i32', inv: 'f64', alpha: 'f64' }, locals, [
+  func(fname, params, locals, [
     set('invv', F64X2.splat(g('inv'))),
     set('alphav', F64X2.splat(g('alpha'))),
-    set('lastp', at(I32.sub(g('w'), I32.c(1)))),
-    each((q) => [set(q.f, q.load(g('src'), q.off)), set(q.l, q.load(g('lastp'), q.off)), set(q.s, q.zero())]),
+    eachRow((R) => set(R.lastp, at(R, I32.sub(g('w'), I32.c(1))))),
+    each((q) => [set(q.f, q.load(g(q.R.src), q.off)), set(q.l, q.load(g(q.R.lastp), q.off)), set(q.s, q.zero())]),
     // sum over k = −r..r in order: r × first, src[0..min(r, w − 1)], then last for k = w..r
     set('k', I32.c(0)),
     whileDo(I32.lt_s(g('k'), g('r')), each((q) => set(q.s, q.add(g(q.s), g(q.f)))), inc('k')),
     set('k', I32.c(0)),
-    set('p', g('src')),
-    whileDo(I32.and(I32.le_s(g('k'), g('r')), I32.lt_s(g('k'), g('w'))), each((q) => set(q.s, q.add(g(q.s), q.load(g('p'), q.off)))), inc('k'), inc('p', g('st'))),
+    eachRow((R) => set(R.p, g(R.src))),
+    whileDo(
+      I32.and(I32.le_s(g('k'), g('r')), I32.lt_s(g('k'), g('w'))),
+      each((q) => set(q.s, q.add(g(q.s), q.load(g(q.R.p), q.off)))),
+      inc('k'),
+      eachRow((R) => inc(R.p, g('st'))),
+    ),
     set('k', g('w')),
     whileDo(I32.le_s(g('k'), g('r')), each((q) => set(q.s, q.add(g(q.s), g(q.l)))), inc('k')),
     // xAdd = max(0, min(w, w − r − 1)), xRem = min(w, r + 1), xm = min(xAdd, xRem)
@@ -349,22 +430,25 @@ function hrowFn(fname, plan) {
     set('xRem', i32min(g('w'), g('xRem'))),
     set('xm', i32min(g('xAdd'), g('xRem'))),
     set('x', I32.c(0)),
-    set('pd', g('dst')),
-    set('pa', at(I32.add(g('r'), I32.c(1)))),
+    eachRow((R) => [set(R.pd, g(R.dst)), set(R.pa, at(R, I32.add(g('r'), I32.c(1))))]),
     when(F64.eq(g('alpha'), F64.c(0)), alpha0, alphaExt),
   ]);
 }
 
-hrowFn('hrow1', [{ kind: 's', off: 0 }]);
-hrowFn('hrow2', [{ kind: 'v', off: 0 }]);
-hrowFn('hrow3', [
-  { kind: 'v', off: 0 },
-  { kind: 's', off: 8 },
-]);
-hrowFn('hrow4', [
-  { kind: 'v', off: 0 },
-  { kind: 'v', off: 8 },
-]);
+const HPLANS = {
+  1: [{ kind: 's', off: 0 }],
+  2: [{ kind: 'v', off: 0 }],
+  3: [
+    { kind: 'v', off: 0 },
+    { kind: 's', off: 8 },
+  ],
+  4: [
+    { kind: 'v', off: 0 },
+    { kind: 'v', off: 8 },
+  ],
+};
+for (const n of [1, 2, 3, 4]) hrowFn(`hrow${n}`, HPLANS[n]);
+for (const n of [1, 2, 3, 4]) hrowFn(`hrow${n}x2`, HPLANS[n], 2);
 
 /* ---------------- util.ts BoxStream vertical steps ---------------- */
 
@@ -450,24 +534,38 @@ func('addrow', { S: 'i32', row: 'i32', n: 'i32' }, { e: 'i32' }, [
 /* ---------------- util.ts blurImage row I/O ---------------- */
 
 const byte = (c) => F64.fromU32(I32.load8u(g('pb'), c));
+/** the four bytes at pb as i32x4 lanes */
+const bytes4 = () => I32X4.extendLowU16(I16X8.extendLowU8(V.load32z(g('pb'))));
 
-// premultiplyRow: n bytes of RGBA at b → n floats at f
-func('premul_row', { b: 'i32', f: 'i32', n: 'i32' }, { pb: 'i32', pf: 'i32', e: 'i32', a: 'i32', m: 'f64' }, [
+// premultiplyRow: n bytes of RGBA at b → n floats at f. Per pixel: a = 255 → the bytes as floats;
+// 0 < a < 255 → float32(byte · (a / 255)) for RGB (float64 products, lane-wise) and a; a = 0 → zeros.
+func('premul_row', { b: 'i32', f: 'i32', n: 'i32' }, { pb: 'i32', pf: 'i32', e: 'i32', a: 'i32', m: 'f64', q: 'v128' }, [
   set('pb', g('b')),
   set('pf', g('f')),
   set('e', I32.add(g('b'), g('n'))),
   whileDo(
     I32.lt_u(g('pb'), g('e')),
     set('a', I32.load8u(g('pb'), 3)),
-    F32.store(g('pf'), F32.fromU32(g('a')), 12),
     when(
       I32.eq(g('a'), I32.c(255)),
-      [0, 1, 2].map((c) => F32.store(g('pf'), F32.fromU32(I32.load8u(g('pb'), c)), c * 4)),
+      V.store(g('pf'), F32X4.fromU32(bytes4())),
       [
         when(
           g('a'),
-          [set('m', F64.div(F64.fromU32(g('a')), F64.c(255))), [0, 1, 2].map((c) => F32.store(g('pf'), F32.demote(F64.mul(byte(c), g('m'))), c * 4))],
-          [0, 1, 2].map((c) => F32.store(g('pf'), F32.c(0), c * 4)),
+          [
+            set('m', F64.div(F64.fromU32(g('a')), F64.c(255))),
+            set('q', bytes4()),
+            // lanes (r, g) · m and (b, a) · (m, 1) in float64, rounded to float32, repacked
+            V.store(
+              g('pf'),
+              V.shuffle(
+                F32X4.demoteZero(F64X2.mul(F64X2.fromLowU32(g('q')), F64X2.splat(g('m')))),
+                F32X4.demoteZero(F64X2.mul(F64X2.fromLowU32(V.shuffle(g('q'), g('q'), lanes32(2, 3, 2, 3))), F64X2.replaceLane(F64X2.splat(g('m')), 1, F64.c(1)))),
+                lanes32(0, 1, 4, 5),
+              ),
+            ),
+          ],
+          V.store(g('pf'), V.zero()),
         ),
       ],
     ),
@@ -477,24 +575,38 @@ func('premul_row', { b: 'i32', f: 'i32', n: 'i32' }, { pb: 'i32', pf: 'i32', e: 
 ]);
 
 const flt = (c) => F64.promote(F32.load(g('pf'), c * 4));
+const ALPHA_255 = V.bytes([0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]);
 
-// unpremultiplyRow: n floats at f → n bytes at b
-func('unpremul_row', { f: 'i32', b: 'i32', n: 'i32' }, { pb: 'i32', pf: 'i32', e: 'i32', a: 'f64', m: 'f64' }, [
+// unpremultiplyRow: n floats at f → n bytes at b. Per pixel: a ≥ 254.5 → u8 of the floats, alpha
+// 255; a < 0.5 → zeros; else u8(c · (255 / a)) in float64 and u8(a).
+func('unpremul_row', { f: 'i32', b: 'i32', n: 'i32' }, { pb: 'i32', pf: 'i32', e: 'i32', a: 'f64', m: 'f64', v: 'v128', k255: 'v128', pk: 'v128' }, [
+  set('k255', I32X4.splat(I32.c(255))),
   set('pb', g('b')),
   set('pf', g('f')),
   set('e', I32.add(g('b'), g('n'))),
   whileDo(
     I32.lt_u(g('pb'), g('e')),
-    set('a', flt(3)),
+    set('v', V.load(g('pf'))),
+    set('a', F64.promote(F32X4.extract(g('v'), 3))),
     when(
       F64.ge(g('a'), F64.c(254.5)),
-      [[0, 1, 2].map((c) => I32.store8(g('pb'), u8(flt(c)), c)), I32.store8(g('pb'), I32.c(255), 3)],
+      V.store32lane0(g('pb'), V.or(pack4(u8f32x4(g('v'))), ALPHA_255)),
       [
-        when(
-          F64.lt(g('a'), F64.c(0.5)),
-          I32.store(g('pb'), I32.c(0)),
-          [set('m', F64.div(F64.c(255), g('a'))), [0, 1, 2].map((c) => I32.store8(g('pb'), u8(F64.mul(flt(c), g('m'))), c)), I32.store8(g('pb'), u8(g('a')), 3)],
-        ),
+        when(F64.lt(g('a'), F64.c(0.5)), I32.store(g('pb'), I32.c(0)), [
+          set('m', F64.div(F64.c(255), g('a'))),
+          V.store32lane0(
+            g('pb'),
+            pack4(
+              clampI(
+                V.shuffle(
+                  I32X4.truncSatF64SZero(F64X2.nearest(F64X2.mul(F64X2.promoteLow(g('v')), F64X2.splat(g('m'))))),
+                  I32X4.truncSatF64SZero(F64X2.nearest(F64X2.mul(F64X2.promoteLow(V.shuffle(g('v'), g('v'), lanes32(2, 3, 2, 3))), F64X2.replaceLane(F64X2.splat(g('m')), 1, F64.c(1))))),
+                  lanes32(0, 1, 4, 5),
+                ),
+              ),
+            ),
+          ),
+        ]),
       ],
     ),
     inc('pb', 4),
@@ -502,17 +614,45 @@ func('unpremul_row', { f: 'i32', b: 'i32', n: 'i32' }, { pb: 'i32', pf: 'i32', e
   ),
 ]);
 
-// opaque rows: RGB bytes of w RGBA pixels ↔ 3·w floats
-func('rgb_in', { b: 'i32', f: 'i32', w: 'i32' }, { pb: 'i32', pf: 'i32', e: 'i32' }, [
+// opaque rows: RGB bytes of w RGBA pixels ↔ 3·w floats; 4 pixels per step, then one at a time
+func('rgb_in', { b: 'i32', f: 'i32', w: 'i32' }, { pb: 'i32', pf: 'i32', e: 'i32', e4: 'i32', v: 'v128' }, [
   set('pb', g('b')),
   set('pf', g('f')),
   set('e', I32.add(g('b'), I32.mul(g('w'), I32.c(4)))),
+  set('e4', I32.add(g('b'), I32.mul(I32.and(g('w'), I32.c(-4)), I32.c(4)))),
+  whileDo(
+    I32.lt_u(g('pb'), g('e4')),
+    set('v', V.load(g('pb'))),
+    [
+      [0, 1, 2, 4],
+      [5, 6, 8, 9],
+      [10, 12, 13, 14],
+    ].map((ls, k) => V.store(g('pf'), F32X4.fromU32(I32X4.extendLowU16(I16X8.extendLowU8(V.shuffle(g('v'), g('v'), [...ls, ...ls, ...ls, ...ls])))), k * 16)),
+    inc('pb', 16),
+    inc('pf', 48),
+  ),
   whileDo(I32.lt_u(g('pb'), g('e')), [0, 1, 2].map((c) => F32.store(g('pf'), F32.fromU32(I32.load8u(g('pb'), c)), c * 4)), inc('pb', 4), inc('pf', 12)),
 ]);
-func('rgb_out', { f: 'i32', b: 'i32', w: 'i32' }, { pb: 'i32', pf: 'i32', e: 'i32' }, [
+func('rgb_out', { f: 'i32', b: 'i32', w: 'i32' }, { pb: 'i32', pf: 'i32', e: 'i32', e4: 'i32', k255: 'v128' }, [
+  set('k255', I32X4.splat(I32.c(255))),
   set('pb', g('b')),
   set('pf', g('f')),
   set('e', I32.add(g('b'), I32.mul(g('w'), I32.c(4)))),
+  set('e4', I32.add(g('b'), I32.mul(I32.and(g('w'), I32.c(-4)), I32.c(4)))),
+  whileDo(
+    I32.lt_u(g('pb'), g('e4')),
+    // 12 converted RGB bytes, interleaved with the 4 alpha bytes already there
+    V.store(
+      g('pb'),
+      V.shuffle(
+        pack16(u8f32x4(V.load(g('pf'))), u8f32x4(V.load(g('pf'), 16)), u8f32x4(V.load(g('pf'), 32)), g('k255')),
+        V.load(g('pb')),
+        [0, 1, 2, 19, 3, 4, 5, 23, 6, 7, 8, 27, 9, 10, 11, 31],
+      ),
+    ),
+    inc('pb', 16),
+    inc('pf', 48),
+  ),
   whileDo(I32.lt_u(g('pb'), g('e')), [0, 1, 2].map((c) => I32.store8(g('pb'), u8(flt(c)), c)), inc('pb', 4), inc('pf', 12)),
 ]);
 
@@ -571,52 +711,72 @@ func('ds_norm', { sm: 'i32', w: 'i32', fc: 'i32', w2: 'i32', kh: 'i32' }, { x0: 
 ]);
 
 // upsampleRowUnpremul: bilinear between grid rows r0 / r1 (byte addresses), x taps from xi0/xi1
-// (byte offsets, i32 arrays) and xt (f32 array), un-premultiplied into w RGBA pixels at b
+// (byte offsets, i32 arrays) and xt (f32 array), un-premultiplied into w RGBA pixels at b.
+// Channel pairs (r, g) and (b, a) as f64x2 lanes: top = A + (A1 − A)·tx, bot likewise, value =
+// fround(top + (bot − top)·ty) — the JS operations lane by lane.
 func(
   'us_unpremul_row',
   { r0: 'i32', r1: 'i32', ty: 'f64', xi0: 'i32', xi1: 'i32', xt: 'i32', b: 'i32', w: 'i32' },
-  { pb: 'i32', e: 'i32', o0: 'i32', o1: 'i32', a0: 'i32', a1: 'i32', b0: 'i32', b1: 'i32', tx: 'f64', top: 'f64', bot: 'f64', p: 'f64', a: 'f64', v0: 'f64', v1: 'f64', v2: 'f64', m: 'f64' },
-  [
-    set('pb', g('b')),
-    set('e', I32.add(g('b'), I32.mul(g('w'), I32.c(4)))),
-    whileDo(
-      I32.lt_u(g('pb'), g('e')),
-      set('o0', I32.load(g('xi0'))),
-      set('o1', I32.load(g('xi1'))),
-      set('a0', I32.add(g('r0'), g('o0'))),
-      set('a1', I32.add(g('r0'), g('o1'))),
-      set('b0', I32.add(g('r1'), g('o0'))),
-      set('b1', I32.add(g('r1'), g('o1'))),
-      set('tx', F64.promote(F32.load(g('xt')))),
-      (() => {
-        // fround(top + (bot − top)·ty) of channel c, top/bot = lerp along x
-        const lerp = (c, out) => [
-          set('p', F64.promote(F32.load(g('a0'), c * 4))),
-          set('top', F64.add(g('p'), F64.mul(F64.sub(F64.promote(F32.load(g('a1'), c * 4)), g('p')), g('tx')))),
-          set('p', F64.promote(F32.load(g('b0'), c * 4))),
-          set('bot', F64.add(g('p'), F64.mul(F64.sub(F64.promote(F32.load(g('b1'), c * 4)), g('p')), g('tx')))),
-          set(out, fround(F64.add(g('top'), F64.mul(F64.sub(g('bot'), g('top')), g('ty'))))),
-        ];
-        return [
-          lerp(3, 'a'),
-          when(F64.lt(g('a'), F64.c(0.5)), I32.store(g('pb'), I32.c(0)), [
-            lerp(0, 'v0'),
-            lerp(1, 'v1'),
-            lerp(2, 'v2'),
-            when(
-              F64.ge(g('a'), F64.c(254.5)),
-              [[0, 1, 2].map((c) => I32.store8(g('pb'), u8(g('v' + c)), c)), I32.store8(g('pb'), I32.c(255), 3)],
-              [set('m', F64.div(F64.c(255), g('a'))), [0, 1, 2].map((c) => I32.store8(g('pb'), u8(F64.mul(g('v' + c), g('m'))), c)), I32.store8(g('pb'), u8(g('a')), 3)],
-            ),
-          ]),
-        ];
-      })(),
-      inc('pb', 4),
-      inc('xi0', 4),
-      inc('xi1', 4),
-      inc('xt', 4),
-    ),
-  ],
+  {
+    pb: 'i32', e: 'i32', o0: 'i32', o1: 'i32', a0: 'i32', a1: 'i32', b0: 'i32', b1: 'i32',
+    a: 'f64', m: 'f64', tx: 'v128', tyv: 'v128', p: 'v128', top: 'v128', bot: 'v128', v01: 'v128', v23: 'v128', c: 'v128', k255: 'v128', pk: 'v128',
+  },
+  (() => {
+    const lerp = (off, out) => [
+      set('p', F64X2.promoteLow(V.load64z(g('a0'), off))),
+      set('top', F64X2.add(g('p'), F64X2.mul(F64X2.sub(F64X2.promoteLow(V.load64z(g('a1'), off)), g('p')), g('tx')))),
+      set('p', F64X2.promoteLow(V.load64z(g('b0'), off))),
+      set('bot', F64X2.add(g('p'), F64X2.mul(F64X2.sub(F64X2.promoteLow(V.load64z(g('b1'), off)), g('p')), g('tx')))),
+      // float32 rounding of both lanes (fround), kept as f32 lanes 0–1
+      set(out, F32X4.demoteZero(F64X2.add(g('top'), F64X2.mul(F64X2.sub(g('bot'), g('top')), g('tyv'))))),
+    ];
+    return [
+      set('k255', I32X4.splat(I32.c(255))),
+      set('tyv', F64X2.splat(g('ty'))),
+      set('pb', g('b')),
+      set('e', I32.add(g('b'), I32.mul(g('w'), I32.c(4)))),
+      whileDo(
+        I32.lt_u(g('pb'), g('e')),
+        set('o0', I32.load(g('xi0'))),
+        set('o1', I32.load(g('xi1'))),
+        set('a0', I32.add(g('r0'), g('o0'))),
+        set('a1', I32.add(g('r0'), g('o1'))),
+        set('b0', I32.add(g('r1'), g('o0'))),
+        set('b1', I32.add(g('r1'), g('o1'))),
+        set('tx', F64X2.splat(F64.promote(F32.load(g('xt'))))),
+        lerp(8, 'v23'),
+        set('a', F64.promote(F32X4.extract(g('v23'), 1))),
+        when(F64.lt(g('a'), F64.c(0.5)), I32.store(g('pb'), I32.c(0)), [
+          lerp(0, 'v01'),
+          // (v0, v1, v2, a) as float32 lanes
+          set('c', V.shuffle(g('v01'), g('v23'), lanes32(0, 1, 4, 5))),
+          when(
+            F64.ge(g('a'), F64.c(254.5)),
+            V.store32lane0(g('pb'), V.or(pack4(u8f32x4(g('c'))), ALPHA_255)),
+            [
+              set('m', F64.div(F64.c(255), g('a'))),
+              V.store32lane0(
+                g('pb'),
+                pack4(
+                  clampI(
+                    V.shuffle(
+                      I32X4.truncSatF64SZero(F64X2.nearest(F64X2.mul(F64X2.promoteLow(g('c')), F64X2.splat(g('m'))))),
+                      I32X4.truncSatF64SZero(F64X2.nearest(F64X2.mul(F64X2.promoteLow(g('v23')), F64X2.replaceLane(F64X2.splat(g('m')), 1, F64.c(1))))),
+                      lanes32(0, 1, 4, 5),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ]),
+        inc('pb', 4),
+        inc('xi0', 4),
+        inc('xi1', 4),
+        inc('xt', 4),
+      ),
+    ];
+  })(),
 );
 
 /* ---------------- core/blur.ts boxBlurImageData passes ---------------- */
@@ -899,6 +1059,8 @@ export function buildModule() {
     ...section(5, vec([[0x00, ...uleb(MIN_PAGES)]])),
     ...section(7, vec(exports)),
     ...section(10, vec(bodies)),
+    // "name" custom section (function names): profilers show hrow4 instead of wasm-function[3]
+    ...section(0, [...name('name'), ...section(1, vec(funcs.map((f, i) => [...uleb(i), ...name(f.name)])))]),
   ];
   return new Uint8Array(bytes);
 }

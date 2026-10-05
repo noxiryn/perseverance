@@ -13,7 +13,7 @@
  *   demand (a 4K blur needs a few to ~70 MB depending on the kernel) and reused. Growing detaches
  *   every typed-array view of the old buffer, so callers keep byte addresses and take fresh views
  *   with `wasmHeap()` after their last allocation. After an operation that left more than
- *   SHRINK_BYTES allocated, the instance is recreated so idle memory is returned.
+ *   192 MB allocated, the instance is recreated so idle memory is returned.
  */
 import { BLUR_WASM_BASE64 } from './blurWasm.generated';
 
@@ -26,6 +26,10 @@ export interface BlurWasm {
   hrow2(src: I, dst: I, w: I, stride: I, r: I, inv: F, alpha: F): void;
   hrow3(src: I, dst: I, w: I, stride: I, r: I, inv: F, alpha: F): void;
   hrow4(src: I, dst: I, w: I, stride: I, r: I, inv: F, alpha: F): void;
+  hrow1x2(src: I, dst: I, src2: I, dst2: I, w: I, stride: I, r: I, inv: F, alpha: F): void;
+  hrow2x2(src: I, dst: I, src2: I, dst2: I, w: I, stride: I, r: I, inv: F, alpha: F): void;
+  hrow3x2(src: I, dst: I, src2: I, dst2: I, w: I, stride: I, r: I, inv: F, alpha: F): void;
+  hrow4x2(src: I, dst: I, src2: I, dst2: I, w: I, stride: I, r: I, inv: F, alpha: F): void;
   vrow(S: I, add: I, rem: I, dst: I, n: I, inv: F): void;
   vrowext(S: I, add: I, rem: I, up: I, dst: I, n: I, inv: F, alpha: F): void;
   addrow(S: I, row: I, n: I): void;
@@ -60,7 +64,7 @@ const BASE = 64;
 /** Never let the stack pass 1 GiB (addresses stay positive int32 in every kernel and view index). */
 const MAX_BYTES = 1 << 30;
 /** Recreate the instance after an operation once memory has grown past this. */
-const SHRINK_BYTES = 192 << 20;
+let shrinkBytes = 192 << 20;
 
 let state: 'idle' | 'loading' | 'ready' | 'failed' = 'idle';
 let reason = '';
@@ -194,10 +198,15 @@ export function wasmAlloc(bytes: number): number {
   return p;
 }
 
+/** Tests: memory size above which the instance is recreated after an operation. */
+export function setWasmShrinkBytes(n: number) {
+  shrinkBytes = n;
+}
+
 /** Free everything allocated after `mark`. At the outermost level, oversized memory is dropped. */
 export function wasmRelease(mark: number) {
   top = mark;
-  if (mark === BASE && mod && X && X.memory.buffer.byteLength > SHRINK_BYTES) {
+  if (mark === BASE && mod && X && X.memory.buffer.byteLength > shrinkBytes) {
     try {
       instantiate(mod);
     } catch {

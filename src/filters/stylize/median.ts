@@ -6,6 +6,7 @@
  */
 import type { Img } from './util';
 import { premultiplyInPlace } from './util';
+import { wasm, wasmAlloc, wasmHeap, wasmMark, wasmRelease } from '../../core/wasm/runtime';
 
 function median2D(src: Uint8Array, dst: Uint8Array, w: number, h: number, r: number) {
   const hist = new Int32Array(256);
@@ -473,6 +474,49 @@ function medianColsNet(src: Uint8Array, dst: Uint8Array, w: number, h: number, r
   else colsMed7(src, dst, w, h);
 }
 
+/**
+ * medianRowsNet + medianColsNet in WebAssembly: the same compare-exchange networks on 16 pixels at
+ * a time (med_rowsN / med_colsN; integer min/max, so identical medians). The clamped row ends use
+ * the scalar networks here, exactly as rowsMedN does. False (dst untouched) without WebAssembly.
+ */
+function medianNetWasm(src: Uint8Array, dst: Uint8Array, w: number, h: number, r: number): boolean {
+  const X = wasm();
+  const n = w * h;
+  if (!X || w < 1 || h < 1 || src.length !== n || dst.length !== n || r < 1 || r > 3) return false;
+  const mark = wasmMark();
+  try {
+    const n16 = (n + 15) & ~15;
+    const a = wasmAlloc(n16 * 3 + 16);
+    if (!a) return false;
+    const t = a + n16,
+      o = t + n16;
+    const H = wasmHeap().u8;
+    H.set(src, a);
+    const rows = r === 1 ? X.med_rows3 : r === 2 ? X.med_rows5 : X.med_rows7;
+    const last = w - 1;
+    for (let y = 0; y < h; y++) {
+      const base = y * w;
+      if (w - r > r) rows(a + base, t + base, r, w - r);
+      const at = (x: number, k: number) => H[a + base + (x + k < 0 ? 0 : x + k > last ? last : x + k)];
+      const edge = (x: number) =>
+        r === 1 ? med3(at(x, -1), at(x, 0), at(x, 1)) : r === 2 ? med5(at(x, -2), at(x, -1), at(x, 0), at(x, 1), at(x, 2)) : med7(at(x, -3), at(x, -2), at(x, -1), at(x, 0), at(x, 1), at(x, 2), at(x, 3));
+      for (let x = 0; x < w && x < r; x++) H[t + base + x] = edge(x);
+      for (let x = Math.max(r, w - r); x < w; x++) H[t + base + x] = edge(x);
+    }
+    const row = (y: number) => t + (y < 0 ? 0 : y >= h ? h - 1 : y) * w;
+    for (let y = 0; y < h; y++) {
+      const d = o + y * w;
+      if (r === 1) X.med_cols3(d, w, row(y - 1), row(y), row(y + 1));
+      else if (r === 2) X.med_cols5(d, w, row(y - 2), row(y - 1), row(y), row(y + 1), row(y + 2));
+      else X.med_cols7(d, w, row(y - 3), row(y - 2), row(y - 1), row(y), row(y + 1), row(y + 2), row(y + 3));
+    }
+    dst.set(H.subarray(o, o + n));
+    return true;
+  } finally {
+    wasmRelease(mark);
+  }
+}
+
 /** Blocked transpose of a w×h byte plane into dst (h×w). */
 function transposeBytes(src: Uint8Array, dst: Uint8Array, w: number, h: number) {
   const B = 32;
@@ -500,6 +544,7 @@ export function medianChannel(src: Uint8Array, w: number, h: number, radius: num
     median2D(src, dst, w, h, r);
     return dst;
   }
+  if (r <= 3 && medianNetWasm(src, dst, w, h, r)) return dst;
   const tmp = new Uint8Array(src.length);
   if (r <= 3) {
     // small windows (3/5/7 taps): a median network per pixel (no dependency between pixels, the

@@ -17,6 +17,22 @@ const lib: any = require('../../electron/lib.cjs');
 const here = dirname(fileURLToPath(import.meta.url));
 const tmp = () => mkdtempSync(join(tmpdir(), 'pgfx-desktop-'));
 
+/** CSP directives → their source tokens (directive names and keywords lower-cased). */
+function cspDirectives(csp: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const part of csp.split(';')) {
+    const [name, ...sources] = part.trim().split(/\s+/).filter(Boolean);
+    if (name) out.set(name.toLowerCase(), sources.map((s) => (s.startsWith("'") ? s.toLowerCase() : s)));
+  }
+  return out;
+}
+
+/** Whether any directive lists the plain 'unsafe-eval' keyword (as a whole token; 'wasm-unsafe-eval' is a different keyword). */
+function allowsPlainEval(csp: string): boolean {
+  for (const sources of cspDirectives(csp).values()) if (sources.includes("'unsafe-eval'")) return true;
+  return false;
+}
+
 describe('path policy', () => {
   it('accepts only absolute, NUL-free paths and rejects Win32 device namespaces', () => {
     expect(lib.isSafeAbsPath('/home/a/b.pgfx', 'linux')).toBe(true);
@@ -418,8 +434,19 @@ describe('native chrome matches the CSS', () => {
   it('the CSP in index.html blocks plugins, frames and base/form hijacks', () => {
     const html = readFileSync(join(here, '..', '..', 'index.html'), 'utf8');
     const csp = html.match(/Content-Security-Policy"\s+content="([^"]+)"/)?.[1] ?? '';
-    for (const d of ["script-src 'self'", "object-src 'none'", "frame-src 'none'", "base-uri 'none'", "form-action 'none'"]) expect(csp).toContain(d);
-    expect(csp).not.toContain('unsafe-eval');
+    for (const d of ["object-src 'none'", "frame-src 'none'", "base-uri 'none'", "form-action 'none'"]) expect(csp).toContain(d);
+    // Scripts: only the app's own files, plus 'wasm-unsafe-eval' so the WebAssembly blur kernels
+    // (src/core/wasm, bytes inlined in the bundle) can be compiled. That keyword allows WebAssembly
+    // compilation only — never eval()/new Function(), which plain 'unsafe-eval' would allow, so that
+    // token (or 'unsafe-inline') must not appear in any directive. Keywords are compared as whole
+    // tokens, case-insensitively ('wasm-unsafe-eval' contains the text "unsafe-eval").
+    const directives = cspDirectives(csp);
+    expect(directives.get('script-src')).toEqual(["'self'", "'wasm-unsafe-eval'"]);
+    expect(allowsPlainEval(csp)).toBe(false);
+    expect(allowsPlainEval("default-src 'self'; script-src 'self' 'unsafe-eval'")).toBe(true);
+    expect(allowsPlainEval("default-src 'self' 'UNSAFE-EVAL'")).toBe(true);
+    expect(allowsPlainEval("script-src 'self' 'wasm-unsafe-eval'")).toBe(false);
+    for (const [name, sources] of directives) if (name !== 'style-src') expect(sources, name).not.toContain("'unsafe-inline'");
     // Network access only to the Roblox APIs/CDN the avatar fetch uses (no "any https host" exfiltration
     // channel, no dev-server leftovers in the production policy).
     expect(csp).not.toMatch(/\shttps:[\s;]/);

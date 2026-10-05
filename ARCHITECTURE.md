@@ -303,6 +303,8 @@ Reference images (PNG) are on disk at `docs/reference/` (not committed): `ref1-b
 - `npx vite build` must succeed.
 - Unit tests (vitest, jsdom) for pure logic: `src/**/*.test.ts`. jsdom has no canvas — test
   ImageData math with plain typed arrays (construct `{ data, width, height }` objects), not canvases.
+  Compositor tests can call `installSoftCanvas()` from `src/render/softCanvas.ts` (test-only software
+  2D canvas: image draws, solid rects, pixel reads, all composite/blend modes; see src/render/clip.test.ts).
 - Visual check: `npm run dev` + playwright-core with Chromium at
   `/opt/pw-browsers/chromium-1194/chrome-linux/chrome` (see `scripts/` for helpers if present).
 - Desktop (Electron) contract — `electron/main.cjs` + `electron/preload.cjs`, pure helpers in
