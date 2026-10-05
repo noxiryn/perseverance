@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SOFT_EDGE_MIN_PIXELS, alphaChannel, finishBakedPixels } from './psdBake';
+import { SOFT_EDGE_MIN_PIXELS, alphaChannel, clippedBakeApprox, finishBakedPixels } from './psdBake';
 
 type Px = [number, number, number, number]; // r, g, b (0..255, straight), a (0..1)
 
@@ -72,5 +72,23 @@ describe('baked PSD adjustments', () => {
     expect(run(make(200), true)).toBe(false); // clipped bakes are exact
     const zero = make(200, 0);
     expect(run(zero)).toBe(false); // fully transparent pixels are exact too
+  });
+
+  it('flags a clipped bake when the clip stack is below its base shape (base at a lower Fill)', () => {
+    const n = 64;
+    const shape = new Uint8Array(n).fill(255);
+    const full = new Uint8Array(n).fill(255);
+    const half = new Uint8Array(n).fill(128);
+    expect(clippedBakeApprox(full, shape, 1)).toBe(false); // stack covers the shape: exact
+    expect(clippedBakeApprox(half, shape, 1)).toBe(true); // Fill 50%: Photoshop shows it denser
+    expect(clippedBakeApprox(half, shape, 0.05)).toBe(false); // faint: off by < SOFT_EDGE_LEVELS
+    expect(clippedBakeApprox(half.subarray(0, SOFT_EDGE_MIN_PIXELS - 1), shape, 1)).toBe(false); // a few stray pixels
+    expect(clippedBakeApprox(new Uint8Array(n), shape, 1)).toBe(false); // empty stack: nothing baked there
+    // Photoshop, baked layer (full alpha, strength m) clipped to a stack at alpha a inside shape s:
+    // the result alpha s·(a/s + m·(1 − a/s)) exceeds ours (a) by m·(s − a).
+    const s = 1,
+      a = 0.5,
+      m = 0.6;
+    expect(s * (a / s + m * (1 - a / s)) - a).toBeCloseTo(m * (s - a), 9);
   });
 });

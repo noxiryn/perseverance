@@ -58,23 +58,3 @@ export function normalizeClipBase(core: Uint8ClampedArray, shape: Uint8ClampedAr
     } else core[i] = ak >= A ? 255 : Math.round((255 * ak) / A);
   }
 }
-
-/**
- * "Atop" blending prep for adjustment layers with a blend mode: `out` = `src`'s straight colour,
- * alpha 255 wherever `coverage` (RGBA, alpha at +3) has any alpha, 0,0,0,0 elsewhere. Blending one
- * opaque copy over another then evaluates B(Cb, Cs) exactly; destination-in with the original
- * alpha puts the coverage back (the result keeps the backdrop's alpha).
- */
-export function opaqueWhereCovered(src: Uint8ClampedArray, coverage: Uint8ClampedArray, out: Uint8ClampedArray): void {
-  const n = Math.min(src.length, coverage.length, out.length);
-  for (let i = 3; i < n; i += 4) {
-    if (coverage[i] === 0) {
-      out[i - 3] = out[i - 2] = out[i - 1] = out[i] = 0;
-      continue;
-    }
-    out[i - 3] = src[i - 3];
-    out[i - 2] = src[i - 2];
-    out[i - 1] = src[i - 1];
-    out[i] = 255;
-  }
-}

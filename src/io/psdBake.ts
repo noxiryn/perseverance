@@ -30,6 +30,24 @@ export function alphaChannel(data: Uint8ClampedArray): Uint8Array {
  * not premultiplied), `alpha` the backdrop's alpha channel, `opacity` the layer's total strength.
  * Returns true when the result is only approximate (unclipped, over enough semi-transparent pixels).
  */
+/**
+ * A clipped bake is exact only where the clip stack covers its base's whole shape. A base drawn at
+ * a lower Fill (with nothing clipped below the adjustment filling it up) leaves the stack at a
+ * lower alpha than the shape, which the adjustment keeps — but Photoshop composites the baked pixel
+ * layer up to the base's shape, so those pixels come out denser by m·(shape − α) (m = the layer's
+ * strength; pixels where the stack is empty get no baked pixels and stay exact). `alpha` = the
+ * stack's alpha channel (the backdrop), `shape` = the base's shape alpha. True when enough pixels
+ * are visibly off (same thresholds as the unclipped soft-edge check).
+ */
+export function clippedBakeApprox(alpha: Uint8Array, shape: Uint8Array, opacity: number): boolean {
+  const o = opacity < 0 ? 0 : opacity > 1 ? 1 : opacity;
+  if (o <= 0) return false;
+  const n = Math.min(alpha.length, shape.length);
+  let off = 0;
+  for (let i = 0; i < n; i++) if (alpha[i] > 0 && o * (shape[i] - alpha[i]) > SOFT_EDGE_LEVELS && ++off >= SOFT_EDGE_MIN_PIXELS) return true;
+  return false;
+}
+
 export function finishBakedPixels(data: Uint8ClampedArray, alpha: Uint8Array, clipped: boolean, opacity: number): boolean {
   const n = Math.min(alpha.length, data.length >> 2);
   if (clipped) {

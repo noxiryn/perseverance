@@ -12,6 +12,7 @@ import { useUI } from './state/ui';
 import { bitmaps } from './core/bitmaps';
 import * as documentUtils from './core/document';
 import { openDemoDocument } from './dev/demo';
+import { blurBackend, blurBackendInfo, setBlurBackend } from './core/blur';
 
 // Automation/debug handle (used by scripts/shot.mjs and tests).
 (window as unknown as { __app: unknown }).__app = {
@@ -21,6 +22,10 @@ import { openDemoDocument } from './dev/demo';
   bitmaps,
   documentUtils,
   openDemoDocument,
+  // which CPU blur kernels run ('wasm' | 'js', and why), and a switch for benchmarks
+  blurBackend,
+  blurBackendInfo,
+  setBlurBackend,
 };
 
 createRoot(document.getElementById('root')!).render(

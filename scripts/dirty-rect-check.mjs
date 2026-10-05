@@ -417,6 +417,23 @@ async function rendererPart(opts) {
     d.__paint = base.bitmapId;
     return d;
   }, { strokes: [{ erase: true }] });
+  await run('adjustment-blend-soft', () => {
+    // Adjustments with blend modes over semi-transparent pixels (transparent document): the result
+    // keeps the backdrop's alpha, blended on the CPU (canvas blending rounds ties differently on a
+    // crop than on the whole surface).
+    const d = doc0(null);
+    const soft = canvas(W, H, (g) => {
+      const rg = g.createRadialGradient(W / 2, H / 2, 60, W / 2, H / 2, 380);
+      rg.addColorStop(0, 'rgba(90,160,220,1)');
+      rg.addColorStop(1, 'rgba(90,160,220,0)');
+      g.fillStyle = rg;
+      g.fillRect(0, 0, W, H);
+    });
+    d.__paint = addRaster(d, { name: 'soft', canvas: soft }).bitmapId;
+    addAdj(d, 'hue-saturation', { hue: -50, saturation: 20 }, { blendMode: 'color' });
+    addAdj(d, 'levels', { inBlack: 30, gamma: 0.8 }, { blendMode: 'soft-light', opacity: 0.6, mask: { feather: 0 } });
+    return d;
+  }, { strokes: [{ erase: true }] });
   await run('masked', () => {
     const d = doc0();
     d.__paint = addRaster(d, { mask: { feather: 0 } }).bitmapId;

@@ -9,7 +9,7 @@ import type { Document, Layer, LayerEffect } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
 import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeGroupLayer, makeRasterLayer } from '../core/document';
 import { filters } from '../registry';
-import { coreExceedsShape, normalizeClipBase, opaqueWhereCovered } from './clip';
+import { coreExceedsShape, normalizeClipBase } from './clip';
 import { installSoftCanvas, pixelAt } from './softCanvas';
 import { invalidateRenderCache, renderCacheInfo, renderDocument, renderDocumentLive, renderLayerToDoc } from './compositor';
 import { setCropExactBackend } from './backendProbe';
@@ -46,14 +46,6 @@ describe('clip-base pixel math', () => {
     expect([cover[3], cover[7], cover[11]]).toEqual([192, 255, 255]);
     expect([share[3], share[7], share[11]]).toEqual([170, 0, 255]); // 128/192, 0/255, 1
     expect([core[3], core[7], core[11]]).toEqual([255, 255, 255]);
-  });
-
-  it('opaque copies for atop blending follow the backdrop coverage', () => {
-    const src = new Uint8ClampedArray([10, 20, 30, 40, 50, 60, 70, 80]);
-    const cov = new Uint8ClampedArray([0, 0, 0, 5, 0, 0, 0, 0]);
-    const out = new Uint8ClampedArray(8);
-    opaqueWhereCovered(src, cov, out);
-    expect(Array.from(out)).toEqual([10, 20, 30, 255, 0, 0, 0, 0]);
   });
 });
 

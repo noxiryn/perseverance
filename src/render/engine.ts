@@ -33,7 +33,8 @@ import { applyFilterStack, compositeOp, makeFilterContext, resolveParams, runFil
 import { cacheGeneration, objId, slots, type Resource } from './cache';
 import { edgeDistance } from './distance';
 import { applyMask, lerpInto, maskAlpha } from './mask';
-import { coreExceedsShape, normalizeClipBase, opaqueWhereCovered } from './clip';
+import { coreExceedsShape, normalizeClipBase } from './clip';
+import { blendAtop, isBlendable } from './blendMath';
 import { cropExactBackend } from './backendProbe';
 import { alignGrid, alignRect, changesSince, effectInfluence, effectUsesFields, fieldBucket, filtersLocal, isPixelExact, mapDirtyRect, type ChangeEntry } from './region';
 import { fillWithPaint } from './paint';
@@ -2048,12 +2049,16 @@ function applyAdjustment(rc: RC, acc: Acc, adj: AdjustmentLayer) {
   const r: PxRect = { x: abs.x - acc.x, y: abs.y - acc.y, w: abs.w, h: abs.h };
   renderStats.adjustments++;
   const ctx = acc.ctx;
+  const blend = adj.blendMode !== 'normal' && isBlendable(adj.blendMode) ? adj.blendMode : null;
   let img: ImageData;
   try {
-    if (acc.clip) {
-      // Incremental composite (the live viewport canvas, below caches): read through a CPU
-      // scratch copy. Chrome moves a GPU canvas to the CPU once it is read back, and the live
-      // canvas must stay accelerated (every brush frame draws layer renders into it).
+    if (acc.clip || blend) {
+      // Read through a CPU scratch copy. Incremental composite (the live viewport canvas, below
+      // caches): Chrome moves a GPU canvas to the CPU once it is read back, and the live canvas
+      // must stay accelerated (every brush frame draws layer renders into it). Blend mode: the
+      // backdrop's straight colour feeds the blend as is, and a GPU readback un-premultiplies
+      // soft pixels with a different rounding than a CPU one — full and incremental composites
+      // must read the same colours.
       const R = acquire(r.w, r.h, { read: true });
       const rc2 = ctx2d(R, { willReadFrequently: true });
       rc2.drawImage(acc.canvas, -r.x, -r.y);
@@ -2067,29 +2072,21 @@ function applyAdjustment(rc: RC, acc: Acc, adj: AdjustmentLayer) {
   }
   // Blend mode: the result is B(backdrop, filtered) "atop" the backdrop — its colour blended over
   // the backdrop's straight colour, its alpha the backdrop's (an adjustment never changes
-  // coverage, also over semi-transparent pixels). Opaque copies of both are blended, then the
-  // backdrop's alpha is applied. The backdrop copy is taken first: filters may work in place.
-  const blend = adj.blendMode && adj.blendMode !== 'normal' ? compositeOp(adj.blendMode) : null;
+  // coverage, also over semi-transparent pixels). Computed on the CPU (./blendMath.ts): canvas
+  // blending rounds ties differently depending on the surfaces, so a crop (incremental composite)
+  // and a full render could differ. The backdrop copy is taken first: filters may work in place.
   let backdrop: ImageData | null = null;
   if (blend) {
     backdrop = ctx.createImageData(r.w, r.h);
-    opaqueWhereCovered(img.data, img.data, backdrop.data);
+    backdrop.data.set(img.data);
   }
-  const out = runFilter(def, img, inst.params, makeFilterContext({ docWidth: rc.doc.width, docHeight: rc.doc.height, offsetX: abs.x / rc.s, offsetY: abs.y / rc.s, scale: rc.s }));
-  const F = acquire(r.w, r.h);
-  const f = ctx2d(F);
+  let out = runFilter(def, img, inst.params, makeFilterContext({ docWidth: rc.doc.width, docHeight: rc.doc.height, offsetX: abs.x / rc.s, offsetY: abs.y / rc.s, scale: rc.s }));
   if (blend && backdrop) {
-    opaqueWhereCovered(out.data, backdrop.data, out.data);
-    const O = acquire(r.w, r.h);
-    ctx2d(O).putImageData(out, 0, 0);
-    f.putImageData(backdrop, 0, 0);
-    f.globalCompositeOperation = blend;
-    f.drawImage(O, 0, 0);
-    f.globalCompositeOperation = 'destination-in';
-    f.drawImage(acc.canvas, -r.x, -r.y);
-    f.globalCompositeOperation = 'source-over';
-    release(O);
-  } else f.putImageData(out, 0, 0);
+    blendAtop(backdrop.data, out.data, blend);
+    out = backdrop;
+  }
+  const F = acquire(r.w, r.h);
+  ctx2d(F).putImageData(out, 0, 0);
   lerpInto(ctx, F, opacity, mk?.canvas ?? null, r.x, r.y);
   release(F);
   if (mk?.temp) release(mk.canvas);

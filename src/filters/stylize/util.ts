@@ -262,6 +262,7 @@ function hTaps7(src: Float32Array, dst: Float32Array, row: number, xa: number, x
 /** Exact separable gaussian on a float plane in place (small sigmas). Clamp-to-edge. */
 function gaussSmallPlane(buf: Float32Array, w: number, h: number, sigma: number) {
   const k = gaussKernel(sigma);
+  if (gaussSmallWasm(buf, w, h, 1, k)) return;
   const r = (k.length - 1) >> 1;
   const tmp = new Float32Array(w * h);
   for (let y = 0; y < h; y++) convolveRow(buf, tmp, y * w, w, k, r);
@@ -340,6 +341,46 @@ function vTaps7(t: Float32Array, out: Float32Array, o: number, w: number, rows: 
     s = Math.fround(s + t[e + x] * k4);
     s = Math.fround(s + t[f + x] * k5);
     out[o + x] = s + t[g + x] * k6;
+  }
+}
+
+/**
+ * gaussSmallPlane (ch = 1) / gaussSmallRGBA (ch = 4) in WebAssembly: the horizontal taps of
+ * convolveRow / hTapsK and the float32-accumulated vertical taps of vTapsK (gs_hK_1, gs_hK_4,
+ * gs_vK: the same float operations in the same order → identical floats). For the 3/5/7-tap
+ * kernels of σ < 1. False (buf untouched) when WebAssembly or its memory isn't available.
+ * `buf` may be a view of the WebAssembly memory itself (multiresBlurGridWasm's grid): it is then
+ * addressed in place — the scratch allocation may grow the memory, which detaches that view.
+ */
+function gaussSmallWasm(buf: Float32Array, w: number, h: number, ch: 1 | 4, k: Float32Array): boolean {
+  const X = wasm();
+  const K = k.length;
+  const n = w * h * ch;
+  if (!X || w < 1 || h < 1 || buf.length < n || (K !== 3 && K !== 5 && K !== 7)) return false;
+  const own = buf.buffer === X.memory.buffer;
+  const ownPtr = buf.byteOffset; // read before any allocation can detach the view
+  const bytes = (n * 4 + 15) & ~15;
+  const mark = wasmMark();
+  try {
+    const t = wasmAlloc(own ? bytes : bytes * 2);
+    if (!t) return false;
+    const a = own ? ownPtr : t + bytes;
+    if (!own) wasmHeap().f32.set(buf.subarray(0, n), a >>> 2);
+    const [k0, k1, k2, k3, k4, k5, k6] = k;
+    if (K === 3) {
+      (ch === 1 ? X.gs_h3_1 : X.gs_h3_4)(a, t, w, h, k0, k1, k2);
+      X.gs_v3(t, a, w * ch, h, k0, k1, k2);
+    } else if (K === 5) {
+      (ch === 1 ? X.gs_h5_1 : X.gs_h5_4)(a, t, w, h, k0, k1, k2, k3, k4);
+      X.gs_v5(t, a, w * ch, h, k0, k1, k2, k3, k4);
+    } else {
+      (ch === 1 ? X.gs_h7_1 : X.gs_h7_4)(a, t, w, h, k0, k1, k2, k3, k4, k5, k6);
+      X.gs_v7(t, a, w * ch, h, k0, k1, k2, k3, k4, k5, k6);
+    }
+    if (!own) buf.set(wasmHeap().f32.subarray(a >>> 2, (a >>> 2) + n));
+    return true;
+  } finally {
+    wasmRelease(mark);
   }
 }
 
@@ -958,6 +999,7 @@ function unpremultiplyFloats(f: Float32Array, d: Uint8ClampedArray) {
 /** Exact separable gaussian of interleaved RGBA floats in place (small sigmas). Clamp-to-edge. */
 function gaussSmallRGBA(f: Float32Array, w: number, h: number, sigma: number) {
   const k = gaussKernel(sigma);
+  if (gaussSmallWasm(f, w, h, 4, k)) return;
   const r = (k.length - 1) >> 1;
   const K = k.length;
   const stride = w * 4;
@@ -1074,11 +1116,54 @@ export function blurImage<T extends Img>(img: T, sigma: number): T {
     blurImageMultires(img.data, w, h, sigma);
     return img;
   }
+  if (sigma < 1 && blurImageSmallWasm(img.data, w, h, sigma)) return img;
   const f = premultipliedFloats(img.data);
   if (sigma < 1) gaussSmallRGBA(f, w, h, sigma);
   else boxBlurPasses(f, w, h, 4, boxPassesForSigma(sigma));
   unpremultiplyFloats(f, img.data);
   return img;
+}
+
+/**
+ * blurImage for σ < 1 (premultipliedFloats → gaussSmallRGBA → unpremultiplyFloats) entirely in
+ * WebAssembly: premul_row / unpremul_row are premultiplyRow / unpremultiplyRow (the same values as
+ * the whole-image versions) run over all rows at once, between them the gs kernels. False
+ * (nothing touched) when WebAssembly, its memory or a 3/5/7-tap kernel isn't available.
+ */
+function blurImageSmallWasm(d: Uint8ClampedArray, w: number, h: number, sigma: number): boolean {
+  const X = wasm();
+  const n = w * h * 4;
+  if (!X || w < 1 || h < 1 || d.length !== n) return false;
+  const k = gaussKernel(sigma);
+  const K = k.length;
+  if (K !== 3 && K !== 5 && K !== 7) return false;
+  const fb = (n * 4 + 15) & ~15;
+  const mark = wasmMark();
+  try {
+    const f = wasmAlloc(fb * 2 + n);
+    if (!f) return false;
+    const t = f + fb,
+      b = t + fb;
+    const H = wasmHeap(); // no allocation below: the views stay valid
+    H.u8.set(d, b);
+    X.premul_row(b, f, n);
+    const [k0, k1, k2, k3, k4, k5, k6] = k;
+    if (K === 3) {
+      X.gs_h3_4(f, t, w, h, k0, k1, k2);
+      X.gs_v3(t, f, w * 4, h, k0, k1, k2);
+    } else if (K === 5) {
+      X.gs_h5_4(f, t, w, h, k0, k1, k2, k3, k4);
+      X.gs_v5(t, f, w * 4, h, k0, k1, k2, k3, k4);
+    } else {
+      X.gs_h7_4(f, t, w, h, k0, k1, k2, k3, k4, k5, k6);
+      X.gs_v7(t, f, w * 4, h, k0, k1, k2, k3, k4, k5, k6);
+    }
+    X.unpremul_row(f, b, n);
+    d.set(H.u8.subarray(b, b + n));
+    return true;
+  } finally {
+    wasmRelease(mark);
+  }
 }
 
 /**
@@ -1202,8 +1287,9 @@ function blurImageMultiresWasm(d: Uint8ClampedArray, w: number, h: number, sigma
 /** multiresBlurGrid on a grid in WebAssembly memory (byte address `ptr`). */
 function multiresBlurGridWasm(ptr: number, w2: number, h2: number, ch: number, sigma: number, f: number) {
   const n = w2 * h2 * ch;
-  // A view of the grid: gaussSmall* allocate no WebAssembly memory, and boxBlurPasses' WebAssembly
-  // path addresses a view of its own memory directly (its JavaScript fallback allocates nothing there).
+  // A view of the grid: the WebAssembly paths of gaussSmall* and boxBlurPasses address a view of
+  // their own memory directly (their allocations may grow it and detach the view; the caller takes
+  // fresh views afterwards), and their JavaScript fallbacks allocate nothing there.
   const view = wasmHeap().f32.subarray(ptr >>> 2, (ptr >>> 2) + n);
   multiresBlurGrid(view, w2, h2, ch, sigma, f);
 }

@@ -6,6 +6,7 @@ import { anchor, blurPlane, bool, clamp, hash, isEmpty, multiresBlurGrid, multir
 import { blurPlaneMultires, downsamplePlane, radialAccumulate, upsamplePlane } from '../ops';
 import { hasTransparency } from '../edges';
 import { boolP, colorP, numP, pctP, pointP, pxP, seedP, selectP } from '../params';
+import { wasm, wasmAlloc, wasmHeap, wasmMark, wasmRelease } from '../../../core/wasm/runtime';
 
 const blurFn = (b: Float32Array, w: number, h: number, s: number) => void blurPlane(b, w, h, s);
 
@@ -335,6 +336,7 @@ export const bloom: FilterDef = {
  * being written and read back.
  */
 function bloomFused(img: Img, threshold: number, scales: { s: number; w: number }[], sat: number, k: number, spill: boolean) {
+  if (bloomFusedWasm(img, threshold, scales, sat, k, spill)) return;
   const { width: w, height: h, data: d } = img;
   // three scales; per-scale numbers in typed arrays (monomorphic loops)
   const sig = Float64Array.from(scales, (sc0) => Math.max(0.5, sc0.s));
@@ -374,6 +376,150 @@ function bloomFused(img: Img, threshold: number, scales: { s: number; w: number 
       a2 = up[2].row(y);
     if (!a0 && !a1 && !a2) continue; // no light reaches this row
     bloomRow(d, y * w * 4, w, up[0], up[1], up[2], wts[0], wts[1], wts[2], desat, sat, k, spill);
+  }
+}
+
+/**
+ * bloomFused with its full-size loops in WebAssembly (core/wasm: bloom_ds = bloomDownsample,
+ * bloom_lerp = lerpRowPair, bloom_row = bloomRow + screenAt — the same float operations in the same
+ * order) and the image, grids and row tables in WebAssembly memory; the grid blurs are the same
+ * blurPlane / normalizeCells / multiresBlurGrid calls on views of that memory, and the row
+ * bookkeeping mirrors UpRows.row. Identical bytes. False (nothing touched) when WebAssembly or its
+ * memory isn't available.
+ */
+function bloomFusedWasm(img: Img, threshold: number, scales: { s: number; w: number }[], sat: number, k: number, spill: boolean): boolean {
+  const X = wasm();
+  const { width: w, height: h, data: d } = img;
+  const n = w * h * 4;
+  if (!X || w < 1 || h < 1 || d.length !== n || scales.length !== 3) return false;
+  const sig = Float64Array.from(scales, (sc0) => Math.max(0.5, sc0.s));
+  const F = Int32Array.from(sig, (sg) => (usesMultires(sg, w, h) ? multiresFactor(sg) : 1));
+  const W2 = Int32Array.from(F, (f) => Math.ceil(w / f)),
+    H2 = Int32Array.from(F, (f) => Math.ceil(h / f));
+  const al16 = (b: number) => (b + 15) & ~15;
+  const plane = [0, 1, 2].map((s) => al16(W2[s] * H2[s] * 4));
+  // one block: bytes, 9 grid planes (per scale R, G, B), per scale: cell-column table, upsampling
+  // tables (left / right cell byte offsets, x-fractions) and the T/D rows (6 × w float64)
+  const colBytes = al16(w * 4),
+    tdBytes = 6 * al16(w * 8);
+  const total = al16(n) + 3 * (plane[0] + plane[1] + plane[2]) + 3 * (4 * colBytes + tdBytes) + 256 * 8;
+  const mark = wasmMark();
+  try {
+    const base = wasmAlloc(total);
+    if (!base) return false;
+    let at = base;
+    const take = (b: number) => {
+      const p = at;
+      at += al16(b);
+      return p;
+    };
+    const bytes = take(n);
+    const grid = [0, 1, 2].map((s) => take(plane[s] * 3)); // R plane, G at + plane[s], B at + 2·plane[s]
+    const cx = [0, 1, 2].map(() => take(colBytes)),
+      xi = [0, 1, 2].map(() => take(colBytes)),
+      xi1 = [0, 1, 2].map(() => take(colBytes)),
+      xt = [0, 1, 2].map(() => take(colBytes)),
+      td = [0, 1, 2].map(() => take(tdBytes)),
+      inv = take(256 * 8);
+    let H = wasmHeap();
+    H.u8.set(d, bytes);
+    // v / 255 for every byte: the kernels look the quotients up instead of dividing per pixel
+    for (let v = 0; v < 256; v++) H.f64[(inv >>> 3) + v] = v / 255;
+    H.u8.fill(0, grid[0], grid[2] + plane[2] * 3);
+    for (let s = 0; s < 3; s++) {
+      const c0 = cx[s] >>> 2,
+        f = F[s];
+      for (let x = 0; x < w; x++) H.i32[c0 + x] = ((x / f) | 0) * 4;
+    }
+    // (1) bright pass → downsampled sums
+    const knee = 0.12;
+    X.bloom_ds(bytes, w, h, threshold - knee, threshold + knee, cx[0], cx[1], cx[2], F[0], F[1], F[2], W2[0] * 4, W2[1] * 4, W2[2] * 4, grid[0], grid[1], grid[2], plane[0], plane[1], plane[2], inv);
+    // the grid blurs (may grow the memory: views are taken right before each call)
+    for (let q = 0; q < 9; q++) {
+      const s = (q / 3) | 0;
+      const ptr = grid[s] + (q % 3) * plane[s];
+      const view = () => wasmHeap().f32.subarray(ptr >>> 2, (ptr >>> 2) + W2[s] * H2[s]);
+      if (F[s] === 1) {
+        blurPlane(view(), w, h, sig[s]);
+        continue;
+      }
+      normalizeCells(view(), W2[s], H2[s], F[s], w, h);
+      multiresBlurGrid(view(), W2[s], H2[s], 1, sig[s], F[s]);
+    }
+    // (2) no allocation from here on: the views stay valid
+    H = wasmHeap();
+    const G = [0, 1, 2].map((s) => [0, 1, 2].map((c) => H.f32.subarray((grid[s] + c * plane[s]) >>> 2, ((grid[s] + c * plane[s]) >>> 2) + W2[s] * H2[s])));
+    for (let s = 0; s < 3; s++) {
+      if (F[s] === 1) continue;
+      const invF = 1 / F[s],
+        w2 = W2[s];
+      const a0 = xi[s] >>> 2,
+        a1 = xi1[s] >>> 2,
+        at2 = xt[s] >>> 2;
+      for (let x = 0; x < w; x++) {
+        let fx = (x + 0.5) * invF - 0.5;
+        if (fx < 0) fx = 0;
+        else if (fx > w2 - 1) fx = w2 - 1;
+        const i0 = fx | 0;
+        H.i32[a0 + x] = i0 * 4;
+        H.i32[a1 + x] = (i0 < w2 - 1 ? i0 + 1 : i0) * 4;
+        H.f32[at2 + x] = fx - i0;
+      }
+    }
+    const j0 = [-1, -1, -1],
+      nz = [false, false, false],
+      ty = [0, 0, 0],
+      rowP = [0, 0, 0];
+    const wts = Float64Array.from(scales, (sc0) => sc0.w);
+    const desat = Math.abs(sat - 1) > 0.01 ? 1 : 0;
+    const wb = w * 8; // T/D row stride inside a scale's block (bloom_row uses the same)
+    for (let y = 0; y < h; y++) {
+      // UpRows.row(y) of each scale
+      for (let s = 0; s < 3; s++) {
+        const w2 = W2[s],
+          h2 = H2[s];
+        if (F[s] === 1) {
+          const o = y * w2;
+          rowP[s] = o * 4;
+          const [gr, gg, gb] = G[s];
+          let any = false;
+          for (let x = 0; x < w2; x++)
+            if (gr[o + x] !== 0 || gg[o + x] !== 0 || gb[o + x] !== 0) {
+              any = true;
+              break;
+            }
+          nz[s] = any;
+          continue;
+        }
+        let fy = (y + 0.5) / F[s] - 0.5;
+        if (fy < 0) fy = 0;
+        else if (fy > h2 - 1) fy = h2 - 1;
+        const r0 = fy | 0;
+        ty[s] = fy - r0;
+        if (r0 !== j0[s]) {
+          j0[s] = r0;
+          const ra = r0 * w2,
+            rb = (r0 < h2 - 1 ? r0 + 1 : r0) * w2;
+          nz[s] = anyNonZero(G[s][0], ra, rb, w2) || anyNonZero(G[s][1], ra, rb, w2) || anyNonZero(G[s][2], ra, rb, w2);
+          for (let c = 0; c < 3; c++) {
+            const pc = grid[s] + c * plane[s];
+            X.bloom_lerp(pc + ra * 4, pc + rb * 4, xi[s], xi1[s], xt[s], td[s] + 2 * c * wb, td[s] + (2 * c + 1) * wb, w);
+          }
+        }
+      }
+      if (!nz[0] && !nz[1] && !nz[2]) continue; // no light reaches this row
+      const P = (s: number, c: number) => grid[s] + c * plane[s] + rowP[s];
+      X.bloom_row(
+        bytes + y * w * 4, w, wts[0], wts[1], wts[2], desat, sat, k, spill ? 1 : 0, inv,
+        F[0] === 1 ? 1 : 0, ty[0], td[0], P(0, 0), P(0, 1), P(0, 2),
+        F[1] === 1 ? 1 : 0, ty[1], td[1], P(1, 0), P(1, 1), P(1, 2),
+        F[2] === 1 ? 1 : 0, ty[2], td[2], P(2, 0), P(2, 1), P(2, 2),
+      );
+    }
+    d.set(H.u8.subarray(bytes, bytes + n));
+    return true;
+  } finally {
+    wasmRelease(mark);
   }
 }
 

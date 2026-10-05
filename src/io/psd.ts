@@ -25,7 +25,7 @@ import { openDialog, toast } from '../state/ui';
 import { formatBytes, fromPsdBlend, safeFileName, toPsdBlend } from './math';
 import { effectLabel, effectsFromPsd, effectsToPsd, fillFromPsd, fillToPsd, representableGradient, toPsdColor } from './psdEffects';
 import { fromPsdAdjustment, toPsdAdjustment } from './psdAdjustments';
-import { alphaChannel, finishBakedPixels } from './psdBake';
+import { alphaChannel, clippedBakeApprox, finishBakedPixels } from './psdBake';
 import { backgroundLayerOf, baseName, ensureFontsFor } from './util';
 
 /** Name of the bottom fill layer that carries the document background colour in exported PSDs. */
@@ -79,7 +79,8 @@ export interface PsdBuildReport {
   bakedAdjustments: string[];
   /**
    * Baked adjustments that are only approximate: not clipped, over semi-transparent pixels (soft
-   * edges inside an isolated group or a transparent document come out denser in Photoshop).
+   * edges inside an isolated group or a transparent document come out denser in Photoshop), or
+   * clipped to a base drawn at a lower Fill (see clippedBakeApprox).
    */
   approxAdjustments: string[];
   /** Gradient fill layers written as plain pixels (Photoshop's fill data can't hold their geometry closely enough). */
@@ -106,9 +107,10 @@ function renderIsolated(doc: Document, rootIds: ID[], overrides: Record<ID, Laye
 /**
  * What an adjustment layer applies to (doc space): everything below it — or, inside an isolated
  * (non pass-through) group, the group's content below it; for a clipped adjustment, its clip base
- * plus the layers clipped to it below the adjustment (`clipped` = the backdrop is a clip stack).
+ * plus the layers clipped to it below the adjustment (`clipped` = the backdrop is a clip stack;
+ * `shape` = the base's shape when it is drawn at a lower Fill, see clippedBakeApprox).
  */
-function adjustmentBackdrop(doc: Document, l: AdjustmentLayer): { canvas: HTMLCanvasElement; clipped: boolean } {
+function adjustmentBackdrop(doc: Document, l: AdjustmentLayer): { canvas: HTMLCanvasElement; clipped: boolean; shape?: HTMLCanvasElement | null } {
   if (l.clipped) {
     const sibs = siblingsOf(doc, l.id);
     const i = sibs.indexOf(l.id);
@@ -119,7 +121,9 @@ function adjustmentBackdrop(doc: Document, l: AdjustmentLayer): { canvas: HTMLCa
       // The clip stack composites the base's content at full opacity; its own opacity/blend apply
       // to the whole stack afterwards.
       const solo = { ...base, opacity: 1, clipped: false, blendMode: base.type === 'group' && base.blendMode === 'pass-through' ? 'pass-through' : 'normal' } as Layer;
-      return { canvas: renderIsolated(doc, sibs.slice(baseIdx, i), { [base.id]: solo }), clipped: true };
+      const fill = Number.isFinite(base.fillOpacity) ? base.fillOpacity : 1;
+      const shape = fill < 0.999 ? renderLayerToDoc(doc, { ...solo, fillOpacity: 1 } as Layer, { effects: false }) : undefined;
+      return { canvas: renderIsolated(doc, sibs.slice(baseIdx, i), { [base.id]: solo }), clipped: true, shape };
     }
   }
   for (let p = parentOf(doc, l.id); p; p = parentOf(doc, p)) {
@@ -136,12 +140,13 @@ function adjustmentBackdrop(doc: Document, l: AdjustmentLayer): { canvas: HTMLCa
 function bakeAdjustment(doc: Document, l: AdjustmentLayer, opacity: number): { canvas: HTMLCanvasElement; approx: boolean } | null {
   const def = filters.get(l.adjustment.filterId);
   if (!def) return null;
-  const { canvas: c, clipped } = adjustmentBackdrop(doc, l);
+  const { canvas: c, clipped, shape } = adjustmentBackdrop(doc, l);
   const ctx = ctx2d(c, { willReadFrequently: true });
   const img = ctx.getImageData(0, 0, c.width, c.height);
   const alpha = alphaChannel(img.data);
   const out = runFilter(def, img, l.adjustment.params, makeFilterContext({ docWidth: doc.width, docHeight: doc.height }));
-  const approx = finishBakedPixels(out.data, alpha, clipped, opacity);
+  let approx = finishBakedPixels(out.data, alpha, clipped, opacity);
+  if (!approx && shape && shape.width === c.width && shape.height === c.height) approx = clippedBakeApprox(alpha, alphaChannel(readPixels(shape)), opacity);
   ctx.putImageData(out, 0, 0);
   return { canvas: c, approx };
 }
@@ -327,7 +332,7 @@ export async function exportPsd(opts: PsdExportOptions): Promise<void> {
       notes.push(
         `${bakedAdjustments.length} adjustment layer${bakedAdjustments.length > 1 ? 's' : ''} without a Photoshop equivalent baked into pixels (${list(bakedAdjustments)})`,
       );
-    if (approxAdjustments.length) notes.push(`baked approximately (soft edges): ${list(approxAdjustments)}`);
+    if (approxAdjustments.length) notes.push(`baked approximately (soft edges or a clip base at reduced Fill): ${list(approxAdjustments)}`);
     if (rasterizedFills.length) notes.push(`gradient fills exported as pixels: ${list(rasterizedFills)}`);
     if (skipped.length) notes.push(`${skipped.length} unknown adjustment layer${skipped.length > 1 ? 's' : ''} left out (${list(skipped)})`);
     if (baked.length) notes.push(`styles baked into pixels on ${list(baked)}`);

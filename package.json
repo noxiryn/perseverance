@@ -13,6 +13,7 @@
     "test": "vitest run",
     "start": "electron .",
     "icons": "node scripts/make-icon.mjs",
+    "wasm": "node scripts/gen-wasm.mjs",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win nsis portable",
     "dist:mac": "npm run build && electron-builder --mac dmg",

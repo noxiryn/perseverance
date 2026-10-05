@@ -4,14 +4,18 @@
  * input — forced JavaScript (setBlurBackend('js')) and WebAssembly — and the outputs are compared
  * bit for bit (float32 bit patterns, bytes).
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { blurBackend, blurBackendInfo, setBlurBackend, setWasmShrinkBytes, wasm, wasmAlloc, wasmHeap, wasmMark, wasmRelease } from './runtime';
 import { blurChannel, boxBlurImageData } from '../blur';
-import { blurImage, blurPlane, boxBlurPasses, type BoxPass } from '../../filters/stylize/util';
+import { blurImage, blurPlane, boxBlurPasses, multiresBlurGrid, type BoxPass } from '../../filters/stylize/util';
 import { medianChannel } from '../../filters/stylize/median';
+import { bloom } from '../../filters/stylize/defs/light';
+import { defaultParams } from '../../filters/engine';
+import type { FilterContext } from '../../registry';
+import type { ParamValues } from '../types';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -171,10 +175,73 @@ describe('WebAssembly blur kernels', () => {
         }
   }, 60000);
 
+  it('exact small-σ gaussian (3, 5 and 7 taps; planes and RGBA) incl. tiny and odd sizes', () => {
+    const R = rng(8);
+    // σ ≤ 1/3 → 3 taps, ≤ 2/3 → 5 taps, < 1 → 7 taps
+    const sigmas = [0.16, 0.25, 0.3333, 0.34, 0.5, 0.6666, 0.67, 0.8, 0.999];
+    for (const [w, h] of [...SIZES, [6, 2] as [number, number], [2, 9] as [number, number], [8, 8] as [number, number], [1920, 4] as [number, number]])
+      for (const sigma of sigmas) {
+        const src = floats(w * h, R);
+        const [a, b] = both(() => blurPlane(Float32Array.from(src), w, h, sigma));
+        let at = firstDiff(a, b);
+        if (at !== -1) throw new Error(`blurPlane ${w}x${h} σ${sigma}: element ${at} js ${a[at]} wasm ${b[at]}`);
+        for (const opaque of [false, true]) {
+          const im = image(w, h, R, opaque);
+          const [c, d] = both(() => blurImage({ data: new Uint8ClampedArray(im.data), width: w, height: h }, sigma + 0.05).data);
+          at = firstDiff(c, d);
+          if (at !== -1) throw new Error(`blurImage ${w}x${h} σ${sigma + 0.05} opaque=${opaque}: byte ${at} js ${c[at]} wasm ${d[at]}`);
+        }
+        // the grid blur of the reduced-resolution path (small σ on the grid: gaussSmallPlane / RGBA)
+        for (const ch of [1, 4]) {
+          const g = floats(w * h * ch, R, 255);
+          const [e, f] = both(() => {
+            const out = Float32Array.from(g);
+            multiresBlurGrid(out, w, h, ch, sigma * 4, 4); // σ_grid = sqrt(16σ² − 4) / 4
+            return out;
+          });
+          at = firstDiff(e, f);
+          if (at !== -1) throw new Error(`multiresBlurGrid ${w}x${h}x${ch} σ${sigma * 4}: element ${at} js ${e[at]} wasm ${f[at]}`);
+        }
+      }
+  });
+
+  it('small-σ gaussian of a grid that is a view of WebAssembly memory survives memory growth', () => {
+    const R = rng(9);
+    const w = 700,
+      h = 90;
+    setWasmShrinkBytes(1 << 30);
+    for (const ch of [1, 4]) {
+      const src = floats(w * h * ch, R, 255);
+      setBlurBackend('js');
+      const expected = Float32Array.from(src);
+      multiresBlurGrid(expected, w, h, ch, 3.4, 4); // grid σ ≈ 0.6 → 5 taps
+      setBlurBackend('auto');
+      const mark = wasmMark();
+      try {
+        const have = blurBackendInfo().memoryBytes;
+        const filler = wasmAlloc(Math.max(0, have - wasmMark() - src.byteLength - 64));
+        expect(filler).toBeGreaterThan(0);
+        const p = wasmAlloc(src.byteLength);
+        expect(p).toBeGreaterThan(0);
+        wasmHeap().f32.set(src, p >>> 2);
+        multiresBlurGrid(wasmHeap().f32.subarray(p >>> 2, (p >>> 2) + src.length), w, h, ch, 3.4, 4);
+        expect(blurBackendInfo().memoryBytes).toBeGreaterThan(have); // the scratch rows grew it
+        expect(firstDiff(expected, wasmHeap().f32.slice(p >>> 2, (p >>> 2) + src.length))).toBe(-1);
+      } finally {
+        wasmRelease(mark);
+      }
+    }
+  });
+
   it('core boxBlurImageData (u8 passes) and blurChannel (float passes)', () => {
     const R = rng(4);
-    for (const [w, h] of SIZES)
-      for (const radius of [0.4, 1, 2, 3, 5.5, 9, 30, 400]) {
+    const cases: [number, number, number[]][] = [
+      ...SIZES.map(([w, h]) => [w, h, [0.4, 1, 2, 3, 5.5, 9, 30, 400]] as [number, number, number[]]),
+      [3840, 24, [1, 7, 60]],
+      [641, 357, [2, 25]],
+    ];
+    for (const [w, h, radii] of cases)
+      for (const radius of radii) {
         const im = image(w, h, R, R() < 0.5);
         const [a, b] = both(() => boxBlurImageData({ data: new Uint8ClampedArray(im.data), width: w, height: h, colorSpace: 'srgb' } as unknown as ImageData, radius).data);
         const at = firstDiff(a, b);
@@ -185,6 +252,41 @@ describe('WebAssembly blur kernels', () => {
         if (at2 !== -1) throw new Error(`blurChannel ${w}x${h} r${radius}: element ${at2} js ${c[at2]} wasm ${d[at2]}`);
       }
   });
+
+  it('bloom (bright pass, grid blurs, row sums and screen) on full-size and reduced grids', () => {
+    const R = rng(10);
+    const ctx = (w: number, h: number): FilterContext => ({ docWidth: w, docHeight: h, offsetX: 0, offsetY: 0, scale: 1, primaryColor: '#000000', secondaryColor: '#ffffff' });
+    const variants: ParamValues[] = [
+      {},
+      { radius: 4, threshold: 0.3 }, // small scales blur at full size (direct rows)
+      { radius: 12, spill: false },
+      { radius: 22.7, saturation: 0.3 },
+      { radius: 80, saturation: 1.6, intensity: 2.5 },
+      { radius: 1, threshold: 0, intensity: 3 },
+      { radius: 300, threshold: 1 },
+    ];
+    let cases = 0;
+    for (const [w, h] of [[1, 1], [3, 2], [15, 40], [16, 16], [97, 61], [200, 17], [333, 190]] as [number, number][])
+      for (const v of variants)
+        for (const opaque of [false, true]) {
+          const im = image(w, h, R, opaque);
+          const p = { ...defaultParams(bloom.params), ...v };
+          const [a, b] = both(() => (bloom.apply({ data: new Uint8ClampedArray(im.data), width: w, height: h } as unknown as ImageData, p, ctx(w, h)) as ImageData).data);
+          const at = firstDiff(a, b);
+          if (at !== -1) throw new Error(`bloom ${w}x${h} ${JSON.stringify(v)} opaque=${opaque}: byte ${at} js ${a[at]} wasm ${b[at]}`);
+          cases++;
+        }
+    // a bigger image: many pixels per cell (float32 cell sums of rounded values)
+    for (const v of [{}, { radius: 9, threshold: 0.4, saturation: 1.3 }] as ParamValues[]) {
+      const im = image(640, 360, R, false);
+      const p = { ...defaultParams(bloom.params), ...v };
+      const [a, b] = both(() => (bloom.apply({ data: new Uint8ClampedArray(im.data), width: 640, height: 360 } as unknown as ImageData, p, ctx(640, 360)) as ImageData).data);
+      const at = firstDiff(a, b);
+      if (at !== -1) throw new Error(`bloom 640x360 ${JSON.stringify(v)}: byte ${at} js ${a[at]} wasm ${b[at]}`);
+      cases++;
+    }
+    expect(cases).toBe(100);
+  }, 60000);
 
   it('separable median networks (3/5/7 taps) incl. clamped edges and narrow planes', () => {
     const R = rng(5);
@@ -212,10 +314,35 @@ describe('WebAssembly blur kernels', () => {
     blurChannel(Float32Array.from(src), w, h, 6);
     expect(blurBackendInfo().memoryBytes).toBe(grown);
     expect(wasmMark()).toBe(start);
-    // past the shrink threshold the instance is recreated after the call (memory handed back)
-    setWasmShrinkBytes(4 << 20);
+    // past the shrink threshold the instance is recreated (memory handed back): right after the
+    // call with no idle delay …
+    setWasmShrinkBytes(4 << 20, 0);
     blurChannel(Float32Array.from(src), w, h, 6);
     expect(blurBackendInfo().memoryBytes).toBeLessThan(grown);
+    // … or, by default, once no operation has used it for 2 s (a burst of calls keeps reusing it)
+    vi.useFakeTimers();
+    try {
+      setWasmShrinkBytes(4 << 20, 2000);
+      blurChannel(Float32Array.from(src), w, h, 6);
+      const big = blurBackendInfo().memoryBytes;
+      expect(big).toBeGreaterThan(4 << 20);
+      vi.advanceTimersByTime(1500);
+      blurChannel(Float32Array.from(src), w, h, 6); // restarts the wait, reuses the memory
+      expect(blurBackendInfo().memoryBytes).toBe(big);
+      vi.advanceTimersByTime(1500);
+      expect(blurBackendInfo().memoryBytes).toBe(big);
+      vi.advanceTimersByTime(600);
+      expect(blurBackendInfo().memoryBytes).toBeLessThan(4 << 20);
+      // operations that don't need the big memory don't postpone handing it back
+      blurChannel(Float32Array.from(src), w, h, 6);
+      expect(blurBackendInfo().memoryBytes).toBe(big);
+      vi.advanceTimersByTime(1500);
+      blurChannel(new Float32Array(64 * 64).fill(0.5), 64, 64, 3);
+      vi.advanceTimersByTime(600);
+      expect(blurBackendInfo().memoryBytes).toBeLessThan(4 << 20);
+    } finally {
+      vi.useRealTimers();
+    }
     const im = image(1500, 900, R, false);
     const [c, d] = both(() => blurImage({ data: new Uint8ClampedArray(im.data), width: 1500, height: 900 }, 4).data);
     expect(firstDiff(c, d)).toBe(-1);

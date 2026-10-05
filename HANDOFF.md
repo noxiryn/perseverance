@@ -69,16 +69,20 @@ starting point; don't rewrite modules from scratch.
   - Baked adjustments (`src/io/psdBake.ts`): clipped ones are written at full alpha wherever the clip
     stack has coverage, which Photoshop's clipping reproduces exactly; unclipped ones over
     semi-transparent pixels (isolated groups, transparent documents) can't be exact with one pixel
-    layer — they are listed as "baked approximately (soft edges)" in the export toast.
+    layer — they are listed as "baked approximately" in the export toast.
   - Gradient fill/overlay center offsets are written in Photoshop's convention (percent of the box,
     ±50 % = edge; ours is ±1 = edge). ag-psd stores scale/offset as whole percents: a fill that needs
     rounding stays an editable fill only if the rounded gradient renders within 2 levels, otherwise
     it is written as pixels ("gradient fills exported as pixels"); such overlays are baked.
   - Clip stacks now use Photoshop's semantics (renderer, see below), so clipped layers look the same
     in Photoshop over soft base edges too, and a clipped baked adjustment re-imports exactly (runtime
-    round trip over a soft-edged base: before 28 % of values off, max 19–44 levels; now exact for a
-    plain clipped bake, ≤ 3 levels (rounding) with an opacity or a clipped layer below it; on the
-    gothic template's character: max 64 → 0).
+    round trip writePsd → readPsd over a soft-edged base, transparent document: before 38–40 % of
+    values off, max 38–64 levels; now exact for a plain clipped bake, ≤ 3 levels (rounding) with an
+    opacity or a clipped texture below it; on the gothic template's character: max 64 → 0). Exception:
+    a base drawn at a lower Fill (the stack stays below the base's shape, which the adjustment keeps,
+    while Photoshop composites the baked layer up to the shape) can't be reproduced by a pixel layer —
+    such bakes are now listed as approximate too (`clippedBakeApprox`). Tests: `src/io/psdClip.test.ts`
+    (buildPsd → psdToDocument → render, software canvas; fails on the old renderer).
 - **Clipping masks** (`src/render/clip.ts`, `compositeClipStack` / `clipBaseFor` in `engine.ts`):
   a clip stack's coverage is its base's — clipped layers never add coverage (50 % base + clipped red
   used to come out at alpha 192, now 128 like Photoshop) — and each clipped layer blends "atop":
@@ -89,12 +93,21 @@ starting point; don't rewrite modules from scratch.
   base's alpha is applied with destination-in. 0 % fill bases still clip (Photoshop); where an
   above-stage effect of the base reaches beyond its content (centered stroke, emboss, overlays over
   soft edges), clipped layers get only the content's share of the coverage. Adjustment layers with a
-  blend mode keep the backdrop's alpha too (they squared it over soft pixels). Every path goes
-  through `compositeClipStack` (full / live / below-cache composites, thumbnails, renderLayerToDoc,
-  merged copies, PSD bakes). Tests: `src/render/clip.test.ts` runs the real compositor on a
-  test-only software canvas (`src/render/softCanvas.ts`, jsdom has none); `dirty-rect-check.mjs`
-  gained `clipped-soft`, `clipped-group-base` and `clipped-fx-base`. None of the 23 templates uses
-  clipping: their renders are bit-identical.
+  blend mode keep the backdrop's alpha too (they squared it over soft pixels); their blend is computed
+  on the CPU (`src/render/blendMath.ts`, W3C formulas, LUTs for separable modes, a result memo for
+  hue/saturation/color/luminosity): canvas blending rounds exact ties differently depending on the
+  surfaces (GPU vs CPU, opaque vs not), so an incremental composite of a crop and a full render
+  differed by 1–2 levels on GPU canvases (also before this change, for any adjustment over soft
+  pixels). Every path goes through `compositeClipStack` (full / live / below-cache composites,
+  thumbnails, renderLayerToDoc, merged copies, PSD bakes). Tests: `src/render/clip.test.ts` runs the
+  real compositor on a test-only software canvas (`src/render/softCanvas.ts`, jsdom has none),
+  `src/render/blendMath.test.ts`; `dirty-rect-check.mjs` gained `clipped-soft`, `clipped-group-base`,
+  `clipped-fx-base` and `adjustment-blend-soft` (all pass, software and --gpu). None of the 23
+  templates uses clipping or blend-mode adjustments: their renders are bit-identical before/after.
+  With clipped shading/rim/hue-sat layers added to 7 template characters, only the characters' soft
+  outlines change (0.1–0.85 % of values; the old dark halo from the added coverage is gone). Cost:
+  a hue/saturation/color/luminosity adjustment blend over a noisy 1080p area ≈ 0.1 s per full
+  re-render on the CPU (≈ 25–50 ms over gradients/flat art; separable modes ≈ 10–15 ms).
 - **Free Transform on tab switch** (`src/viewport/transform/controller.ts commitTransformInOwnDoc`):
   applied in its own document (with a toast) instead of being dropped.
 - **CI / installers**: Build installers is green since f6ce5d3 (Windows case-clash rename b4d8728 +
@@ -171,13 +184,59 @@ starting point; don't rewrite modules from scratch.
      450 → 409, cutout 826 → 548. Hue/sat, vibrance, color balance and selective color keep a per-parameter-set color
      memo between calls (adjustments/math.ts colorMemo: 4 × 2 MB LRU; re-rendering an unchanged layer, e.g. painting
      below it, is mostly lookups: ~20-29 ms); noisy images drop to the plain loop after a probe.
-   - PERF (open): still above the spec targets with exact JS: hue/sat, vibrance, selective color, channel mixer
-     (25-50 ms vs < 25), vignette (~26 vs < 20), bloom (~210), cel shade (~400), cutout (~550), and noisy-image
-     gaussian blur / halftone / chromatic aberration (165-185); watercolor / ink wash / screen print / risograph
-     0.8-1.2 s (only shared primitives got faster). The box-blur core runs at ~8 cycles per element (scalar limit).
-     Next step: WASM SIMD (a prototype box blur was 3-4× faster and bit-identical) — needs 'wasm-unsafe-eval' in
-     index.html's CSP, which src/platform/desktopMain.test.ts currently rejects (any 'unsafe-eval' substring) — or a
-     Worker behind an async filter API.
+   - (done, wasm-blur) WebAssembly fast path for the hot CPU loops, bit-identical to the JavaScript it replaces:
+     src/core/wasm/ (runtime.ts: loader + stack allocator over one growable linear memory; boxStream.ts: util.ts's
+     streaming box passes; blurWasm.generated.ts: the module, base64-inlined so nothing is fetched). Kernels:
+     util.ts box passes (rows 1-4 channels, two rows per call, f64x2 vertical steps, premultiplied / opaque-RGB
+     row I/O), blurImage's reduced-resolution path, the exact small-σ gaussian (σ < 1, 3/5/7 taps), core/blur.ts
+     boxBlurImageData (selection feather; i32x4) and blurChannel, the separable median networks (u8x16), and
+     bloom's full-size loops (bright-pass downsample, row lerps, row sum + screen). Source of truth:
+     scripts/gen-wasm.mjs (a tiny assembler + the hand-written kernels; no toolchain) — regenerate with
+     `npm run wasm` (`node scripts/gen-wasm.mjs`; `--check` exits 1 when the generated file is stale; a vitest test
+     fails too). Every kernel does the JS's float64/float32 operations in the same order (Uint8ClampedArray
+     rounding = nearest-even + clamp); the JS path stays and runs whenever WebAssembly is unavailable or refused
+     (no 'wasm-unsafe-eval' in the CSP, old engine, instantiation error, a refused memory grow) — identical output
+     either way. `blurBackend()` / `blurBackendInfo()` (core/blur.ts, also `window.__app`) say which one runs and
+     why; `setBlurBackend('js')` forces JS (tests/benchmarks). Memory grows on demand (a 4K image: a few MB to
+     ~285 MB depending on the kernel), is reused, and is handed back (instance recreated) once no operation has
+     needed more than 192 MB for 2 s — a burst of 4K runs (live preview) doesn't regrow it each time. CSP: index.html script-src is `'self' 'wasm-unsafe-eval'` (WebAssembly compilation only; eval /
+     new Function stay blocked — desktopMain.test.ts compares CSP keywords as whole tokens and still forbids plain
+     'unsafe-eval'); electron/main.cjs sets no CSP header of its own and its file:// filter is unaffected (no
+     fetch). Tests: src/core/wasm/blurWasm.test.ts (JS vs WASM bit for bit on random inputs: sizes 1×1 … 3840×n,
+     radius 0/1/> width, fractional radii, 1-6 channels, every small-σ kernel size, bloom variants, memory growth
+     under a view of the module's memory, refused allocations); perf.test.ts (vs the pre-optimization reference)
+     now runs on the WASM path. Runtime checks: all 23 templates render pixel-identical with WASM and forced JS;
+     with 'wasm-unsafe-eval' stripped from the CSP the page falls back to JS (CompileError) with identical filter
+     output; in the packaged Electron app the module compiles in page context, no CSP violations / console
+     errors, eval and new Function still throw EvalError.
+     1920×1080, headless Chromium (same method as above: crimson template render / noisy synthetic image, median
+     of 7, JS and WASM alternated in one page; JS = this tree with setBlurBackend('js'), i.e. the code as before;
+     noisy shared 4-core box, ±10 %):
+       filter                     JS (before)       WASM
+       gaussian blur r4           121 / 158         34 / 41
+       gaussian blur r20           78 / 72          30 / 28
+       bloom                      183 / 208         90 / 120
+       halftone                   103 / 167         93 / 114
+       cutout                     537 / 704        385 / 531
+       cel shade                  373 / 423        307 / 365
+       unsharp mask               182 / 213         99 / 97
+       watercolor                1152 / 913        840 / 775
+       screen print / risograph   ~800              ~720-770
+       ink wash, sharpen          unchanged (no CPU blur in their hot path)
+       chromatic aberration       103 / 117        unchanged (no blur: bilinear taps + compositing)
+       drop shadow / outer glow    ~65              unchanged (layer effects blur with the canvas filter)
+     Primitives at 1920×1080: boxBlurImageData r6 (selection feather) 289 → 63 ms, blurPlane σ 0.9 53 → 15,
+     blurImage σ 0.9 270 → 69, blurChannel r4 61 → 18. 3840×2160 (median of 3, identical bytes): gaussian blur
+     r0.8 1327 → 305, r5 745 → 174, r60 258 → 116, bloom 1129 → 494 (radius 10: 2043 → 792). Inside the packaged
+     Electron app (xvfb): gaussian blur r4 172 → 39, r20 90 → 30, bloom 186 → 106, unsharp mask 169 → 57.
+   - PERF (open): still above the spec targets: hue/sat, vibrance, selective color, channel mixer (25-50 ms vs < 25),
+     vignette (~26 vs < 20), bloom (~90-120: what is left is its per-pixel arithmetic, now WebAssembly but scalar),
+     cel shade (~300-365: celFinish, distance fields, edge passes — not blur), cutout (~390-530: quantization, mode
+     filter, OKLab), noisy-image halftone (~115: screening) and chromatic aberration (~120); watercolor / ink wash /
+     screen print / risograph 0.7-1.1 s. These are filter-specific loops (no shared blur left to speed up); the
+     same generator can take more of them (each needs its own JS-vs-WASM test), or a Worker behind an async filter
+     API. Not ported: src/render/effects/math.ts `blurField` (bevel/emboss soften; same arithmetic as blurChannel,
+     so it could call the bc_h / bc_v kernels).
    - Optional: editor store `beforeCommit` hook so Free Transform can commit itself before another command
      (viewport currently repairs history via transform/historySplit.ts).
    - Optional: FilterContext.contentRect so edge-sensitive filters (rim-light, toon) know the real layer box.

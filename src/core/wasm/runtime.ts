@@ -10,10 +10,11 @@
  *   instantiation error) `wasm()` returns null and every caller runs its existing JavaScript
  *   code, which produces bit-identical results.
  * - Memory: one linear memory used as a stack (`wasmMark` / `wasmAlloc` / `wasmRelease`), grown on
- *   demand (a 4K blur needs a few to ~70 MB depending on the kernel) and reused. Growing detaches
+ *   demand (a 4K image needs a few MB to ~285 MB depending on the kernel) and reused. Growing detaches
  *   every typed-array view of the old buffer, so callers keep byte addresses and take fresh views
- *   with `wasmHeap()` after their last allocation. After an operation that left more than
- *   192 MB allocated, the instance is recreated so idle memory is returned.
+ *   with `wasmHeap()` after their last allocation. Once no operation has needed more than 192 MB
+ *   for 2 s, the instance is recreated so the memory is returned (a burst of big operations — a
+ *   live preview on a 4K document — keeps reusing it).
  */
 import { BLUR_WASM_BASE64 } from './blurWasm.generated';
 
@@ -44,6 +45,27 @@ export interface BlurWasm {
   bb_v(src: I, dst: I, w: I, h: I, r: I, iarr: F, acc: I): void;
   bc_h(src: I, dst: I, w: I, h: I, r: I, iarr: F): void;
   bc_v(src: I, dst: I, w: I, h: I, r: I, iarr: F, acc: I): void;
+  gs_h3_1(src: I, dst: I, w: I, h: I, k0: F, k1: F, k2: F): void;
+  gs_h5_1(src: I, dst: I, w: I, h: I, k0: F, k1: F, k2: F, k3: F, k4: F): void;
+  gs_h7_1(src: I, dst: I, w: I, h: I, k0: F, k1: F, k2: F, k3: F, k4: F, k5: F, k6: F): void;
+  gs_h3_4(src: I, dst: I, w: I, h: I, k0: F, k1: F, k2: F): void;
+  gs_h5_4(src: I, dst: I, w: I, h: I, k0: F, k1: F, k2: F, k3: F, k4: F): void;
+  gs_h7_4(src: I, dst: I, w: I, h: I, k0: F, k1: F, k2: F, k3: F, k4: F, k5: F, k6: F): void;
+  gs_v3(src: I, dst: I, n: I, h: I, k0: F, k1: F, k2: F): void;
+  gs_v5(src: I, dst: I, n: I, h: I, k0: F, k1: F, k2: F, k3: F, k4: F): void;
+  gs_v7(src: I, dst: I, n: I, h: I, k0: F, k1: F, k2: F, k3: F, k4: F, k5: F, k6: F): void;
+  bloom_ds(
+    d: I, w: I, h: I, lo: F, hi: F,
+    cx0: I, cx1: I, cx2: I, f0: I, f1: I, f2: I, rb0: I, rb1: I, rb2: I,
+    g0: I, g1: I, g2: I, ps0: I, ps1: I, ps2: I, inv255: I,
+  ): void;
+  bloom_lerp(p0: I, p1: I, xi: I, xi1: I, xt: I, T: I, D: I, w: I): void;
+  bloom_row(
+    d: I, w: I, w0: F, w1: F, w2: F, desat: I, sat: F, k: F, spill: I, inv255: I,
+    m0: I, ty0: F, td0: I, pr0: I, pg0: I, pb0: I,
+    m1: I, ty1: F, td1: I, pr1: I, pg1: I, pb1: I,
+    m2: I, ty2: F, td2: I, pr2: I, pg2: I, pb2: I,
+  ): void;
   med_rows3(src: I, dst: I, from: I, to: I): void;
   med_rows5(src: I, dst: I, from: I, to: I): void;
   med_rows7(src: I, dst: I, from: I, to: I): void;
@@ -63,8 +85,17 @@ export type BlurBackendSetting = 'auto' | 'wasm' | 'js';
 const BASE = 64;
 /** Never let the stack pass 1 GiB (addresses stay positive int32 in every kernel and view index). */
 const MAX_BYTES = 1 << 30;
-/** Recreate the instance after an operation once memory has grown past this. */
+/** Memory above this is handed back (instance recreated) once no operation has used it for shrinkDelayMs. */
 let shrinkBytes = 192 << 20;
+/**
+ * Idle time before oversized memory is handed back: a burst of big operations (a filter's live
+ * preview on a 4K document, a slider drag) keeps reusing the grown memory instead of growing it
+ * again — page faults and zeroing — on every run.
+ */
+let shrinkDelayMs = 2000;
+let shrinkTimer: ReturnType<typeof setTimeout> | null = null;
+/** Highest stack position of the current outermost operation. */
+let peak = BASE;
 
 let state: 'idle' | 'loading' | 'ready' | 'failed' = 'idle';
 let reason = '';
@@ -100,6 +131,7 @@ function instantiate(m: WebAssembly.Module) {
   X = new WebAssembly.Instance(m, {}).exports as unknown as BlurWasm;
   heapCache = null;
   top = BASE;
+  peak = BASE;
 }
 
 function load() {
@@ -195,22 +227,44 @@ export function wasmAlloc(bytes: number): number {
     }
   }
   top = end;
+  if (end > peak) peak = end;
   return p;
 }
 
-/** Tests: memory size above which the instance is recreated after an operation. */
-export function setWasmShrinkBytes(n: number) {
+/** Tests: memory size above which the instance is recreated, and after how long idle (0 = right after the operation). */
+export function setWasmShrinkBytes(n: number, delayMs = 2000) {
   shrinkBytes = n;
+  shrinkDelayMs = delayMs;
 }
 
-/** Free everything allocated after `mark`. At the outermost level, oversized memory is dropped. */
+/** Recreate the instance (fresh small memory) if it is idle and oversized. */
+function shrinkNow() {
+  if (top !== BASE || !mod || !X || X.memory.buffer.byteLength <= shrinkBytes) return;
+  try {
+    instantiate(mod);
+  } catch {
+    /* keep the big instance */
+  }
+}
+
+/**
+ * Free everything allocated after `mark`. At the outermost level, oversized memory is handed back
+ * once no operation has needed it for shrinkDelayMs (each operation that used more than
+ * shrinkBytes restarts the wait; smaller ones don't postpone it).
+ */
 export function wasmRelease(mark: number) {
   top = mark;
-  if (mark === BASE && mod && X && X.memory.buffer.byteLength > shrinkBytes) {
-    try {
-      instantiate(mod);
-    } catch {
-      /* keep the big instance */
-    }
-  }
+  if (mark !== BASE) return;
+  const big = peak > shrinkBytes;
+  peak = BASE;
+  if (!X || X.memory.buffer.byteLength <= shrinkBytes || (!big && shrinkTimer !== null)) return;
+  if (shrinkTimer !== null) clearTimeout(shrinkTimer);
+  shrinkTimer = null;
+  if (shrinkDelayMs <= 0 || typeof setTimeout !== 'function') return shrinkNow();
+  shrinkTimer = setTimeout(() => {
+    shrinkTimer = null;
+    shrinkNow();
+  }, shrinkDelayMs);
+  // Node (tests, tools): a pending shrink must not keep the process alive
+  (shrinkTimer as { unref?: () => void }).unref?.();
 }

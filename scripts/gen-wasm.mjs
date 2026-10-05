@@ -22,8 +22,12 @@
  *    unpremultiplyRow, the opaque RGB rows).
  *  - ds_premul_row / ds_norm / us_unpremul_row: blurImage's reduced-resolution path
  *    (downsampleRowPremul, the cell normalisation, upsampleRowUnpremul).
- *  - bb_h / bb_v: src/core/blur.ts boxBlurImageData passes (exact integer sums).
+ *  - bb_h / bb_v: src/core/blur.ts boxBlurImageData passes (exact integer sums, i32x4).
  *  - bc_h / bc_v: src/core/blur.ts blurChannel passes (vertical pass walks rows).
+ *  - gs_h{3,5,7}_1 / gs_h{3,5,7}_4 / gs_v{3,5,7}: util.ts exact small-σ gaussian (gaussSmallPlane,
+ *    gaussSmallRGBA: convolveRow / hTapsK, vTapsK).
+ *  - bloom_ds / bloom_lerp / bloom_row: src/filters/stylize/defs/light.ts bloomFused's full-size loops
+ *    (bloomDownsample, lerpRowPair, bloomRow + screenAt).
  *  - med_rows3/5/7, med_cols3/5/7: src/filters/stylize/median.ts separable median networks (u8x16).
  */
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -781,38 +785,61 @@ func(
 
 /* ---------------- core/blur.ts boxBlurImageData passes ---------------- */
 
-// boxBlurH: rows of RGBA bytes src → dst. The JS running sums are whole numbers (exact in float64),
-// so they are kept in i32 registers; the output is u8(sum · iarr) as in the JS.
+// The JS running sums are whole numbers (exact in float64), so they are kept as i32 lanes; each
+// output byte is ToUint8Clamp(sum · iarr) with the product in float64, as in the JS. Four sums
+// (the 4 channels of a pixel, or 4 consecutive bytes of a row) per i32x4.
+Object.assign(I32X4, {
+  add: (a, b) => [a, b, ...simd(0xae)],
+  sub: (a, b) => [a, b, ...simd(0xb1)],
+  mul: (a, b) => [a, b, ...simd(0xb5)],
+});
+/** f64x2.convert_low_i32x4_s: two i32 (low half) → two f64 (exact) */
+F64X2.fromLowI32 = (a) => [a, ...simd(0xfe)];
+/** the four bytes at p as i32x4 lanes */
+const u8x4At = (p) => I32X4.extendLowU16(I16X8.extendLowU8(V.load32z(p)));
+/**
+ * The four bytes ToUint8Clamp(lane · iarr) of the i32x4 sums in local `name` (≥ 0), in the low
+ * 4 bytes of a v128 (locals: iv = f64x2.splat(iarr), k255, pk).
+ */
+const sumsToU8x4 = (name) =>
+  pack4(
+    clampI(
+      V.shuffle(
+        I32X4.truncSatF64SZero(F64X2.nearest(F64X2.mul(F64X2.fromLowI32(g(name)), g('iv')))),
+        I32X4.truncSatF64SZero(F64X2.nearest(F64X2.mul(F64X2.fromLowI32(V.shuffle(g(name), g(name), lanes32(2, 3, 2, 3))), g('iv')))),
+        lanes32(0, 1, 4, 5),
+      ),
+    ),
+  );
+
+// boxBlurH: rows of RGBA bytes src → dst; one pixel (4 channel sums) per step
 func(
   'bb_h',
   { src: 'i32', dst: 'i32', w: 'i32', h: 'i32', r: 'i32', iarr: 'f64' },
-  { y: 'i32', x: 'i32', j: 'i32', row: 'i32', pd: 'i32', p: 'i32', q: 'i32', rs: 'i32', v0: 'i32', v1: 'i32', v2: 'i32', v3: 'i32' },
+  { y: 'i32', x: 'i32', j: 'i32', row: 'i32', pd: 'i32', rs: 'i32', wm: 'i32', v: 'v128', rv: 'v128', iv: 'v128', k255: 'v128', pk: 'v128' },
   [
+    set('k255', I32X4.splat(I32.c(255))),
+    set('iv', F64X2.splat(g('iarr'))),
+    set('rv', I32X4.splat(g('r'))),
     set('rs', I32.mul(g('w'), I32.c(4))),
+    set('wm', I32.sub(g('w'), I32.c(1))),
     set('row', g('src')),
     set('pd', g('dst')),
     whileDo(
       I32.lt_s(g('y'), g('h')),
-      [0, 1, 2, 3].map((c) => set('v' + c, I32.mul(g('r'), I32.load8u(g('row'), c)))),
+      // val = r·first + Σ_{j<r} src[min(j, w − 1)]
+      set('v', I32X4.mul(g('rv'), u8x4At(g('row')))),
       set('j', I32.c(0)),
-      whileDo(
-        I32.lt_s(g('j'), g('r')),
-        set('p', I32.add(g('row'), I32.mul(i32min(g('j'), I32.sub(g('w'), I32.c(1))), I32.c(4)))),
-        [0, 1, 2, 3].map((c) => set('v' + c, I32.add(g('v' + c), I32.load8u(g('p'), c)))),
-        inc('j'),
-      ),
+      whileDo(I32.lt_s(g('j'), g('r')), set('v', I32X4.add(g('v'), u8x4At(I32.add(g('row'), I32.mul(i32min(g('j'), g('wm')), I32.c(4)))))), inc('j')),
       set('x', I32.c(0)),
       whileDo(
         I32.lt_s(g('x'), g('w')),
+        // val += x + r < w ? src[x + r] : last;  out = val·iarr;  val −= x − r ≥ 0 ? src[x − r] : first
         set('j', I32.add(g('x'), g('r'))),
-        set('p', I32.add(g('row'), I32.mul(i32min(g('j'), I32.sub(g('w'), I32.c(1))), I32.c(4)))),
+        set('v', I32X4.add(g('v'), u8x4At(I32.add(g('row'), I32.mul(i32min(g('j'), g('wm')), I32.c(4)))))),
+        V.store32lane0(g('pd'), sumsToU8x4('v')),
         set('j', I32.sub(g('x'), g('r'))),
-        set('q', I32.add(g('row'), I32.mul(i32max(g('j'), I32.c(0)), I32.c(4)))),
-        [0, 1, 2, 3].map((c) => [
-          set('v' + c, I32.add(g('v' + c), I32.load8u(g('p'), c))),
-          I32.store8(g('pd'), u8(F64.mul(F64.fromI32(g('v' + c)), g('iarr'))), c),
-          set('v' + c, I32.sub(g('v' + c), I32.load8u(g('q'), c))),
-        ]),
+        set('v', I32X4.sub(g('v'), u8x4At(I32.add(g('row'), I32.mul(i32max(g('j'), I32.c(0)), I32.c(4)))))),
         inc('x'),
         inc('pd', 4),
       ),
@@ -822,22 +849,27 @@ func(
   ],
 );
 
-// boxBlurV, walking rows: acc (i32 × 4w) holds every column's running sum
+// boxBlurV, walking rows: acc (i32 × 4w) holds every column's running sum; 4 bytes per step
 func(
   'bb_v',
   { src: 'i32', dst: 'i32', w: 'i32', h: 'i32', r: 'i32', iarr: 'f64', acc: 'i32' },
-  { y: 'i32', j: 'i32', q: 'i32', rs: 'i32', pa: 'i32', ps: 'i32', pd: 'i32', pc: 'i32', v: 'i32' },
+  { y: 'i32', j: 'i32', q: 'i32', rs: 'i32', hm: 'i32', pa: 'i32', ps: 'i32', pd: 'i32', pc: 'i32', v: 'v128', rv: 'v128', iv: 'v128', k255: 'v128', pk: 'v128' },
   [
+    set('k255', I32X4.splat(I32.c(255))),
+    set('iv', F64X2.splat(g('iarr'))),
+    set('rv', I32X4.splat(g('r'))),
     set('rs', I32.mul(g('w'), I32.c(4))),
+    set('hm', I32.sub(g('h'), I32.c(1))),
+    // acc[q] = r·src[q], then += src[min(j, h − 1)·rs + q] for j < r
     set('q', I32.c(0)),
-    whileDo(I32.lt_s(g('q'), g('rs')), I32.store(I32.add(g('acc'), I32.mul(g('q'), I32.c(4))), I32.mul(g('r'), I32.load8u(I32.add(g('src'), g('q'))))), inc('q')),
+    whileDo(I32.lt_s(g('q'), g('rs')), V.store(I32.add(g('acc'), I32.mul(g('q'), I32.c(4))), I32X4.mul(g('rv'), u8x4At(I32.add(g('src'), g('q'))))), inc('q', 4)),
     set('j', I32.c(0)),
     whileDo(
       I32.lt_s(g('j'), g('r')),
-      set('pa', I32.add(g('src'), I32.mul(i32min(g('j'), I32.sub(g('h'), I32.c(1))), g('rs')))),
+      set('pa', I32.add(g('src'), I32.mul(i32min(g('j'), g('hm')), g('rs')))),
       set('q', I32.c(0)),
       set('pc', g('acc')),
-      whileDo(I32.lt_s(g('q'), g('rs')), I32.store(g('pc'), I32.add(I32.load(g('pc')), I32.load8u(I32.add(g('pa'), g('q'))))), inc('q'), inc('pc', 4)),
+      whileDo(I32.lt_s(g('q'), g('rs')), V.store(g('pc'), I32X4.add(V.load(g('pc')), u8x4At(I32.add(g('pa'), g('q'))))), inc('q', 4), inc('pc', 16)),
       inc('j'),
     ),
     set('y', I32.c(0)),
@@ -845,18 +877,18 @@ func(
     whileDo(
       I32.lt_s(g('y'), g('h')),
       set('j', I32.add(g('y'), g('r'))),
-      set('pa', I32.add(g('src'), I32.mul(i32min(g('j'), I32.sub(g('h'), I32.c(1))), g('rs')))),
+      set('pa', I32.add(g('src'), I32.mul(i32min(g('j'), g('hm')), g('rs')))),
       set('j', I32.sub(g('y'), g('r'))),
       set('ps', I32.add(g('src'), I32.mul(i32max(g('j'), I32.c(0)), g('rs')))),
       set('q', I32.c(0)),
       set('pc', g('acc')),
       whileDo(
         I32.lt_s(g('q'), g('rs')),
-        set('v', I32.add(I32.load(g('pc')), I32.load8u(I32.add(g('pa'), g('q'))))),
-        I32.store8(I32.add(g('pd'), g('q')), u8(F64.mul(F64.fromI32(g('v')), g('iarr')))),
-        I32.store(g('pc'), I32.sub(g('v'), I32.load8u(I32.add(g('ps'), g('q'))))),
-        inc('q'),
-        inc('pc', 4),
+        set('v', I32X4.add(V.load(g('pc')), u8x4At(I32.add(g('pa'), g('q'))))),
+        V.store32lane0(I32.add(g('pd'), g('q')), sumsToU8x4('v')),
+        V.store(g('pc'), I32X4.sub(g('v'), u8x4At(I32.add(g('ps'), g('q'))))),
+        inc('q', 4),
+        inc('pc', 16),
       ),
       inc('y'),
       inc('pd', g('rs')),
@@ -955,6 +987,331 @@ func(
           ],
         ),
         inc('y'),
+      ),
+    ];
+  })(),
+);
+
+/* ---------------- util.ts exact small gaussian (gaussSmallPlane / gaussSmallRGBA) ---------------- */
+
+/**
+ * Kernels for K = 3, 5, 7 taps (σ < 1 ⇒ r = ceil(3σ) ≤ 3), the weights k0..k(K−1) passed as
+ * float64 (the Float32Array kernel's values).
+ *
+ *  - gs_hK_1(src, dst, w, h, k…): rows of a float plane: dst[x] = f32(0 + src[c(x − r)]·k0 + … +
+ *    src[c(x + r)]·k(K−1)) — float64 products and sums left to right as convolveRow / hTapsK
+ *    (c = clamp to the row). Interior pairs of elements are the two f64x2 lanes.
+ *  - gs_hK_4(…): the same per channel of RGBA pixels (gaussSmallRGBA's s0..s3), lanes (r, g), (b, a).
+ *  - gs_vK(src, dst, n, h, k…): columns of rows of n floats: s = 0; s = f32(s + src[c(y − r + i)]·ki)
+ *    for i = 0..K−1 (vTapsK / the Float32Array accumulator row of gaussSmallRGBA), walking rows.
+ */
+function gaussFns(K) {
+  const r = (K - 1) >> 1;
+  const kParams = Object.fromEntries(Array.from({ length: K }, (_, i) => ['k' + i, 'f64']));
+  const kvLocals = Object.fromEntries(Array.from({ length: K }, (_, i) => ['kv' + i, 'v128']));
+  const taps = Array.from({ length: K }, (_, i) => i);
+  const splatK = taps.map((i) => set('kv' + i, F64X2.splat(g('k' + i))));
+  /** clamp(x − r + i, 0, wm) */
+  const clampX = (i) => [set('j', I32.add(g('x'), I32.c(i - r))), set('j', i32max(g('j'), I32.c(0))), set('j', i32min(g('j'), g('wm')))];
+  const rowLoop = (pxBytes, body) => [
+    set('wm', I32.sub(g('w'), I32.c(1))),
+    // interior: every tap inside the row ⇔ r ≤ x < w − r (as convolveRow: xa = min(r, w), xb = max(xa, w − r))
+    set('xa', i32min(I32.c(r), g('w'))),
+    set('xb', I32.sub(g('w'), I32.c(r))),
+    set('xb', i32max(g('xa'), g('xb'))),
+    set('rs', I32.mul(g('w'), I32.c(pxBytes))),
+    set('row', g('src')),
+    set('pd', g('dst')),
+    set('y', I32.c(0)),
+    whileDo(I32.lt_s(g('y'), g('h')), body, inc('y'), inc('row', g('rs')), inc('pd', g('rs'))),
+  ];
+  const hLocals = { y: 'i32', x: 'i32', j: 'i32', p: 'i32', row: 'i32', pd: 'i32', rs: 'i32', xa: 'i32', xb: 'i32', wm: 'i32' };
+
+  // one channel: interior pairs as f64x2 lanes (x, x + 1), the rest (ends, odd one) scalar with clamped taps
+  const scalar1 = () => [
+    set('s', F64.c(0)),
+    taps.map((i) => [clampX(i), set('s', F64.add(g('s'), F64.mul(F64.promote(F32.load(I32.add(g('row'), I32.mul(g('j'), I32.c(4))))), g('k' + i))))]),
+    F32.store(I32.add(g('pd'), I32.mul(g('x'), I32.c(4))), F32.demote(g('s'))),
+    inc('x'),
+  ];
+  func(`gs_h${K}_1`, { src: 'i32', dst: 'i32', w: 'i32', h: 'i32', ...kParams }, { ...hLocals, s: 'f64', v: 'v128', ...kvLocals }, [
+    splatK,
+    rowLoop(4, [
+      set('x', I32.c(0)),
+      whileDo(I32.lt_s(g('x'), g('xa')), scalar1()),
+      whileDo(
+        I32.lt_s(I32.add(g('x'), I32.c(1)), g('xb')),
+        set('p', I32.add(g('row'), I32.mul(I32.sub(g('x'), I32.c(r)), I32.c(4)))),
+        set('v', V.zero()),
+        taps.map((i) => set('v', F64X2.add(g('v'), F64X2.mul(F64X2.promoteLow(V.load64z(g('p'), i * 4)), g('kv' + i))))),
+        V.store64lane0(I32.add(g('pd'), I32.mul(g('x'), I32.c(4))), F32X4.demoteZero(g('v'))),
+        inc('x', 2),
+      ),
+      whileDo(I32.lt_s(g('x'), g('w')), scalar1()),
+    ]),
+  ]);
+
+  // RGBA: per pixel two f64x2 sums (r, g) and (b, a); taps clamped at the ends only
+  const tap4 = (i, off) => [
+    set('a', F64X2.add(g('a'), F64X2.mul(F64X2.promoteLow(V.load64z(g('p'), off)), g('kv' + i)))),
+    set('b', F64X2.add(g('b'), F64X2.mul(F64X2.promoteLow(V.load64z(g('p'), off + 8)), g('kv' + i)))),
+  ];
+  const store4 = () => [
+    set('p', I32.add(g('pd'), I32.mul(g('x'), I32.c(16)))),
+    V.store64lane0(g('p'), F32X4.demoteZero(g('a'))),
+    V.store64lane0(g('p'), F32X4.demoteZero(g('b')), 8),
+    inc('x'),
+  ];
+  const clamped4 = () => [
+    set('a', V.zero()),
+    set('b', V.zero()),
+    taps.map((i) => [clampX(i), set('p', I32.add(g('row'), I32.mul(g('j'), I32.c(16)))), tap4(i, 0)]),
+    store4(),
+  ];
+  // interior: one base address (pixel x − r), the taps at constant offsets
+  const inner4 = () => [
+    set('a', V.zero()),
+    set('b', V.zero()),
+    set('p', I32.add(g('row'), I32.mul(I32.sub(g('x'), I32.c(r)), I32.c(16)))),
+    taps.map((i) => tap4(i, i * 16)),
+    store4(),
+  ];
+  func(`gs_h${K}_4`, { src: 'i32', dst: 'i32', w: 'i32', h: 'i32', ...kParams }, { ...hLocals, a: 'v128', b: 'v128', ...kvLocals }, [
+    splatK,
+    rowLoop(16, [
+      set('x', I32.c(0)),
+      whileDo(I32.lt_s(g('x'), g('xa')), clamped4()),
+      whileDo(I32.lt_s(g('x'), g('xb')), inner4()),
+      whileDo(I32.lt_s(g('x'), g('w')), clamped4()),
+    ]),
+  ]);
+
+  // vertical: K row pointers per output row; 4 floats per step (two f64x2 chains), then one at a time
+  const rowsL = Object.fromEntries(taps.map((i) => ['r' + i, 'i32']));
+  const vstep = (load, add, mul, demote, promote, zero, kk, sname, off) => [
+    set(sname, zero()),
+    taps.map((i) => {
+      const t = add(g(sname), mul(load(I32.add(g('r' + i), g('o')), off), kk(i)));
+      return i < K - 1 ? set(sname, promote(demote(t))) : set(sname, t);
+    }),
+  ];
+  func(`gs_v${K}`, { src: 'i32', dst: 'i32', n: 'i32', h: 'i32', ...kParams }, { y: 'i32', j: 'i32', o: 'i32', e: 'i32', e4: 'i32', rs: 'i32', pd: 'i32', s0: 'v128', s1: 'v128', t: 'f64', ...rowsL, ...kvLocals }, [
+    splatK,
+    set('rs', I32.mul(g('n'), I32.c(4))),
+    set('e4', I32.and(g('rs'), I32.c(-16))),
+    set('y', I32.c(0)),
+    whileDo(
+      I32.lt_s(g('y'), g('h')),
+      taps.map((i) => [
+        set('j', I32.add(g('y'), I32.c(i - r))),
+        set('j', i32max(g('j'), I32.c(0))),
+        set('j', i32min(g('j'), I32.sub(g('h'), I32.c(1)))),
+        set('r' + i, I32.add(g('src'), I32.mul(g('j'), g('rs')))),
+      ]),
+      set('pd', I32.add(g('dst'), I32.mul(g('y'), g('rs')))),
+      set('o', I32.c(0)),
+      whileDo(
+        I32.lt_u(g('o'), g('e4')),
+        vstep((p, off) => F64X2.promoteLow(V.load64z(p, off)), F64X2.add, F64X2.mul, F32X4.demoteZero, F64X2.promoteLow, V.zero, (i) => g('kv' + i), 's0', 0),
+        vstep((p, off) => F64X2.promoteLow(V.load64z(p, off)), F64X2.add, F64X2.mul, F32X4.demoteZero, F64X2.promoteLow, V.zero, (i) => g('kv' + i), 's1', 8),
+        V.store64lane0(I32.add(g('pd'), g('o')), F32X4.demoteZero(g('s0'))),
+        V.store64lane0(I32.add(g('pd'), g('o')), F32X4.demoteZero(g('s1')), 8),
+        inc('o', 16),
+      ),
+      whileDo(
+        I32.lt_u(g('o'), g('rs')),
+        vstep((p) => F64.promote(F32.load(p)), F64.add, F64.mul, F32.demote, F64.promote, () => F64.c(0), (i) => g('k' + i), 't', 0),
+        F32.store(I32.add(g('pd'), g('o')), F32.demote(g('t'))),
+        inc('o', 4),
+      ),
+      inc('y'),
+    ),
+  ]);
+}
+
+for (const K of [3, 5, 7]) gaussFns(K);
+
+/* ---------------- light.ts bloom (bloomFused's full-size loops) ---------------- */
+
+Object.assign(I32, { or: op2(0x72), divU: op2(0x6e) });
+Object.assign(F64, { gt: op2(0x64), le: op2(0x65), max: op2(0xa5) });
+const LUMA = [0.2126, 0.7152, 0.0722];
+const CH = ['r', 'g', 'b'];
+/** (a·0.2126 + b·0.7152) + c·0.0722, as the JS expression */
+const luma3 = (a, b, c) => F64.add(F64.add(F64.mul(a, F64.c(LUMA[0])), F64.mul(b, F64.c(LUMA[1]))), F64.mul(c, F64.c(LUMA[2])));
+const byteF = (p, c) => F64.fromU32(I32.load8u(p, c));
+/** byte / 255 from the caller's table of the 256 quotients (float64 v / 255 — the same division, without dividing per pixel) */
+const div255 = (p, c) => F64.load(I32.add(g('inv'), I32.mul(I32.load8u(p, c), I32.c(8))));
+
+// bloomDownsample: the bright pass of every pixel, summed into the cells of the three scales'
+// grids (float32 sums: cell += fround(C·kk)). cxS = per-column byte offset of the cell inside a
+// cell row; gS = the scale's R plane (G at + psS, B at + 2·psS); rbS = cell-row bytes; inv = the
+// table of v / 255 (float64 × 256).
+func(
+  'bloom_ds',
+  {
+    d: 'i32', w: 'i32', h: 'i32', lo: 'f64', hi: 'f64',
+    cx0: 'i32', cx1: 'i32', cx2: 'i32', f0: 'i32', f1: 'i32', f2: 'i32', rb0: 'i32', rb1: 'i32', rb2: 'i32',
+    g0: 'i32', g1: 'i32', g2: 'i32', ps0: 'i32', ps1: 'i32', ps2: 'i32', inv: 'i32',
+  },
+  {
+    y: 'i32', x: 'i32', j: 'i32', q: 'i32', c: 'i32', av: 'i32', flat: 'i32', o0: 'i32', o1: 'i32', o2: 'i32',
+    den: 'f64', a: 'f64', R: 'f64', G: 'f64', B: 'f64', l: 'f64', t: 'f64', s: 'f64', kk: 'f64', vr: 'f64', vg: 'f64', vb: 'f64',
+  },
+  (() => {
+    const SKIP = label();
+    const add3 = (S) => [
+      set('c', I32.add(g('o' + S), I32.load(I32.add(g('cx' + S), g('q'))))),
+      ['vr', 'vg', 'vb'].map((v, k) => {
+        const addr = k === 0 ? g('c') : I32.add(g('c'), k === 1 ? g('ps' + S) : I32.mul(g('ps' + S), I32.c(2)));
+        return F32.store(addr, F32.demote(F64.add(F64.promote(F32.load(addr)), g(v))));
+      }),
+    ];
+    return [
+      // smoothstep(lo, hi, l): if (hi === lo) l < lo ? 0 : 1 else t = clamp01((l − lo) / (hi − lo)), t·t·(3 − 2t)
+      set('flat', F64.eq(g('hi'), g('lo'))),
+      set('den', F64.sub(g('hi'), g('lo'))),
+      set('j', g('d')),
+      whileDo(
+        I32.lt_s(g('y'), g('h')),
+        [0, 1, 2].map((S) => set('o' + S, I32.add(g('g' + S), I32.mul(I32.divU(g('y'), g('f' + S)), g('rb' + S))))),
+        set('x', I32.c(0)),
+        whileDo(
+          I32.lt_s(g('x'), g('w')),
+          block(
+            SKIP,
+            set('av', I32.load8u(g('j'), 3)),
+            brIf(SKIP, I32.eqz(g('av'))), // a === 0
+            set('a', F64.load(I32.add(g('inv'), I32.mul(g('av'), I32.c(8))))),
+            set('R', div255(g('j'), 0)),
+            set('G', div255(g('j'), 1)),
+            set('B', div255(g('j'), 2)),
+            set('l', luma3(g('R'), g('G'), g('B'))),
+            when(g('flat'), set('s', cond('f64', F64.lt(g('l'), g('lo')), [F64.c(0)], [F64.c(1)])), [
+              set('t', F64.div(F64.sub(g('l'), g('lo')), g('den'))),
+              set('t', cond('f64', F64.lt(g('t'), F64.c(0)), [F64.c(0)], [cond('f64', F64.gt(g('t'), F64.c(1)), [F64.c(1)], [g('t')])])),
+              set('s', F64.mul(F64.mul(g('t'), g('t')), F64.sub(F64.c(3), F64.mul(F64.c(2), g('t'))))),
+            ]),
+            set('kk', F64.mul(g('s'), g('a'))),
+            brIf(SKIP, F64.le(g('kk'), F64.c(0))), // adds nothing to any cell
+            set('vr', fround(F64.mul(g('R'), g('kk')))),
+            set('vg', fround(F64.mul(g('G'), g('kk')))),
+            set('vb', fround(F64.mul(g('B'), g('kk')))),
+            set('q', I32.mul(g('x'), I32.c(4))),
+            add3(0),
+            add3(1),
+            add3(2),
+          ),
+          inc('x'),
+          inc('j', 4),
+        ),
+        inc('y'),
+      ),
+    ];
+  })(),
+);
+
+// lerpRowPair: horizontal halves of the bilinear taps of every output column between grid rows
+// p0 / p1 (byte addresses): T = a0 + (a1 − a0)·tx, D = (b0 + (b1 − b0)·tx) − T. xi / xi1 = byte
+// offsets of the left / right cell, xt = float32 x-fractions; T, D float64.
+func(
+  'bloom_lerp',
+  { p0: 'i32', p1: 'i32', xi: 'i32', xi1: 'i32', xt: 'i32', T: 'i32', D: 'i32', w: 'i32' },
+  { x: 'i32', q: 'i32', i: 'i32', i1: 'i32', tx: 'f64', a0: 'f64', b0: 'f64', top: 'f64' },
+  [
+    whileDo(
+      I32.lt_s(g('x'), g('w')),
+      set('q', I32.mul(g('x'), I32.c(4))),
+      set('i', I32.load(I32.add(g('xi'), g('q')))),
+      set('i1', I32.load(I32.add(g('xi1'), g('q')))),
+      set('tx', F64.promote(F32.load(I32.add(g('xt'), g('q'))))),
+      set('a0', F64.promote(F32.load(I32.add(g('p0'), g('i'))))),
+      set('b0', F64.promote(F32.load(I32.add(g('p1'), g('i'))))),
+      set('top', F64.add(g('a0'), F64.mul(F64.sub(F64.promote(F32.load(I32.add(g('p0'), g('i1')))), g('a0')), g('tx')))),
+      set('q', I32.mul(g('x'), I32.c(8))),
+      F64.store(I32.add(g('T'), g('q')), g('top')),
+      F64.store(I32.add(g('D'), g('q')), F64.sub(F64.add(g('b0'), F64.mul(F64.sub(F64.promote(F32.load(I32.add(g('p1'), g('i1')))), g('b0')), g('tx'))), g('top'))),
+      inc('x'),
+    ),
+  ],
+);
+
+// bloomRow + screenAt: one output row (RGBA bytes at d) = the three upsampled scales summed in
+// float32 (scale S: mS = 1 → direct full-size rows at pr/pg/pbS, else T + D·tyS from the T/D block
+// at tdS: tr, dr, tg, dg, tb, db, w float64 each), optional saturation, screened onto the pixel.
+func(
+  'bloom_row',
+  (() => {
+    const p = { d: 'i32', w: 'i32', w0: 'f64', w1: 'f64', w2: 'f64', desat: 'i32', sat: 'f64', k: 'f64', spill: 'i32', inv: 'i32' };
+    for (const S of [0, 1, 2]) Object.assign(p, { ['m' + S]: 'i32', ['ty' + S]: 'f64', ['td' + S]: 'i32', ['pr' + S]: 'i32', ['pg' + S]: 'i32', ['pb' + S]: 'i32' });
+    return p;
+  })(),
+  (() => {
+    const l = { x: 'i32', j: 'i32', q4: 'i32', q8: 'i32', wb: 'i32', c3: 'i32' };
+    for (const S of [0, 1, 2]) for (const n of ['tr', 'dr', 'tg', 'dg', 'tb', 'db']) l[n + S] = 'i32';
+    for (const n of ['gr', 'gg', 'gb', 'l', 'lr', 'lg', 'lb', 'a', 'cv', 'pr', 'pg', 'pb', 'nr', 'ng', 'nb', 'lm', 'na']) l[n] = 'f64';
+    return l;
+  })(),
+  (() => {
+    const DONE = label();
+    /** value of scale S, channel c, already multiplied by the scale's weight (before the fround of the sum) */
+    const direct = (S, c) => F64.mul(F64.promote(F32.load(I32.add(g('p' + CH[c] + S), g('q4')))), g('w' + S));
+    const interp = (S, c) =>
+      F64.mul(fround(F64.add(F64.load(I32.add(g('t' + CH[c] + S), g('q8'))), F64.mul(F64.load(I32.add(g('d' + CH[c] + S), g('q8'))), g('ty' + S)))), g('w' + S));
+    const scale = (S) =>
+      when(
+        g('m' + S),
+        CH.map((c, k) => set('g' + c, S === 0 ? fround(direct(S, k)) : fround(F64.add(g('g' + c), direct(S, k))))),
+        CH.map((c, k) => set('g' + c, S === 0 ? fround(interp(S, k)) : fround(F64.add(g('g' + c), interp(S, k))))),
+      );
+    const L = ['lr', 'lg', 'lb'];
+    return [
+      set('wb', I32.mul(g('w'), I32.c(8))),
+      [0, 1, 2].map((S) => ['tr', 'dr', 'tg', 'dg', 'tb', 'db'].map((n, i) => set(n + S, I32.add(g('td' + S), I32.mul(g('wb'), I32.c(i)))))),
+      set('j', g('d')),
+      whileDo(
+        I32.lt_s(g('x'), g('w')),
+        set('q4', I32.mul(g('x'), I32.c(4))),
+        set('q8', I32.mul(g('x'), I32.c(8))),
+        scale(0),
+        scale(1),
+        scale(2),
+        when(g('desat'), [
+          set('l', luma3(g('gr'), g('gg'), g('gb'))),
+          CH.map((c) => set('g' + c, fround(F64.max(F64.c(0), F64.add(g('l'), F64.mul(F64.sub(g('g' + c), g('l')), g('sat'))))))),
+        ]),
+        // screenAt(d, j, gr·k, gg·k, gb·k, spill)
+        CH.map((c, i) => set(L[i], F64.mul(g('g' + c), g('k')))),
+        block(
+          DONE,
+          brIf(DONE, I32.and(I32.and(F64.lt(g('lr'), F64.c(0.001)), F64.lt(g('lg'), F64.c(0.001))), F64.lt(g('lb'), F64.c(0.001)))),
+          L.map((n) => set(n, cond('f64', F64.gt(g(n), F64.c(1)), [F64.c(1)], [g(n)]))),
+          set('a', div255(g('j'), 3)),
+          when(I32.or(F64.ge(g('a'), F64.c(0.999)), I32.eqz(g('spill'))), [
+            brIf(DONE, F64.eq(g('a'), F64.c(0))),
+            // d[j + c] += (255 − d[j + c])·L
+            L.map((n, c) => [set('cv', byteF(g('j'), c)), I32.store8(g('j'), u8(F64.add(g('cv'), F64.mul(F64.sub(F64.c(255), g('cv')), g(n)))), c)]),
+            br(DONE),
+          ]),
+          // premultiplied screen: Cp' = Cp + L(1 − Cp), A' = A + max(L)(1 − A)
+          ['pr', 'pg', 'pb'].map((n, c) => set(n, F64.mul(div255(g('j'), c), g('a')))),
+          ['nr', 'ng', 'nb'].map((n, c) => set(n, F64.add(g(['pr', 'pg', 'pb'][c]), F64.mul(g(L[c]), F64.sub(F64.c(1), g(['pr', 'pg', 'pb'][c])))))),
+          set(
+            'lm',
+            cond(
+              'f64',
+              F64.gt(g('lr'), g('lg')),
+              [cond('f64', F64.gt(g('lr'), g('lb')), [g('lr')], [g('lb')])],
+              [cond('f64', F64.gt(g('lg'), g('lb')), [g('lg')], [g('lb')])],
+            ),
+          ),
+          set('na', F64.add(g('a'), F64.mul(g('lm'), F64.sub(F64.c(1), g('a'))))),
+          brIf(DONE, F64.le(g('na'), F64.c(0.002))),
+          ['nr', 'ng', 'nb'].map((n, c) => I32.store8(g('j'), u8(F64.mul(F64.div(g(n), g('na')), F64.c(255))), c)),
+          I32.store8(g('j'), u8(F64.mul(g('na'), F64.c(255))), 3),
+        ),
+        inc('x'),
+        inc('j', 4),
       ),
     ];
   })(),
