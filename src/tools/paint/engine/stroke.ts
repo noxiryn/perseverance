@@ -66,6 +66,19 @@ export class BrushStroke {
     return this.resolve(this.spacer.start(p));
   }
 
+  /**
+   * Start the stroke at `p` WITHOUT stamping there (Shift-click polylines continue from the
+   * previous stroke's end point, which already has a dab — stamping it again would leave a
+   * darker blob at every joint with soft or low-flow brushes). Follow with lineTo().
+   */
+  beginAt(p: InputPoint): void {
+    this.current = { ...p };
+    this.stab.push(p);
+    this.smoother.push(p);
+    this.pending = null;
+    this.spacer.start(p);
+  }
+
   private feed(points: InputPoint[]): Dab[] {
     const out: DabPoint[] = [];
     for (const pt of points) {

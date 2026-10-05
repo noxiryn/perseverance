@@ -76,7 +76,8 @@ export function PatternFillEditor({
 }: {
   value: Extract<FillContent, { type: 'pattern' }>;
   onChange: (f: FillContent) => void;
-  onCommit: (f: FillContent) => void;
+  /** `discrete` is true for one-off picks (the asset select), false at the end of a scrub. */
+  onCommit: (f: FillContent, discrete: boolean) => void;
 }) {
   const list = useRegistry(assets);
   const options = useMemo(() => {
@@ -84,17 +85,11 @@ export function PatternFillEditor({
     return patternAssets().map((a) => ({ value: a.id, label: a.name }));
   }, [list]);
   if (!options.length) return <div className="ui-empty">No pattern assets are available yet.</div>;
-  const set = (f: FillContent, commit: boolean) => (commit ? onCommit(f) : onChange(f));
   return (
     <div className="layers-pattern-editor">
       <AssetPreview assetId={value.assetId} />
       <div className="layers-col" style={{ flex: 1, minWidth: 0 }}>
-        <Select
-          value={value.assetId}
-          options={options}
-          width="100%"
-          onChange={(assetId) => set({ ...value, assetId, params: undefined }, true)}
-        />
+        <Select value={value.assetId} options={options} width="100%" onChange={(assetId) => onCommit({ ...value, assetId, params: undefined }, true)} />
         <div className="ui-row">
           <span className="ui-label">Scale</span>
           <NumberField
@@ -105,8 +100,8 @@ export function PatternFillEditor({
             displayScale={100}
             unit="%"
             width={72}
-            onChange={(v) => set({ ...value, scale: v }, false)}
-            onCommit={(v) => set({ ...value, scale: v }, true)}
+            onChange={(v) => onChange({ ...value, scale: v })}
+            onCommit={(v) => onCommit({ ...value, scale: v }, false)}
           />
         </div>
       </div>
@@ -166,7 +161,7 @@ function FillLayerDialog({ close, kind }: { close: (r?: string) => void; kind: F
         {fill.type === 'gradient' && (
           <GradientEditor value={fill.gradient} onChange={(g) => update({ type: 'gradient', gradient: g })} onCommit={(g) => update({ type: 'gradient', gradient: g })} />
         )}
-        {fill.type === 'pattern' && <PatternFillEditor value={fill} onChange={update} onCommit={update} />}
+        {fill.type === 'pattern' && <PatternFillEditor value={fill} onChange={update} onCommit={(f) => update(f)} />}
       </div>
     </Dialog>
   );

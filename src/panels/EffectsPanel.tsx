@@ -3,18 +3,20 @@
  * enable toggles, expandable ParamEditors (live preview + coalesced commits), drag reorder,
  * duplicate/delete, "Add effect" menu, style presets and copy/paste/clear style.
  *
- * The list is shown like the layer stack: the TOP row is drawn last (on top). LayerEffect arrays
- * are stored bottom → top, so rows are rendered in reverse array order.
+ * Rows are listed in the order the renderer really draws them (top row = drawn last): effects
+ * drawn over the content, a "Layer content" divider, then effects drawn behind it. Effect types
+ * have a fixed order; only effects of the same type (e.g. a double stroke) can be reordered.
  */
 import { useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, ClipboardCopy, ClipboardPaste, CopyPlus, Eraser, GripVertical, Plus, RotateCcw, Sparkle, Trash2 } from 'lucide-react';
-import type { Layer, LayerEffect } from '../core/types';
+import type { Layer } from '../core/types';
 import { useEditor } from '../state/editor';
 import { effects, useRegistry } from '../registry';
 import { defaultParams, resolveParams } from '../filters/engine';
 import { Checkbox, IconButton, ParamEditor, Section, showContextMenu, showMenuAt, type MenuItem } from '../ui/controls';
 import * as ops from './layerOps';
 import { STYLE_PRESETS, effectMenuIds, effectName, type StylePreset } from './effectPresets';
+import { effectPlacement, effectsTopDown, reorderTarget, type OrderedEffect } from './effectOrder';
 import './panels.css';
 
 const cls = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
@@ -50,9 +52,11 @@ function addEffectItems(): MenuItem[] {
   return effectMenuIds().map((id) => ({ label: effectName(id), run: () => void ops.addEffect(id, undefined, { showPanel: false }) }));
 }
 
-/** Drag state in DISPLAY rows (0 = top row). */
-interface DragRows {
+/** Pending drop while dragging an effect: place `from` above / below effect `ref` (array indices). */
+interface DropState {
   from: number;
+  ref: number;
+  where: 'above' | 'below';
   to: number;
 }
 
@@ -61,47 +65,58 @@ function EffectsEditor({ layer }: { layer: Layer }) {
   const clip = ops.useLayersUI((s) => s.styleClipboard);
   const setExpanded = ops.useLayersUI((s) => s.setExpandedEffect);
   const listRef = useRef<HTMLDivElement>(null);
-  const [drag, setDrag] = useState<DragRows | null>(null);
+  const [drag, setDrag] = useState<{ from: number; drop: DropState | null } | null>(null);
   const list = layer.effects;
   const n = list.length;
-  /** display row ↔ array index */
-  const toIndex = (row: number) => n - 1 - row;
+  const rows = effectsTopDown(list);
+  const bucketSize = new Map<string, number>();
+  for (const r of rows) bucketSize.set(r.bucket, (bucketSize.get(r.bucket) ?? 0) + 1);
+  const firstBehind = rows.findIndex((r) => r.place.stage === 'behind');
+  const dividerAt = firstBehind < 0 ? rows.length : firstBehind;
 
-  const startDrag = (e: React.PointerEvent, from: number) => {
-    if (e.button !== 0) return;
+  const startDrag = (e: React.PointerEvent, item: OrderedEffect) => {
+    if (e.button !== 0 || (bucketSize.get(item.bucket) ?? 0) < 2) return;
     e.preventDefault();
-    let to = from;
+    const from = item.index;
+    let drop: DropState | null = null;
     let moved = false;
     const startY = e.clientY;
+    setDrag({ from, drop: null });
     const move = (ev: PointerEvent) => {
       if (!moved && Math.abs(ev.clientY - startY) < 3) return;
       moved = true;
-      const items = [...(listRef.current?.querySelectorAll<HTMLElement>('[data-fx-row]') ?? [])];
-      let slot = items.length;
-      for (let i = 0; i < items.length; i++) {
-        const r = items[i].getBoundingClientRect();
-        if (ev.clientY < r.top + r.height / 2) {
-          slot = i;
-          break;
+      // Only rows of the same effect type are valid targets.
+      const els = [...(listRef.current?.querySelectorAll<HTMLElement>('[data-fx-index]') ?? [])].filter(
+        (el) => el.dataset.fxBucket === item.bucket && Number(el.dataset.fxIndex) !== from,
+      );
+      drop = null;
+      if (els.length) {
+        let ref = Number(els[els.length - 1].dataset.fxIndex);
+        let where: 'above' | 'below' = 'below';
+        for (const el of els) {
+          const r = el.getBoundingClientRect();
+          if (ev.clientY < r.top + r.height / 2) {
+            ref = Number(el.dataset.fxIndex);
+            where = 'above';
+            break;
+          }
         }
+        const to = reorderTarget(list, effectPlacement, from, ref, where);
+        if (to !== null) drop = { from, ref, where, to };
       }
-      // Insertion slot → final row.
-      to = slot > from ? slot - 1 : slot;
-      setDrag({ from, to });
+      setDrag({ from, drop });
     };
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
       window.removeEventListener('pointercancel', up);
       setDrag(null);
-      if (moved && to !== from) ops.moveEffect(layer.id, toIndex(from), toIndex(to));
+      if (moved && drop) ops.moveEffect(layer.id, drop.from, drop.to);
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
     window.addEventListener('pointercancel', up);
   };
-
-  const rows = list.map((fx, i) => ({ fx, index: i })).reverse();
 
   return (
     <div className="layers-fx">
@@ -124,21 +139,24 @@ function EffectsEditor({ layer }: { layer: Layer }) {
           </div>
         ) : (
           <div className="layers-fx-list" ref={listRef}>
-            {rows.map(({ fx, index }, row) => (
-              <EffectItem
-                key={fx.id}
-                layer={layer}
-                fx={fx}
-                index={index}
-                row={row}
-                open={expanded === fx.id}
-                onToggleOpen={() => setExpanded(expanded === fx.id ? null : fx.id)}
-                onGrip={(e) => startDrag(e, row)}
-                dragging={drag?.from === row}
-                dropBefore={!!drag && drag.to !== drag.from && drag.to === row && drag.to < drag.from}
-                dropAfter={!!drag && drag.to !== drag.from && drag.to === row && drag.to > drag.from}
-              />
+            {rows.map((item, row) => (
+              <div key={item.fx.id} style={{ display: 'contents' }}>
+                {row === dividerAt && <ContentDivider />}
+                <EffectItem
+                  layer={layer}
+                  item={item}
+                  rows={rows}
+                  sortable={(bucketSize.get(item.bucket) ?? 0) > 1}
+                  open={expanded === item.fx.id}
+                  onToggleOpen={() => setExpanded(expanded === item.fx.id ? null : item.fx.id)}
+                  onGrip={(e) => startDrag(e, item)}
+                  dragging={drag?.from === item.index}
+                  dropBefore={drag?.drop?.ref === item.index && drag.drop.where === 'above'}
+                  dropAfter={drag?.drop?.ref === item.index && drag.drop.where === 'below'}
+                />
+              </div>
             ))}
+            {dividerAt === rows.length && <ContentDivider />}
           </div>
         )}
         <Section title="Style Presets">
@@ -150,6 +168,15 @@ function EffectsEditor({ layer }: { layer: Layer }) {
           <div className="layers-note">Click a preset to add its effects to the current style · Alt-click replaces the style.</div>
         </Section>
       </div>
+    </div>
+  );
+}
+
+/** Marks where the layer's own pixels sit between the effects drawn above and behind them. */
+function ContentDivider() {
+  return (
+    <div className="layers-fx-content" title="Effects listed above this line are drawn over the layer content; effects below it are drawn behind it">
+      <span>Layer content</span>
     </div>
   );
 }
@@ -170,11 +197,18 @@ function PresetTile({ preset: p }: { preset: StylePreset }) {
   );
 }
 
+/** Array index of the same-type effect displayed directly above (-1) or below (+1) `item`. */
+function neighbor(rows: OrderedEffect[], item: OrderedEffect, dir: -1 | 1): OrderedEffect | null {
+  const at = rows.indexOf(item);
+  for (let i = at + dir; i >= 0 && i < rows.length; i += dir) if (rows[i].bucket === item.bucket) return rows[i];
+  return null;
+}
+
 function EffectItem({
   layer,
-  fx,
-  index,
-  row,
+  item,
+  rows,
+  sortable,
   open,
   onToggleOpen,
   onGrip,
@@ -183,11 +217,10 @@ function EffectItem({
   dropAfter,
 }: {
   layer: Layer;
-  fx: LayerEffect;
-  /** Index in layer.effects (0 = bottom). */
-  index: number;
-  /** Display row (0 = top). */
-  row: number;
+  item: OrderedEffect;
+  rows: OrderedEffect[];
+  /** Another effect of the same type exists (only those can be reordered). */
+  sortable: boolean;
   open: boolean;
   onToggleOpen: () => void;
   onGrip: (e: React.PointerEvent) => void;
@@ -195,12 +228,18 @@ function EffectItem({
   dropBefore: boolean;
   dropAfter: boolean;
 }) {
+  const { fx, index } = item;
   const def = effects.get(fx.effectId);
   const name = effectName(fx.effectId);
   const values = def ? resolveParams(def, fx.params) : fx.params;
   const color = typeof values.color === 'string' ? values.color : null;
-  const label = `Edit ${name}`;
-  const n = layer.effects.length;
+  const up = neighbor(rows, item, -1);
+  const down = neighbor(rows, item, 1);
+  const moveNext = (ref: OrderedEffect | null, where: 'above' | 'below') => {
+    if (!ref) return;
+    const to = reorderTarget(layer.effects, effectPlacement, index, ref.index, where);
+    if (to !== null) ops.moveEffect(layer.id, index, to);
+  };
 
   const menu = (): MenuItem[] => [
     { label: open ? 'Collapse' : 'Edit Parameters', run: onToggleOpen },
@@ -213,8 +252,8 @@ function EffectItem({
       run: () => def && ops.updateEffect(layer.id, fx.id, (e) => (e.params = defaultParams(def.params)), 'commit', `Reset ${name}`),
     },
     { separator: true },
-    { label: 'Move Up', disabled: index >= n - 1, run: () => ops.moveEffect(layer.id, index, index + 1) },
-    { label: 'Move Down', disabled: index <= 0, run: () => ops.moveEffect(layer.id, index, index - 1) },
+    { label: 'Move Up', disabled: !up, run: () => moveNext(up, 'above') },
+    { label: 'Move Down', disabled: !down, run: () => moveNext(down, 'below') },
     { separator: true },
     { label: 'Delete', icon: Trash2, run: () => ops.removeEffect(layer.id, fx.id) },
   ];
@@ -222,17 +261,26 @@ function EffectItem({
   return (
     <div
       className={cls('layers-fx-item', open && 'open', !fx.enabled && 'off', dragging && 'dragging', dropBefore && 'drop-before', dropAfter && 'drop-after')}
-      data-fx-row={row}
+      data-fx-index={index}
+      data-fx-bucket={item.bucket}
       onContextMenu={(e) => showContextMenu(e, menu())}
     >
       <div className="layers-fx-item-head">
-        <span className="layers-fx-grip" title="Drag to reorder (rows higher in the list are drawn on top)" onPointerDown={onGrip}>
+        <span
+          className={cls('layers-fx-grip', !sortable && 'fixed')}
+          title={
+            sortable
+              ? `Drag to change which ${name} is drawn on top (the upper row is drawn over the lower one)`
+              : 'Effects are drawn in a fixed order by type — only effects of the same type can be reordered'
+          }
+          onPointerDown={onGrip}
+        >
           <GripVertical size={13} />
         </span>
         <Checkbox checked={fx.enabled} onChange={() => ops.toggleEffect(layer.id, fx.id)} title={fx.enabled ? 'Hide effect' : 'Show effect'} />
-        {color && <span className="layers-fx-swatch" style={{ background: color }} />}
         <span className="layers-fx-name" onClick={onToggleOpen} title={def ? `Click to ${open ? 'collapse' : 'edit'}` : 'Effect not available in this build'}>
-          {name}
+          <span className="layers-fx-name-text">{name}</span>
+          {color && <span className="layers-fx-dot" style={{ background: color }} title={`Color ${color}`} />}
         </span>
         <IconButton icon={CopyPlus} size="sm" title="Duplicate effect" onClick={() => ops.duplicateEffect(layer.id, fx.id)} />
         <IconButton icon={Trash2} size="sm" title="Delete effect" onClick={() => ops.removeEffect(layer.id, fx.id)} />
@@ -245,8 +293,10 @@ function EffectItem({
               defs={def.params}
               values={values}
               compact
-              onChange={(_k, _v, all) => ops.updateEffect(layer.id, fx.id, (e) => (e.params = all), 'preview', label)}
-              onCommit={(_k, _v, all) => ops.updateEffect(layer.id, fx.id, (e) => (e.params = all), 'commit', label)}
+              onChange={(k, _v, all) => ops.updateEffect(layer.id, fx.id, (e) => (e.params = all), 'preview', ops.paramLabel(name, def.params, k))}
+              onCommit={(k, _v, all) =>
+                ops.updateEffect(layer.id, fx.id, (e) => (e.params = all), ops.paramCommitPhase(def.params, k), ops.paramLabel(name, def.params, k))
+              }
             />
           ) : (
             <div className="layers-note">“{name}” is not available in this build — it is kept with the layer and will render once the effect is installed.</div>

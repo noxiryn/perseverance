@@ -7,7 +7,7 @@ import { panels } from '../registry';
 import { LayersPanel, layersPanelMenu } from './LayersPanel';
 import { PropertiesPanel } from './PropertiesPanel';
 import { EffectsPanel } from './EffectsPanel';
-import { HistoryPanel } from './HistoryPanel';
+import { HistoryPanel, startHistorySnapshots } from './HistoryPanel';
 import { NavigatorPanel } from './NavigatorPanel';
 import { registerLayerCommands } from './commands';
 import { useEditor } from '../state/editor';
@@ -73,3 +73,4 @@ panels.register({
 });
 
 registerLayerCommands();
+startHistorySnapshots();

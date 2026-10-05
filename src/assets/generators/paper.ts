@@ -101,22 +101,27 @@ const grungePaper = defineAsset(
       // stains + burnt edges, computed on a reduced grid
       const { fw, fh, s } = fieldDims(W, H, 140_000);
       const up = s * u;
-      const f = noiseField(fw, fh, up, { seed: seed + 1, freq: 3.4, octaves: 5, warp: 0.9 });
-      const f2 = noiseField(fw, fh, up, { seed: seed + 2, freq: 1.6, octaves: 3 });
+      const f = noiseField(fw, fh, up, { seed: seed + 1, freq: 1.7, octaves: 5, warp: 0.7 });
+      const f2 = noiseField(fw, fh, up, { seed: seed + 2, freq: 2.4, octaves: 4 });
+      const tint = noiseField(fw, fh, up, { seed: seed + 3, freq: 0.9, octaves: 3 });
       const M = Math.min(fw, fh);
-      const t = 0.42 - stains * 0.32;
-      const stain = { r: 112, g: 82, b: 48 };
-      const burn = { r: 38, g: 26, b: 16 };
+      const t = 0.5 - stains * 0.22;
+      const stain = { r: 120, g: 88, b: 52 };
+      const burn = { r: 46, g: 30, b: 18 };
       const layer = paintField(fw, fh, (i, x, y, px, o) => {
         const v = f[i];
-        const inside = smoothstep(t, t + 0.05, v);
-        const d = (v - t) / 0.02;
-        const ring = Math.exp(-d * d);
-        const aS = stains * (inside * 0.12 + ring * 0.26);
+        // tea stains: faint fill + a darker, slightly sharper tide line at the rim
+        const inside = smoothstep(t, t + 0.06, v);
+        const d = (v - t - 0.012) / 0.018;
+        const ring = Math.exp(-d * d) * smoothstep(t - 0.02, t + 0.01, v);
+        // broad warm discoloration
+        const age = smoothstep(-0.2, 0.7, tint[i]) * 0.12;
+        const aS = stains * (inside * 0.1 + ring * 0.22 + age);
+        // irregular burnt edges
         const e = Math.min(x, fw - 1 - x, y, fh - 1 - y) / M;
-        const bw = 0.07 + 0.08 * (f2[i] * 0.5 + 0.5);
+        const bw = 0.025 + 0.11 * smoothstep(-0.5, 0.6, f2[i]);
         const k = 1 - smoothstep(0, bw, e);
-        const aB = edges * k * k * 0.85;
+        const aB = edges * k * k * 0.9;
         const a = 1 - (1 - aS) * (1 - aB);
         const wb = aB / (aS + aB + 1e-6);
         px[o] = stain.r + (burn.r - stain.r) * wb;
@@ -358,12 +363,12 @@ function drawFold(ctx: CanvasRenderingContext2D, a: Pt, b: Pt, u: number, streng
   const nx = -dy / L;
   const ny = dx / L;
   const lit = r() < 0.5 ? 1 : -1;
-  const spread = (40 + r() * 50) * u;
+  const spread = (30 + r() * 70) * u;
   // broad soft shading on both sides of the fold
   for (const side of [1, -1]) {
     const g = ctx.createLinearGradient(a.x, a.y, a.x + nx * spread * side, a.y + ny * spread * side);
     const col = side === lit ? '#ffffff' : '#000000';
-    const amt = (side === lit ? 0.2 : 0.24) * strength;
+    const amt = (side === lit ? 0.32 : 0.38) * strength;
     g.addColorStop(0, rgba(col, amt));
     g.addColorStop(0.35, rgba(col, amt * 0.4));
     g.addColorStop(1, rgba(col, 0));
@@ -389,16 +394,16 @@ function drawFold(ctx: CanvasRenderingContext2D, a: Pt, b: Pt, u: number, streng
     const y0 = a.y + dy * t0;
     const x1 = a.x + dx * t1;
     const y1 = a.y + dy * t1;
-    ctx.strokeStyle = rgba('#000000', 0.6 * strength * w);
-    ctx.lineWidth = Math.max(0.7, 1.4 * u);
+    ctx.strokeStyle = rgba('#000000', 0.75 * strength * w);
+    ctx.lineWidth = Math.max(0.8, 1.8 * u);
     ctx.beginPath();
     ctx.moveTo(x0, y0);
     ctx.lineTo(x1, y1);
     ctx.stroke();
     const ox = nx * lit * 1.7 * u;
     const oy = ny * lit * 1.7 * u;
-    ctx.strokeStyle = rgba('#ffffff', 0.7 * strength * (1.1 - w * 0.5));
-    ctx.lineWidth = Math.max(0.6, 1.1 * u);
+    ctx.strokeStyle = rgba('#ffffff', 0.85 * strength * (1.1 - w * 0.5));
+    ctx.lineWidth = Math.max(0.7, 1.5 * u);
     ctx.beginPath();
     ctx.moveTo(x0 + ox, y0 + oy);
     ctx.lineTo(x1 + ox, y1 + oy);
@@ -442,7 +447,7 @@ const foldCreases = defineAsset(
     defaultOpacity: 1,
     params: [
       P.num('folds', 'Folds', 1, 12, 3),
-      P.pct('strength', 'Strength', 0.6),
+      P.pct('strength', 'Strength', 0.7),
       P.select('style', 'Layout', ['grid', 'random', 'diagonal'], 'grid'),
       P.pct('wear', 'Wrinkles', 0.5),
       P.seed(4),
@@ -450,18 +455,17 @@ const foldCreases = defineAsset(
     generate(p, { width: W, height: H }) {
       const u = unitOf(W, H);
       const seed = num(p, 'seed', 4);
-      const strength = num(p, 'strength', 0.6);
+      const strength = num(p, 'strength', 0.7);
       const folds = Math.max(1, Math.round(num(p, 'folds', 3)));
       const style = str(p, 'style', 'grid');
       const wear = num(p, 'wear', 0.5);
       const r = makeRand(seed);
       const [c, ctx] = newCanvas(W, H);
-      // neutral gray with faint wrinkle relief
+      // neutral 50% gray (invisible in overlay) with faint, soft wrinkle relief
       const { fw, fh, s } = fieldDims(W, H, 60_000);
-      const f = noiseField(fw, fh, s * u, { seed, freq: 7, octaves: 4, kind: 'ridged' });
-      const g2 = noiseField(fw, fh, s * u, { seed: seed + 1, freq: 2.5, octaves: 3 });
+      const f = noiseField(fw, fh, s * u, { seed, freq: 2.2, octaves: 5, gain: 0.55 });
       const bg = paintField(fw, fh, (i, _x, _y, px, o) => {
-        const v = 128 + ((f[i] - 0.55) * 26 + g2[i] * 10) * wear;
+        const v = 128 + f[i] * 14 * wear;
         px[o] = px[o + 1] = px[o + 2] = v;
         px[o + 3] = 255;
       });

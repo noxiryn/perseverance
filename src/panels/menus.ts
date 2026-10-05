@@ -1,6 +1,7 @@
 /** Menu item builders shared by the Layers / Effects panels (context menus, footer menus). */
 import {
   Contrast,
+  Copy,
   CopyPlus,
   CornerLeftDown,
   Eye,
@@ -100,6 +101,7 @@ export function layerContextMenu(layer: Layer, startRename: (id: ID) => void): M
     { label: multi ? `${sel.length} layers selected` : layer.name, heading: true },
     { label: 'Rename Layer…', icon: Pencil, run: () => startRename(layer.id), disabled: multi },
     { label: multi ? 'Duplicate Layers' : 'Duplicate Layer', icon: CopyPlus, shortcut: 'Ctrl+J', run: () => void ops.duplicateLayers() },
+    ...(!multi && layer.type === 'raster' && s.doc.selection ? [{ label: 'New Layer via Copy', icon: Copy, run: () => void ops.layerViaCopy() }] : []),
     { label: multi ? 'Delete Layers' : 'Delete Layer', icon: Trash2, run: () => void ops.deleteLayers() },
     { separator: true },
     { label: 'Group Layers', icon: FolderPlus, shortcut: 'Ctrl+G', run: () => void ops.groupSelected() },

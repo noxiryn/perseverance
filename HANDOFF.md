@@ -21,7 +21,7 @@ ARCHITECTURE.md §3 for each module's full feature list).
 | layers-panels (Layers/Properties/Effects/History/Navigator, Layer menu) | `src/panels` | fixing review findings |
 | paint (brush engine, paint tools, brushes panel) | `src/tools/paint` | fixing review findings |
 | adjustments | `src/filters/adjustments` | fixing review findings |
-| fonts-color (85 bundled fonts, swatches/color/fonts panels) | `src/fonts`, `src/presets` | fixing review findings |
+| fonts-color (86 bundled fonts, swatches/color/fonts panels) | `src/fonts`, `src/presets` | **done** |
 | renderer (compositor, text, shapes, layer styles) | `src/render` | in review |
 | viewport-select (canvas, selection/transform/crop tools, Select/View menus) | `src/viewport` | in review |
 | roblox (Pose Studio, remove bg, styler, safe zones, preview) | `src/roblox` | in review |
@@ -40,6 +40,12 @@ starting point; don't rewrite modules from scratch.
 2. **Pending core requests** (from module reports):
    - viewport should read `getPref('checkerSize', 8)` from `src/ui/shell/prefs.ts` for the checkerboard.
    - (done) `isTypingTarget` text-only; (done) `desktop.setZoomFactor` bridge in preload.
+   - assets (`src/assets/lib/fonts.ts`) imports @fontsource CSS directly → duplicate faces + .woff in dist;
+     switch it to `ensureFont()` from `src/fonts/loader.ts`.
+   - renderer: `invalidateRenderCache(layerId)` should also drop cached text layout (fonts loader currently
+     imports `resetTextCaches` from `src/render/text.ts`); optionally pass a text sample to `ensureFont`.
+   - type tool / store: expose "is on-canvas text editing active" + a way to refocus the text editor
+     (fonts `apply.ts` currently peeks at the textarea class).
 3. **End-to-end smoke test**: `npx vite --port 5300 &` then `node scripts/smoke.mjs --url http://localhost:5300`
    (exercises templates, every command, tool and panel; screenshots in `screenshots-tmp/`).
    Make sure the viewport element carries `data-viewport` so the smoke test drags on the canvas.

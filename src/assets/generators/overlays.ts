@@ -135,15 +135,15 @@ const filmScratches = defineAsset(
         ctx.stroke(path);
       }
       // 2. faint long horizontal lines (print/fold marks)
-      const nH = Math.round((2 + 8 * density) * lines);
+      const nH = Math.round((3 + 9 * density) * lines);
       {
         const path = new Path2D();
         for (let i = 0; i < nH; i++) {
           const y = r() * H;
-          const x0 = r() < 0.6 ? -10 * u : r() * W * 0.6;
-          hairline(path, x0, y, W * (0.3 + r() * 0.9), false, u, r, 0.3);
+          const x0 = r() < 0.75 ? -10 * u : r() * W * 0.6;
+          hairline(path, x0, y, W * (0.5 + r() * 0.8), false, u, r, 0.25);
         }
-        ctx.strokeStyle = rgba(color, 0.16);
+        ctx.strokeStyle = rgba(color, 0.24);
         ctx.lineWidth = Math.max(0.5, 0.9 * u);
         ctx.stroke(path);
       }
@@ -169,60 +169,59 @@ const filmScratches = defineAsset(
         ctx.lineWidth = Math.max(0.5, 0.8 * u);
         ctx.stroke(path);
       }
-      // 4. dust: specks, flecks and curly hairs
+      // 4. dense fine hairline scratches in every direction (worn emulsion)
+      {
+        const n = Math.round(520 * density * area);
+        for (let bkt = 0; bkt < 3; bkt++) {
+          const path = new Path2D();
+          for (let i = 0; i < n / 3; i++) {
+            const x = r() * W;
+            const y = r() * H;
+            // mostly diagonal-ish strokes, a few in random directions
+            const a = r() < 0.7 ? (r() < 0.5 ? 1 : -1) * (0.6 + r() * 0.7) + (r() < 0.5 ? 0 : Math.PI) : r() * TAU;
+            const L = u * (6 + r() * r() * 90);
+            const bend = (r() - 0.5) * L * 0.18;
+            const ex = x + Math.cos(a) * L;
+            const ey = y + Math.sin(a) * L;
+            path.moveTo(x, y);
+            path.quadraticCurveTo((x + ex) / 2 - Math.sin(a) * bend, (y + ey) / 2 + Math.cos(a) * bend, ex, ey);
+          }
+          ctx.strokeStyle = rgba(color, [0.1, 0.18, 0.3][bkt]);
+          ctx.lineWidth = Math.max(0.45, u * [0.5, 0.6, 0.7][bkt]);
+          ctx.stroke(path);
+        }
+      }
+      // 5. dust: small irregular specks, flecks and curly hairs
       if (dust > 0) {
-        const specks = Math.round(700 * dust * area * (0.4 + density));
+        const specks = Math.round(360 * dust * area * (0.4 + density));
         for (let bkt = 0; bkt < 3; bkt++) {
           const path = new Path2D();
           for (let i = 0; i < specks / 3; i++) {
             const x = r() * W;
             const y = r() * H;
-            const rad = u * (0.5 + r() ** 3 * (bkt === 2 ? 4 : 1.6));
-            if (bkt === 2 && r() < 0.5) tracePoly(path, blob(x, y, rad * 1.4, r, 6, 0.7));
-            else {
-              path.moveTo(x + rad, y);
-              path.arc(x, y, rad, 0, TAU);
-            }
+            const rad = u * (0.35 + r() ** 4 * (bkt === 2 ? 3 : 1.2));
+            tracePoly(path, blob(x, y, rad, r, r.int(4, 7), 0.8));
           }
-          ctx.fillStyle = rgba(color, [0.35, 0.6, 0.8][bkt]);
+          ctx.fillStyle = rgba(color, [0.3, 0.5, 0.7][bkt]);
           ctx.fill(path);
         }
         const hairs = new Path2D();
-        const nHair = Math.round(26 * dust * area * (0.3 + density));
+        const nHair = Math.round(14 * dust * area * (0.3 + density));
         for (let i = 0; i < nHair; i++) hair(hairs, r() * W, r() * H, (12 + r() * 50) * u, r);
-        ctx.strokeStyle = rgba(color, 0.55);
-        ctx.lineWidth = Math.max(0.5, 0.9 * u);
+        ctx.strokeStyle = rgba(color, 0.45);
+        ctx.lineWidth = Math.max(0.5, 0.75 * u);
         ctx.stroke(hairs);
         // soft blotches (emulsion damage)
         ctx.save();
-        ctx.filter = `blur(${Math.max(1, 6 * u)}px)`;
-        const bl = Math.round(4 * dust * (0.5 + density));
+        ctx.filter = `blur(${Math.max(1, 8 * u)}px)`;
+        const bl = Math.round(3 * dust * (0.5 + density));
         for (let i = 0; i < bl; i++) {
-          ctx.fillStyle = rgba(color, 0.06 + r() * 0.08);
+          ctx.fillStyle = rgba(color, 0.03 + r() * 0.05);
           ctx.beginPath();
           ctx.ellipse(r() * W, r() * H, (20 + r() * 60) * u, (10 + r() * 40) * u, r() * TAU, 0, TAU);
           ctx.fill();
         }
         ctx.restore();
-        // a few bright sparkles (like the corner flare in film prints)
-        const sp = Math.round(2 + 3 * dust);
-        for (let i = 0; i < sp; i++) {
-          const x = r() * W;
-          const y = r() * H;
-          const L = (6 + r() * 14) * u;
-          ctx.strokeStyle = rgba(color, 0.85);
-          ctx.lineWidth = Math.max(0.5, 0.8 * u);
-          ctx.beginPath();
-          ctx.moveTo(x - L, y);
-          ctx.lineTo(x + L, y);
-          ctx.moveTo(x, y - L);
-          ctx.lineTo(x, y + L);
-          ctx.stroke();
-          ctx.fillStyle = rgba(color, 0.9);
-          ctx.beginPath();
-          ctx.arc(x, y, 1.6 * u, 0, TAU);
-          ctx.fill();
-        }
       }
       return c;
     },
@@ -435,7 +434,10 @@ const lightLeak = defineAsset(
       const s = Math.min(1, Math.sqrt(160_000 / (W * H)));
       const w = Math.max(2, Math.round(W * s));
       const h = Math.max(2, Math.round(H * s));
-      const [lo, lctx] = newCanvas(w, h);
+      // padded so the final blur has real content beyond the canvas edges (no dark fringe)
+      const pad = Math.ceil(Math.max(w, h) * 0.08);
+      const [lo, lctx] = newCanvas(w + pad * 2, h + pad * 2);
+      lctx.translate(pad, pad);
       lctx.globalCompositeOperation = 'lighter';
       const M = Math.max(w, h);
       const anchors: { x: number; y: number }[] = [];
@@ -465,10 +467,39 @@ const lightLeak = defineAsset(
           lctx.translate(x, y);
           lctx.scale(1, 0.6 + r() * 0.9);
           lctx.translate(-x, -y);
-          lctx.fillRect(0, 0, w, h);
+          // fill generously: the scaled space must still cover the whole canvas
+          lctx.fillRect(-w, -h * 3, w * 3, h * 7);
           lctx.restore();
         }
       });
+      // burn streaks: soft bands running across the frame from the leak side
+      const streaks = 1 + Math.floor(r() * 3);
+      for (let k = 0; k < streaks; k++) {
+        const a = anchors[Math.floor(r() * anchors.length)] ?? { x: w, y: h / 2 };
+        const horizontal = pos === 'left' || pos === 'right' || (pos !== 'top' && r() < 0.5);
+        const bw = M * (0.04 + r() * 0.08) * (0.6 + spread);
+        const col = cols[k % 3];
+        const g = horizontal ? lctx.createLinearGradient(0, a.y - bw, 0, a.y + bw) : lctx.createLinearGradient(a.x - bw, 0, a.x + bw, 0);
+        const al = (0.12 + r() * 0.18) * intensity;
+        g.addColorStop(0, rgba(col, 0));
+        g.addColorStop(0.5, rgba(col, al));
+        g.addColorStop(1, rgba(col, 0));
+        // fade along the streak away from the source
+        const [band, bctx] = newCanvas(w, h);
+        bctx.translate(0, 0);
+        bctx.fillStyle = g;
+        bctx.fillRect(0, 0, w, h);
+        bctx.globalCompositeOperation = 'destination-in';
+        const fade = horizontal ? bctx.createLinearGradient(a.x, 0, a.x < w / 2 ? w : 0, 0) : bctx.createLinearGradient(0, a.y, 0, a.y < h / 2 ? h : 0);
+        fade.addColorStop(0, 'rgba(0,0,0,1)');
+        fade.addColorStop(0.55 + spread * 0.4, 'rgba(0,0,0,0)');
+        bctx.fillStyle = fade;
+        bctx.fillRect(0, 0, w, h);
+        lctx.drawImage(band, 0, 0);
+        // extend the band into the padding on the source side
+        if (horizontal) lctx.drawImage(band, a.x < w / 2 ? 0 : w - 1, 0, 1, h, a.x < w / 2 ? -pad : w, 0, pad, h);
+        else lctx.drawImage(band, 0, a.y < h / 2 ? 0 : h - 1, w, 1, 0, a.y < h / 2 ? -pad : h, w, pad);
+      }
       // hot white-yellow core streak at the leak source
       const a0 = anchors[0];
       if (a0) {
@@ -480,7 +511,8 @@ const lightLeak = defineAsset(
       }
       const [c, ctx] = newCanvas(W, H);
       ctx.filter = `blur(${Math.max(2, Math.min(W, H) * 0.012)}px)`;
-      drawUpscaled(ctx, lo, W, H);
+      const k = W / w;
+      drawUpscaled(ctx, lo, (w + pad * 2) * k, (h + pad * 2) * (H / h), -pad * k, -pad * (H / h));
       ctx.filter = 'none';
       return c;
     },

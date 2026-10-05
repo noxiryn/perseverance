@@ -4,9 +4,10 @@
  */
 import { useEffect, useRef } from 'react';
 import { History, Redo2, Undo2 } from 'lucide-react';
-import type { HistoryEntry } from '../core/types';
-import { useEditor } from '../state/editor';
+import type { Document, HistoryEntry } from '../core/types';
+import { activeSession, useEditor } from '../state/editor';
 import { renderThumbnail } from '../render/compositor';
+import { bitmaps } from '../core/bitmaps';
 import { cloneCanvas } from '../core/canvas';
 import { IconButton } from '../ui/controls';
 import { historyIcon } from './icons';
@@ -14,24 +15,64 @@ import { CanvasView } from './thumbs';
 import './panels.css';
 
 /**
- * Snapshot thumbnails of first entries, rendered once when first seen and keyed by entry id
- * (entries may be re-created for silent UI changes; bitmaps may since have been painted on, so
- * re-rendering later could show a newer state).
+ * Document snapshots for the first history entry, keyed by the entry's (immutable) document.
+ * Pixels live in mutable bitmaps that later strokes paint into, so a snapshot is only correct
+ * when rendered while the bitmaps still hold that entry's state. startHistorySnapshots() renders
+ * each newly committed entry right away (idle time), so once old entries are trimmed the new
+ * first entry still shows its own state instead of today's pixels.
  */
-const snapshots = new Map<string, HTMLCanvasElement>();
+const snapshots = new WeakMap<Document, HTMLCanvasElement>();
+const SNAPSHOT_PX = 64;
+
+function renderSnapshot(doc: Document): HTMLCanvasElement | null {
+  try {
+    const c = cloneCanvas(renderThumbnail(doc, null, SNAPSHOT_PX));
+    snapshots.set(doc, c);
+    return c;
+  } catch {
+    return null;
+  }
+}
 
 function snapshotOf(e: HistoryEntry): HTMLCanvasElement | null {
-  let c = snapshots.get(e.id) ?? null;
-  if (!c) {
-    try {
-      c = cloneCanvas(renderThumbnail(e.doc, null, 64));
-      snapshots.set(e.id, c);
-      if (snapshots.size > 40) snapshots.delete(snapshots.keys().next().value as string);
-    } catch {
-      return null;
-    }
-  }
-  return c;
+  return snapshots.get(e.doc) ?? renderSnapshot(e.doc);
+}
+
+let started = false;
+
+/** Keep a snapshot of every history state of the active document as it is committed. */
+export function startHistorySnapshots() {
+  if (started) return;
+  started = true;
+  let bitmapSeq = 0;
+  bitmaps.subscribe(() => void bitmapSeq++);
+  let scheduled: Document | null = null;
+  const idle = (fn: () => void) =>
+    typeof window.requestIdleCallback === 'function' ? window.requestIdleCallback(fn, { timeout: 400 }) : window.setTimeout(fn, 60);
+  useEditor.subscribe((st) => {
+    const s = st.activeDocId ? st.sessions[st.activeDocId] : null;
+    if (!s) return;
+    const { entries, index } = s.history;
+    const e = entries[index];
+    // Only the newest state, right after its commit (undo/redo restore older pixels via patches).
+    if (!e || index !== entries.length - 1 || snapshots.has(e.doc) || scheduled === e.doc) return;
+    const doc = e.doc;
+    const seq = bitmapSeq;
+    scheduled = doc;
+    idle(() => {
+      const cur = activeSession();
+      const ce = cur?.history.entries[cur.history.index];
+      if (!cur || !ce || ce.doc !== doc || snapshots.has(doc)) return;
+      if (cur.doc !== doc) {
+        // A live preview is running: try again when the store settles.
+        if (scheduled === doc) scheduled = null;
+        return;
+      }
+      // Pixels were painted since the commit: this state can no longer be rendered faithfully.
+      if (bitmapSeq !== seq) return;
+      renderSnapshot(doc);
+    });
+  });
 }
 
 const timeFmt = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });

@@ -27,7 +27,7 @@ import type {
 import { bitmaps } from '../core/bitmaps';
 import { cloneCanvas, createCanvas, ctx2d, ctxRead, opaqueBounds } from '../core/canvas';
 import { uid } from '../core/ids';
-import { identityTransform, transformMatrix } from '../core/geometry';
+import { identityTransform, transformMatrix, transformedBounds } from '../core/geometry';
 import {
   displayList,
   insertLayerDraft,
@@ -46,7 +46,6 @@ import { toast, useUI } from '../state/ui';
 import { effects, filters } from '../registry';
 import { defaultParams } from '../filters/engine';
 import {
-  getLayerBounds,
   getLayerSize,
   renderDocument,
   renderLayerContent,
@@ -60,6 +59,7 @@ import {
   ancestorsOf,
   arrangeDraft,
   cloneLayerTree,
+  descendantsOf,
   layerBelow,
   moveLayersDraft,
   orderedTopLevel,
@@ -67,6 +67,7 @@ import {
   type ArrangeOp,
 } from './treeOps';
 import { alignDelta, distributeDeltas, pixelBox, reboxTransform, unionRects, type AlignMode, type DistributeMode } from './geometryMath';
+import { layerContentBounds } from './bounds';
 import { effectName, type StylePreset } from './effectPresets';
 
 /* ------------------------------------------------------------------ */
@@ -682,15 +683,32 @@ function translateDraft(d: Document, id: ID, dx: number, dy: number) {
   }
 }
 
-function movableWithBounds(s: DocSession): { id: ID; b: Rect }[] {
+/**
+ * Selected layers that can be aligned, with the bounds of what they actually cover (opaque pixels
+ * of pixel layers — a canvas-sized layer with a small painted shape aligns by the shape). Null
+ * after a helpful toast when nothing can be aligned.
+ */
+function movableWithBounds(s: DocSession, min: number): { id: ID; b: Rect }[] | null {
   const out: { id: ID; b: Rect }[] = [];
+  let locked = 0;
+  let empty = 0;
   for (const id of selectedTopLevel(s)) {
     const l = s.doc.layers[id];
-    if (!l || l.type === 'fill' || l.type === 'adjustment' || l.locks.position || l.locks.all) continue;
-    const b = getLayerBounds(s.doc, id);
+    if (!l || l.type === 'fill' || l.type === 'adjustment') continue;
+    if (l.locks.position || l.locks.all) {
+      locked++;
+      continue;
+    }
+    const b = layerContentBounds(s.doc, id);
     if (b && b.width > 0 && b.height > 0) out.push({ id, b });
+    else empty++;
   }
-  return out;
+  if (out.length >= min) return out;
+  if (min > 1) toast(`Select at least ${min} unlocked layers with content to distribute`, 'info');
+  else if (locked) toast('The selected layer’s position is locked — unlock it to align it', 'info');
+  else if (empty) toast('The selected layer has no visible pixels to align', 'info');
+  else toast('Select an unlocked text, shape, pixel layer or group to align', 'info');
+  return null;
 }
 
 const ALIGN_LABELS: Record<AlignMode, string> = {
@@ -702,34 +720,48 @@ const ALIGN_LABELS: Record<AlignMode, string> = {
   bottom: 'Align Bottom Edges',
 };
 
+/** Whole-pixel moves keep pixel layers crisp (a half-pixel offset would resample them). */
+const roundDelta = (d: { dx: number; dy: number }) => ({ dx: Math.round(d.dx), dy: Math.round(d.dy) });
+
+/** Apply per-layer moves as one commit; toasts `already` (and commits nothing) when nothing moves. */
+function commitMoves(label: string, moves: { id: ID; dx: number; dy: number }[], already: string) {
+  const real = moves.filter((m) => m.dx || m.dy);
+  if (!real.length) return void toast(already, 'info', 1600);
+  ed().commit(label, (d) => real.forEach((m) => translateDraft(d, m.id, m.dx, m.dy)));
+}
+
 /** Align to the pixel selection, else to the selected layers' bounds (2+), else to the canvas. */
 export function alignSelected(mode: AlignMode) {
   const s = needDoc();
   if (!s) return;
-  const items = movableWithBounds(s);
-  if (!items.length) return void toast('Select an unlocked text, shape, pixel layer or group to align', 'info');
+  const items = movableWithBounds(s, 1);
+  if (!items) return;
   const canvas = { x: 0, y: 0, width: s.doc.width, height: s.doc.height };
   const target = s.doc.selection?.bounds ?? (items.length > 1 ? unionRects(items.map((i) => i.b)) : canvas) ?? canvas;
-  ed().commit(ALIGN_LABELS[mode], (d) => {
-    for (const it of items) {
-      const { dx, dy } = alignDelta(it.b, target, mode);
-      if (dx || dy) translateDraft(d, it.id, dx, dy);
-    }
-  });
+  const to = s.doc.selection ? 'selection' : items.length > 1 ? 'selected layers' : 'canvas';
+  commitMoves(
+    ALIGN_LABELS[mode],
+    items.map((it) => ({ id: it.id, ...roundDelta(alignDelta(it.b, target, mode)) })),
+    `Already aligned to the ${to}`,
+  );
 }
 
 export function distributeSelected(axis: 'h' | 'v', mode: DistributeMode = 'centers') {
   const s = needDoc();
   if (!s) return;
-  const items = movableWithBounds(s);
-  if (items.length < 3) return void toast('Select at least three unlocked layers to distribute', 'info');
+  const items = movableWithBounds(s, 3);
+  if (!items) return;
   const deltas = distributeDeltas(
     items.map((i) => i.b),
     axis,
     mode,
   );
   const label = `Distribute ${axis === 'h' ? 'Horizontal' : 'Vertical'} ${mode === 'centers' ? 'Centers' : 'Spacing'}`;
-  ed().commit(label, (d) => items.forEach((it, k) => translateDraft(d, it.id, deltas[k].dx, deltas[k].dy)));
+  commitMoves(
+    label,
+    items.map((it, k) => ({ id: it.id, ...roundDelta(deltas[k]) })),
+    'Already evenly distributed',
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -858,6 +890,7 @@ export function addMask(mode: MaskMode): boolean {
     toast('Make a selection first to create a mask from it', 'info');
     return false;
   }
+  if (!assertEditable(s.doc, [layer.id], 'all')) return false;
   const c = makeMaskCanvas(s.doc, mode);
   if (!c) return false;
   const mask: LayerMask = { bitmapId: bitmaps.add(c), enabled: true, density: 1, feather: 0, inverted: false };
@@ -882,6 +915,7 @@ export function maskFromSelection() {
   const { s, layer } = ctx;
   if (!s.doc.selection) return void toast('Make a selection first to create a mask from it', 'info');
   if (!layer.mask) return void addMask('revealSelection');
+  if (!assertEditable(s.doc, [layer.id], 'all')) return;
   const c = makeMaskCanvas(s.doc, 'revealSelection');
   if (!c) return;
   const bitmapId = bitmaps.add(c);
@@ -893,23 +927,52 @@ export function maskFromSelection() {
 }
 
 /**
- * Doc-sized canvas whose ALPHA is the effective mask (luminance → alpha, density, invert and
- * optionally feather applied).
+ * Draw `img` into the rect (dx, dy, dw, dh) and extend its edge pixels outward over the rest of
+ * the target — the same edge clamping the renderer uses for masks (src/render/mask.ts), so a
+ * feather blur sees the mask's border values instead of transparency beyond the canvas.
  */
-export function effectiveMaskAlpha(doc: Document, mask: LayerMask, withFeather = true): HTMLCanvasElement {
+function drawClamped(ctx: CanvasRenderingContext2D, img: HTMLCanvasElement, dx: number, dy: number, dw: number, dh: number) {
+  const W = ctx.canvas.width;
+  const H = ctx.canvas.height;
+  const iw = img.width;
+  const ih = img.height;
+  const x1 = dx + dw;
+  const y1 = dy + dh;
+  ctx.drawImage(img, 0, 0, iw, ih, dx, dy, dw, dh);
+  if (dx > 0) ctx.drawImage(img, 0, 0, 1, ih, 0, dy, dx + 0.5, dh);
+  if (x1 < W) ctx.drawImage(img, iw - 1, 0, 1, ih, x1 - 0.5, dy, W - x1 + 0.5, dh);
+  if (dy > 0) ctx.drawImage(img, 0, 0, iw, 1, dx, 0, dw, dy + 0.5);
+  if (y1 < H) ctx.drawImage(img, 0, ih - 1, iw, 1, dx, y1 - 0.5, dw, H - y1 + 0.5);
+  if (dx > 0 && dy > 0) ctx.drawImage(img, 0, 0, 1, 1, 0, 0, dx + 0.5, dy + 0.5);
+  if (x1 < W && dy > 0) ctx.drawImage(img, iw - 1, 0, 1, 1, x1 - 0.5, 0, W - x1 + 0.5, dy + 0.5);
+  if (dx > 0 && y1 < H) ctx.drawImage(img, 0, ih - 1, 1, 1, 0, y1 - 0.5, dx + 0.5, H - y1 + 0.5);
+  if (x1 < W && y1 < H) ctx.drawImage(img, iw - 1, ih - 1, 1, 1, x1 - 0.5, y1 - 0.5, W - x1 + 0.5, H - y1 + 0.5);
+}
+
+/**
+ * Canvas covering `region` (document px, integer; default: the canvas) whose ALPHA is the
+ * effective mask visibility, computed like the renderer does: luminance → alpha with invert and
+ * density, the mask's edge pixels extended beyond the canvas, then (optionally) the feather blur.
+ */
+export function effectiveMaskAlpha(doc: Document, mask: LayerMask, withFeather = true, region?: Rect): HTMLCanvasElement {
+  const R = region ?? { x: 0, y: 0, width: doc.width, height: doc.height };
   const src = bitmaps.tryGet(mask.bitmapId);
-  const c = createCanvas(doc.width, doc.height);
   if (!src) {
+    // The renderer leaves the content untouched when the mask bitmap is missing.
+    const c = createCanvas(R.width, R.height);
     const ctx = ctx2d(c);
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, c.width, c.height);
     return c;
   }
-  const rctx = ctxRead(c);
+  const proc = createCanvas(doc.width, doc.height);
+  const rctx = ctxRead(proc);
+  rctx.imageSmoothingEnabled = true;
+  rctx.imageSmoothingQuality = 'high';
   rctx.drawImage(src, 0, 0, doc.width, doc.height);
-  const img = rctx.getImageData(0, 0, c.width, c.height);
+  const img = rctx.getImageData(0, 0, proc.width, proc.height);
   const d = img.data;
-  const density = Math.max(0, Math.min(1, mask.density));
+  const density = Math.max(0, Math.min(1, Number.isFinite(mask.density) ? mask.density : 1));
   const inv = mask.inverted;
   for (let i = 0; i < d.length; i += 4) {
     // Mask pixels may themselves be partly transparent: treat missing coverage as black.
@@ -920,13 +983,25 @@ export function effectiveMaskAlpha(doc: Document, mask: LayerMask, withFeather =
     d[i + 3] = v * 255;
   }
   rctx.putImageData(img, 0, 0);
-  if (!withFeather || mask.feather <= 0) return c;
-  const f = createCanvas(doc.width, doc.height);
-  const fctx = ctx2d(f);
-  fctx.filter = `blur(${mask.feather / 2}px)`;
-  fctx.drawImage(c, 0, 0);
-  return f;
+  const sigma = withFeather ? Math.max(0, Number(mask.feather) || 0) / 2 : 0;
+  const m = sigma > 0.05 ? Math.ceil(sigma * 3) + 2 : 0;
+  const isDocRect = R.x === 0 && R.y === 0 && R.width === doc.width && R.height === doc.height;
+  if (!m && isDocRect) return proc;
+  const ext = createCanvas(R.width + 2 * m, R.height + 2 * m);
+  const ectx = ctx2d(ext);
+  ectx.imageSmoothingEnabled = false;
+  drawClamped(ectx, proc, m - R.x, m - R.y, doc.width, doc.height);
+  if (!m) return ext;
+  const out = createCanvas(R.width, R.height);
+  const octx = ctx2d(out);
+  octx.filter = `blur(${sigma}px)`;
+  octx.drawImage(ext, -m, -m);
+  octx.filter = 'none';
+  return out;
 }
+
+/** Largest distance (px) beyond the canvas edges that a mask bake still covers. */
+const MAX_BAKE_MARGIN = 4096;
 
 /** Layer ▸ Layer Mask ▸ Apply: bake the mask into the layer's pixels. */
 export function applyMask() {
@@ -940,17 +1015,32 @@ export function applyMask() {
   const doc = s.doc;
   const mask = layer.mask;
   if (!mask.enabled) return void toast('Enable the mask before applying it (Shift-click the mask thumbnail)', 'info');
+  if (!assertEditable(doc, [layer.id], 'pixels')) return;
   if (layer.type === 'raster') {
-    const alpha = effectiveMaskAlpha(doc, mask);
+    // The mask over everything the layer covers, also beyond the canvas edges (where the renderer
+    // extends the mask's edge pixels), then mapped into the layer's local pixel space.
+    const docRect: Rect = { x: 0, y: 0, width: doc.width, height: doc.height };
+    const lb = transformedBounds(layer.transform, layer.width, layer.height);
+    const all = pixelBox(unionRects([docRect, lb]) ?? docRect);
+    const x0 = Math.max(all.x, -MAX_BAKE_MARGIN);
+    const y0 = Math.max(all.y, -MAX_BAKE_MARGIN);
+    const region: Rect = {
+      x: x0,
+      y: y0,
+      width: Math.min(all.x + all.width, doc.width + MAX_BAKE_MARGIN) - x0,
+      height: Math.min(all.y + all.height, doc.height + MAX_BAKE_MARGIN) - y0,
+    };
+    const alpha = effectiveMaskAlpha(doc, mask, true, region);
     const m = transformMatrix(layer.transform, layer.width, layer.height).inverse();
-    // Build the mask in the layer's local space; pixels outside the canvas stay untouched.
     const local = createCanvas(layer.width, layer.height);
     const lctx = ctx2d(local);
     lctx.fillStyle = '#000';
     lctx.fillRect(0, 0, local.width, local.height);
     lctx.setTransform(m.a, m.b, m.c, m.d, m.e, m.f);
-    lctx.clearRect(0, 0, doc.width, doc.height);
-    lctx.drawImage(alpha, 0, 0);
+    lctx.imageSmoothingEnabled = true;
+    lctx.imageSmoothingQuality = 'high';
+    lctx.clearRect(region.x, region.y, region.width, region.height);
+    lctx.drawImage(alpha, region.x, region.y);
     if (!bitmaps.has(layer.bitmapId)) return void toast('Layer pixels are missing', 'error');
     const patch = bitmaps.edit(layer.bitmapId, (bctx) => {
       bctx.globalCompositeOperation = 'destination-in';
@@ -979,6 +1069,7 @@ export function deleteMask() {
   const ctx = needLayer('delete a mask from');
   if (!ctx) return;
   if (!ctx.layer.mask) return void toast(`“${ctx.layer.name}” has no layer mask`, 'info');
+  if (!assertEditable(ctx.s.doc, [ctx.layer.id], 'all')) return;
   ed().commit('Delete Layer Mask', (d) => {
     d.layers[ctx.layer.id].mask = null;
   });
@@ -1093,8 +1184,13 @@ export function rasterizeSelected() {
   if (!s) return;
   const ids = selectedTopLevel(s);
   if (!ids.length) return void toast('Select a text, shape or fill layer to rasterize', 'info');
+  const convertible = ids.filter((id) => {
+    const l = s.doc.layers[id];
+    return l.type === 'text' || l.type === 'shape' || l.type === 'fill' || (l.type === 'raster' && !!l.generator);
+  });
+  if (!assertEditable(s.doc, convertible, 'pixels')) return;
   const out: RasterLayer[] = [];
-  for (const id of ids) {
+  for (const id of convertible) {
     const r = rasterizeContent(s.doc, s.doc.layers[id]);
     if (r) out.push(r);
   }
@@ -1110,7 +1206,11 @@ export function rasterizeSelected() {
   });
 }
 
-/** Layer ▸ Rasterize Layer Style: bake effects (and smart filters) into pixels. */
+/**
+ * Layer ▸ Rasterize Layer Style: bake effects and smart filters into pixels without changing the
+ * image. The renderer masks the content BEFORE the effects (strokes and shadows follow the masked
+ * edge), so an enabled mask is baked as well and removed; a disabled mask is kept as it is.
+ */
 export function rasterizeStyleSelected() {
   const s = needDoc();
   if (!s) return;
@@ -1119,21 +1219,32 @@ export function rasterizeStyleSelected() {
     return l.type !== 'group' && l.type !== 'adjustment' && (l.effects.length > 0 || l.filters.length > 0);
   });
   if (!ids.length) return void toast('Select a layer with a layer style to rasterize it', 'info');
+  if (!assertEditable(s.doc, ids, 'pixels')) return;
   const out: RasterLayer[] = [];
+  let bakedMasks = 0;
   for (const id of ids) {
     const l = s.doc.layers[id];
-    const c = renderLayerToDoc(s.doc, { ...l, mask: null } as Layer, { effects: true, mask: false });
+    const bakeMask = !!l.mask?.enabled;
+    const c = renderLayerToDoc(s.doc, l, { effects: true, mask: bakeMask });
     if (!c) continue;
     const r = toRaster(l, bitmaps.add(c), s.doc.width, s.doc.height, identityTransform());
     r.effects = [];
     r.filters = [];
     r.fillOpacity = 1;
+    if (bakeMask) {
+      r.mask = null;
+      bakedMasks++;
+    }
     out.push(r);
   }
   if (!out.length) return void toast('Nothing to rasterize — the layer is empty', 'info');
   ed().commit('Rasterize Layer Style', (d) => {
     for (const r of out) d.layers[r.id] = r;
   });
+  if (bakedMasks) {
+    ed().setEditTarget('content');
+    toast(bakedMasks > 1 ? 'The layer masks were applied with the styles' : 'The layer mask was applied with the style', 'info', 2200);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1171,6 +1282,8 @@ export function mergeDown() {
   const below = doc.layers[belowId];
   if (below.type === 'adjustment') return void toast('Cannot merge into an adjustment layer — select the layers to merge instead', 'info');
   if (below.type === 'group') return void toast('Cannot merge down into a group — use Merge Group instead', 'info');
+  if (!layer.visible) return void toast(`“${layer.name}” is hidden — show it before merging it down`, 'info');
+  if (!assertEditable(doc, [layer.id, belowId], 'pixels')) return;
   // When both layers are clipped to the same base further down, the upper one must not be
   // clipped to the lower one during the merge (the result is clipped to the base afterwards).
   const canvas = renderSubset(doc, [belowId, layer.id], {
@@ -1199,7 +1312,9 @@ export function mergeLayers(ids: ID[]) {
   const doc = s.doc;
   const list = orderedTopLevel(doc, ids);
   if (list.length < 2) return void toast('Select at least two layers to merge', 'info');
+  if (!assertEditable(doc, list, 'pixels')) return;
   const visible = list.filter((id) => doc.layers[id].visible);
+  if (!visible.length) return void toast('The selected layers are all hidden — nothing to merge', 'info');
   const top = doc.layers[list[list.length - 1]];
   const canvas = renderSubset(doc, visible);
   const r = mergedRaster(top, canvas, doc);
@@ -1223,6 +1338,7 @@ export function mergeGroup(g: GroupLayer) {
   const s = activeSession();
   if (!s) return;
   if (!g.childIds.length) return void toast('The group is empty', 'info');
+  if (!assertEditable(s.doc, [g.id, ...descendantsOf(s.doc, g.id)], 'pixels')) return;
   const canvas = renderLayerToDoc(s.doc, { ...g, visible: true }, { effects: true, mask: true }) ?? createCanvas(s.doc.width, s.doc.height);
   const r = mergedRaster(g, canvas, s.doc);
   r.opacity = g.opacity;
@@ -1300,6 +1416,7 @@ function styleTarget(action: string): { s: DocSession; layer: Layer } | null {
     toast('Adjustment layers cannot have layer styles', 'info');
     return null;
   }
+  if (!assertEditable(ctx.s.doc, [ctx.layer.id], 'all')) return null;
   return ctx;
 }
 
@@ -1415,6 +1532,7 @@ export function pasteStyle() {
   if (!clip) return void toast('Copy a layer style first (Layer ▸ Layer Style ▸ Copy Layer Style)', 'info');
   const ids = selectedIds(s).filter((id) => s.doc.layers[id].type !== 'adjustment');
   if (!ids.length) return void toast('Select a layer to paste the style onto', 'info');
+  if (!assertEditable(s.doc, ids, 'all')) return;
   ed().commit('Paste Layer Style', (d) => {
     for (const id of ids) d.layers[id].effects = clip.map((e) => ({ ...structuredClone(e), id: uid('ef_') }));
   });
@@ -1425,6 +1543,7 @@ export function clearStyle() {
   if (!s) return;
   const ids = selectedIds(s).filter((id) => s.doc.layers[id].effects.length);
   if (!ids.length) return void toast('The selected layer has no layer style', 'info');
+  if (!assertEditable(s.doc, ids, 'all')) return;
   ed().commit('Clear Layer Style', (d) => {
     for (const id of ids) d.layers[id].effects = [];
   });

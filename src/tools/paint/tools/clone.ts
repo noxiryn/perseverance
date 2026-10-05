@@ -1,7 +1,7 @@
 /**
  * Clone Stamp (S): Alt-click to set the source, then paint copies of it. Aligned keeps one
  * fixed offset for all strokes; otherwise each stroke restarts from the source point. Samples
- * the current layer (as it was before the stroke) or all visible layers.
+ * the current layer (as it was when the stroke started) or all visible layers.
  */
 import { Stamp } from 'lucide-react';
 import { createCanvas, ctx2d } from '../../../core/canvas';
@@ -14,7 +14,7 @@ import type { PaintTarget } from '../engine/target';
 import { CLONE_DEFAULTS, brushCompositeOp } from '../options';
 import { CloneOptionsBar } from '../ui/OptionsBars';
 import { strokeConfig } from '../engine/config';
-import { brushCursor, drawBrushOutline, drawCrosshair, handleBrushKeys, hover, stabilizerRadius } from './common';
+import { brushCursor, drawBrushOutline, drawCrosshair, handleBrushKeys, hover, isSquareTip, stabilizerRadius } from './common';
 import { createStampTool } from './stampTool';
 import { cloneSource, setCloneSource } from './cloneState';
 
@@ -22,26 +22,49 @@ import { cloneSource, setCloneSource } from './cloneState';
 let painting: { offset: { x: number; y: number }; pos: { x: number; y: number } } | null = null;
 let altDown = false;
 
-/** Doc-space canvas with the pixels to clone from. */
-function buildSource(target: PaintTarget, sample: 'current' | 'all'): HTMLCanvasElement | null {
-  const s = activeSession();
-  if (!s) return null;
-  const doc = s.doc;
-  const c = createCanvas(doc.width, doc.height);
-  const ctx = ctx2d(c);
+/** Reset the Alt (set source) state — also when the window loses focus mid-press (Alt+Tab). */
+function releaseAlt() {
+  if (!altDown) return;
+  altDown = false;
+  viewport.setCursor(null);
+}
+
+/** Reused doc-sized canvas holding the merged document for "All Layers" sampling. */
+let mergedSource: HTMLCanvasElement | null = null;
+
+/**
+ * Fill image + image → layer-local matrix for the clone source.
+ *  - Current layer: the session's stroke-start copy of the layer itself ('before'), mapped
+ *    local → doc → shifted by the clone offset → local. No allocation, and pixels of a moved or
+ *    scaled layer that lie outside the document can still be cloned.
+ *  - All layers: a doc-space render of the visible document (copied, since the compositor's
+ *    canvas changes while we paint).
+ */
+function cloneFill(target: PaintTarget, sample: 'current' | 'all', offset: { x: number; y: number }): { image: HTMLCanvasElement | 'before'; matrix: DOMMatrix } | null {
+  const shift = new DOMMatrix().translateSelf(-offset.x, -offset.y);
+  const toLocal = target.toLocal ?? new DOMMatrix();
   if (sample === 'all' && target.kind === 'content') {
+    const doc = activeSession()?.doc;
+    if (!doc) return null;
+    let merged: HTMLCanvasElement;
     try {
-      ctx.drawImage(renderDocument(doc, { background: true }), 0, 0);
+      merged = renderDocument(doc, { background: true });
     } catch (err) {
       console.error('[paint] clone sample failed', err);
+      toast('Clone Stamp: could not sample all layers', 'error');
       return null;
     }
-    return c;
+    if (!mergedSource || mergedSource.width !== doc.width || mergedSource.height !== doc.height) mergedSource = createCanvas(doc.width, doc.height);
+    const ctx = ctx2d(mergedSource);
+    ctx.save();
+    ctx.globalCompositeOperation = 'copy';
+    ctx.drawImage(merged, 0, 0, doc.width, doc.height);
+    ctx.restore();
+    return { image: mergedSource, matrix: toLocal.multiply(shift) };
   }
-  const m = target.toDoc;
-  if (m) ctx.setTransform(m.a, m.b, m.c, m.d, m.e, m.f);
-  ctx.drawImage(target.canvas, 0, 0);
-  return c;
+  // local → doc → source offset → local
+  const matrix = target.toDoc ? toLocal.multiply(shift).multiply(target.toDoc) : toLocal.multiply(shift);
+  return { image: 'before', matrix };
 }
 
 export const cloneTool = createStampTool({
@@ -81,13 +104,11 @@ export const cloneTool = createStampTool({
       offset = { x: st.source.x - e.docX, y: st.source.y - e.docY };
       if (o.aligned) st.offset = offset;
     }
-    const src = buildSource(target, o.sample);
-    if (!src) return null;
+    const fill = cloneFill(target, o.sample, offset);
+    if (!fill) return null;
     // The stroke buffer collects tip coverage only; the composite fills it with the source image
     // shifted by the clone offset (exact colors even at soft, low-flow edges).
     const painter = new DabPainter({ tip: tipForPreset(o.presetId, o.hardness), color: COVERAGE, base: target.toLocal, maxSize: o.size });
-    const toLocal = target.toLocal ?? new DOMMatrix();
-    const matrix = toLocal.multiply(new DOMMatrix().translateSelf(-offset.x, -offset.y));
     painting = { offset, pos: { x: e.docX, y: e.docY } };
 
     return {
@@ -95,7 +116,7 @@ export const cloneTool = createStampTool({
       mode: {
         opacity: o.opacity,
         op: target.kind === 'mask' ? 'source-over' : brushCompositeOp(o.blendMode),
-        fill: { image: src, matrix },
+        fill,
       },
       draw: (ctx, d) => painter.draw(ctx, d),
       dispose: () => {
@@ -112,9 +133,18 @@ export const cloneTool = createStampTool({
     painting = null;
   },
 
+  onActivate() {
+    window.addEventListener('blur', releaseAlt);
+  },
+
+  onDeactivate() {
+    window.removeEventListener('blur', releaseAlt);
+    releaseAlt();
+  },
+
   renderOverlay(ctx) {
     const o = toolOptions('clone-stamp', CLONE_DEFAULTS);
-    drawBrushOutline(ctx, { size: o.size, angle: o.angle, roundness: o.roundness });
+    drawBrushOutline(ctx, { size: o.size, angle: o.angle, roundness: o.roundness, square: isSquareTip(o.presetId) });
     const st = cloneSource();
     if (!st) return;
     if (painting) drawCrosshair(ctx, { x: painting.pos.x + painting.offset.x, y: painting.pos.y + painting.offset.y });
@@ -134,8 +164,7 @@ export const cloneTool = createStampTool({
 
   onKeyUp(e) {
     if (e.key === 'Alt') {
-      altDown = false;
-      viewport.setCursor(null);
+      releaseAlt();
       return true;
     }
     return false;

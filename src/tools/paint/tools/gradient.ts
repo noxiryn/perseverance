@@ -1,11 +1,12 @@
 /**
  * Gradient tool (G): drag a line to fill the layer (or selection) with a gradient. Live preview
  * while dragging (reduced resolution on big layers), full resolution + dither on release.
- * Non-pixel active layers get a new "Gradient" layer above them.
+ * Non-pixel active layers get a new "Gradient" layer above them (created on the first real
+ * drag, so plain clicks allocate nothing).
  */
 import { Blend } from 'lucide-react';
 import type { Rect } from '../../../core/types';
-import type { ToolDef, ToolPointerEvent } from '../../../registry';
+import type { ToolDef } from '../../../registry';
 import { bitmaps } from '../../../core/bitmaps';
 import { createCanvas, ctx2d } from '../../../core/canvas';
 import { insertLayerDraft, makeRasterLayer, nextLayerName } from '../../../core/document';
@@ -15,6 +16,7 @@ import { activeSession, toolOptions, useEditor } from '../../../state/editor';
 import { toast } from '../../../state/ui';
 import { transformRect } from '../engine/dabs';
 import { buildLUT, renderGradientPixels } from '../engine/gradient';
+import { isModifierKey, watchStroke } from '../engine/guard';
 import { CompositeSession } from '../engine/session';
 import { maskGray, resolvePaintTarget, selectionInLocal, type PaintTarget } from '../engine/target';
 import { GRADIENT_DEFAULTS, brushCompositeOp, effectiveGradient, type GradientToolOptions } from '../options';
@@ -22,19 +24,33 @@ import { GradientOptionsBar } from '../ui/OptionsBars';
 import { handleBrushKeys, installLeaveTracking, removeLeaveTracking, trackHover } from './common';
 
 interface GradActive {
-  session: CompositeSession;
-  target: PaintTarget;
+  docId: string;
   start: { x: number; y: number };
   end: { x: number; y: number };
+  o: GradientToolOptions;
+  lut: Float32Array;
+  /** Pixel/mask target resolved on pointerdown; null → a new "Gradient" layer on first drag. */
+  target: PaintTarget | null;
+  /** Layer the new "Gradient" layer goes above (when target is null). */
+  aboveId: string | null;
+  /** Created lazily once the drag passes the click threshold. */
+  session: CompositeSession | null;
   newLayerId: string | null;
   region: Rect;
-  lut: Float32Array;
-  o: GradientToolOptions;
   raf: number;
+  unwatch: () => void;
 }
 
 let active: GradActive | null = null;
 let tmpCanvas: HTMLCanvasElement | null = null;
+/**
+ * Bitmap of a cancelled new-layer drag, kept for the next one instead of allocating another
+ * doc-sized canvas (cancelled sessions restore it to fully transparent).
+ */
+let spareBitmap: string | null = null;
+
+/** Drags shorter than this (screen px) are clicks: no gradient. */
+const MIN_DRAG = 3;
 
 function snapAngle(s: { x: number; y: number }, p: { x: number; y: number }) {
   const dx = p.x - s.x,
@@ -44,13 +60,19 @@ function snapAngle(s: { x: number; y: number }, p: { x: number; y: number }) {
   return { x: s.x + Math.cos(a) * len, y: s.y + Math.sin(a) * len };
 }
 
+function dragLength(a: GradActive): number {
+  return Math.hypot(a.end.x - a.start.x, a.end.y - a.start.y) * viewport.zoom();
+}
+
 function render(a: GradActive, preview: boolean) {
+  const s = a.session;
+  if (!s) return;
   const r = a.region;
   const scale = preview ? Math.min(1, Math.sqrt(420_000 / Math.max(1, r.width * r.height))) : 1;
   const ow = Math.max(1, Math.ceil(r.width * scale));
   const oh = Math.max(1, Math.ceil(r.height * scale));
   const img = new ImageData(ow, oh);
-  renderGradientPixels(img.data, ow, oh, r.x, r.y, scale, a.target.toDoc, {
+  renderGradientPixels(img.data, ow, oh, r.x, r.y, scale, s.target.toDoc, {
     kind: a.o.kind,
     start: a.start,
     end: a.end,
@@ -59,7 +81,6 @@ function render(a: GradActive, preview: boolean) {
   });
   if (!tmpCanvas || tmpCanvas.width < ow || tmpCanvas.height < oh) tmpCanvas = createCanvas(Math.max(ow, tmpCanvas?.width ?? 0), Math.max(oh, tmpCanvas?.height ?? 0));
   ctx2d(tmpCanvas).putImageData(img, 0, 0);
-  const s = a.session;
   s.clearBuffer(r);
   const ctx = s.bufferCtx;
   ctx.save();
@@ -83,60 +104,110 @@ function scheduleRender(a: GradActive) {
   });
 }
 
-/** Paint target for the gradient, creating a new layer when the active one has no pixels. */
-function gradientTarget(): { target: PaintTarget; newLayerId: string | null } | null {
+/** Put a document's live doc back to its history head (drops a previewed new layer), even when it is not the active document. */
+function cancelPreviewFor(docId: string) {
+  const st = useEditor.getState();
+  const s = st.sessions[docId];
+  if (!s) return;
+  const head = s.history.entries[s.history.index].doc;
+  if (s.doc === head) return;
+  if (st.activeDocId === docId) st.cancelPreview();
+  else useEditor.setState({ sessions: { ...st.sessions, [docId]: { ...s, doc: head } } });
+}
+
+/** Insert the previewed "Gradient" layer and return its paint target (first real drag only). */
+function createLayerTarget(a: GradActive): PaintTarget | null {
   const s = activeSession();
-  if (!s) {
-    toast('Gradient: open or create a document first', 'info');
-    return null;
-  }
+  if (!s || s.doc.id !== a.docId) return null;
   const doc = s.doc;
-  const layer = s.activeLayerId ? doc.layers[s.activeLayerId] : null;
-  if (layer && ((s.editTarget === 'mask' && layer.mask) || layer.type === 'raster')) {
-    const t = resolvePaintTarget({ toolName: 'Gradient', offerRasterize: false });
-    return t ? { target: t, newLayerId: null } : null;
-  }
-  const bitmapId = bitmaps.create(doc.width, doc.height);
-  const nl = makeRasterLayer({ name: nextLayerName(doc, 'Gradient'), bitmapId, width: doc.width, height: doc.height });
-  useEditor.getState().preview((d) => insertLayerDraft(d, nl, { aboveId: layer?.id ?? null }));
-  const canvas = bitmaps.get(bitmapId);
+  let bitmapId = spareBitmap;
+  spareBitmap = null;
+  const spare = bitmapId ? bitmaps.tryGet(bitmapId) : null;
+  if (!spare || spare.width !== doc.width || spare.height !== doc.height) bitmapId = bitmaps.create(doc.width, doc.height);
+  const nl = makeRasterLayer({ name: nextLayerName(doc, 'Gradient'), bitmapId: bitmapId!, width: doc.width, height: doc.height });
+  const aboveId = a.aboveId && doc.layers[a.aboveId] ? a.aboveId : null;
+  useEditor.getState().preview((d) => insertLayerDraft(d, nl, { aboveId }));
+  a.newLayerId = nl.id;
+  const canvas = bitmaps.get(bitmapId!);
   return {
-    newLayerId: nl.id,
-    target: {
-      docId: doc.id,
-      layerId: nl.id,
-      layerName: nl.name,
-      kind: 'content',
-      bitmapId,
-      canvas,
-      width: canvas.width,
-      height: canvas.height,
-      toLocal: null,
-      toDoc: null,
-      lockTransparency: false,
-      selection: selectionInLocal(doc, canvas.width, canvas.height, null),
-    },
+    docId: doc.id,
+    layerId: nl.id,
+    layerName: nl.name,
+    kind: 'content',
+    bitmapId: bitmapId!,
+    canvas,
+    width: canvas.width,
+    height: canvas.height,
+    toLocal: null,
+    toDoc: null,
+    lockTransparency: false,
+    selection: selectionInLocal(doc, canvas.width, canvas.height, null),
   };
 }
 
-function finish(e: ToolPointerEvent | null, cancel = false) {
+/** Create the live session on the first drag past the click threshold. */
+function ensureSession(a: GradActive): boolean {
+  if (a.session) return true;
+  const target = a.target ?? createLayerTarget(a);
+  if (!target) return false;
+  // Limit work to the selection bounds when there is a selection.
+  const full: Rect = { x: 0, y: 0, width: target.width, height: target.height };
+  let region: Rect = full;
+  const sel = useEditor.getState().sessions[a.docId]?.doc.selection;
+  if (sel && target.selection) {
+    const b = transformRect(sel.bounds, target.toLocal);
+    const grown = { x: Math.floor(b.x) - 1, y: Math.floor(b.y) - 1, width: Math.ceil(b.width) + 3, height: Math.ceil(b.height) + 3 };
+    region = rectIntersect(grown, full) ?? full;
+  }
+  a.region = region;
+  a.session = new CompositeSession(target, {
+    opacity: a.o.opacity,
+    op: target.kind === 'mask' ? 'source-over' : brushCompositeOp(a.o.blendMode),
+  });
+  a.unwatch = watchStroke(a.session, (msg) => abort(a, msg));
+  return true;
+}
+
+/** Forget a cancelled new layer (its bitmap is reused by the next drag). */
+function dropNewLayer(a: GradActive) {
+  if (!a.newLayerId) return;
+  cancelPreviewFor(a.docId);
+  if (a.session) spareBitmap = a.session.target.bitmapId;
+}
+
+function finish(cancel = false) {
   const a = active;
   if (!a) return;
   active = null;
   if (a.raf) cancelAnimationFrame(a.raf);
-  const tooShort = Math.hypot(a.end.x - a.start.x, a.end.y - a.start.y) * viewport.zoom() < 3;
-  if (cancel || tooShort) {
-    a.session.cancel();
-    if (a.newLayerId) useEditor.getState().cancelPreview();
+  a.unwatch();
+  const s = a.session;
+  if (!s) {
+    // A click (no drag): nothing was created or painted.
+    viewport.requestOverlay();
+    return;
+  }
+  if (cancel || dragLength(a) < MIN_DRAG) {
+    s.cancel();
+    dropNewLayer(a);
     viewport.requestRender();
     viewport.requestOverlay();
     return;
   }
   render(a, false);
-  const ok = a.session.commit('Gradient', a.newLayerId ? { activeLayerId: a.newLayerId } : undefined);
-  if (!ok && a.newLayerId) useEditor.getState().cancelPreview();
+  const ok = s.commit('Gradient', a.newLayerId ? { activeLayerId: a.newLayerId } : undefined);
+  if (!ok) dropNewLayer(a);
   viewport.requestOverlay();
-  void e;
+}
+
+/** The guard discarded the gradient (history or document changed underneath it). */
+function abort(a: GradActive, message: string) {
+  if (active !== a) return;
+  active = null;
+  if (a.raf) cancelAnimationFrame(a.raf);
+  dropNewLayer(a);
+  toast(message, 'warning');
+  viewport.requestOverlay();
 }
 
 export const gradientTool: ToolDef = {
@@ -154,45 +225,45 @@ export const gradientTool: ToolDef = {
     installLeaveTracking();
   },
   onDeactivate() {
-    if (active) finish(null, true);
+    if (active) finish(true);
     removeLeaveTracking();
   },
 
   onPointerDown(e) {
     trackHover(e);
     if (e.button !== 0) return;
-    if (active) finish(null, true);
-    const res = gradientTarget();
-    if (!res) return;
-    const { target, newLayerId } = res;
+    if (active) finish(true);
+    const s = activeSession();
+    if (!s) {
+      toast('Gradient: open or create a document first', 'info');
+      return;
+    }
+    const layer = s.activeLayerId ? s.doc.layers[s.activeLayerId] : null;
+    let target: PaintTarget | null = null;
+    if (layer && ((s.editTarget === 'mask' && layer.mask) || layer.type === 'raster')) {
+      target = resolvePaintTarget({ toolName: 'Gradient', offerRasterize: false });
+      if (!target) return;
+    }
+    // Otherwise a new "Gradient" layer is created above the active one — but only once the
+    // pointer actually drags (a plain click allocates nothing).
     const o = toolOptions('gradient', GRADIENT_DEFAULTS);
     const g = effectiveGradient(o);
-    const isMask = target.kind === 'mask';
-    const stops = isMask ? g.stops.map((s) => ({ ...s, color: maskGray(s.color) })) : g.stops;
+    const isMask = target?.kind === 'mask';
+    const stops = isMask ? g.stops.map((st) => ({ ...st, color: maskGray(st.color) })) : g.stops;
     const lut = buildLUT(stops, o.reverse !== !!g.reverse, isMask ? false : o.transparency);
-    // Limit work to the selection bounds when there is a selection.
-    const full: Rect = { x: 0, y: 0, width: target.width, height: target.height };
-    let region: Rect = full;
-    const sel = activeSession()?.doc.selection;
-    if (sel && target.selection) {
-      const b = transformRect(sel.bounds, target.toLocal);
-      const grown = { x: Math.floor(b.x) - 1, y: Math.floor(b.y) - 1, width: Math.ceil(b.width) + 3, height: Math.ceil(b.height) + 3 };
-      region = rectIntersect(grown, full) ?? full;
-    }
-    const session = new CompositeSession(target, {
-      opacity: o.opacity,
-      op: isMask ? 'source-over' : brushCompositeOp(o.blendMode),
-    });
     active = {
-      session,
-      target,
+      docId: s.doc.id,
       start: { x: e.docX, y: e.docY },
       end: { x: e.docX, y: e.docY },
-      newLayerId,
-      region,
-      lut,
       o,
+      lut,
+      target,
+      aboveId: layer?.id ?? null,
+      session: null,
+      newLayerId: null,
+      region: { x: 0, y: 0, width: 0, height: 0 },
       raf: 0,
+      unwatch: () => {},
     };
   },
 
@@ -202,7 +273,14 @@ export const gradientTool: ToolDef = {
     if (!a) return;
     const p = { x: e.docX, y: e.docY };
     a.end = e.shiftKey ? snapAngle(a.start, p) : p;
-    if (Math.hypot(a.end.x - a.start.x, a.end.y - a.start.y) * viewport.zoom() >= 3) scheduleRender(a);
+    if (dragLength(a) >= MIN_DRAG) {
+      if (!ensureSession(a)) {
+        active = null;
+        viewport.requestOverlay();
+        return;
+      }
+      scheduleRender(a);
+    }
     viewport.requestOverlay();
   },
 
@@ -212,7 +290,12 @@ export const gradientTool: ToolDef = {
     if (!a) return;
     const p = { x: e.docX, y: e.docY };
     a.end = e.shiftKey ? snapAngle(a.start, p) : p;
-    finish(e);
+    if (dragLength(a) >= MIN_DRAG && !ensureSession(a)) {
+      active = null;
+      viewport.requestOverlay();
+      return;
+    }
+    finish();
   },
 
   onHover(e) {
@@ -220,9 +303,15 @@ export const gradientTool: ToolDef = {
   },
 
   onKeyDown(e) {
-    if (e.key === 'Escape' && active) {
-      finish(null, true);
-      return true;
+    if (active && !isModifierKey(e)) {
+      if (e.key === 'Escape') {
+        finish(true);
+        return true;
+      }
+      if (handleBrushKeys('gradient', e, { digits: 'opacity' })) return true;
+      // Commit before the shell runs a command (undo, clear, document switch…).
+      finish();
+      return false;
     }
     return handleBrushKeys('gradient', e, { digits: 'opacity' });
   },

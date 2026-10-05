@@ -25,15 +25,17 @@ export function paintPaper(ctx: CanvasRenderingContext2D, W: number, H: number, 
   // 1. tonal mottling (low-res, upscaled)
   const { fw, fh, s } = fieldDims(W, H, 50_000);
   const up = s * u; // field px per unit
-  const f1 = noiseField(fw, fh, up, { seed, freq: 2.2, octaves: 4 });
-  const f2 = noiseField(fw, fh, up, { seed: seed + 7, freq: 11, octaves: 3, gain: 0.55 });
-  const m = 0.09 * mottle;
+  const f1 = noiseField(fw, fh, up, { seed, freq: 2.6, octaves: 5 });
+  const f2 = noiseField(fw, fh, up, { seed: seed + 7, freq: 14, octaves: 3, gain: 0.55 });
+  const m = 0.11 * mottle;
   const base = paintField(fw, fh, (i, _x, _y, px, off) => {
     const v = f1[i] * 0.7 + f2[i] * 0.3;
     const k = 1 + v * m;
-    px[off] = tone.r * k + v * 2;
-    px[off + 1] = tone.g * k;
-    px[off + 2] = tone.b * k - v * 3 * mottle;
+    // compensate the slight darkening of the multiply grain pass below
+    const kk = k * (1 + 0.06 * grain);
+    px[off] = tone.r * kk + v * 2;
+    px[off + 1] = tone.g * kk;
+    px[off + 2] = tone.b * kk - v * 3 * mottle;
     px[off + 3] = 255;
   });
   drawUpscaled(ctx, base, W, H);
@@ -41,10 +43,14 @@ export function paintPaper(ctx: CanvasRenderingContext2D, W: number, H: number, 
   if (grain > 0) {
     ctx.save();
     ctx.globalCompositeOperation = 'overlay';
-    ctx.globalAlpha = Math.min(1, 0.32 * grain);
-    fillGrain(ctx, W, H, seed, 1);
-    ctx.globalAlpha = Math.min(1, 0.45 * grain);
+    ctx.globalAlpha = Math.min(1, 0.5 * grain);
+    fillGrain(ctx, W, H, seed, Math.max(1, 0.9 * u));
+    ctx.globalAlpha = Math.min(1, 0.55 * grain);
     fillGrain(ctx, W, H, seed + 3, Math.max(1, 2.2 * u), 0.7);
+    // a darker multiply pass gives the speckled, printed-on-rough-stock look
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.globalAlpha = Math.min(1, 0.12 * grain);
+    fillGrain(ctx, W, H, seed + 5, Math.max(1, 1.3 * u), 0.4);
     ctx.restore();
   }
   // 3. fibers
@@ -57,8 +63,8 @@ export function paintPaper(ctx: CanvasRenderingContext2D, W: number, H: number, 
 export function drawFibers(ctx: CanvasRenderingContext2D, W: number, H: number, u: number, tone: RGB, r: Rand, amount: number) {
   const n = Math.round(((W * H) / (u * u * 1e6)) * 1400 * amount);
   const buckets = [
-    { color: rgba(shade(tone, -0.35), 0.16), width: Math.max(0.5, 0.45 * u), path: new Path2D() },
-    { color: rgba(shade(tone, -0.25), 0.22), width: Math.max(0.6, 0.9 * u), path: new Path2D() },
+    { color: rgba(shade(tone, -0.45), 0.3), width: Math.max(0.5, 0.45 * u), path: new Path2D() },
+    { color: rgba(shade(tone, -0.3), 0.3), width: Math.max(0.6, 0.9 * u), path: new Path2D() },
     { color: rgba('#ffffff', 0.35), width: Math.max(0.5, 0.6 * u), path: new Path2D() },
     { color: rgba('#ffffff', 0.22), width: Math.max(0.8, 1.3 * u), path: new Path2D() },
   ];
@@ -173,7 +179,7 @@ export function drawCrackLine(ctx: CanvasRenderingContext2D, pts: { x: number; y
     seg.moveTo(pts[i].x, pts[i].y);
     for (let k = 1; k <= len && i + k < pts.length; k++) seg.lineTo(pts[i + k].x, pts[i + k].y);
     ctx.strokeStyle = rgba('#0d0b09', (0.55 + r() * 0.4) * strength);
-    ctx.lineWidth = Math.max(0.6, u * (0.7 + r() * r() * 2.6));
+    ctx.lineWidth = Math.max(0.6, u * (1 + r() * r() * 3.6));
     ctx.stroke(seg);
     i += len;
   }

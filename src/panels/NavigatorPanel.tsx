@@ -5,6 +5,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Compass } from 'lucide-react';
 import { useEditor } from '../state/editor';
+import { useUI } from '../state/ui';
 import { viewport } from '../editor/viewport';
 import { NumberField, Slider } from '../ui/controls';
 import { CanvasView, useDocumentThumbnail } from './thumbs';
@@ -36,23 +37,52 @@ function useElementSize<T extends HTMLElement>() {
   return [ref, size] as const;
 }
 
-/** Re-render on window resizes (the viewport size is not reactive). */
-function useWindowTick() {
+/**
+ * Re-render whenever the viewport element changes size (viewport.getSize() is not reactive):
+ * dock resizes, collapsing / opening panel groups and window resizes all move the visible area.
+ * The element is observed with a ResizeObserver, re-attached when the viewport (re)mounts.
+ */
+function useViewportSizeTick() {
   const [, setTick] = useState(0);
   useEffect(() => {
     let raf = 0;
-    const on = () => {
+    let observed: HTMLElement | null = null;
+    let ro: ResizeObserver | null = null;
+    const bump = () => {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => setTick((t) => t + 1));
     };
-    window.addEventListener('resize', on);
-    // The viewport may mount after us: refresh a few times early on.
-    const t1 = window.setTimeout(on, 300);
-    const t2 = window.setTimeout(on, 1200);
+    const attach = () => {
+      const el = viewport.element();
+      if (el === observed) return;
+      ro?.disconnect();
+      ro = null;
+      observed = el;
+      if (el) {
+        ro = new ResizeObserver(bump);
+        ro.observe(el);
+      }
+      bump();
+    };
+    attach();
+    // The viewport may mount after us or be re-created (e.g. when the first document opens).
+    const unsubEditor = useEditor.subscribe((s, p) => {
+      if (s.activeDocId !== p.activeDocId || s.docOrder !== p.docOrder) window.setTimeout(attach, 0);
+    });
+    const unsubUI = useUI.subscribe((s, p) => {
+      if (s.dockWidth !== p.dockWidth || s.dockVisible !== p.dockVisible || s.workspace !== p.workspace) {
+        attach();
+        bump();
+      }
+    });
+    const poll = window.setInterval(attach, 1500);
+    window.addEventListener('resize', bump);
     return () => {
-      window.removeEventListener('resize', on);
-      window.clearTimeout(t1);
-      window.clearTimeout(t2);
+      ro?.disconnect();
+      unsubEditor();
+      unsubUI();
+      window.clearInterval(poll);
+      window.removeEventListener('resize', bump);
       cancelAnimationFrame(raf);
     };
   }, []);
@@ -63,7 +93,7 @@ export function NavigatorPanel() {
   const view = useEditor((st) => (st.activeDocId ? (st.sessions[st.activeDocId]?.view ?? null) : null));
   const [stageRef, stage] = useElementSize<HTMLDivElement>();
   const [dragging, setDragging] = useState(false);
-  useWindowTick();
+  useViewportSizeTick();
 
   const availW = Math.max(0, stage.width - PAD * 2);
   const availH = Math.max(0, stage.height - PAD * 2 - PILLS_H);

@@ -11,7 +11,7 @@ import {
   brushCompositeOp,
 } from '../options';
 import { BrushOptionsBar, EraserOptionsBar, PencilOptionsBar } from '../ui/OptionsBars';
-import { brushCursor, colors, drawBrushOutline, handleBrushKeys, stabilizerRadius } from './common';
+import { brushCursor, colors, drawBrushOutline, handleBrushKeys, isSquareTip, stabilizerRadius } from './common';
 import { createStampTool } from './stampTool';
 
 export const brushTool = createStampTool({
@@ -46,7 +46,7 @@ export const brushTool = createStampTool({
   },
   renderOverlay(ctx) {
     const o = toolOptions('brush', BRUSH_DEFAULTS);
-    drawBrushOutline(ctx, { size: o.size, angle: o.angle, roundness: o.roundness, square: o.presetId === 'square' });
+    drawBrushOutline(ctx, { size: o.size, angle: o.angle, roundness: o.roundness, square: isSquareTip(o.presetId) });
   },
   onKeyDown: (e) => handleBrushKeys('brush', e, { size: 'size', hardness: 'hardness', digits: 'opacity' }),
 });
@@ -117,7 +117,7 @@ export const eraserTool = createStampTool({
   },
   renderOverlay(ctx) {
     const o = toolOptions('eraser', ERASER_DEFAULTS);
-    if (o.mode === 'brush') drawBrushOutline(ctx, { size: o.size, angle: o.angle, roundness: o.roundness });
+    if (o.mode === 'brush') drawBrushOutline(ctx, { size: o.size, angle: o.angle, roundness: o.roundness, square: isSquareTip(o.presetId) });
     else drawBrushOutline(ctx, { size: o.size, square: o.mode === 'block' });
   },
   onKeyDown: (e) => handleBrushKeys('eraser', e, { size: 'size', hardness: 'hardness', digits: 'opacity' }),

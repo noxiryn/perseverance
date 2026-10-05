@@ -1,35 +1,57 @@
 /**
  * PixelSession — CPU pipeline for the retouch tools. Pixels are read lazily in 256px tiles
- * the first time a dab touches them (one readback per tile per stroke), edited in a
- * full-size working ImageData, and pushed back with putImageData for the dirty rect once per
- * frame. The original tile pixels double as the patch "before" image.
+ * the first time a dab touches them (one readback per tile per stroke) into a full-size working
+ * buffer, edited there, and pushed back once per frame.
+ *
+ * The working/original buffers are pooled across strokes, so only LOADED tiles hold valid
+ * pixels. Everything that leaves the session — live writes, history patches, restores — is
+ * therefore built from the touched 64px cells (DirtyGrid), each of which lies inside a loaded
+ * tile, never from a bounding box that could span tiles the brush never visited.
  */
-import type { Rect } from '../../../core/types';
+import type { BitmapPatch, Rect } from '../../../core/types';
 import { bitmaps } from '../../../core/bitmaps';
 import { ctx2d, ctxRead } from '../../../core/canvas';
-import { pixelRect, rectUnion } from '../../../core/geometry';
+import { pixelRect } from '../../../core/geometry';
 import { viewport } from '../../../editor/viewport';
 import { useEditor } from '../../../state/editor';
+import { toast } from '../../../state/ui';
+import { restoreIfAlive, type GuardedSession } from './guard';
 import { targetStillValid, type PaintTarget } from './target';
+import { DIRTY_CELL, DirtyGrid } from './tiles';
 import type { PixelBuf } from './pixelOps';
 
-const TILE = 256;
+/** Load tile size (a multiple of DIRTY_CELL, so every dirty cell lies inside one load tile). */
+export const LOAD_TILE = DIRTY_CELL * 4;
 
 let workPool: ImageData | null = null;
-let origPool: Uint8ClampedArray | null = null;
+let origPool: ImageData | null = null;
 let covPool: Float32Array | null = null;
 
-export class PixelSession {
+/** Copy rect `r` of a full-width RGBA buffer into a new ImageData. */
+function region(src: Uint8ClampedArray, W: number, r: Rect): ImageData {
+  const out = new ImageData(r.width, r.height);
+  for (let y = 0; y < r.height; y++) {
+    const o = ((r.y + y) * W + r.x) * 4;
+    out.data.set(src.subarray(o, o + r.width * 4), y * r.width * 4);
+  }
+  return out;
+}
+
+export class PixelSession implements GuardedSession {
   readonly target: PaintTarget;
   readonly work: ImageData;
   readonly buf: PixelBuf;
   readonly orig: Uint8ClampedArray;
+  private readonly origImg: ImageData;
   /** Selection alpha per local pixel (null = everything selected). */
   readonly sel: Uint8Array | null;
   private loaded: Uint8Array;
   private tilesX: number;
-  private dirty: Rect | null = null;
-  private frame: Rect | null = null;
+  private tilesY: number;
+  /** Cells touched during the whole stroke (patches / restore). */
+  private dirty: DirtyGrid;
+  /** Cells touched since the last flush (live writes). */
+  private frame: DirtyGrid;
   private raf = 0;
   private finished = false;
   private cov: Float32Array | null = null;
@@ -39,13 +61,17 @@ export class PixelSession {
     const { width: w, height: h } = target;
     if (!workPool || workPool.width !== w || workPool.height !== h) {
       workPool = new ImageData(w, h);
-      origPool = new Uint8ClampedArray(w * h * 4);
+      origPool = new ImageData(w, h);
     }
     this.work = workPool;
-    this.orig = origPool!;
+    this.origImg = origPool!;
+    this.orig = this.origImg.data;
     this.buf = { data: this.work.data, width: w, height: h };
-    this.tilesX = Math.ceil(w / TILE);
-    this.loaded = new Uint8Array(this.tilesX * Math.ceil(h / TILE));
+    this.tilesX = Math.ceil(w / LOAD_TILE);
+    this.tilesY = Math.ceil(h / LOAD_TILE);
+    this.loaded = new Uint8Array(this.tilesX * this.tilesY);
+    this.dirty = new DirtyGrid(w, h);
+    this.frame = new DirtyGrid(w, h);
     if (target.selection) {
       const sc = target.selection;
       const data = ctxRead(sc).getImageData(0, 0, sc.width, sc.height).data;
@@ -68,23 +94,23 @@ export class PixelSession {
   /** Make sure all tiles intersecting `r` (local px) are loaded into the working buffer. */
   ensure(r: Rect) {
     const { width: W, height: H } = this.target;
-    const x0 = Math.max(0, Math.floor(r.x / TILE));
-    const y0 = Math.max(0, Math.floor(r.y / TILE));
-    const x1 = Math.min(this.tilesX - 1, Math.floor((r.x + r.width - 1) / TILE));
-    const y1 = Math.min(Math.ceil(H / TILE) - 1, Math.floor((r.y + r.height - 1) / TILE));
+    const x0 = Math.max(0, Math.floor(r.x / LOAD_TILE));
+    const y0 = Math.max(0, Math.floor(r.y / LOAD_TILE));
+    const x1 = Math.min(this.tilesX - 1, Math.floor((r.x + r.width - 1) / LOAD_TILE));
+    const y1 = Math.min(this.tilesY - 1, Math.floor((r.y + r.height - 1) / LOAD_TILE));
     if (x1 < x0 || y1 < y0) return;
-    const ctx = ctx2d(this.target.canvas);
+    let ctx: CanvasRenderingContext2D | null = null;
     for (let ty = y0; ty <= y1; ty++) {
       for (let tx = x0; tx <= x1; tx++) {
         const ti = ty * this.tilesX + tx;
         if (this.loaded[ti]) continue;
         this.loaded[ti] = 1;
-        const px = tx * TILE,
-          py = ty * TILE;
-        const tw = Math.min(TILE, W - px),
-          th = Math.min(TILE, H - py);
-        const img = ctx.getImageData(px, py, tw, th);
-        const src = img.data;
+        ctx ??= ctx2d(this.target.canvas);
+        const px = tx * LOAD_TILE,
+          py = ty * LOAD_TILE;
+        const tw = Math.min(LOAD_TILE, W - px),
+          th = Math.min(LOAD_TILE, H - py);
+        const src = ctx.getImageData(px, py, tw, th).data;
         for (let y = 0; y < th; y++) {
           const so = y * tw * 4;
           const dO = ((py + y) * W + px) * 4;
@@ -96,12 +122,14 @@ export class PixelSession {
     }
   }
 
+  /** Mark a local rect as edited (its tiles are loaded if they were not yet). */
   markDirty(r: Rect) {
     const pr = pixelRect(r, this.target.width, this.target.height);
-    if (!pr) return;
-    this.frame = rectUnion(this.frame, pr);
-    this.dirty = rectUnion(this.dirty, pr);
-    if (!this.raf && !this.finished) {
+    if (!pr || this.finished) return;
+    this.ensure(pr);
+    this.frame.add(pr);
+    this.dirty.add(pr);
+    if (!this.raf) {
       this.raf = requestAnimationFrame(() => {
         this.raf = 0;
         this.flush();
@@ -109,48 +137,60 @@ export class PixelSession {
     }
   }
 
+  /** Push the cells edited since the last frame into the layer bitmap. */
   flush() {
-    const r = this.frame;
-    if (!r || this.finished) return;
-    this.frame = null;
-    ctx2d(this.target.canvas).putImageData(this.work, 0, 0, r.x, r.y, r.width, r.height);
+    if (this.finished || this.frame.isEmpty) return;
+    const ctx = ctx2d(this.target.canvas);
+    for (const r of this.frame.rects()) ctx.putImageData(this.work, 0, 0, r.x, r.y, r.width, r.height);
+    this.frame.clear();
     bitmaps.touch(this.target.bitmapId);
     viewport.requestRender();
   }
 
-  private region(src: Uint8ClampedArray, r: Rect): ImageData {
+  /** One patch per run of touched cells (memory scales with the painted area). */
+  private buildPatches(): BitmapPatch[] {
     const W = this.target.width;
-    const out = new ImageData(r.width, r.height);
-    for (let y = 0; y < r.height; y++) {
-      const o = ((r.y + y) * W + r.x) * 4;
-      out.data.set(src.subarray(o, o + r.width * 4), y * r.width * 4);
-    }
-    return out;
+    return this.dirty.rects().map((r) => ({
+      bitmapId: this.target.bitmapId,
+      x: r.x,
+      y: r.y,
+      before: region(this.orig, W, r),
+      after: region(this.work.data, W, r),
+    }));
   }
 
   commit(label: string): boolean {
     if (this.finished) return false;
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
+    if (!targetStillValid(this.target)) {
+      this.finished = true;
+      if (!this.dirty.isEmpty && restoreIfAlive(this)) toast('Stroke discarded — the document changed while painting', 'warning');
+      return false;
+    }
     this.flush();
     this.finished = true;
-    const r = this.dirty;
-    if (!r || !targetStillValid(this.target)) return false;
-    const before = this.region(this.orig, r);
-    const after = this.region(this.work.data, r);
-    useEditor.getState().commit(label, undefined, { patches: [{ bitmapId: this.target.bitmapId, x: r.x, y: r.y, before, after }] });
+    if (this.dirty.isEmpty) return false;
+    useEditor.getState().commit(label, undefined, { patches: this.buildPatches() });
     return true;
   }
 
   cancel() {
     if (this.finished) return;
+    this.kill();
+    if (!this.dirty.isEmpty) restoreIfAlive(this);
+  }
+
+  /** GuardedSession: stop live updates without touching pixels. */
+  kill() {
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.finished = true;
-    const r = this.dirty;
-    if (!r || !targetStillValid(this.target)) return;
-    ctx2d(this.target.canvas).putImageData(this.region(this.orig, r), r.x, r.y);
-    bitmaps.touch(this.target.bitmapId);
-    viewport.requestRender();
+  }
+
+  /** GuardedSession: put the original pixels back over the touched cells. */
+  restoreBefore() {
+    const ctx = ctx2d(this.target.canvas);
+    for (const r of this.dirty.rects()) ctx.putImageData(this.origImg, 0, 0, r.x, r.y, r.width, r.height);
   }
 }

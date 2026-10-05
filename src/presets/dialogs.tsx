@@ -229,7 +229,7 @@ function ExtractPaletteDialog({ close }: { close: (id?: string) => void }) {
             ]}
           />
         </Field>
-        <div className="fc-extract-preview" style={colors.length ? { gridTemplateColumns: `repeat(${colors.length}, 1fr)` } : undefined}>
+        <div className="fc-extract-preview" style={colors.length ? { gridTemplateColumns: `repeat(${Math.max(colors.length, 6)}, 1fr)` } : undefined}>
           {colors.length ? (
             colors.map((c) => (
               <div key={c.color} className="fc-extract-chip" title={`${describeColor(c.color)} ${c.color} · ${(c.weight * 100).toFixed(1)}% of pixels`}>

@@ -6,7 +6,9 @@ import { CircleDashed, Droplet, Flame, Pointer, SunDim, Triangle } from 'lucide-
 import type { ToolDef, ToolPointerEvent } from '../../../registry';
 import { parseColor } from '../../../core/color';
 import { activeSession, toolOptions } from '../../../state/editor';
+import { toast } from '../../../state/ui';
 import { viewport } from '../../../editor/viewport';
+import { isModifierKey, watchStroke } from '../engine/guard';
 import { BrushStroke } from '../engine/stroke';
 import { matrixScale } from '../engine/dabs';
 import { PixelSession } from '../engine/pixelSession';
@@ -74,6 +76,8 @@ function createRetouchTool(spec: RetouchSpec): ToolDef {
     finger: [number, number, number] | null;
     /** Previous dab center (local px) — smudge pickup is distance based. */
     lastDab: { x: number; y: number } | null;
+    /** Stops the history/document watcher (see engine/guard). */
+    unwatch: () => void;
   }
   let active: Active | null = null;
 
@@ -131,11 +135,20 @@ function createRetouchTool(spec: RetouchSpec): ToolDef {
     const a = active;
     if (!a) return;
     active = null;
+    a.unwatch();
     if (cancel) a.session.cancel();
     else {
       paint(a, a.stroke.end(e ? a.axis.apply(inputPoint(e), e.shiftKey, a.stroke.position) : undefined));
       a.session.commit(spec.label);
     }
+    viewport.requestOverlay();
+  };
+
+  /** The guard discarded the stroke (history or document changed underneath it). */
+  const abort = (a: Active, message: string) => {
+    if (active !== a) return;
+    active = null;
+    toast(message, 'warning');
     viewport.requestOverlay();
   };
 
@@ -199,8 +212,10 @@ function createRetouchTool(spec: RetouchSpec): ToolDef {
         axis: new AxisLock(),
         finger,
         lastDab: null,
+        unwatch: () => {},
       };
       active = a;
+      a.unwatch = watchStroke(a.session, (msg) => abort(a, msg));
       paint(a, stroke.begin(inputPoint(e)));
     },
 
@@ -221,11 +236,18 @@ function createRetouchTool(spec: RetouchSpec): ToolDef {
     },
 
     onKeyDown(e) {
-      if (e.key === 'Escape' && active) {
-        finish(undefined, true);
-        return true;
+      const keys = () => handleBrushKeys(spec.id, e, { size: 'size', hardness: 'hardness', digits: digitKey(spec.kind) });
+      if (active && !isModifierKey(e)) {
+        if (e.key === 'Escape') {
+          finish(undefined, true);
+          return true;
+        }
+        if (keys()) return true;
+        // Commit before the shell runs a command (undo, clear, document switch…).
+        finish();
+        return false;
       }
-      return handleBrushKeys(spec.id, e, { size: 'size', hardness: 'hardness', digits: digitKey(spec.kind) });
+      return keys();
     },
 
     renderOverlay(ctx) {

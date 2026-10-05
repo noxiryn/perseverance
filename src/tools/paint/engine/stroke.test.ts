@@ -59,6 +59,24 @@ describe('BrushStroke', () => {
     expect(s.position).toMatchObject({ x: 0, y: 50 });
   });
 
+  it('beginAt + lineTo (Shift-click polyline) does not re-stamp the joint', () => {
+    const s = new BrushStroke(cfg);
+    s.beginAt({ x: 0, y: 0, pressure: 1 });
+    const dabs = s.lineTo({ x: 0, y: 50, pressure: 1 });
+    // Same segment as begin()+lineTo() minus the dab on the start point.
+    expect(dabs.length).toBe(10);
+    expect(dabs[0].y).toBeCloseTo(5, 6);
+    for (const d of dabs) expect(d.y).toBeGreaterThan(0);
+    expect(dabs[dabs.length - 1].y).toBeCloseTo(50, 6);
+  });
+
+  it('beginAt never emits a deferred follow-direction dab at the joint', () => {
+    const s = new BrushStroke({ ...cfg, followDirection: true });
+    s.beginAt({ x: 0, y: 0, pressure: 1 });
+    const dabs = [...s.lineTo({ x: 20, y: 0, pressure: 1 }), ...s.end()];
+    expect(dabs.every((d) => d.x > 0)).toBe(true);
+  });
+
   it('follow-direction tips defer the first dab until the direction is known', () => {
     const c = { ...cfg, followDirection: true };
     const s = new BrushStroke(c);

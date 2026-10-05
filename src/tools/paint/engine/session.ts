@@ -7,15 +7,20 @@
  * Brush-like tools paint WHITE coverage dabs into S and the color (or the clone source image)
  * is applied once per composite (`mode.color` / `mode.fill`), which keeps low-alpha edges
  * color-exact. Only dirty rects are recomposited each frame (one rAF), the before-image is a
- * GPU copy of the layer taken at stroke start, and the BitmapPatch is read back once on commit.
+ * GPU copy of the layer taken at stroke start, and the history patches are read back once on
+ * commit — one per run of touched 64px cells (see DirtyGrid), so history memory scales with
+ * the painted area rather than the stroke's bounding box.
  */
-import type { Rect } from '../../../core/types';
+import type { BitmapPatch, Rect } from '../../../core/types';
 import { bitmaps } from '../../../core/bitmaps';
 import { createCanvas, ctx2d } from '../../../core/canvas';
 import { pixelRect, rectUnion } from '../../../core/geometry';
 import { viewport } from '../../../editor/viewport';
 import { useEditor } from '../../../state/editor';
+import { toast } from '../../../state/ui';
+import { restoreIfAlive, type GuardedSession } from './guard';
 import { targetStillValid, type PaintTarget } from './target';
+import { DirtyGrid, bandsOf, cropImageData } from './tiles';
 
 export interface CompositeMode {
   /** 0..1 stroke opacity cap. */
@@ -31,9 +36,10 @@ export interface CompositeMode {
   color?: string;
   /**
    * Image fill for coverage strokes (clone stamp): `image` drawn through `matrix` (image → bitmap
-   * local space) and masked by the stroke coverage. Takes precedence over `color`.
+   * local space) and masked by the stroke coverage. Takes precedence over `color`. The image
+   * 'before' means the session's own stroke-start copy of the layer (local space).
    */
-  fill?: { image: CanvasImageSource; matrix: DOMMatrix };
+  fill?: { image: CanvasImageSource | 'before'; matrix: DOMMatrix };
 }
 
 /* ---------------- canvas pool ---------------- */
@@ -65,13 +71,16 @@ function scratch(name: string, w: number, h: number): HTMLCanvasElement {
  */
 let bufferGarbage: Rect | null = null;
 
-export class CompositeSession {
+export class CompositeSession implements GuardedSession {
   readonly target: PaintTarget;
   readonly buffer: HTMLCanvasElement;
   readonly bufferCtx: CanvasRenderingContext2D;
   readonly before: HTMLCanvasElement;
   mode: CompositeMode;
+  /** Bounding box of everything touched (local px). */
   private dirty: Rect | null = null;
+  /** Touched cells — what the history patches and restores cover. */
+  private cells: DirtyGrid;
   private frame: Rect | null = null;
   private raf = 0;
   private finished = false;
@@ -80,6 +89,7 @@ export class CompositeSession {
     this.target = target;
     this.mode = mode;
     const { width: w, height: h } = target;
+    this.cells = new DirtyGrid(w, h);
 
     this.before = pooled('before', w, h);
     const bctx = ctx2d(this.before);
@@ -102,21 +112,13 @@ export class CompositeSession {
     this.bufferCtx.imageSmoothingQuality = 'high';
   }
 
-  get isFinished() {
-    return this.finished;
-  }
-
-  /** Union of everything touched so far (local px), or null. */
-  get dirtyRect(): Rect | null {
-    return this.dirty;
-  }
-
   /** Mark a local-space rect of the buffer as changed; schedules a composite. */
   markDirty(r: Rect) {
     const pr = pixelRect(r, this.target.width, this.target.height, 1);
     if (!pr) return;
     this.frame = rectUnion(this.frame, pr);
     this.dirty = rectUnion(this.dirty, pr);
+    this.cells.add(pr);
     bufferGarbage = rectUnion(bufferGarbage, pr);
     this.schedule();
   }
@@ -147,14 +149,6 @@ export class CompositeSession {
     this.composite(r);
     bitmaps.touch(this.target.bitmapId);
     viewport.requestRender();
-  }
-
-  /** Recomposite the whole touched area (e.g. after changing the mode mid-preview). */
-  recompositeAll() {
-    if (this.dirty) {
-      this.frame = rectUnion(this.frame, this.dirty);
-      this.schedule();
-    }
   }
 
   private composite(r: Rect) {
@@ -193,7 +187,7 @@ export class CompositeSession {
         xc.setTransform(m.a, m.b, m.c, m.d, m.e - x, m.f - y);
         xc.imageSmoothingEnabled = true;
         xc.imageSmoothingQuality = 'high';
-        xc.drawImage(fill.image, 0, 0);
+        xc.drawImage(fill.image === 'before' ? this.before : fill.image, 0, 0);
         xc.restore();
         xc.globalCompositeOperation = 'destination-in';
         xc.drawImage(this.buffer, x, y, w, h, 0, 0, w, h);
@@ -239,28 +233,44 @@ export class CompositeSession {
     ctx.restore();
   }
 
-  /** Read the before-image of a rect (CPU). */
-  readBefore(r: Rect): ImageData {
-    return ctx2d(this.before, { willReadFrequently: true }).getImageData(r.x, r.y, r.width, r.height);
+  /**
+   * History patches for the touched cells: one per run of touched cells in a cell row, read back
+   * with one getImageData per row band (before + after) instead of one per rect.
+   */
+  private buildPatches(): BitmapPatch[] {
+    const t = this.target;
+    const beforeCtx = ctx2d(this.before);
+    const afterCtx = ctx2d(t.canvas);
+    const patches: BitmapPatch[] = [];
+    for (const { band, rects } of bandsOf(this.cells.rects())) {
+      const b = beforeCtx.getImageData(band.x, band.y, band.width, band.height);
+      const a = afterCtx.getImageData(band.x, band.y, band.width, band.height);
+      for (const r of rects) {
+        patches.push({ bitmapId: t.bitmapId, x: r.x, y: r.y, before: cropImageData(b, band, r), after: cropImageData(a, band, r) });
+      }
+    }
+    return patches;
   }
 
   /**
-   * Finish: composite pending pixels, record the patch for the touched area and commit one
-   * history step. Returns false when nothing was painted.
+   * Finish: composite pending pixels, record the patches for the touched area and commit one
+   * history step. Returns false when nothing was painted (or the stroke had to be discarded).
    */
   commit(label: string, extra?: { activeLayerId?: string }): boolean {
     if (this.finished) return false;
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
+    if (!targetStillValid(this.target)) {
+      // The document changed under the stroke: leave no unrecorded pixels behind.
+      this.finished = true;
+      if (this.dirty && restoreIfAlive(this)) toast('Stroke discarded — the document changed while painting', 'warning');
+      return false;
+    }
     this.flush();
     this.finished = true;
-    const r = this.dirty;
-    if (!r) return false;
-    if (!targetStillValid(this.target)) return false;
-    const before = this.readBefore(r);
-    const after = bitmaps.read(this.target.bitmapId, r);
+    if (this.cells.isEmpty) return false;
     useEditor.getState().commit(label, undefined, {
-      patches: [{ bitmapId: this.target.bitmapId, x: r.x, y: r.y, before, after }],
+      patches: this.buildPatches(),
       ...(extra?.activeLayerId ? { activeLayerId: extra.activeLayerId } : {}),
     });
     return true;
@@ -269,21 +279,32 @@ export class CompositeSession {
   /** Abort: restore the original pixels. */
   cancel() {
     if (this.finished) return;
+    this.kill();
+    // Restores even when another document became active: the stroke was never recorded.
+    if (this.dirty) restoreIfAlive(this);
+  }
+
+  /** GuardedSession: stop live updates without touching pixels. */
+  kill() {
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.finished = true;
-    const r = this.dirty;
-    if (!r || !targetStillValid(this.target)) return;
+  }
+
+  /** GuardedSession: copy the stroke-start pixels back over the touched cells. */
+  restoreBefore() {
+    const rects = this.cells.rects();
+    if (!rects.length) return;
     const ctx = ctx2d(this.target.canvas);
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'copy';
+    ctx.imageSmoothingEnabled = false;
     ctx.beginPath();
-    ctx.rect(r.x, r.y, r.width, r.height);
+    for (const r of rects) ctx.rect(r.x, r.y, r.width, r.height);
     ctx.clip();
     ctx.drawImage(this.before, 0, 0);
     ctx.restore();
-    bitmaps.touch(this.target.bitmapId);
-    viewport.requestRender();
   }
 }

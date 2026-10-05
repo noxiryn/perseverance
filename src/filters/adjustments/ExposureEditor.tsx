@@ -82,7 +82,7 @@ export function ExposureEditor({
         onChange={(_k: string, _v: ParamValue, all: ParamValues) => onChange(all)}
         onCommit={(_k: string, _v: ParamValue, all: ParamValues) => onCommit(all)}
       />
-      <Field label="Gamma Correction" hint="Below 1 darkens and adds contrast to midtones, above 1 brightens them">
+      <Field label="Gamma" hint="Gamma Correction: below 1 darkens the midtones, above 1 brightens them (logarithmic slider, 1.0 in the middle)">
         <LogGammaSlider value={gamma} onChange={(g) => onChange({ ...values, gamma: g })} onCommit={(g) => onCommit({ ...values, gamma: g })} />
       </Field>
     </div>

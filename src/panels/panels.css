@@ -103,9 +103,13 @@
 }
 .layers-num.disabled {
   opacity: 0.45;
-  pointer-events: none;
+  cursor: default;
 }
-.layers-num .ui-scrub {
+.layers-num.disabled input {
+  cursor: default;
+}
+.layers-num .ui-scrub,
+.layers-num .layers-num-label {
   min-width: 36px;
   text-align: right;
 }
@@ -630,24 +634,63 @@ body.layers-dragging * {
 .layers-fx-grip:hover {
   color: var(--text);
 }
+/* Single effect of its type: nothing to reorder against. */
+.layers-fx-grip.fixed {
+  cursor: default;
+  opacity: 0.35;
+}
+.layers-fx-grip.fixed:hover {
+  color: var(--text-faint);
+}
 .layers-fx-name {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
   cursor: pointer;
   font-size: var(--fs-sm);
 }
+.layers-fx-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .layers-fx-item.off .layers-fx-name {
   color: var(--text-faint);
 }
-.layers-fx-swatch {
-  width: 12px;
-  height: 12px;
-  border-radius: 3px;
-  border: 1px solid #555;
+/* Effect color: a small round dot after the name (clearly not a checkbox). */
+.layers-fx-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
   flex: none;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.28);
+}
+.layers-fx-item.off .layers-fx-dot {
+  opacity: 0.45;
+}
+.layers-fx-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 18px;
+  padding: 0 4px;
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: default;
+}
+.layers-fx-content::before,
+.layers-fx-content::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
 }
 .layers-fx-body {
   padding: 6px 10px 10px;

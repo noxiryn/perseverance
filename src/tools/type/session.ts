@@ -913,13 +913,7 @@ export function drawSessionOverlay(ctx: CanvasRenderingContext2D) {
     const [x2, y2] = shear(t, c.x, y, c.baseline);
     pts.push(toScreen(frame, x2, y2));
   }
-  // Keep the hidden textarea at the caret so IME candidate windows open next to it.
-  const host = viewport.element();
-  if (host) {
-    const r = host.getBoundingClientRect();
-    s.ta.style.left = `${Math.round(r.left + pts[0].x)}px`;
-    s.ta.style.top = `${Math.round(r.top + pts[0].y)}px`;
-  }
+  placeTextarea(s, pts[0]);
   if (a === b && (s.blinkOn || !focused)) {
     ctx.lineCap = 'round';
     const line = () => {

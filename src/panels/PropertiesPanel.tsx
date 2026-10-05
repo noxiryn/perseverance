@@ -1,7 +1,8 @@
 /**
  * Properties panel (id 'properties'): document properties when no layer is active; otherwise the
  * active layer's header, transform, appearance, registered propertiesSections, fill editor, mask
- * and smart filter sections. Every edit previews live and commits one (coalesced) history step.
+ * and smart filter sections. Continuous controls preview live and commit one coalesced history
+ * step on release; buttons, toggles and selects are one discrete step each (see layerOps.Phase).
  */
 import { Component, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
@@ -53,6 +54,7 @@ import { layerTypeIcon, layerTypeLabel } from './icons';
 import { BLEND_MODES, GROUP_BLEND_MODES } from './LayersPanel';
 import { PatternFillEditor, defaultFill } from './dialogs';
 import { effectName } from './effectPresets';
+import { effectsTopDown } from './effectOrder';
 import { filterContextMenu } from './menus';
 import './panels.css';
 
@@ -170,7 +172,7 @@ function DocProps({ doc }: { doc: Document }) {
             <ColorField
               value={bg ?? '#ffffff'}
               onChange={(c) => ops.editDoc('Background Color', (d) => void (d.background = c), 'preview')}
-              onCommit={(c) => ops.editDoc('Background Color', (d) => void (d.background = c))}
+              onCommit={(c) => ops.editDoc('Background Color', (d) => void (d.background = c), 'coalesce')}
               showHex
             />
           </div>
@@ -179,7 +181,7 @@ function DocProps({ doc }: { doc: Document }) {
           <Checkbox
             checked={bg === null}
             label="Transparent background"
-            onChange={(v) => ops.editDoc('Background Color', (d) => void (d.background = v ? null : '#ffffff'))}
+            onChange={(v) => ops.editDoc(v ? 'Transparent Background' : 'Background Color', (d) => void (d.background = v ? null : '#ffffff'))}
           />
         </Field>
       </Section>
@@ -294,13 +296,14 @@ function TransformSection({ layer }: { layer: TransformableLayer }) {
   const locked = layer.locks.position || layer.locks.all;
   const id = layer.id;
 
-  const edit = (fn: (tl: TransformableLayer) => void) => ({
-    preview: () => ops.editLayers([id], 'Transform', (l) => isTransformable(l) && fn(l), 'preview'),
-    commit: () => ops.editLayers([id], 'Transform', (l) => isTransformable(l) && fn(l), 'commit'),
-  });
-  const field = (fn: (tl: TransformableLayer, v: number) => void) => ({
-    onChange: (v: number) => !locked && edit((l) => fn(l, v)).preview(),
-    onCommit: (v: number) => !locked && edit((l) => fn(l, v)).commit(),
+  /** Each kind of transform edit has its own history label so different edits never merge. */
+  const edit = (label: string, fn: (tl: TransformableLayer) => void, phase: ops.Phase) => {
+    if (!locked) ops.editLayers([id], label, (l) => isTransformable(l) && fn(l), phase);
+  };
+  /** Continuous field: live preview while scrubbing, coalesced history step on release / Enter. */
+  const field = (label: string, fn: (tl: TransformableLayer, v: number) => void) => ({
+    onChange: (v: number) => edit(label, (l) => fn(l, v), 'preview'),
+    onCommit: (v: number) => edit(label, (l) => fn(l, v), 'coalesce'),
   });
   const scaleX = Math.round(Math.abs(t.scaleX) * 1000) / 10;
   const scaleY = Math.round(Math.abs(t.scaleY) * 1000) / 10;
@@ -308,12 +311,20 @@ function TransformSection({ layer }: { layer: TransformableLayer }) {
   return (
     <Section
       title="Transform"
-      actions={<IconButton icon={RotateCcw} size="sm" title="Reset transform (scale, rotation, flip)" disabled={locked} onClick={() => edit((l) => (l.transform = resetTransform(l.transform))).commit()} />}
+      actions={
+        <IconButton
+          icon={RotateCcw}
+          size="sm"
+          title="Reset transform (scale, rotation, flip)"
+          disabled={locked}
+          onClick={() => edit('Reset Transform', (l) => (l.transform = resetTransform(l.transform)), 'commit')}
+        />
+      }
     >
       {locked && <div className="layers-note">Position is locked for this layer.</div>}
       <div className="layers-grid2" style={locked ? { opacity: 0.5, pointerEvents: 'none' } : undefined}>
-        <NumberField value={box.x} step={1} unit="px" scrubLabel="X" title="Left edge (px)" {...field((l, v) => (l.transform = withVisualPosition(l.transform, w, h, { x: v })))} />
-        <NumberField value={box.y} step={1} unit="px" scrubLabel="Y" title="Top edge (px)" {...field((l, v) => (l.transform = withVisualPosition(l.transform, w, h, { y: v })))} />
+        <NumberField value={box.x} step={1} unit="px" scrubLabel="X" title="Left edge (px)" {...field('Move', (l, v) => (l.transform = withVisualPosition(l.transform, w, h, { x: v })))} />
+        <NumberField value={box.y} step={1} unit="px" scrubLabel="Y" title="Top edge (px)" {...field('Move', (l, v) => (l.transform = withVisualPosition(l.transform, w, h, { y: v })))} />
       </div>
       <div className="layers-wh" style={locked ? { opacity: 0.5, pointerEvents: 'none' } : undefined}>
         <NumberField
@@ -323,7 +334,7 @@ function TransformSection({ layer }: { layer: TransformableLayer }) {
           unit="px"
           scrubLabel="W"
           title={`Width (${scaleX}%)`}
-          {...field((l, v) => (l.transform = withVisualSize(l.transform, w, h, { width: v }, linked)))}
+          {...field('Resize', (l, v) => (l.transform = withVisualSize(l.transform, w, h, { width: v }, linked)))}
         />
         <IconButton icon={linked ? Link : Unlink} size="sm" active={linked} title={linked ? 'Aspect ratio linked' : 'Link aspect ratio'} onClick={() => setLinked(!linked)} />
         <NumberField
@@ -333,14 +344,14 @@ function TransformSection({ layer }: { layer: TransformableLayer }) {
           unit="px"
           scrubLabel="H"
           title={`Height (${scaleY}%)`}
-          {...field((l, v) => (l.transform = withVisualSize(l.transform, w, h, { height: v }, linked)))}
+          {...field('Resize', (l, v) => (l.transform = withVisualSize(l.transform, w, h, { height: v }, linked)))}
         />
       </div>
       <div className="ui-row" style={locked ? { opacity: 0.5, pointerEvents: 'none' } : undefined}>
         <AngleDial
           value={-t.rotation}
-          onChange={(a) => edit((l) => (l.transform = { ...l.transform, rotation: normalizeAngle(-a) })).preview()}
-          onCommit={(a) => edit((l) => (l.transform = { ...l.transform, rotation: normalizeAngle(-a) })).commit()}
+          onChange={(a) => edit('Rotate', (l) => (l.transform = { ...l.transform, rotation: normalizeAngle(-a) }), 'preview')}
+          onCommit={(a) => edit('Rotate', (l) => (l.transform = { ...l.transform, rotation: normalizeAngle(-a) }), 'coalesce')}
         />
         <NumberField
           value={t.rotation}
@@ -350,11 +361,21 @@ function TransformSection({ layer }: { layer: TransformableLayer }) {
           unit="°"
           width={66}
           title="Rotation (degrees, clockwise)"
-          {...field((l, v) => (l.transform = { ...l.transform, rotation: normalizeAngle(v) }))}
+          {...field('Rotate', (l, v) => (l.transform = { ...l.transform, rotation: normalizeAngle(v) }))}
         />
         <span style={{ flex: 1 }} />
-        <IconButton icon={FlipVertical2} title="Flip horizontal" active={t.scaleX < 0} onClick={() => edit((l) => (l.transform = flippedTransform(l.transform, 'h'))).commit()} />
-        <IconButton icon={FlipHorizontal2} title="Flip vertical" active={t.scaleY < 0} onClick={() => edit((l) => (l.transform = flippedTransform(l.transform, 'v'))).commit()} />
+        <IconButton
+          icon={FlipVertical2}
+          title="Flip horizontal"
+          active={t.scaleX < 0}
+          onClick={() => edit('Flip Horizontal', (l) => (l.transform = flippedTransform(l.transform, 'h')), 'commit')}
+        />
+        <IconButton
+          icon={FlipHorizontal2}
+          title="Flip vertical"
+          active={t.scaleY < 0}
+          onClick={() => edit('Flip Vertical', (l) => (l.transform = flippedTransform(l.transform, 'v')), 'commit')}
+        />
       </div>
       <div className="layers-note">
         Scale {scaleX}% × {scaleY}% · content {Math.round(size.width)} × {Math.round(size.height)} px
@@ -387,7 +408,7 @@ function AppearanceSection({ layer }: { layer: Layer }) {
           displayScale={100}
           unit="%"
           onChange={(v) => ops.editLayers([id], 'Opacity', (l) => void (l.opacity = v), 'preview')}
-          onCommit={(v) => ops.editLayers([id], 'Opacity', (l) => void (l.opacity = v))}
+          onCommit={(v) => ops.editLayers([id], 'Opacity', (l) => void (l.opacity = v), 'coalesce')}
         />
       </Field>
       {!isGroup && layer.type !== 'adjustment' && (
@@ -400,7 +421,7 @@ function AppearanceSection({ layer }: { layer: Layer }) {
             displayScale={100}
             unit="%"
             onChange={(v) => ops.editLayers([id], 'Fill Opacity', (l) => void (l.fillOpacity = v), 'preview')}
-            onCommit={(v) => ops.editLayers([id], 'Fill Opacity', (l) => void (l.fillOpacity = v))}
+            onCommit={(v) => ops.editLayers([id], 'Fill Opacity', (l) => void (l.fillOpacity = v), 'coalesce')}
           />
         </Field>
       )}
@@ -431,11 +452,16 @@ const GRADIENT_KINDS: { value: GradientKind; label: string }[] = [
 function FillSection({ layer }: { layer: Extract<Layer, { type: 'fill' }> }) {
   const id = layer.id;
   const fill = layer.fill;
-  const set = (f: FillContent, phase: ops.Phase) =>
-    ops.editLayers([id], 'Edit Fill', (l) => {
-      if (l.type === 'fill') l.fill = structuredClone(f);
-    }, phase);
-  const setGradient = (g: Gradient, phase: ops.Phase) => set({ type: 'gradient', gradient: g }, phase);
+  const set = (f: FillContent, phase: ops.Phase, label: string) =>
+    ops.editLayers(
+      [id],
+      label,
+      (l) => {
+        if (l.type === 'fill') l.fill = structuredClone(f);
+      },
+      phase,
+    );
+  const setGradient = (g: Gradient, phase: ops.Phase, label = 'Fill Gradient') => set({ type: 'gradient', gradient: g }, phase, label);
 
   return (
     <Section title="Fill">
@@ -451,7 +477,7 @@ function FillSection({ layer }: { layer: Extract<Layer, { type: 'fill' }> }) {
               // Carry the current color over where it makes sense.
               if (k === 'gradient' && fill.type === 'solid' && next.type === 'gradient') next.gradient.stops[0].color = fill.color;
               if (k === 'solid' && fill.type === 'gradient' && next.type === 'solid') next.color = fill.gradient.stops[0]?.color ?? next.color;
-              set(next, 'commit');
+              set(next, 'commit', 'Fill Type');
             }}
           >
             {k === 'solid' ? 'Color' : k === 'gradient' ? 'Gradient' : 'Pattern'}
@@ -460,23 +486,29 @@ function FillSection({ layer }: { layer: Extract<Layer, { type: 'fill' }> }) {
       </div>
       {fill.type === 'solid' && (
         <Field label="Color">
-          <ColorField value={fill.color} showHex alpha onChange={(c) => set({ type: 'solid', color: c }, 'preview')} onCommit={(c) => set({ type: 'solid', color: c }, 'commit')} />
+          <ColorField
+            value={fill.color}
+            showHex
+            alpha
+            onChange={(c) => set({ type: 'solid', color: c }, 'preview', 'Fill Color')}
+            onCommit={(c) => set({ type: 'solid', color: c }, 'coalesce', 'Fill Color')}
+          />
         </Field>
       )}
       {fill.type === 'gradient' && (
         <>
           <Field label="Gradient">
-            <GradientField value={fill.gradient} onChange={(g) => setGradient(g, 'preview')} onCommit={(g) => setGradient(g, 'commit')} />
+            <GradientField value={fill.gradient} onChange={(g) => setGradient(g, 'preview')} onCommit={(g) => setGradient(g, 'coalesce')} />
           </Field>
           <Field label="Style">
-            <Select value={fill.gradient.kind} options={GRADIENT_KINDS} width="100%" onChange={(k) => setGradient({ ...fill.gradient, kind: k }, 'commit')} />
+            <Select value={fill.gradient.kind} options={GRADIENT_KINDS} width="100%" onChange={(k) => setGradient({ ...fill.gradient, kind: k }, 'commit', 'Gradient Style')} />
           </Field>
           <Field label="Angle">
             <div className="ui-row">
               <AngleDial
                 value={-fill.gradient.angle}
-                onChange={(a) => setGradient({ ...fill.gradient, angle: normalizeAngle(-a) }, 'preview')}
-                onCommit={(a) => setGradient({ ...fill.gradient, angle: normalizeAngle(-a) }, 'commit')}
+                onChange={(a) => setGradient({ ...fill.gradient, angle: normalizeAngle(-a) }, 'preview', 'Gradient Angle')}
+                onCommit={(a) => setGradient({ ...fill.gradient, angle: normalizeAngle(-a) }, 'coalesce', 'Gradient Angle')}
               />
               <NumberField
                 value={fill.gradient.angle}
@@ -484,8 +516,8 @@ function FillSection({ layer }: { layer: Extract<Layer, { type: 'fill' }> }) {
                 max={360}
                 unit="°"
                 width={60}
-                onChange={(v) => setGradient({ ...fill.gradient, angle: v }, 'preview')}
-                onCommit={(v) => setGradient({ ...fill.gradient, angle: v }, 'commit')}
+                onChange={(v) => setGradient({ ...fill.gradient, angle: v }, 'preview', 'Gradient Angle')}
+                onCommit={(v) => setGradient({ ...fill.gradient, angle: v }, 'coalesce', 'Gradient Angle')}
               />
             </div>
           </Field>
@@ -497,16 +529,22 @@ function FillSection({ layer }: { layer: Extract<Layer, { type: 'fill' }> }) {
               step={1}
               displayScale={100}
               unit="%"
-              onChange={(v) => setGradient({ ...fill.gradient, scale: v }, 'preview')}
-              onCommit={(v) => setGradient({ ...fill.gradient, scale: v }, 'commit')}
+              onChange={(v) => setGradient({ ...fill.gradient, scale: v }, 'preview', 'Gradient Scale')}
+              onCommit={(v) => setGradient({ ...fill.gradient, scale: v }, 'coalesce', 'Gradient Scale')}
             />
           </Field>
           <Field label="">
-            <Checkbox checked={!!fill.gradient.reverse} label="Reverse" onChange={(v) => setGradient({ ...fill.gradient, reverse: v }, 'commit')} />
+            <Checkbox checked={!!fill.gradient.reverse} label="Reverse" onChange={(v) => setGradient({ ...fill.gradient, reverse: v }, 'commit', 'Reverse Gradient')} />
           </Field>
         </>
       )}
-      {fill.type === 'pattern' && <PatternFillEditor value={fill} onChange={(f) => set(f, 'preview')} onCommit={(f) => set(f, 'commit')} />}
+      {fill.type === 'pattern' && (
+        <PatternFillEditor
+          value={fill}
+          onChange={(f) => set(f, 'preview', 'Pattern Scale')}
+          onCommit={(f, discrete) => (discrete ? set(f, 'commit', 'Fill Pattern') : set(f, 'coalesce', 'Pattern Scale'))}
+        />
+      )}
     </Section>
   );
 }
@@ -548,7 +586,7 @@ function MaskSection({ doc, layer }: { doc: Document; layer: Layer }) {
           displayScale={100}
           unit="%"
           onChange={(v) => ops.setMaskProps(id, { density: v }, 'preview', 'Mask Density')}
-          onCommit={(v) => ops.setMaskProps(id, { density: v }, 'commit', 'Mask Density')}
+          onCommit={(v) => ops.setMaskProps(id, { density: v }, 'coalesce', 'Mask Density')}
         />
       </Field>
       <Field label="Feather">
@@ -559,7 +597,7 @@ function MaskSection({ doc, layer }: { doc: Document; layer: Layer }) {
           step={0.5}
           unit="px"
           onChange={(v) => ops.setMaskProps(id, { feather: v }, 'preview', 'Mask Feather')}
-          onCommit={(v) => ops.setMaskProps(id, { feather: v }, 'commit', 'Mask Feather')}
+          onCommit={(v) => ops.setMaskProps(id, { feather: v }, 'coalesce', 'Mask Feather')}
         />
       </Field>
       <Field label="">
@@ -631,7 +669,7 @@ function SmartFiltersSection({ layer }: { layer: Layer }) {
           const def = filters.get(f.filterId);
           const expanded = open === f.id;
           const values = def ? resolveParams(def, f.params) : {};
-          const label = `Edit ${def?.name ?? 'Smart Filter'}`;
+          const prefix = def?.name ?? 'Smart Filter';
           return (
             <div key={f.id} className="layers-filter-card" onContextMenu={(e) => showContextMenu(e, filterContextMenu(id, f.id))}>
               <div className="layers-filter-card-head">
@@ -652,8 +690,10 @@ function SmartFiltersSection({ layer }: { layer: Layer }) {
                         defs={def.params}
                         values={values}
                         compact
-                        onChange={(_k, _v, all) => ops.updateFilter(id, f.id, (x) => (x.params = all), 'preview', label)}
-                        onCommit={(_k, _v, all) => ops.updateFilter(id, f.id, (x) => (x.params = all), 'commit', label)}
+                        onChange={(k, _v, all) => ops.updateFilter(id, f.id, (x) => (x.params = all), 'preview', ops.paramLabel(prefix, def.params, k))}
+                        onCommit={(k, _v, all) =>
+                          ops.updateFilter(id, f.id, (x) => (x.params = all), ops.paramCommitPhase(def.params, k), ops.paramLabel(prefix, def.params, k))
+                        }
                       />
                     ) : (
                       <div className="layers-note">This filter has no parameters.</div>
@@ -670,7 +710,7 @@ function SmartFiltersSection({ layer }: { layer: Layer }) {
                       displayScale={100}
                       unit="%"
                       onChange={(v) => ops.updateFilter(id, f.id, (x) => (x.opacity = v), 'preview', 'Smart Filter Opacity')}
-                      onCommit={(v) => ops.updateFilter(id, f.id, (x) => (x.opacity = v), 'commit', 'Smart Filter Opacity')}
+                      onCommit={(v) => ops.updateFilter(id, f.id, (x) => (x.opacity = v), 'coalesce', 'Smart Filter Opacity')}
                     />
                   </Field>
                   <Field label="Blend">
@@ -700,7 +740,7 @@ function EffectsSummary({ layer }: { layer: Layer }) {
       defaultOpen={false}
       actions={<IconButton icon={Sparkles} size="sm" title="Edit in the Effects panel" onClick={() => useUI.getState().showPanel('effects')} />}
     >
-      {layer.effects.map((e) => (
+      {effectsTopDown(layer.effects).map(({ fx: e }) => (
         <div key={e.id} className="ui-row">
           <Checkbox checked={e.enabled} onChange={() => ops.toggleEffect(layer.id, e.id)} label={effectName(e.effectId)} />
         </div>

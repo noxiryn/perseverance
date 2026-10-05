@@ -43,6 +43,7 @@ import { THUMB_PX, useLayersPanel, type ThumbSize } from './panelState';
 import { LayerThumbCanvas, MaskThumbCanvas } from './thumbs';
 import { adjustmentMenuItems, effectContextMenu, effectMenuItems, filterContextMenu, labelCss, layerContextMenu, showFx, showProps } from './menus';
 import { effectName } from './effectPresets';
+import { effectsTopDown } from './effectOrder';
 import './panels.css';
 
 /* ------------------------------------------------------------------ */
@@ -142,15 +143,12 @@ function LayersHeader({ doc }: { doc: Document | null }) {
   const disabled = !doc || !active;
   const kindValue = kinds.length === 0 ? 'all' : kinds.length === 1 ? kinds[0] : 'multi';
 
-  const editAll = (label: string, fn: (l: Layer) => void) => ({
-    preview: () => ops.editSelected(label, fn, 'preview'),
-    commit: () => ops.editSelected(label, fn, 'commit'),
-  });
-
   const opacity = active?.opacity ?? 1;
   const fill = active?.fillOpacity ?? 1;
   const locks = active?.locks;
   const isGroup = active?.type === 'group';
+  // Groups and adjustment layers have no fill opacity of their own (Properties hides it too).
+  const fillDisabled = disabled || isGroup || active?.type === 'adjustment';
 
   return (
     <div className="layers-head">
@@ -214,21 +212,13 @@ function LayersHeader({ doc }: { doc: Document | null }) {
           />
         </div>
         <span className="layers-vsep" />
-        <div className={cls('layers-num', disabled && 'disabled')}>
-          <NumberField
-            value={opacity}
-            min={0}
-            max={1}
-            step={1}
-            displayScale={100}
-            unit="%"
-            width={56}
-            title="Layer opacity (affects content and effects)"
-            scrubLabel="Opacity"
-            onChange={(v) => !disabled && editAll('Opacity', (l) => (l.opacity = v)).preview()}
-            onCommit={(v) => !disabled && editAll('Opacity', (l) => (l.opacity = v)).commit()}
-          />
-        </div>
+        <HeaderPercent
+          label="Opacity"
+          title="Layer opacity (affects content and effects)"
+          value={opacity}
+          disabled={disabled}
+          onEdit={(v, phase) => ops.editSelected('Opacity', (l) => void (l.opacity = v), phase)}
+        />
       </div>
       <div className="layers-head-row">
         <span className="ui-label">Lock:</span>
@@ -256,22 +246,72 @@ function LayersHeader({ doc }: { doc: Document | null }) {
         </div>
         <span style={{ flex: 1 }} />
         <span className="layers-vsep" />
-        <div className={cls('layers-num', (disabled || isGroup || active?.type === 'adjustment') && 'disabled')}>
-          <NumberField
-            value={fill}
-            min={0}
-            max={1}
-            step={1}
-            displayScale={100}
-            unit="%"
-            width={56}
-            title="Fill opacity (affects content but not layer effects)"
-            scrubLabel="Fill"
-            onChange={(v) => !disabled && editAll('Fill Opacity', (l) => (l.fillOpacity = v)).preview()}
-            onCommit={(v) => !disabled && editAll('Fill Opacity', (l) => (l.fillOpacity = v)).commit()}
-          />
+        <HeaderPercent
+          label="Fill"
+          title={fillDisabled && active ? 'Groups and adjustment layers have no fill opacity' : 'Fill opacity (affects content but not layer effects)'}
+          value={fill}
+          disabled={fillDisabled}
+          onEdit={(v, phase) =>
+            ops.editSelected(
+              'Fill Opacity',
+              (l) => {
+                if (l.type !== 'group' && l.type !== 'adjustment') l.fillOpacity = v;
+              },
+              phase,
+            )
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Scrubbable "Opacity" / "Fill" percentage of the header. Live preview while scrubbing and one
+ * coalesced history step per release / typed value. When disabled it renders a read-only field,
+ * so nothing can be typed or scrubbed into it.
+ */
+function HeaderPercent({
+  label,
+  title,
+  value,
+  disabled,
+  onEdit,
+}: {
+  label: string;
+  title: string;
+  value: number;
+  disabled: boolean;
+  onEdit: (v: number, phase: ops.Phase) => void;
+}) {
+  if (disabled) {
+    return (
+      <div className="layers-num disabled" title={title}>
+        <div className="ui-row" style={{ gap: 4, minHeight: 0 }}>
+          <span className="ui-label layers-num-label">{label}</span>
+          <div className="ui-num" style={{ width: 56 }}>
+            <input value={Math.round(value * 100)} readOnly disabled tabIndex={-1} aria-label={label} />
+            <span className="unit">%</span>
+          </div>
         </div>
       </div>
+    );
+  }
+  return (
+    <div className="layers-num">
+      <NumberField
+        value={value}
+        min={0}
+        max={1}
+        step={1}
+        displayScale={100}
+        unit="%"
+        width={56}
+        title={title}
+        scrubLabel={label}
+        onChange={(v) => onEdit(v, 'preview')}
+        onCommit={(v) => onEdit(v, 'coalesce')}
+      />
     </div>
   );
 }
@@ -965,8 +1005,8 @@ function EffectRows({ layer, indent, h }: { layer: Layer; indent: number; h: Row
           <span className="layers-sub-title">Effects</span>
         </div>
       </div>
-      {/* Top row = drawn on top (arrays are stored bottom → top). */}
-      {[...layer.effects].reverse().map((fx: LayerEffect) => (
+      {/* In the renderer's drawing order: the top row is drawn last (on top). */}
+      {effectsTopDown(layer.effects).map(({ fx }) => (
         <div
           key={fx.id}
           className={cls('layers-subrow', !fx.enabled && 'off')}

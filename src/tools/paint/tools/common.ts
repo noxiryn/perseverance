@@ -3,12 +3,14 @@
  * '[' / ']' / digit keys, and Shift-click line memory.
  */
 import type { ToolPointerEvent } from '../../../registry';
+import { brushPresets } from '../../../registry';
 import { viewport } from '../../../editor/viewport';
 import { activeSession, toolOptions, useEditor } from '../../../state/editor';
 import { eventKey } from '../../../ui/shortcuts';
 import { clamp } from '../../../core/geometry';
 import { nextBrushSize, smoothingRadius, type InputPoint } from '../engine/math';
 import { defaultsFor, effectivePressure, setOpt } from '../options';
+import type { PaintBrushPreset } from '../presets/presets';
 
 /* ---------------- input sampling ---------------- */
 
@@ -139,6 +141,12 @@ export function drawBrushOutline(ctx: CanvasRenderingContext2D, o: OutlineOption
   ctx.strokeStyle = 'rgba(255,255,255,0.95)';
   ctx.stroke();
   ctx.restore();
+}
+
+/** True when a preset paints with the Square tip (directly or as a user preset saved from it). */
+export function isSquareTip(presetId: string): boolean {
+  if (presetId === 'square') return true;
+  return (brushPresets.get(presetId) as PaintBrushPreset | undefined)?.tipFrom === 'square';
 }
 
 /** Crosshair marker in screen space (clone source, gradient endpoints…). */

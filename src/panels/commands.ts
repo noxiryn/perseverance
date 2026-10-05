@@ -21,6 +21,7 @@ import {
   ClipboardPaste,
   ClipboardX,
   Combine,
+  Copy,
   CopyPlus,
   CornerLeftDown,
   Eye,
@@ -89,9 +90,20 @@ export function registerLayerCommands() {
     order: 30,
     shortcut: 'Ctrl+J',
     icon: CopyPlus,
-    keywords: ['copy layer', 'layer via copy', 'clone'],
+    keywords: ['copy layer', 'clone'],
     enabled: hasLayer,
-    run: () => void ops.duplicateLayers({ viaCopy: true }),
+    run: () => void ops.duplicateLayers(),
+  });
+  cmd({
+    id: 'layer.viaCopy',
+    label: 'New Layer via Copy',
+    menu: 'Layer',
+    group: '10-new',
+    order: 35,
+    icon: Copy,
+    keywords: ['layer via copy', 'copy selection to new layer', 'extract selection'],
+    enabled: ops.canLayerViaCopy,
+    run: () => void ops.layerViaCopy(),
   });
   cmd({
     id: 'layer.delete',

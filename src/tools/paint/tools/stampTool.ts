@@ -8,6 +8,8 @@ import type { Rect } from '../../../core/types';
 import type { ToolDef, ToolPointerEvent } from '../../../registry';
 import { viewport } from '../../../editor/viewport';
 import { activeSession } from '../../../state/editor';
+import { toast } from '../../../state/ui';
+import { isModifierKey, watchStroke } from '../engine/guard';
 import { CompositeSession, type CompositeMode } from '../engine/session';
 import { BrushStroke, type StrokeConfig } from '../engine/stroke';
 import { resolvePaintTarget, type PaintTarget } from '../engine/target';
@@ -52,6 +54,8 @@ export interface StampToolSpec {
   renderOverlay(ctx: CanvasRenderingContext2D, painting: boolean): void;
   onKeyDown?(e: KeyboardEvent): boolean | void;
   onKeyUp?(e: KeyboardEvent): boolean | void;
+  onActivate?(): void;
+  onDeactivate?(): void;
   /** Notified on each painted batch (clone uses it to track the source). */
   onStrokeMove?(p: { x: number; y: number }): void;
   onStrokeEnd?(): void;
@@ -66,6 +70,8 @@ interface ActiveStroke {
   timer: number;
   /** Pointer move events seen (airbrush builds up only while the pointer rests). */
   moves: number;
+  /** Stops the history/document watcher (see engine/guard). */
+  unwatch: () => void;
 }
 
 export function createStampTool(spec: StampToolSpec): ToolDef {
@@ -84,6 +90,7 @@ export function createStampTool(spec: StampToolSpec): ToolDef {
     if (!a) return;
     active = null;
     window.clearInterval(a.timer);
+    a.unwatch();
     if (!cancel) {
       if (e) paint(a, a.stroke.end(a.axis.apply(inputPoint(e), e.shiftKey, a.stroke.position)));
       else paint(a, a.stroke.end());
@@ -93,6 +100,17 @@ export function createStampTool(spec: StampToolSpec): ToolDef {
     } else a.session.cancel();
     a.setup.dispose?.();
     spec.onStrokeEnd?.();
+    viewport.requestOverlay();
+  };
+
+  /** The guard discarded the stroke (history or document changed underneath it). */
+  const abort = (a: ActiveStroke, message: string) => {
+    if (active !== a) return;
+    active = null;
+    window.clearInterval(a.timer);
+    a.setup.dispose?.();
+    spec.onStrokeEnd?.();
+    toast(message, 'warning');
     viewport.requestOverlay();
   };
 
@@ -109,11 +127,13 @@ export function createStampTool(spec: StampToolSpec): ToolDef {
 
     onActivate() {
       installLeaveTracking();
+      spec.onActivate?.();
     },
 
     onDeactivate() {
       if (active) finish();
       removeLeaveTracking();
+      spec.onDeactivate?.();
     },
 
     onPointerDown(e) {
@@ -128,11 +148,13 @@ export function createStampTool(spec: StampToolSpec): ToolDef {
       const session = new CompositeSession(target, setup.mode);
       const stroke = new BrushStroke(setup.config);
       const p = inputPoint(e);
-      const a: ActiveStroke = { session, stroke, setup, target, axis: new AxisLock(), timer: 0, moves: 0 };
+      const a: ActiveStroke = { session, stroke, setup, target, axis: new AxisLock(), timer: 0, moves: 0, unwatch: () => {} };
       active = a;
+      a.unwatch = watchStroke(session, (msg) => abort(a, msg));
       const last = e.shiftKey ? lastPointFor(spec.id, target.docId, target.layerId) : null;
       if (last) {
-        paint(a, stroke.begin({ ...last, pressure: p.pressure }));
+        // Continue the polyline from the previous end point without re-stamping the joint.
+        stroke.beginAt({ ...last, pressure: p.pressure });
         paint(a, stroke.lineTo(p));
       } else {
         paint(a, stroke.begin(p));
@@ -171,9 +193,16 @@ export function createStampTool(spec: StampToolSpec): ToolDef {
     },
 
     onKeyDown(e) {
-      if (e.key === 'Escape' && active) {
-        finish(undefined, true);
-        return true;
+      if (active && !isModifierKey(e)) {
+        if (e.key === 'Escape') {
+          finish(undefined, true);
+          return true;
+        }
+        if (spec.onKeyDown?.(e)) return true; // '[' / ']' / digits keep the stroke going
+        // Any other key may run a command (undo, clear, switch document…): commit the stroke
+        // first so the command sees — and history records — a consistent state.
+        finish();
+        return false;
       }
       return spec.onKeyDown?.(e);
     },

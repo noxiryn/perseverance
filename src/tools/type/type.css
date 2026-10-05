@@ -1,8 +1,9 @@
 /* Type tool: hidden IME textarea, options bar, Character panel, Properties section, Warp dialog. */
 
-/* Invisible textarea that receives typing / IME / clipboard while editing text on canvas. */
+/* Invisible textarea that receives typing / IME / clipboard while editing text on canvas.
+   Positioned in the viewport element's own coordinates (it is the containing block). */
 .type-ime {
-  position: fixed;
+  position: absolute;
   left: 0;
   top: 0;
   width: 2px;
