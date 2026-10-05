@@ -100,11 +100,13 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     swatch: ['#0d0d0d', '#5a5a5a', '#bdbdbd', '#efede8'],
     layerEffects: [{ effectId: 'drop-shadow', params: { color: '#000000', opacity: 0.9, angle: 125, distance: 26, spread: 0.1, size: 34 } }],
     overlays: [
-      // Torn-edged strips down the left/right edges only, so content always stays visible.
+      // Torn-edged strips down the left/right edges only, multiplied so the content under them
+      // (titles near the edge) always shows through.
       {
         assetId: 'newspaper-clippings',
         params: { columns: 3, tone: '#dcd9d0', density: 0.45, rotation: 6, placement: 'edges', textSize: 1.2, headlines: true, shadow: 0.5 },
-        opacity: 0.95,
+        blendMode: 'multiply',
+        opacity: 0.9,
         name: 'Newspaper Clippings',
         mask: { kind: 'edge-strips', width: 0.11, sides: 'both', tear: 0.008, seed: 5 },
       },

@@ -508,22 +508,16 @@ function alphaBBox(a: Uint8Array, w: number, h: number): PxRect | null {
 }
 
 /**
- * Opaque content bounds from an alpha read of `r` (local), when `r` covers all the content
- * the canvas can hold and the result is trustworthy (not cut by a clipped region edge).
- * Returns undefined when unknown.
+ * Opaque content bounds from an alpha read of `r` (local) — only when the region holds ALL the
+ * content (not clipped: a clipped region may miss content beyond its edges, even disconnected
+ * content) and `r` covers it. Undefined when unknown, null when the content is empty.
  */
 function tightFromRead(region: PxRect, extent: PxRect, r: LocalRect, data: Uint8Array): PxRect | null | undefined {
-  const ext = intersectRect(extent, region);
-  if (!ext) return null;
-  const local = { x: ext.x - region.x, y: ext.y - region.y, w: ext.w, h: ext.h };
+  if (!containsRect(region, extent)) return undefined;
+  const local = { x: extent.x - region.x, y: extent.y - region.y, w: extent.w, h: extent.h };
   if (!containsRect(r, local)) return undefined;
   const bb = alphaBBox(data, r.w, r.h);
-  if (!bb) return containsRect(region, extent) ? null : undefined;
-  const abs = { x: bb.x + r.x + region.x, y: bb.y + r.y + region.y, w: bb.w, h: bb.h };
-  if (containsRect(region, extent)) return abs;
-  // The region is clipped: content touching a clipped edge may continue beyond it.
-  const inner = { x: region.x + 1, y: region.y + 1, w: region.w - 2, h: region.h - 2 };
-  return containsRect(inner, abs) ? abs : undefined;
+  return bb ? { x: bb.x + r.x + region.x, y: bb.y + r.y + region.y, w: bb.w, h: bb.h } : null;
 }
 
 /** EffectFields of one layer render: alpha reads and distance fields, cached and shared. */
@@ -875,7 +869,7 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
       k.globalAlpha = fill;
       k.drawImage(C, 0, 0);
     }
-    return { region, core: fill > 0 ? core : null, shape: C, behind: [], bounds: layoutBox, csig, extent, fields: reuse.fields.length ? reuse.fields : undefined, tight: reuse.C ? reuse.tight : undefined };
+    return { region, core: fill > 0 ? core : null, shape: C, behind: [], bounds: layoutBox, csig, extent, fields: reuse.fields.length ? reuse.fields : undefined, tight: reuse.tight };
   }
 
   // Effects work on everything the content covers (text stroke/warp/descenders, shape stroke,
@@ -883,7 +877,7 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
   const ext = intersectRect(extent, region);
   const effectBounds: LocalRect = ext ? { x: ext.x - region.x, y: ext.y - region.y, w: ext.w, h: ext.h } : { x: 0, y: 0, w: 0, h: 0 };
   const paintBox: LocalRect = { x: layoutBox.x - region.x, y: layoutBox.y - region.y, w: layoutBox.w, h: layoutBox.h };
-  const fieldsP = new LayerFields(C, region, extent, reuse.fields, reuse.C ? reuse.tight : undefined);
+  const fieldsP = new LayerFields(C, region, extent, reuse.fields, reuse.tight);
   const sorted = fx
     .map((e) => ({ ...e, stage: effectStage(e.def, e.params) }))
     .sort((a, b) => a.def.order - b.def.order || a.idx - b.idx);

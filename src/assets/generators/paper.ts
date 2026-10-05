@@ -8,6 +8,8 @@ import { fieldDims, fillGrain, noiseField, paintField } from '../lib/field';
 import { FONT } from '../lib/fonts';
 import { tornLine } from '../lib/geom';
 import { simplex } from '../lib/noise';
+import { worleyAt, worleyGrid } from '../lib/raster';
+import type { WorleyGrid, WorleyHit } from '../lib/raster';
 import { P, defineAsset } from '../lib/params';
 import { drawCrackLine, drawFibers, drawScratches, paintPaper, walkLine } from '../lib/surface';
 import type { Pt, Rand, RGB } from '../lib/util';
@@ -166,66 +168,30 @@ const grungePaper = defineAsset(
 /* ------------------------------------------------------------------ */
 
 /**
- * Crumpled paper as a flat-shaded random height mesh: a jittered grid split into triangles
- * (random diagonals), vertex heights from multi-octave noise + jitter. Adjacent facets share
- * vertices, so the shading reads like real folded paper; crease lines are drawn along edges
- * where neighbouring facets meet at a sharp angle.
+ * Crumpled paper as a continuous height field: the sum, over several scales, of Voronoi
+ * "F2 − F1" pyramids with a random up/down sign per cell. F2 − F1 is zero on cell borders and
+ * grows linearly inside, so every cell becomes a faceted pyramid (mountain or valley fold) whose
+ * borders are straight sharp creases — big folds broken into smaller and smaller facets, like
+ * real crumpled stock. Fine wrinkles come from ridged |noise|. Shading uses the field's normals
+ * plus a little occlusion in the valleys; computed at reduced resolution and up-scaled, then
+ * full-resolution grain and fibers are added on top.
  */
-export interface CrumpleMesh {
-  cols: number;
-  rows: number;
-  /** vertex positions (x, y) and heights */
-  vx: Float32Array;
-  vy: Float32Array;
-  vh: Float32Array;
-  /** per quad: 0 = split along (i,j)-(i+1,j+1), 1 = the other diagonal */
-  diag: Uint8Array;
+export interface CreaseScale {
+  grid: WorleyGrid;
+  amp: number;
 }
 
-export function crumpleMesh(W: number, H: number, cell: number, r: Rand, heightAt: (x: number, y: number) => number, jitterH: number): CrumpleMesh {
-  const cols = Math.max(2, Math.ceil(W / cell) + 2);
-  const rows = Math.max(2, Math.ceil(H / cell) + 2);
-  const n = (cols + 1) * (rows + 1);
-  const vx = new Float32Array(n);
-  const vy = new Float32Array(n);
-  const vh = new Float32Array(n);
-  const cw = (W + cell * 2) / cols;
-  const ch = (H + cell * 2) / rows;
-  for (let j = 0; j <= rows; j++)
-    for (let i = 0; i <= cols; i++) {
-      const k = j * (cols + 1) + i;
-      const x = -cell + i * cw + (i > 0 && i < cols ? (r() - 0.5) * cw * 0.8 : 0);
-      const y = -cell + j * ch + (j > 0 && j < rows ? (r() - 0.5) * ch * 0.8 : 0);
-      vx[k] = x;
-      vy[k] = y;
-      vh[k] = heightAt(x, y) + (r() - 0.5) * jitterH;
-    }
-  const diag = new Uint8Array(cols * rows);
-  for (let q = 0; q < diag.length; q++) diag[q] = r() < 0.5 ? 0 : 1;
-  return { cols, rows, vx, vy, vh, diag };
-}
-
-/** Unit normal (z up) and Lambert term of triangle (a, b, c) for light (lx, ly, lz). Pure. */
-export function facetLight(m: CrumpleMesh, a: number, b: number, c: number, lx: number, ly: number, lz: number): { lit: number; nx: number; ny: number; nz: number } {
-  const ux = m.vx[b] - m.vx[a];
-  const uy = m.vy[b] - m.vy[a];
-  const uz = m.vh[b] - m.vh[a];
-  const wx = m.vx[c] - m.vx[a];
-  const wy = m.vy[c] - m.vy[a];
-  const wz = m.vh[c] - m.vh[a];
-  let nx = uy * wz - uz * wy;
-  let ny = uz * wx - ux * wz;
-  let nz = ux * wy - uy * wx;
-  if (nz < 0) {
-    nx = -nx;
-    ny = -ny;
-    nz = -nz;
+/** Height of the crumple field at (x, y) (px). Pure given the grids. */
+export function crumpleHeight(scales: CreaseScale[], x: number, y: number, hit: WorleyHit): number {
+  let h = 0;
+  for (const sc of scales) {
+    worleyAt(sc.grid, x, y, hit);
+    const rv = sc.grid.rnd[hit.id];
+    // sign and strength per cell: some cells fold up, some down, some barely
+    const sgn = rv < 0.5 ? -(0.35 + rv * 1.3) : 0.35 + (rv - 0.5) * 1.3;
+    h += sc.amp * sgn * (hit.f2 - hit.f1);
   }
-  const l = Math.hypot(nx, ny, nz) || 1;
-  nx /= l;
-  ny /= l;
-  nz /= l;
-  return { lit: nx * lx + ny * ly + nz * lz, nx, ny, nz };
+  return h;
 }
 
 const crumpledPaper = defineAsset(
@@ -233,14 +199,15 @@ const crumpledPaper = defineAsset(
     id: 'crumpled-paper',
     name: 'Crumpled Paper',
     category: 'Paper & Grunge',
-    tags: ['paper', 'crumpled', 'wrinkles', 'creases', 'texture', 'facets'],
+    tags: ['paper', 'crumpled', 'wrinkles', 'creases', 'texture', 'folds'],
     sizing: 'document',
     defaultBlendMode: 'multiply',
     defaultOpacity: 1,
     params: [
       P.color('tone', 'Tone', '#ebe7de'),
-      P.pct('crumple', 'Crumple', 0.7),
-      P.num('scale', 'Facet size', 40, 400, 170, { unit: 'px' }),
+      P.pct('crumple', 'Crumple', 0.65),
+      P.num('scale', 'Fold size', 40, 400, 170, { unit: 'px' }),
+      P.pct('wrinkles', 'Fine wrinkles', 0.35),
       P.angle('light', 'Light angle', 125),
       P.pct('grain', 'Grain', 0.45),
       P.seed(21),
@@ -249,100 +216,73 @@ const crumpledPaper = defineAsset(
       const u = unitOf(W, H);
       const seed = num(p, 'seed', 21);
       const tone = rgbOf(str(p, 'tone', '#ebe7de'));
-      const crumple = num(p, 'crumple', 0.7);
+      const crumple = num(p, 'crumple', 0.65);
+      const wrinkles = num(p, 'wrinkles', 0.35);
       const la = (num(p, 'light', 125) * Math.PI) / 180;
-      const Lx = Math.cos(la) * 0.75;
-      const Ly = -Math.sin(la) * 0.75;
-      const Lz = 0.66;
+      const ws = Math.min(1, Math.sqrt(400_000 / (W * H)));
+      const w = Math.max(2, Math.round(W * ws));
+      const h = Math.max(2, Math.round(H * ws));
+      const k = ws * u; // working px per unit
       const r = makeRand(seed);
-      const cell = Math.max(8, num(p, 'scale', 170) * u * 0.42);
-      const nz = simplex(seed + 3);
-      const kb = 1 / (cell * 4.5);
-      const relief = cell * 0.5 * crumple;
-      const mesh = crumpleMesh(
-        W,
-        H,
-        cell,
-        r,
-        (x, y) => relief * (nz(x * kb, y * kb) + 0.5 * nz(x * kb * 2.1 + 9.7, y * kb * 2.1 - 4.4) + 0.25 * nz(x * kb * 4.3 - 2.2, y * kb * 4.3 + 7.1)),
-        cell * 0.32 * crumple,
-      );
-      const [c, ctx] = newCanvas(W, H);
-      ctx.fillStyle = rgba(tone, 1);
-      ctx.fillRect(0, 0, W, H);
-      const { cols, rows, vx, vy, diag } = mesh;
-      const stride = cols + 1;
+      const base = Math.max(8, num(p, 'scale', 170) * k);
+      const levels = [
+        { cell: base * 1.9, amp: 0.55 },
+        { cell: base * 0.85, amp: 0.42 },
+        { cell: base * 0.38, amp: 0.3 },
+      ];
+      // fine crinkles: one more, smaller crease level (same visual language as the big folds)
+      if (wrinkles > 0) levels.push({ cell: Math.max(3, base * 0.17), amp: 0.5 * wrinkles });
+      const scales: CreaseScale[] = levels.map((sc, i) => ({ grid: worleyGrid(w, h, sc.cell, r.fork(i + 1), 0.95), amp: sc.amp * crumple }));
+      // height field (+1px border for the gradients)
+      const hw = w + 2;
+      const hh = h + 2;
+      const hf = new Float32Array(hw * hh);
+      const hit: WorleyHit = { f1: 0, f2: 0, id: 0, cx: 0, cy: 0 };
+      for (let y = 0; y < hh; y++) {
+        for (let x = 0; x < hw; x++) {
+          const px = x - 1;
+          const py = y - 1;
+          hf[y * hw + x] = crumpleHeight(scales, px, py, hit);
+        }
+      }
+      const Lx = Math.cos(la) * 0.62;
+      const Ly = -Math.sin(la) * 0.62;
+      const Lz = 0.78;
       const ll = Math.hypot(Lx, Ly, Lz);
       const lx = Lx / ll;
       const ly = Ly / ll;
       const lz = Lz / ll;
-      type Tri = [number, number, number];
-      const tris: { t: Tri; lit: number; nx: number; ny: number; nz: number }[] = [];
-      for (let j = 0; j < rows; j++)
-        for (let i = 0; i < cols; i++) {
-          const a = j * stride + i;
-          const b = a + 1;
-          const d = a + stride;
-          const e = d + 1;
-          const pair: Tri[] = diag[j * cols + i] ? [[a, b, d], [b, e, d]] : [[a, b, e], [a, e, d]];
-          for (const t of pair) tris.push({ t, ...facetLight(mesh, t[0], t[1], t[2], lx, ly, lz) });
+      const [lo, lctx] = newCanvas(w, h);
+      const img = lctx.createImageData(w, h);
+      const d = img.data;
+      const slope = 1.25;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = (y + 1) * hw + (x + 1);
+          const dx = (hf[i + 1] - hf[i - 1]) * 0.5 * slope;
+          const dy = (hf[i + hw] - hf[i - hw]) * 0.5 * slope;
+          const inv = 1 / Math.sqrt(dx * dx + dy * dy + 1);
+          const lum = (-dx * lx - dy * ly + lz) * inv;
+          // valleys (positive laplacian) collect a little shadow, ridges catch a glint
+          const lap = hf[i + 1] + hf[i - 1] + hf[i + hw] + hf[i - hw] - 4 * hf[i];
+          let v = 1 + (lum - lz) * 0.68 - Math.max(0, lap) * 0.07 + Math.max(0, -lap) * 0.025;
+          v = v < 0.58 ? 0.58 : v > 1.1 ? 1.1 : v;
+          const o = (y * w + x) * 4;
+          d[o] = Math.min(255, tone.r * v);
+          d[o + 1] = Math.min(255, tone.g * v);
+          d[o + 2] = Math.min(255, tone.b * v);
+          d[o + 3] = 255;
         }
-      // flat-shaded facets (a 1px stroke in the same color hides anti-aliasing seams)
-      ctx.lineJoin = 'round';
-      ctx.lineWidth = 1;
-      for (const f of tris) {
-        const lum = Math.max(0.62, 1 + (f.lit - lz) * 0.85);
-        const col = cssRGB({ r: Math.min(255, tone.r * lum), g: Math.min(255, tone.g * lum), b: Math.min(255, tone.b * lum) });
-        ctx.beginPath();
-        ctx.moveTo(vx[f.t[0]], vy[f.t[0]]);
-        ctx.lineTo(vx[f.t[1]], vy[f.t[1]]);
-        ctx.lineTo(vx[f.t[2]], vy[f.t[2]]);
-        ctx.closePath();
-        ctx.fillStyle = col;
-        ctx.strokeStyle = col;
-        ctx.fill();
-        ctx.stroke();
       }
-      // crease lines on sharp folds: dark seam + light lip on the lit side
-      const edgeMap = new Map<number, number>();
-      const dark = new Path2D();
-      const lightP = new Path2D();
-      const ox = -1.2 * u * lx;
-      const oy = -1.2 * u * ly;
-      tris.forEach((f, idx) => {
-        for (let k = 0; k < 3; k++) {
-          const p0 = f.t[k];
-          const p1 = f.t[(k + 1) % 3];
-          const key = p0 < p1 ? p0 * 1e6 + p1 : p1 * 1e6 + p0;
-          const other = edgeMap.get(key);
-          if (other === undefined) {
-            edgeMap.set(key, idx);
-            continue;
-          }
-          const g = tris[other];
-          const cosA = f.nx * g.nx + f.ny * g.ny + f.nz * g.nz;
-          if (cosA > 0.985 || r() > 0.75) continue;
-          dark.moveTo(vx[p0], vy[p0]);
-          dark.lineTo(vx[p1], vy[p1]);
-          lightP.moveTo(vx[p0] + ox, vy[p0] + oy);
-          lightP.lineTo(vx[p1] + ox, vy[p1] + oy);
-        }
-      });
-      ctx.save();
-      ctx.lineCap = 'round';
-      ctx.strokeStyle = rgba(shade(tone, -0.5), 0.22 * crumple);
-      ctx.lineWidth = Math.max(0.6, 1.1 * u);
-      ctx.stroke(dark);
-      ctx.strokeStyle = rgba('#ffffff', 0.35 * crumple);
-      ctx.lineWidth = Math.max(0.5, 0.8 * u);
-      ctx.stroke(lightP);
-      ctx.restore();
+      lctx.putImageData(img, 0, 0);
+      const [c, ctx] = newCanvas(W, H);
+      drawUpscaled(ctx, lo, W, H);
       const grain = num(p, 'grain', 0.45);
       ctx.save();
       ctx.globalCompositeOperation = 'overlay';
-      ctx.globalAlpha = 0.35 * grain;
+      ctx.globalAlpha = 0.16 * grain;
       fillGrain(ctx, W, H, seed, 1);
-      ctx.globalAlpha = 0.4 * grain;
+      ctx.globalAlpha = 0.2 * grain;
       fillGrain(ctx, W, H, seed + 1, Math.max(1, 2 * u), 0.7);
       ctx.restore();
       drawFibers(ctx, W, H, u, tone, makeRand(seed + 9), 0.35);

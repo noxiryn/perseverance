@@ -45,12 +45,21 @@ function spike(base: THREE.Vector3, dir: THREE.Vector3, length: number, radius: 
   return n;
 }
 
+/**
+ * Ellipsoid cap shell, closed by a lid at its rim so it is a solid: an open shell would let the
+ * inverted-hull outline's dark inside show through the rim (a black band under the hairline).
+ */
 function cap(sx: number, sy: number, sz: number, y: number, z: number, thetaLen = Math.PI * 0.56, tilt = 0): THREE.BufferGeometry {
-  const g = new THREE.SphereGeometry(1, 28, 14, 0, Math.PI * 2, 0, thetaLen);
+  const shell = prep(new THREE.SphereGeometry(1, 28, 14, 0, Math.PI * 2, 0, thetaLen));
+  const lid = new THREE.CircleGeometry(Math.sin(thetaLen), 28);
+  lid.rotateX(Math.PI / 2); // face down (−Y)
+  lid.translate(0, Math.cos(thetaLen), 0);
+  const g = mergeGeometries([shell, prep(lid)], false)!;
+  shell.dispose();
   g.scale(sx, sy, sz);
   if (tilt) g.rotateX(tilt);
   g.translate(0, y, z);
-  return prep(g);
+  return g;
 }
 
 /**
@@ -153,25 +162,23 @@ export function buildHairGeometry(style: HairStyle): THREE.BufferGeometry | null
     const SL = { sx: 0.84, sy: 0.7, sz: 0.92, y: 0.08, z: -0.14, tilt: -0.38 };
     parts.push(cap(SL.sx, SL.sy, SL.sz, SL.y, SL.z, Math.PI * 0.5, SL.tilt));
     const shell = tiltedCap(SL.sx, SL.sy, SL.sz, SL.y, SL.z, SL.tilt);
-    // Rolled front edge (pompadour) following the rim.
-    for (let i = 0; i < 9; i++) {
-      const a = -1.05 + (i / 8) * 2.1;
-      const { p, n, tan } = shell.point(Math.PI * 0.47, a);
-      const along = new THREE.Vector3().crossVectors(n, tan).normalize();
-      parts.push(lock(p.clone().addScaledVector(n, 0.02), along, n, 0.42, 0.2, 0.16));
+    // Raised front swoop (pompadour volume) above the hairline.
+    {
+      const { p, n, tan } = shell.point(1.02, 0);
+      parts.push(lock(p.clone().addScaledVector(n, -0.07), tan.clone().negate(), n, 0.9, 1.2, 0.3));
     }
-    // Combed locks: from the hairline over the crown, then down the back.
-    for (let i = 0; i < 7; i++) {
-      const a = -0.9 + (i / 6) * 1.8 + (R() - 0.5) * 0.08;
+    // A few wide combed locks sweeping from the hairline over the crown and down the back.
+    for (let i = 0; i < 5; i++) {
+      const a = -0.78 + (i / 4) * 1.56 + (R() - 0.5) * 0.06;
       for (const [t, len] of [
-        [1.12, 0.5],
-        [0.62, 0.5],
+        [1.18, 0.62],
+        [0.62, 0.66],
       ] as const) {
         const { p, n, tan } = shell.point(t, a);
-        parts.push(lock(p.clone().addScaledVector(n, 0.015), tan.clone().negate(), n, len + R() * 0.08, 0.17, 0.09));
+        parts.push(lock(p.clone().addScaledVector(n, 0.012), tan.clone().negate(), n, len + R() * 0.06, 0.36, 0.085));
       }
-      const back = shell.point(0.55 + R() * 0.1, Math.PI + a * 0.8);
-      parts.push(lock(back.p.clone().addScaledVector(back.n, 0.015), back.tan, back.n, 0.58 + R() * 0.1, 0.17, 0.09));
+      const back = shell.point(0.62 + R() * 0.08, Math.PI + a * 0.85);
+      parts.push(lock(back.p.clone().addScaledVector(back.n, 0.012), back.tan, back.n, 0.72 + R() * 0.08, 0.36, 0.085));
     }
     // Swept tips at the nape.
     for (let i = 0; i < 6; i++) {

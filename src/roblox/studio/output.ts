@@ -54,12 +54,13 @@ export function commitRender(scene: StudioScene, opts: CommitRenderOptions): boo
   const st = useEditor.getState();
   const old = opts.replaceLayerId ? doc.layers[opts.replaceLayerId] : undefined;
   const bitmapId = bitmaps.add(cropped);
+  const what = opts.kind === 'model' ? 'Model Render' : 'Pose Studio Render';
 
   if (old && old.type === 'raster') {
     const oldPlacement = readPlacement((old.generator?.params as Record<string, unknown> | undefined)?.placement);
     const transform = oldPlacement ? reeditTransform(oldPlacement, old.transform, placement) : freshTransform(placement, doc.width, doc.height);
     st.commit(
-      'Edit Pose Studio Render',
+      `Edit ${what}`,
       (d) => {
         const l = d.layers[old.id] as RasterLayer | undefined;
         if (!l) return;
@@ -71,7 +72,7 @@ export function commitRender(scene: StudioScene, opts: CommitRenderOptions): boo
       },
       { activeLayerId: old.id },
     );
-    toast('Updated render layer', 'success');
+    toast(`Updated “${old.name}” (${opts.kind === 'model' ? 'model render' : 'Pose Studio render'})`, 'success');
   } else {
     const layer = makeRasterLayer({
       name: nextLayerName(doc, opts.name),
@@ -82,7 +83,7 @@ export function commitRender(scene: StudioScene, opts: CommitRenderOptions): boo
     });
     layer.generator = generator;
     layer.meta = { roblox: { kind: 'character', source: opts.kind } };
-    st.addLayer(layer, { label: 'Add Render Layer' });
+    st.addLayer(layer, { label: `Add ${what}` });
     toast(`Added “${layer.name}”`, 'success');
   }
   viewport.requestRender();

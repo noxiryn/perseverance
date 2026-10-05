@@ -284,15 +284,75 @@ export function selectionRects(t: TextProps, start: number, end: number, layout:
 
 /* ---------------- rasterization ---------------- */
 
-/** Local-space overflow padding around the layout box (stroke, descenders, italic, faux bold). */
-export function textPadding(t: TextProps, layout: TextLayout): number {
-  const size = Math.max(0.5, Number(t.fontSize) || 12) * Math.max(Math.abs(t.scaleX || 1), Math.abs(t.scaleY || 1));
+const inkCache = new WeakMap<TextLayout, Rect>();
+
+/**
+ * Local-space ink bounds of a text layer's unwarped raster: the glyphs' actual bounding boxes
+ * (per line, through glyph scale / mirroring / faux italic) grown by faux bold, the outline
+ * stroke and anti-aliasing. Tighter than a font-size based padding, exact for descenders, tight
+ * leading, swashes and side bearings.
+ */
+export function textInkBounds(t: TextProps, layout: TextLayout = layoutTextProps(t)): Rect {
+  const hit = inkCache.get(layout);
+  if (hit) return hit;
+  const ctx = measureCtx();
+  ctx.font = fontString(t);
+  ctx.letterSpacing = `${Number(t.letterSpacing) || 0}px`;
+  const sx = Number(t.scaleX) || 1;
+  const sy = Number(t.scaleY) || 1;
+  const asx = Math.abs(sx);
+  const asy = Math.abs(sy);
+  const size = Math.max(0.5, Number(t.fontSize) || 12);
+  const skew = t.fauxItalic ? ITALIC_SKEW : 0;
+  let x0 = Infinity,
+    y0 = Infinity,
+    x1 = -Infinity,
+    y1 = -Infinity;
+  for (const line of layout.lines) {
+    if (!line.text) continue;
+    const m = ctx.measureText(line.text);
+    let l = m.actualBoundingBoxLeft;
+    let r = m.actualBoundingBoxRight;
+    let a = m.actualBoundingBoxAscent;
+    let d = m.actualBoundingBoxDescent;
+    if (![l, r, a, d].every(Number.isFinite)) {
+      l = 0;
+      r = line.width / asx;
+      a = layout.fontAscent / asy;
+      d = layout.fontDescent / asy;
+    }
+    // glyph space → scaled (mirrored inside the line box for negative scales)
+    const px0 = sx >= 0 ? -l * asx : line.width - r * asx;
+    const px1 = sx >= 0 ? r * asx : line.width + l * asx;
+    const py0 = sy >= 0 ? -a * asy : -d * asy;
+    const py1 = sy >= 0 ? d * asy : a * asy;
+    // faux italic shear x' = x − skew·y (y relative to the baseline)
+    const lx0 = line.x + px0 - skew * py1;
+    const lx1 = line.x + px1 - skew * py0;
+    x0 = Math.min(x0, lx0);
+    x1 = Math.max(x1, lx1);
+    y0 = Math.min(y0, line.baseline + py0);
+    y1 = Math.max(y1, line.baseline + py1);
+  }
+  if (!(x1 > x0) || !(y1 > y0)) {
+    x0 = 0;
+    y0 = 0;
+    x1 = Math.max(1, layout.width);
+    y1 = Math.max(1, layout.height);
+  }
+  const bold = t.fauxBold ? size * 0.04 * Math.max(asx, asy) * 0.5 : 0;
   const stroke = t.stroke && t.stroke.width > 0 ? t.stroke.width : 0;
-  const bold = t.fauxBold ? size * 0.04 : 0;
-  const italic = t.fauxItalic ? (layout.fontAscent + layout.fontDescent) * ITALIC_SKEW : 0;
-  // Line boxes smaller than the font (lineHeight < 1) push glyphs outside the box.
-  const tight = Math.max(0, layout.fontAscent + layout.fontDescent - layout.lineHeight);
-  return Math.ceil(size * 0.3 + stroke + bold + italic + tight + 2);
+  const g = bold + stroke + 2;
+  const ink = { x: x0 - g, y: y0 - g, width: x1 - x0 + 2 * g, height: y1 - y0 + 2 * g };
+  inkCache.set(layout, ink);
+  return ink;
+}
+
+/** Local-space overflow padding around the layout box (everything the raster must hold). */
+export function textPadding(t: TextProps, layout: TextLayout): number {
+  const ink = textInkBounds(t, layout);
+  const over = Math.max(0, -ink.x, -ink.y, ink.x + ink.width - layout.width, ink.y + ink.height - layout.height);
+  return Math.ceil(over + 2);
 }
 
 function drawLines(
@@ -576,11 +636,11 @@ function warpContent(flat: FlatPixels, t: TextProps, layout: TextLayout): LocalC
   return { canvas: out, k, ox: nox, oy: noy };
 }
 
-/** Local bounds (layout coordinates) covered by a text layer's raster: layout box + overflow. */
+/** Local bounds (layout coordinates) covered by a text layer's raster: ink + overflow (+ warp). */
 export function textLocalBounds(t: TextProps): Rect {
   const layout = layoutTextProps(t);
-  const P = textPadding(t, layout);
-  if (!isWarpActive(t.warp)) return { x: -P, y: -P, width: layout.width + 2 * P, height: layout.height + 2 * P };
+  const ink = textInkBounds(t, layout);
+  if (!isWarpActive(t.warp)) return ink;
   const a = layout.width / 2;
   const c = layout.height / 2;
   let minX = Infinity,
@@ -591,8 +651,8 @@ export function textLocalBounds(t: TextProps): Rect {
   for (let j = 0; j <= N; j++) {
     for (let i = 0; i <= N; i++) {
       if (j > 0 && j < N && i > 0 && i < N && (i + j) % 3) continue;
-      const lx = -P + ((layout.width + 2 * P) * i) / N;
-      const ly = -P + ((layout.height + 2 * P) * j) / N;
+      const lx = ink.x + (ink.width * i) / N;
+      const ly = ink.y + (ink.height * j) / N;
       const [X, Y] = warpPoint(t.warp, lx - a, ly - c, a, c);
       minX = Math.min(minX, X + a);
       minY = Math.min(minY, Y + c);

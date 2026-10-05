@@ -19,7 +19,7 @@ ARCHITECTURE.md §3 for each module's full feature list).
 | foundation (core, store, registries, controls, electron) | `src/core`, `src/state`, `src/registry`, `src/editor`, `src/ui/controls`, `electron/` | done |
 | shell (chrome, menus, dock, palette, start screen) | `src/ui/shell`, `src/App.tsx` | **done** (implement + review + fix) |
 | layers-panels (Layers/Properties/Effects/History/Navigator, Layer menu) | `src/panels` | **done** |
-| paint (brush engine, paint tools, brushes panel) | `src/tools/paint` | fixing review findings |
+| paint (brush engine, paint tools, brushes panel) | `src/tools/paint` | **done** |
 | adjustments | `src/filters/adjustments` | **done** |
 | fonts-color (86 bundled fonts, swatches/color/fonts panels) | `src/fonts`, `src/presets` | **done** |
 | renderer (compositor, text, shapes, layer styles) | `src/render` | in review |
@@ -52,6 +52,10 @@ starting point; don't rewrite modules from scratch.
    - renderer: export `renderLayerParts(doc, layer)` (behind-effects + core separately; engine.ts has an internal
      `renderLayer`) so layers-panels' Rasterize Layer Style is exact for non-Normal blend layers.
    - (done) NumberField `disabled` prop.
+   - PERF (paint/viewport/renderer/bitmaps): dirty-rect fast path for live painting — `bitmaps.touch(id, rect?)`
+     (or `viewport.requestRender(docRect?)`) + cache composites below/above the active layer during a stroke, so a
+     brush frame re-blends only the stroke region (today every frame re-composites the whole doc: ~30-200 ms).
+     Paint already computes per-frame dirty rects in CompositeSession.flush / PixelSession.flush.
    - macOS: Edit-menu roles intercept Cmd+C/V — canvas copy/paste on mac should also listen to DOM copy/paste events.
 3. **End-to-end smoke test**: `npx vite --port 5300 &` then `node scripts/smoke.mjs --url http://localhost:5300`
    (exercises templates, every command, tool and panel; screenshots in `screenshots-tmp/`).
