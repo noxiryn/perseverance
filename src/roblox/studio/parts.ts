@@ -45,10 +45,42 @@ function spike(base: THREE.Vector3, dir: THREE.Vector3, length: number, radius: 
   return n;
 }
 
-function cap(sx: number, sy: number, sz: number, y: number, z: number, thetaLen = Math.PI * 0.56): THREE.BufferGeometry {
+function cap(sx: number, sy: number, sz: number, y: number, z: number, thetaLen = Math.PI * 0.56, tilt = 0): THREE.BufferGeometry {
   const g = new THREE.SphereGeometry(1, 28, 14, 0, Math.PI * 2, 0, thetaLen);
   g.scale(sx, sy, sz);
+  if (tilt) g.rotateX(tilt);
   g.translate(0, y, z);
+  return prep(g);
+}
+
+/**
+ * A cap shell tilted about X (negative tilt raises the front rim and lowers the back), with
+ * surface points/normals/tangents in head coordinates for placing strands on it.
+ */
+function tiltedCap(sx: number, sy: number, sz: number, y: number, z: number, tilt: number) {
+  const c = Math.cos(tilt),
+    s = Math.sin(tilt);
+  const rot = (v: THREE.Vector3) => v.set(v.x, v.y * c - v.z * s, v.y * s + v.z * c);
+  return {
+    point(t: number, a: number) {
+      const p = rot(new THREE.Vector3(Math.sin(t) * Math.sin(a) * sx, Math.cos(t) * sy, Math.sin(t) * Math.cos(a) * sz)).add(new THREE.Vector3(0, y, z));
+      const n = rot(new THREE.Vector3((Math.sin(t) * Math.sin(a)) / sx, Math.cos(t) / sy, (Math.sin(t) * Math.cos(a)) / sz)).normalize();
+      // Tangent toward increasing t (from the crown down toward the rim).
+      const tan = rot(new THREE.Vector3(Math.cos(t) * Math.sin(a) * sx, -Math.sin(t) * sy, Math.cos(t) * Math.cos(a) * sz)).normalize();
+      return { p, n, tan };
+    },
+  };
+}
+
+/** Elongated flattened ellipsoid lying along `dir` with its flat side facing `normal` (a combed lock). */
+function lock(center: THREE.Vector3, dir: THREE.Vector3, normal: THREE.Vector3, length: number, width: number, thickness: number): THREE.BufferGeometry {
+  const g = new THREE.SphereGeometry(1, 12, 8);
+  g.scale(width / 2, thickness / 2, length / 2);
+  const zAxis = dir.clone().normalize();
+  const yAxis = normal.clone().addScaledVector(zAxis, -normal.dot(zAxis)).normalize();
+  const xAxis = new THREE.Vector3().crossVectors(yAxis, zAxis).normalize();
+  g.applyMatrix4(new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis));
+  g.translate(center.x, center.y, center.z);
   return prep(g);
 }
 
@@ -115,18 +147,41 @@ export function buildHairGeometry(style: HairStyle): THREE.BufferGeometry | null
       parts.push(spike(base, new THREE.Vector3((R() - 0.5) * 0.8, -1, 0.4), 0.3 + R() * 0.15, 0.12, 3, 0.55));
     }
   } else if (style === 'slick') {
-    parts.push(cap(0.69, 0.52, 0.72, 0.2, -0.08, Math.PI * 0.52));
-    const back = new THREE.SphereGeometry(1, 20, 12);
-    back.scale(0.62, 0.38, 0.42);
-    back.translate(0, 0.12, -0.36);
-    parts.push(prep(back));
+    // A shell tilted back over the head: high hairline on the forehead, full coverage of the
+    // crown and the back (checked against the rounded head so no skin pokes through), plus a
+    // rolled front edge and combed locks sweeping back.
+    const SL = { sx: 0.84, sy: 0.7, sz: 0.92, y: 0.08, z: -0.14, tilt: -0.38 };
+    parts.push(cap(SL.sx, SL.sy, SL.sz, SL.y, SL.z, Math.PI * 0.5, SL.tilt));
+    const shell = tiltedCap(SL.sx, SL.sy, SL.sz, SL.y, SL.z, SL.tilt);
+    // Rolled front edge (pompadour) following the rim.
+    for (let i = 0; i < 9; i++) {
+      const a = -1.05 + (i / 8) * 2.1;
+      const { p, n, tan } = shell.point(Math.PI * 0.47, a);
+      const along = new THREE.Vector3().crossVectors(n, tan).normalize();
+      parts.push(lock(p.clone().addScaledVector(n, 0.02), along, n, 0.42, 0.2, 0.16));
+    }
+    // Combed locks: from the hairline over the crown, then down the back.
+    for (let i = 0; i < 7; i++) {
+      const a = -0.9 + (i / 6) * 1.8 + (R() - 0.5) * 0.08;
+      for (const [t, len] of [
+        [1.12, 0.5],
+        [0.62, 0.5],
+      ] as const) {
+        const { p, n, tan } = shell.point(t, a);
+        parts.push(lock(p.clone().addScaledVector(n, 0.015), tan.clone().negate(), n, len + R() * 0.08, 0.17, 0.09));
+      }
+      const back = shell.point(0.55 + R() * 0.1, Math.PI + a * 0.8);
+      parts.push(lock(back.p.clone().addScaledVector(back.n, 0.015), back.tan, back.n, 0.58 + R() * 0.1, 0.17, 0.09));
+    }
+    // Swept tips at the nape.
     for (let i = 0; i < 6; i++) {
-      const x = -0.42 + (i / 5) * 0.84;
-      const base = new THREE.Vector3(x, 0.5 - Math.abs(x) * 0.25, 0.1);
-      parts.push(spike(base, new THREE.Vector3(x * 0.2, 0.18, -1), 0.75 + R() * 0.2, 0.16, 4, 0.5));
+      const a = Math.PI - 0.75 + (i / 5) * 1.5;
+      const { p, n, tan } = shell.point(Math.PI * 0.46, a);
+      parts.push(spike(p.clone().addScaledVector(n, -0.04), tan.clone().addScaledVector(n, 0.25), 0.3 + R() * 0.1, 0.13, 4, 0.55));
     }
   } else if (style === 'long') {
-    parts.push(cap(CAP.sx, CAP.sy, CAP.sz, CAP.y, CAP.z));
+    // Slightly fuller dome than CAP so the head's rounded top corners never show through.
+    parts.push(cap(0.86, 0.68, 0.84, 0.06, -0.02));
     for (const s of [-1, 1]) {
       const side = new RoundedBoxGeometry(0.2, 1.35, 0.85, 2, 0.08);
       side.translate(0.67 * s, -0.42, -0.06);

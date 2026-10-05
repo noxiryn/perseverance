@@ -269,8 +269,10 @@ export function hitTestLayer(doc: Document, x: number, y: number): ID | null {
         if (a <= 0.02) continue;
         if (maskVisibilityAt(doc, l, x, y) <= 10) continue;
         if (!clipOk(ids, i, l)) continue;
-        // An isolated group shows exactly its own render: nothing inside is visible where it is clear.
-        if (l.blendMode !== 'pass-through' && sampleLayer(rc, l, x, y) <= 10) continue;
+        // An isolated group (blend mode, effects or smart filters) shows exactly its own render:
+        // nothing inside is visible where that render is clear.
+        const isolated = l.blendMode !== 'pass-through' || !!l.effects?.some((e) => e.enabled) || !!l.filters?.some((f) => f.enabled);
+        if (isolated && sampleLayer(rc, l, x, y) <= 10) continue;
         const r = visit(l.childIds);
         if (r) return r;
         continue;

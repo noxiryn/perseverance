@@ -10,6 +10,7 @@ import {
   fillFromOptions,
   keyAppliesToKind,
   optionsFromShape,
+  renameForPreset,
   shapeDefaults,
   strokeFromOptions,
 } from './options';
@@ -122,6 +123,28 @@ describe('shape options ↔ props', () => {
     // Center unchanged (rotation pivots on the center).
     expect(l.transform.x + l.shape.width / 2).toBeCloseTo(100 + 100);
     expect(l.transform.y + l.shape.height / 2).toBeCloseTo(50 + 150);
+  });
+
+  it('renames layers still named after the previous preset', () => {
+    const named = (name: string) => {
+      const l = { name };
+      renameForPreset(l, '5-Point Star', 'Skull');
+      return l.name;
+    };
+    expect(named('5-Point Star')).toBe('Skull');
+    expect(named('5-Point Star 3')).toBe('Skull 3');
+    expect(named('Boss Icon')).toBe('Boss Icon');
+    expect(named('5-Point Star copy')).toBe('5-Point Star copy');
+  });
+
+  it('keeps axis-aligned lines exactly on-axis (0 extent, no 1px clamp)', () => {
+    const h = lineGeometry({ x0: 10, y0: 20, x1: 410, y1: 27, shift: true, alt: false });
+    expect(h.h).toBe(0);
+    expect(h.y).toBe(20);
+    expect(h.w).toBeCloseTo(Math.hypot(400, 7));
+    const v = lineGeometry({ x0: 10, y0: 20, x1: 14, y1: 320, shift: true, alt: false });
+    expect(v.w).toBe(0);
+    expect(v.x).toBe(10);
   });
 
   it('reads tool options back from a shape', () => {

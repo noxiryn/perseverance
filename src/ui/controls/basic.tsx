@@ -129,6 +129,7 @@ export function NumberField({
   title,
   displayScale = 1,
   scrubLabel,
+  disabled,
 }: {
   value: number;
   /** Called continuously (typing commit / scrubbing). */
@@ -145,6 +146,8 @@ export function NumberField({
   displayScale?: number;
   /** Optional label element that scrubs the value when dragged horizontally. */
   scrubLabel?: ReactNode;
+  /** Read-only, dimmed, no scrubbing. */
+  disabled?: boolean;
 }) {
   const shown = value * displayScale;
   const [text, setText] = useState(fmt(shown, step));
@@ -173,7 +176,7 @@ export function NumberField({
   };
 
   const startScrub = (e: React.PointerEvent) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || disabled) return;
     e.preventDefault();
     const startX = e.clientX;
     const start = value;
@@ -205,9 +208,10 @@ export function NumberField({
           {scrubLabel}
         </span>
       )}
-      <div className="ui-num" style={{ width }} title={title}>
+      <div className="ui-num" style={{ width, opacity: disabled ? 0.45 : undefined }} title={title}>
         <input
           value={text}
+          disabled={disabled}
           onFocus={(e) => {
             focused.current = true;
             e.target.select();

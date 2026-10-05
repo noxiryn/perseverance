@@ -1,5 +1,5 @@
 /** Pure marquee geometry + modifier semantics (unit-tested). */
-import type { Point, Rect } from '../../core/types';
+import type { Point, Rect, Selection } from '../../core/types';
 
 export type MarqueeStyle = 'normal' | 'ratio' | 'size';
 
@@ -52,4 +52,15 @@ export function latchModifiers(m: ModifierLatch, shiftKey: boolean, altKey: bool
   if (m.altLatch && !altKey) m.altLatch = false;
   m.shift = shiftKey && !m.shiftLatch;
   m.alt = altKey && !m.altLatch;
+}
+
+/**
+ * True when a selection's vector shape can stand in for its mask: the shape must lie inside the
+ * canvas (masks are always clipped to it). Shapes reaching past an edge fall back to the mask.
+ */
+export function shapeInsideCanvas(shape: Selection['shape'], width: number, height: number): boolean {
+  if (!shape) return false;
+  const r = shape.rect;
+  const e = 1e-6;
+  return r.width > 0 && r.height > 0 && r.x >= -e && r.y >= -e && r.x + r.width <= width + e && r.y + r.height <= height + e;
 }

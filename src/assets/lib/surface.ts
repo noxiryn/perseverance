@@ -27,9 +27,10 @@ export function paintPaper(ctx: CanvasRenderingContext2D, W: number, H: number, 
   const up = s * u; // field px per unit
   const f1 = noiseField(fw, fh, up, { seed, freq: 2.6, octaves: 5 });
   const f2 = noiseField(fw, fh, up, { seed: seed + 7, freq: 14, octaves: 3, gain: 0.55 });
-  const m = 0.11 * mottle;
+  // real stock is fairly even: gentle large-scale tone drift + finer cloudy variation
+  const m = 0.085 * mottle;
   const base = paintField(fw, fh, (i, _x, _y, px, off) => {
-    const v = f1[i] * 0.7 + f2[i] * 0.3;
+    const v = f1[i] * 0.55 + f2[i] * 0.45;
     const k = 1 + v * m;
     // compensate the slight darkening of the multiply grain pass below
     const kk = k * (1 + 0.06 * grain);

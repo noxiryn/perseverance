@@ -122,6 +122,14 @@ function applyPatches(c: FakeCanvas, patches: BitmapPatch[], side: 'before' | 'a
   }
 }
 
+/** Number of differing bytes (toEqual on multi-megabyte typed arrays is far too slow). */
+function diff(a: Uint8ClampedArray, b: Uint8ClampedArray): number {
+  if (a.length !== b.length) return Infinity;
+  let n = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++;
+  return n;
+}
+
 const px = (c: FakeCanvas, x: number, y: number) => Array.from(c.data.subarray((y * W + x) * 4, (y * W + x) * 4 + 4));
 
 describe('PixelSession', () => {
@@ -155,9 +163,9 @@ describe('PixelSession', () => {
 
     // Undo restores the original everywhere; redo reproduces the stroke exactly.
     applyPatches(blue, patches, 'before');
-    expect(blue.data).toEqual(original);
+    expect(diff(blue.data, original)).toBe(0);
     applyPatches(blue, patches, 'after');
-    expect(blue.data).toEqual(after);
+    expect(diff(blue.data, after)).toBe(0);
   });
 
   it('a single fast move (one big jump per frame) writes only the dabbed cells', async () => {
@@ -169,7 +177,10 @@ describe('PixelSession', () => {
     expect(px(blue, 500, 380)).toEqual([51, 102, 204, 255]);
     expect(px(blue, 40, 40)).toEqual([255 - 51, 255 - 102, 204, 255]);
     s.commit('Blur');
-    expect(commits[commits.length - 1].patches.length).toBe(2);
+    // One cell for the first dab, two (stacked cell rows) for the second — nothing in between.
+    const patches = commits[commits.length - 1].patches;
+    expect(patches.length).toBe(3);
+    expect(patches.reduce((n, p) => n + p.before.width * p.before.height, 0)).toBeLessThanOrEqual(3 * 40 * 40);
   });
 
   it('cancel and a discarded commit (document changed) restore the touched pixels', async () => {
@@ -178,9 +189,9 @@ describe('PixelSession', () => {
     const s = await session(blue);
     for (let i = 0; i < 20; i++) dab(s, 100 + i * 30, 100 + i * 20);
     s.flush();
-    expect(blue.data).not.toEqual(original);
+    expect(diff(blue.data, original)).toBeGreaterThan(0);
     s.cancel();
-    expect(blue.data).toEqual(original);
+    expect(diff(blue.data, original)).toBe(0);
 
     const s2 = await session(blue);
     for (let i = 0; i < 20; i++) dab(s2, 100 + i * 30, 600 - i * 20);
@@ -188,6 +199,6 @@ describe('PixelSession', () => {
     valid = false;
     expect(s2.commit('Sponge')).toBe(false);
     expect(commits.length).toBe(0);
-    expect(blue.data).toEqual(original);
+    expect(diff(blue.data, original)).toBe(0);
   });
 });

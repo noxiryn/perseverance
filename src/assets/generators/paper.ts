@@ -31,7 +31,7 @@ const paperTexture = defineAsset(
       P.color('tone', 'Tone', '#ece8df'),
       P.pct('grain', 'Grain', 0.5),
       P.pct('fibers', 'Fibers', 0.5),
-      P.pct('mottle', 'Mottling', 0.6),
+      P.pct('mottle', 'Mottling', 0.45),
       P.pct('specks', 'Specks', 0.25),
       P.seed(7),
     ],
@@ -40,7 +40,7 @@ const paperTexture = defineAsset(
       paintPaper(ctx, W, H, unitOf(W, H), rgbOf(str(p, 'tone', '#ece8df')), num(p, 'seed', 7), {
         grain: num(p, 'grain', 0.5),
         fibers: num(p, 'fibers', 0.5),
-        mottle: num(p, 'mottle', 0.6),
+        mottle: num(p, 'mottle', 0.45),
         specks: num(p, 'specks', 0.25),
       });
       return c;
@@ -684,7 +684,19 @@ function drawColumn(
   return y;
 }
 
-function renderClipping(r: Rand, cw: number, ch: number, u: number, cols: number, tone: RGB, headlines: boolean, textSize: number, seed: number, paperTex: HTMLCanvasElement) {
+function renderClipping(
+  r: Rand,
+  cw: number,
+  ch: number,
+  u: number,
+  cols: number,
+  tone: RGB,
+  headlines: boolean,
+  textSize: number,
+  seed: number,
+  paperTex: HTMLCanvasElement,
+  zoom = 1,
+) {
   const pad = Math.ceil(10 * u);
   const [c, ctx] = newCanvas(cw + pad * 2, ch + pad * 2);
   ctx.translate(pad, pad);
@@ -760,9 +772,10 @@ function renderClipping(r: Rand, cw: number, ch: number, u: number, cols: number
     ctx.fillRect(m, y + 3 * u, inner, Math.max(0.5, 0.6 * u));
     y += 9 * u;
   }
-  const gutter = 7 * u;
+  const gutter = 7 * u * Math.sqrt(zoom);
   const colW = (inner - (cols - 1) * gutter) / cols;
-  const fs = Math.max(5, Math.min(colW / 15, 15 * u) * textSize);
+  // `zoom` > 1 = a close-up clipping with big type (like the cut-outs in the noir reference)
+  const fs = Math.max(5, Math.min(colW / 13, 15 * u * zoom) * textSize);
   for (let k = 0; k < cols; k++) {
     const x0 = m + k * (colW + gutter);
     drawColumn(ctx, r, x0, y, colW, ch + fs * 2, fs, ink, u);
@@ -861,8 +874,22 @@ const newspaperClippings = defineAsset(
         let cw = M * (0.26 + r() * 0.2);
         let ch = M * (0.42 + r() * 0.4);
         if (slot.side === 't' || slot.side === 'b') [cw, ch] = [ch * 0.9, cw * 0.95];
-        const colsHere = Math.max(1, Math.min(cols, Math.round((cw / M) * cols * 2.6)));
-        const { canvas: clip, pad } = renderClipping(r, Math.round(cw), Math.round(ch), u, colsHere, shade(tone, (r() - 0.5) * 0.1), headlines, textSize, seed * 7 + idx, paperTex);
+        // most clippings are regular print; every few is a close-up with large type
+        const zoom = idx % 3 === 0 ? 1.7 + r() * 0.9 : 0.85 + r() * 0.4;
+        const colsHere = Math.max(1, Math.min(cols, Math.round(((cw / M) * cols * 2.6) / zoom)));
+        const { canvas: clip, pad } = renderClipping(
+          r,
+          Math.round(cw),
+          Math.round(ch),
+          u,
+          colsHere,
+          shade(tone, (r() - 0.5) * 0.1),
+          headlines,
+          textSize,
+          seed * 7 + idx,
+          paperTex,
+          zoom,
+        );
         let angle = (r() - 0.5) * 2 * rot;
         if (vertical) angle += (r() < 0.5 ? 1 : -1) * Math.PI / 2;
         // visual (rotated) extents

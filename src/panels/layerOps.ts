@@ -1203,6 +1203,12 @@ interface StyleBake {
   /** Effects drawn behind the content, on their own layer below (see bakeStyle). */
   below: RasterLayer | null;
   bakedOpacity: boolean;
+  /**
+   * The split is approximate: with another blend mode at 100% opacity and fill, the effects
+   * hidden under opaque content still tint what the content blends with, and the compositor
+   * contract has no way to render them there.
+   */
+  approx: boolean;
 }
 
 /**
@@ -1233,16 +1239,17 @@ function bakeStyle(doc: Document, l: Layer, bakeMask: boolean): StyleBake | null
   const shown = { ...l, visible: true } as Layer;
 
   if (l.clipped || !behind.length || (l.blendMode === 'normal' && !isClipBase(doc, l.id))) {
-    if (!l.clipped && behind.length && opacity < 0.999) return { layer: finish(renderAlone(doc, l), 1), below: null, bakedOpacity: true };
+    if (!l.clipped && behind.length && opacity < 0.999) return { layer: finish(renderAlone(doc, l), 1), below: null, bakedOpacity: true, approx: false };
     const c = renderLayerToDoc(doc, shown, { effects: true, mask: true });
-    return c ? { layer: finish(c, l.opacity), below: null, bakedOpacity: false } : null;
+    return c ? { layer: finish(c, l.opacity), below: null, bakedOpacity: false, approx: false } : null;
   }
 
   // Content + the effects drawn over it, with the layer's own blend mode and opacity.
   const core = renderLayerToDoc(doc, { ...shown, effects: l.effects.filter((e) => !isBehindEffect(e)) } as Layer, { effects: true, mask: true });
   // The effects behind it, each at the layer opacity, knocked out where the content is (fill 0).
   const pieces = renderAlone(doc, { ...l, effects: behind, fillOpacity: 0, blendMode: 'normal' } as Layer);
-  if (opacity * fill >= 0.999) {
+  const opaque = opacity * fill >= 0.999;
+  if (opaque) {
     // Under fully opaque content the compositor does not knock the effects out: bring back what
     // still shows through the content's partly transparent edges.
     const shape = renderLayerToDoc(doc, { ...shown, effects: [], fillOpacity: 1 } as Layer, { effects: false, mask: true });
@@ -1256,7 +1263,7 @@ function bakeStyle(doc: Document, l: Layer, bakeMask: boolean): StyleBake | null
   const fx = makeRasterLayer({ name: `${l.name} Effects`, bitmapId: bitmaps.add(pieces), width: W, height: H });
   fx.visible = l.visible;
   fx.label = l.label;
-  return { layer: finish(core ?? createCanvas(W, H), l.opacity), below: fx, bakedOpacity: false };
+  return { layer: finish(core ?? createCanvas(W, H), l.opacity), below: fx, bakedOpacity: false, approx: opaque && l.blendMode !== 'normal' };
 }
 
 /**
@@ -1307,6 +1314,7 @@ export function rasterizeStyleSelected() {
         : `Shadows and glows behind “${split[0].layer.name}” were placed on “${split[0].below!.name}” below it, so its blend mode and clipping keep looking the same.`,
     );
   }
+  if (out.some((b) => b.approx)) notes.push('Where the content covers those effects, its blend mode may look a little different.');
   if (out.some((b) => b.bakedOpacity)) notes.push('The layer opacity was merged into the pixels to keep the same look.');
   if (notes.length) toast(notes.join(' '), 'info', 3200);
 }

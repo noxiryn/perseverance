@@ -3,7 +3,7 @@ import { useEditor } from '../../state/editor';
 import { shapePresets } from '../../registry';
 import { Field, NumberField, Select } from '../../ui/controls';
 import type { Gradient, ShapeKind, ShapeLayer, StrokeStyle } from '../../core/types';
-import { KIND_LABEL, dashFor, dashPresetOf, defaultGradient, editShapeLayer, paintColor, readShapeOptions, swapShapePath, type DashPreset, type EditPhase, type FillMode } from './options';
+import { KIND_LABEL, dashFor, dashPresetOf, defaultGradient, editShapeLayer, paintColor, readShapeOptions, renameForPreset, swapShapePath, type DashPreset, type EditPhase, type FillMode } from './options';
 import { ALIGN_OPTIONS, DashSelect, FillButton, StrokeButton } from './PaintControls';
 import { PresetPicker } from './PresetPicker';
 import { DEFAULT_SHAPE_PRESET } from './presets';
@@ -29,6 +29,19 @@ function sideValue(l: ShapeLayer, v: number, other: number): number {
   const n = Number.isFinite(v) ? v : 1;
   if (l.shape.kind === 'line') return other > 0 ? Math.max(0, n) : Math.max(1, n);
   return Math.max(1, n);
+}
+
+/**
+ * Last stroke removed from a layer here (width 0 / stroke toggled off): turning the stroke back on
+ * restores its colour, alignment, dash and joins instead of a default black stroke.
+ */
+const removedStrokes = new Map<string, StrokeStyle>();
+
+function rememberStroke(layerId: string, stroke: StrokeStyle | null) {
+  if (!stroke) return;
+  removedStrokes.delete(layerId);
+  removedStrokes.set(layerId, structuredClone(stroke));
+  if (removedStrokes.size > 64) removedStrokes.delete(removedStrokes.keys().next().value as string);
 }
 
 const JOINS: { value: CanvasLineJoin; label: string }[] = [
@@ -64,10 +77,12 @@ export function ShapeProperties({ layerId }: { layerId: string }) {
     edit(
       (l) => {
         if (patch === null) {
+          if (phase === 'commit') rememberStroke(layerId, l.shape.stroke);
           l.shape.stroke = null;
           return;
         }
-        const base: StrokeStyle = l.shape.stroke ?? { paint: { type: 'solid', color: strokeColor }, width: 4, align: 'outside', ...dashFor('solid') };
+        const restored = removedStrokes.get(layerId);
+        const base: StrokeStyle = l.shape.stroke ?? (restored ? { ...structuredClone(restored), width: restored.width > 0 ? restored.width : 4 } : { paint: { type: 'solid', color: strokeColor }, width: 4, align: 'outside', ...dashFor('solid') });
         l.shape.stroke = { ...base, ...patch };
       },
       phase,
@@ -85,10 +100,13 @@ export function ShapeProperties({ layerId }: { layerId: string }) {
       (l) => {
         const cur = l.shape.stroke;
         if (cur) {
-          if (phase === 'commit' && width === 0) l.shape.stroke = null;
-          else cur.width = width;
+          if (phase === 'commit' && width === 0) {
+            rememberStroke(layerId, cur);
+            l.shape.stroke = null;
+          } else cur.width = width;
         } else if (width > 0) {
-          l.shape.stroke = { paint: { type: 'solid', color: strokeColor }, width, align: 'outside', ...dashFor('solid') };
+          const restored = removedStrokes.get(layerId);
+          l.shape.stroke = restored ? { ...structuredClone(restored), width } : { paint: { type: 'solid', color: strokeColor }, width, align: 'outside', ...dashFor('solid') };
         }
       },
       phase,
@@ -126,7 +144,15 @@ export function ShapeProperties({ layerId }: { layerId: string }) {
             onChange={(id) => {
               const p = shapePresets.get(id);
               if (!p) return;
-              edit((l) => swapShapePath(l, p.path, p.viewBox, p.id), 'commit', 'Custom Shape');
+              edit(
+                (l) => {
+                  const prev = l.shape.presetId ? shapePresets.get(l.shape.presetId) : undefined;
+                  swapShapePath(l, p.path, p.viewBox, p.id);
+                  renameForPreset(l, prev?.name, p.name);
+                },
+                'commit',
+                'Custom Shape',
+              );
             }}
           />
         </Field>

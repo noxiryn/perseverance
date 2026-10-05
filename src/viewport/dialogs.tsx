@@ -40,10 +40,11 @@ export function AmountDialog({ close, title, label, initial, min, max, step = 1,
     flushFocusedField();
     close(Math.max(min, Math.min(max, ref.current)));
   };
+  const sliderMax = Math.min(max, 250);
   return (
     <Dialog
       title={title}
-      width={360}
+      width={380}
       onClose={() => close()}
       onSubmit={submit}
       footer={
@@ -58,7 +59,9 @@ export function AmountDialog({ close, title, label, initial, min, max, step = 1,
       <div className="viewport-dlg">
         <div className="viewport-dlg-row">
           <span className="ui-label">{label}</span>
-          <Slider value={value} min={min} max={Math.min(max, 250)} step={step} unit={unit} onChange={set} width={220} />
+          {/* The slider covers the useful range; the field accepts the full range (e.g. 1000 px feather). */}
+          <Slider value={Math.min(value, sliderMax)} min={min} max={sliderMax} step={step} showNumber={false} onChange={set} width={150} />
+          <NumberField value={value} min={min} max={max} step={step} unit={unit} width={72} onChange={set} />
         </div>
         {note && <div className="viewport-dlg-note">{note}</div>}
       </div>

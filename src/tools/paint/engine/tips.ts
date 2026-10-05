@@ -24,10 +24,6 @@ class Lru<V> {
     this.map.set(k, v);
     if (this.map.size > this.limit) this.map.delete(this.map.keys().next().value as string);
   }
-  /** Remove every entry whose key starts with `prefix`. */
-  deletePrefix(prefix: string) {
-    for (const k of [...this.map.keys()]) if (k.startsWith(prefix)) this.map.delete(k);
-  }
 }
 
 const MAX_TIP_RES = 1024;
@@ -138,11 +134,19 @@ export function grayToAlpha(src: HTMLCanvasElement, n: number): HTMLCanvasElemen
  */
 export const MAX_GENERATED_TIP = 512;
 
+/**
+ * Cache identity of a preset's tip: user presets copy the generator of the built-in they were
+ * saved from (`tipFrom`), so they share its cached stamps instead of generating their own.
+ */
+function tipKey(preset: BrushPresetDef): string {
+  return (preset as { tipFrom?: string }).tipFrom || preset.id;
+}
+
 /** Textured tip of a preset at (at least) `size` px, alpha stamp. */
 export function textureTip(preset: BrushPresetDef, size: number): HTMLCanvasElement | null {
   if (!preset.tip) return null;
   const n = textureBucket(size);
-  const key = `${preset.id}|${n}`;
+  const key = `${tipKey(preset)}|${n}`;
   const hit = textureCache.get(key);
   if (hit) return hit;
   let out: HTMLCanvasElement;
@@ -166,14 +170,9 @@ export function textureTip(preset: BrushPresetDef, size: number): HTMLCanvasElem
   return out;
 }
 
-/** Drop the cached textured tips of one preset (e.g. after a user preset is deleted). */
-export function forgetTexture(presetId: string) {
-  textureCache.deletePrefix(`${presetId}|`);
-}
-
 /* ---------------- idle pre-warming ---------------- */
 
-/** Latest requested bucket per preset id. */
+/** Latest requested bucket per tip (see tipKey). */
 const warmQueue = new Map<string, { preset: BrushPresetDef; size: number }>();
 let warmTimer = 0;
 
@@ -204,11 +203,11 @@ function warmNext() {
 export function prewarmTexture(preset: BrushPresetDef | undefined, size: number) {
   if (!preset?.tip) return;
   const n = textureBucket(size);
-  if (textureCache.get(`${preset.id}|${n}`)) {
-    warmQueue.delete(preset.id);
+  if (textureCache.get(`${tipKey(preset)}|${n}`)) {
+    warmQueue.delete(tipKey(preset));
     return;
   }
-  warmQueue.set(preset.id, { preset, size: n });
+  warmQueue.set(tipKey(preset), { preset, size: n });
   window.clearTimeout(warmTimer);
   warmTimer = window.setTimeout(() => {
     warmTimer = 0;

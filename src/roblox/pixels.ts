@@ -227,7 +227,7 @@ export interface ContentFrame {
   y1: number;
   /**
    * Sides where the content is CUT (by the layer box or the canvas edge) rather than ending in a
-   * silhouette: a straight opaque run covers at least half of that side. Neighbourhood operations
+   * silhouette: a straight, fully opaque run covers at least half of that side. Neighbourhood operations
    * (rim light, outlines, edge detection, blurs) extend the content beyond cut sides instead of
    * treating the transparent padding there as background.
    */
@@ -265,7 +265,9 @@ export function contentFrame(img: PixelBuffer, minShare = 0.002, cutShare = 0.5)
     let best = 0,
       run = 0;
     for (let k = 0; k < len; k++) {
-      if (d[((y + dy * k) * w + (x + dx * k)) * 4 + 3] >= 200) {
+      // Hard cuts are fully opaque up to the bound; anti-aliased silhouettes (flat feet, a
+      // feathered cut-out) have a semi-transparent outermost row and never count as a cut.
+      if (d[((y + dy * k) * w + (x + dx * k)) * 4 + 3] >= 250) {
         if (++run > best) best = run;
       } else run = 0;
     }

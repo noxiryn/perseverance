@@ -20,6 +20,9 @@ import type { Rect, Selection } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
 import { ctxRead } from '../core/canvas';
 import { traceContours } from './math/contours';
+import { shapeInsideCanvas } from './math/marquee';
+
+export { shapeInsideCanvas };
 import type { Affine } from './math/affine';
 
 interface Entry {
@@ -45,17 +48,6 @@ function shapePath(shape: NonNullable<Selection['shape']>): Path2D {
 
 function boundsKey(bounds?: Rect | null): string {
   return bounds ? `${bounds.x},${bounds.y},${bounds.width},${bounds.height}` : 'all';
-}
-
-/**
- * True when a selection's vector shape can stand in for its mask: the shape must lie inside the
- * canvas (the mask is always clipped to it). Shapes reaching past the edge fall back to the mask.
- */
-export function shapeInsideCanvas(shape: Selection['shape'], width: number, height: number): boolean {
-  if (!shape) return false;
-  const r = shape.rect;
-  const e = 1e-6;
-  return r.x >= -e && r.y >= -e && r.x + r.width <= width + e && r.y + r.height <= height + e && r.width > 0 && r.height > 0;
 }
 
 /** The selection's vector shape when it is usable for drawing (see shapeInsideCanvas). */

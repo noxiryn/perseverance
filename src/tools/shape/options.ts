@@ -248,7 +248,9 @@ export function editShapeLayer(layerId: string, mutate: (l: ShapeLayer) => void,
 }
 
 /** Apply one option change to a shape layer (only keys relevant to its kind). */
-export function applyOptionToShape(l: ShapeLayer, key: keyof ShapeToolOptions, o: ShapeToolOptions, primary: string, secondary: string, presetLookup?: (id: string) => { path: string; viewBox: [number, number, number, number] } | undefined) {
+export type PresetLookup = (id: string) => { path: string; viewBox: [number, number, number, number]; name?: string } | undefined;
+
+export function applyOptionToShape(l: ShapeLayer, key: keyof ShapeToolOptions, o: ShapeToolOptions, primary: string, secondary: string, presetLookup?: PresetLookup) {
   const s = l.shape;
   if (!keyAppliesToKind(key, s.kind)) return;
   switch (key) {
@@ -281,7 +283,11 @@ export function applyOptionToShape(l: ShapeLayer, key: keyof ShapeToolOptions, o
       break;
     case 'presetId': {
       const p = presetLookup?.(o.presetId);
-      if (p) swapShapePath(l, p.path, p.viewBox, o.presetId);
+      if (p) {
+        const prev = s.presetId ? presetLookup?.(s.presetId) : undefined;
+        swapShapePath(l, p.path, p.viewBox, o.presetId);
+        renameForPreset(l, prev?.name, p.name);
+      }
       break;
     }
   }
@@ -320,4 +326,14 @@ export function swapShapePath(l: ShapeLayer, path: string, viewBox: [number, num
     l.transform.x = pos.x;
     l.transform.y = pos.y;
   }
+}
+
+/**
+ * A layer still named after its custom shape preset ("5-Point Star", "5-Point Star 2") follows a
+ * preset swap ("Skull", "Skull 2"); names the user chose are left alone.
+ */
+export function renameForPreset(l: { name: string }, oldName: string | undefined, newName: string | undefined) {
+  if (!oldName || !newName || oldName === newName) return;
+  if (l.name === oldName) l.name = newName;
+  else if (l.name.startsWith(`${oldName} `) && /^\d+$/.test(l.name.slice(oldName.length + 1))) l.name = newName + l.name.slice(oldName.length);
 }

@@ -234,6 +234,69 @@ export class DocBuilder {
     if (this.characterId === layer.id) this.characterId = null;
   }
 
+  /**
+   * Run `fn` after the bitmap work queued so far (e.g. to place text where generated artwork
+   * left room). Runs synchronously at finish() when nothing is deferred.
+   */
+  later(label: string, fn: () => void) {
+    this.defer(label, fn);
+  }
+
+  /**
+   * Fraction (0..1) of the doc-space box covered by opaque pixels of the given raster layers
+   * (unrotated layers; others are ignored). Only meaningful inside later().
+   */
+  coverage(box: Box, layers: (RasterLayer | null)[]): number {
+    let covered = 0;
+    let total = 0;
+    for (const l of layers) {
+      if (!l || !this.doc.layers[l.id] || l.transform.rotation) continue;
+      const bmp = bitmaps.tryGet(l.bitmapId);
+      const ctx = bmp?.getContext('2d', { willReadFrequently: true });
+      if (!bmp || !ctx) continue;
+      const t = l.transform;
+      const cx = t.x + l.width / 2;
+      const cy = t.y + l.height / 2;
+      const toBx = (X: number) => (X - cx) / t.scaleX + l.width / 2;
+      const toBy = (Y: number) => (Y - cy) / t.scaleY + l.height / 2;
+      const xs = [toBx(box.x), toBx(box.x + box.width)];
+      const ys = [toBy(box.y), toBy(box.y + box.height)];
+      const x0 = Math.max(0, Math.floor(Math.min(...xs)));
+      const x1 = Math.min(bmp.width, Math.ceil(Math.max(...xs)));
+      const y0 = Math.max(0, Math.floor(Math.min(...ys)));
+      const y1 = Math.min(bmp.height, Math.ceil(Math.max(...ys)));
+      const area = Math.max(1, (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys)));
+      total = Math.max(total, area);
+      if (x1 <= x0 || y1 <= y0) continue;
+      const data = ctx.getImageData(x0, y0, x1 - x0, y1 - y0).data;
+      let n = 0;
+      for (let i = 3; i < data.length; i += 4) if (data[i] > 60) n++;
+      covered += n / area;
+    }
+    return total ? Math.min(1, covered) : 0;
+  }
+
+  /**
+   * Move a text layer to the first candidate position (anchor = box center, doc px) whose box is
+   * clear of the given layers' pixels; falls back to the least covered candidate.
+   */
+  placeTextInOpenSpace(text: TextLayer, candidates: [number, number][], avoid: (RasterLayer | null)[], margin = 10) {
+    if (!candidates.length) return;
+    const size = this.textBox(text);
+    let best = candidates[0];
+    let bestCov = Infinity;
+    for (const [x, y] of candidates) {
+      const box = { x: x - size.width / 2 - margin, y: y - size.height / 2 - margin, width: size.width + margin * 2, height: size.height + margin * 2 };
+      const cov = this.coverage(box, avoid);
+      if (cov < bestCov - 1e-3) {
+        best = [x, y];
+        bestCov = cov;
+      }
+      if (cov <= 0.002) break;
+    }
+    text.transform = { ...text.transform, x: Math.round(best[0] - size.width / 2), y: Math.round(best[1] - size.height / 2) };
+  }
+
   /** Number of queued bitmap steps. */
   get pendingWork() {
     return this.jobs.length;

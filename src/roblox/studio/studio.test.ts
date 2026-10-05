@@ -16,7 +16,9 @@ import {
 } from './presets';
 import { JOINTS_R15, MIRROR_JOINT, zeroJoints } from './types';
 import { GRADIENT_RES, lightDirection, toonGradient, yawOf } from './toon';
-import { isTextureName, mimeOf, mtlLibsOf, pickMainFile, resourceKey } from './modelFiles';
+import { WHITE_PIXEL_PNG, isTextureName, mimeOf, mtlLibsOf, pickMainFile, resourceKey, selectMtlFiles } from './modelFiles';
+import { fitCamera, maxNdcExtent, orbitBasis, supersampleFactor } from './framing';
+import { inflateSync } from 'node:zlib';
 import { cacheModelFiles, cachedModelFiles } from './modelCache';
 
 describe('output frame size', () => {
@@ -232,5 +234,89 @@ describe('model files', () => {
     expect(cachedModelFiles(key)).toBe(files);
     expect(cachedModelFiles('missing')).toBeNull();
     expect(cachedModelFiles(42)).toBeNull();
+  });
+});
+
+describe('missing-texture stand-in', () => {
+  it('is a valid opaque white 1×1 RGBA PNG', () => {
+    const bytes = Buffer.from(WHITE_PIXEL_PNG.split(',')[1], 'base64');
+    expect([...bytes.subarray(1, 4)].map((c) => String.fromCharCode(c)).join('')).toBe('PNG');
+    // IHDR: 1×1, 8-bit, color type 6 (RGBA)
+    expect(bytes.readUInt32BE(16)).toBe(1);
+    expect(bytes.readUInt32BE(20)).toBe(1);
+    expect(bytes[24]).toBe(8);
+    expect(bytes[25]).toBe(6);
+    let p = 8;
+    let raw: number[] | null = null;
+    while (p < bytes.length) {
+      const len = bytes.readUInt32BE(p);
+      const type = bytes.toString('ascii', p + 4, p + 8);
+      if (type === 'IDAT') raw = [...inflateSync(bytes.subarray(p + 8, p + 8 + len))];
+      p += 12 + len;
+    }
+    // filter byte + RGBA
+    expect(raw).toEqual([0, 255, 255, 255, 255]);
+  });
+
+  it('selects every referenced MTL library (and falls back to all .mtl files)', () => {
+    const files = [{ name: 'Avatar.obj' }, { name: 'b.mtl' }, { name: 'A.MTL' }, { name: 'tex.png' }];
+    expect(selectMtlFiles('mtllib a.mtl\nmtllib b.mtl\nv 0 0 0', files).map((f) => f.name)).toEqual(['A.MTL', 'b.mtl']);
+    expect(selectMtlFiles('mtllib other.mtl', files).map((f) => f.name)).toEqual(['b.mtl', 'A.MTL']);
+    expect(selectMtlFiles('v 0 0 0', [{ name: 'x.obj' }])).toEqual([]);
+  });
+});
+
+describe('perspective framing', () => {
+  /** Corners of an axis-aligned box as flat xyz triples. */
+  const box = (min: [number, number, number], max: [number, number, number]) => {
+    const out: number[] = [];
+    for (let k = 0; k < 8; k++) out.push(k & 1 ? max[0] : min[0], k & 2 ? max[1] : min[1], k & 4 ? max[2] : min[2]);
+    return out;
+  };
+
+  it('builds an orthonormal camera basis matching the orbit convention', () => {
+    const { d, r, u } = orbitBasis(35, 6);
+    const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    expect(dot(d, r)).toBeCloseTo(0, 6);
+    expect(dot(d, u)).toBeCloseTo(0, 6);
+    expect(dot(r, u)).toBeCloseTo(0, 6);
+    expect(u[1]).toBeGreaterThan(0); // up stays up
+    // Front view: camera on +Z, right = +X
+    const f = orbitBasis(0, 0);
+    expect(f.d[2]).toBeCloseTo(1, 6);
+    expect(f.r[0]).toBeCloseTo(1, 6);
+  });
+
+  it('keeps a deep model inside the frame at a 3/4 angle (with the margin)', () => {
+    // Two cubes ≈ 3.6 studs wide and deep — the case the old approximation cropped.
+    const pts = [...box([-1.8, 0, -1.8], [0, 1.8, 0]), ...box([0, 0, 0], [1.8, 3.6, 1.8])];
+    for (const [yaw, pitch] of [[35, 6], [-35, 6], [22, -24], [0, 4], [155, 12]]) {
+      const fit = fitCamera(pts, yaw, pitch, 35, 16 / 9, 1.07)!;
+      const ext = maxNdcExtent(pts, fit.target, yaw, pitch, fit.distance, 35, 16 / 9);
+      expect(ext).toBeLessThanOrEqual(1 / 1.07 + 1e-3);
+      // Tight: something touches the margin.
+      expect(ext).toBeGreaterThan(1 / 1.07 - 0.02);
+    }
+  });
+
+  it('centers asymmetric content and respects tall/wide aspect ratios', () => {
+    const pts = box([-0.5, 0, -0.5], [0.5, 5, 0.5]);
+    for (const aspect of [1, 9 / 16, 16 / 9]) {
+      const fit = fitCamera(pts, 0, 0, 35, aspect, 1.1)!;
+      expect(maxNdcExtent(pts, fit.target, 0, 0, fit.distance, 35, aspect)).toBeLessThanOrEqual(1 / 1.1 + 1e-3);
+      expect(fit.target[1]).toBeGreaterThan(2);
+      expect(fit.target[1]).toBeLessThan(3);
+    }
+    expect(fitCamera([], 0, 0, 35, 1, 1)).toBeNull();
+  });
+
+  it('caps supersampling so 4K renders stay 1:1 and 1080p renders get 2×', () => {
+    expect(supersampleFactor(1920, 1080, 8192)).toBe(2);
+    expect(supersampleFactor(4096, 2304, 8192)).toBe(1);
+    expect(supersampleFactor(4096, 4096, 8192)).toBe(1);
+    expect(supersampleFactor(1024, 1024, 1536)).toBeCloseTo(1.5, 6);
+    expect(supersampleFactor(3000, 3000, 8192)).toBe(1);
+    expect(supersampleFactor(2048, 2048, 8192)).toBeGreaterThan(1);
+    expect(supersampleFactor(2048, 2048, 8192) * 2048).toBeLessThanOrEqual(Math.sqrt(8_500_000) + 1);
   });
 });

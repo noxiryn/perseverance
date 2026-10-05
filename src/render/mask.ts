@@ -9,6 +9,11 @@ import { ctx2d } from '../core/canvas';
 import { px, slots } from './cache';
 import { acquire, fresh, release, type PxRect } from './surface';
 
+/** Slot tag of a mask bitmap's processed alpha (dropped with its layer). */
+export function maskTag(bitmapId: string): string {
+  return `mask:${bitmapId}`;
+}
+
 /** Pure per-pixel mask transfer: luminance (0..255) → visibility (0..255). */
 export function maskValue(lum: number, inverted: boolean, density: number): number {
   const l = inverted ? 255 - lum : lum;
@@ -100,7 +105,7 @@ export function maskAlpha(mask: LayerMask, scale: number, region: PxRect, docW: 
     octx.drawImage(work, 0, 0);
   }
   release(work);
-  slots.set(key, sig, out, px(out), { max: 2 });
+  slots.set(key, sig, out, px(out), { max: 2, layerId: maskTag(mask.bitmapId) });
   return out;
 }
 

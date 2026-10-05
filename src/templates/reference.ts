@@ -89,7 +89,7 @@ export const gothicPaper = defineTemplate({
       b.text('Birdcage', { ...title, x: 512, y: 40, fill: solid('#141414') }, { name: 'Title' });
     });
 
-    b.asset(
+    const tendrils = b.asset(
       'swirl-tendrils',
       { color: '#0b0b0b', outlineColor: '#6f63c9', outlineWidth: 6, count: 6, thickness: 34, scale: 0.9, side: 'both', style: 'angular', spikes: 0.45, rimAngle: 135, seed: 5 },
       { name: 'Swirl Tendrils' },
@@ -106,12 +106,19 @@ export const gothicPaper = defineTemplate({
       saturation: -10,
     });
 
-    const numeral = b.text('VII', { fontFamily: SERIF, fontWeight: 600, fontSize: 54, x: 902, y: 462, anchor: 'center', fill: solid('#161616') }, { name: 'Numeral' });
-    b.effect(numeral, 'stroke', { color: '#e6e5e1', size: 5, position: 'outside' });
+    // Small dark serif numeral on open paper at the right (like the ref). It is placed once the
+    // tendrils are generated, in the first candidate spot the artwork leaves clear.
+    const numeral = b.text('VII', { fontFamily: SERIF, fontWeight: 600, fontSize: 54, x: 914, y: 470, anchor: 'center', fill: solid('#161616') }, { name: 'Numeral' });
+    b.effect(numeral, 'stroke', { color: '#e9e8e4', size: 2, position: 'outside' });
 
     b.adjustment('hue-saturation', { saturation: -28 }, { name: 'Desaturate' });
     b.adjustment('curves', { curves: S_CURVE }, { name: 'Contrast' });
-    b.asset('torn-border', { color: '#0b0b0b', thickness: 34, roughness: 0.7, burn: 0.55, flecks: 0.6, seed: 11 }, { name: 'Torn Border' });
+    const border = b.asset('torn-border', { color: '#0b0b0b', thickness: 34, roughness: 0.7, burn: 0.55, flecks: 0.6, seed: 11 }, { name: 'Torn Border' });
+    b.later('place numeral', () => {
+      const spots: [number, number][] = [];
+      for (const y of [470, 430, 510, 390, 550, 350, 590, 310, 630]) for (const x of [914, 944, 884, 960, 860]) spots.push([x, y]);
+      b.placeTextInOpenSpace(numeral, spots, [tendrils, ch, border], 8);
+    });
   },
 });
 

@@ -30,7 +30,7 @@ import { ctx2d } from '../core/canvas';
 import { transformMatrix } from '../core/geometry';
 import { effects, filters, type EffectDef } from '../registry';
 import { applyFilterStack, compositeOp, makeFilterContext, resolveParams, runFilter } from '../filters/engine';
-import { cacheGeneration, objId, px, slots, type Resource } from './cache';
+import { cacheGeneration, objId, slots, type Resource } from './cache';
 import { edgeDistance } from './distance';
 import { applyMask, lerpInto, maskAlpha } from './mask';
 import { fillWithPaint } from './paint';
@@ -123,6 +123,11 @@ export interface LayerRender {
   extent?: PxRect;
   /** @internal Distance fields of `shape`, reusable by renders with the same csig. */
   fields?: FieldEntry[];
+  /**
+   * @internal Opaque bounds of the content (output px; null = empty), when known and not cut by
+   * the region: the true content extent, tighter than `extent` (text padding, empty bitmap areas).
+   */
+  tight?: PxRect | null;
   /** @internal Translation reuse. */
   move?: MoveInfo;
 }
@@ -471,6 +476,56 @@ function readAlphaPadded(c: HTMLCanvasElement, r: LocalRect): Uint8Array {
   return out;
 }
 
+/** Bounding box (local to the map) of non-zero alpha, or null. */
+function alphaBBox(a: Uint8Array, w: number, h: number): PxRect | null {
+  let x0 = w,
+    y0 = h,
+    x1 = -1,
+    y1 = -1;
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    let first = -1;
+    for (let x = 0; x < w; x++) {
+      if (a[row + x]) {
+        first = x;
+        break;
+      }
+    }
+    if (first < 0) continue;
+    let last = first;
+    for (let x = w - 1; x > first; x--) {
+      if (a[row + x]) {
+        last = x;
+        break;
+      }
+    }
+    if (first < x0) x0 = first;
+    if (last > x1) x1 = last;
+    if (y < y0) y0 = y;
+    y1 = y;
+  }
+  return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+}
+
+/**
+ * Opaque content bounds from an alpha read of `r` (local), when `r` covers all the content
+ * the canvas can hold and the result is trustworthy (not cut by a clipped region edge).
+ * Returns undefined when unknown.
+ */
+function tightFromRead(region: PxRect, extent: PxRect, r: LocalRect, data: Uint8Array): PxRect | null | undefined {
+  const ext = intersectRect(extent, region);
+  if (!ext) return null;
+  const local = { x: ext.x - region.x, y: ext.y - region.y, w: ext.w, h: ext.h };
+  if (!containsRect(r, local)) return undefined;
+  const bb = alphaBBox(data, r.w, r.h);
+  if (!bb) return containsRect(region, extent) ? null : undefined;
+  const abs = { x: bb.x + r.x + region.x, y: bb.y + r.y + region.y, w: bb.w, h: bb.h };
+  if (containsRect(region, extent)) return abs;
+  // The region is clipped: content touching a clipped edge may continue beyond it.
+  const inner = { x: region.x + 1, y: region.y + 1, w: region.w - 2, h: region.h - 2 };
+  return containsRect(inner, abs) ? abs : undefined;
+}
+
 /** EffectFields of one layer render: alpha reads and distance fields, cached and shared. */
 class LayerFields implements EffectFields {
   /** Fields used or computed by this render (carried by the LayerRender for later reuse). */
@@ -482,6 +537,8 @@ class LayerFields implements EffectFields {
     private readonly region: PxRect,
     private readonly extent: PxRect,
     private readonly inherited: FieldEntry[],
+    /** Opaque content bounds (undefined = unknown). */
+    public tight: PxRect | null | undefined,
   ) {}
 
   alpha(r: LocalRect): Uint8Array {
@@ -492,6 +549,7 @@ class LayerFields implements EffectFields {
     const data = readAlphaPadded(this.C, r);
     this.reads.push({ rect: { ...r }, data });
     if (this.reads.length > 4) this.reads.shift();
+    if (this.tight === undefined) this.tight = tightFromRead(this.region, this.extent, r, data);
     return data;
   }
 
@@ -500,7 +558,8 @@ class LayerFields implements EffectFields {
     const abs: PxRect = { x: r.x + reg.x, y: r.y + reg.y, w: r.w, h: r.h };
     // The field at a pixel depends on the content within maxDist of it: that part of the
     // content must have been present when the field was computed.
-    const needSrc = intersectRect(expandRect(abs, maxDist + 2), this.extent);
+    const content = this.tight === undefined ? this.extent : this.tight;
+    const needSrc = content ? intersectRect(expandRect(abs, maxDist + 2), content) : null;
     const ok = (e: FieldEntry) => e.mode === mode && e.maxDist >= maxDist && containsRect(e.rect, abs) && (!needSrc || containsRect(e.src, needSrc));
     let e = this.entries.find(ok);
     if (!e) {
@@ -530,11 +589,8 @@ function flagsKey(f: RenderFlags): string {
 
 /* ---------------- translation reuse ---------------- */
 
-const fracQ = (v: number) => {
-  const f = v - Math.floor(v);
-  const q = Math.round(f * 256) / 256;
-  return q >= 1 ? 0 : q;
-};
+/** Whether a translation delta (output px) is a whole number of pixels. */
+const wholePx = (d: number) => Math.abs(d - Math.round(d)) < 1e-6;
 
 /**
  * Signature of everything a transformable layer's render depends on EXCEPT its integer
@@ -556,7 +612,9 @@ function translationSig(l: Layer, flags: RenderFlags, m: DOMMatrix): string | nu
         : `s${objId(l.shape)}`;
   const fill = Number.isFinite(l.fillOpacity) ? l.fillOpacity : 1;
   const knock = fill * Math.max(0, Math.min(1, l.opacity)) < 0.999 ? 1 : 0;
-  return `${content}|e${flags.effects ? objId(l.effects) : 0}|${t.rotation}|${t.scaleX}|${t.scaleY}|${t.skewX ?? 0}|${fill}|${knock}|${fracQ(m.e)},${fracQ(m.f)}`;
+  // The sub-pixel phase is NOT part of the signature: the lookup requires an exact whole-pixel
+  // delta from the base render (see renderLayer), so a shifted render equals a fresh one.
+  return `${content}|e${flags.effects ? objId(l.effects) : 0}|${m.a},${m.b},${m.c},${m.d}|${t.rotation}|${t.scaleX}|${t.scaleY}|${t.skewX ?? 0}|${fill}|${knock}`;
 }
 
 const shiftRect = (r: PxRect, dx: number, dy: number): PxRect => ({ x: r.x + dx, y: r.y + dy, w: r.w, h: r.h });
@@ -572,6 +630,7 @@ function shiftRender(r: LayerRender, dx: number, dy: number, csig: string | unde
     csig,
     extent: r.extent && shiftRect(r.extent, dx, dy),
     fields: r.fields?.map((f) => ({ ...f, rect: shiftRect(f.rect, dx, dy), src: shiftRect(f.src, dx, dy) })),
+    tight: r.tight && shiftRect(r.tight, dx, dy),
   };
 }
 
@@ -605,10 +664,13 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
     for (const p of prevs) {
       const mv = p?.move;
       if (!mv || mv.sig !== tfull) continue;
-      // Shift relative to the unshifted base: rounding errors never accumulate, and positions
-      // just below/above .5 shift exactly like a fresh render would place them.
-      const dx = Math.round(geom.m.e - mv.e);
-      const dy = Math.round(geom.m.f - mv.f);
+      // Shift relative to the unshifted base by an exact whole-pixel delta (same sub-pixel
+      // phase): the shifted render is identical to a fresh render at the new position.
+      const ddx = geom.m.e - mv.e;
+      const ddy = geom.m.f - mv.f;
+      if (!wholePx(ddx) || !wholePx(ddy)) continue;
+      const dx = Math.round(ddx);
+      const dy = Math.round(ddy);
       const moved = shiftRender(mv.base, dx, dy, contentSig(rc, l, flags));
       if (!containsRect(expandSides({ x: 0, y: 0, w: rc.W, h: rc.H }, mv.clip), moved.region)) continue;
       moved.move = mv;
@@ -655,22 +717,30 @@ function groupExtent(rc: RC, g: GroupLayer): PxRect | null {
   return r;
 }
 
+interface Reuse {
+  C: HTMLCanvasElement | null;
+  fields: FieldEntry[];
+  /** Opaque content bounds known from the previous render (undefined = unknown). */
+  tight: PxRect | null | undefined;
+}
+
 /** Previous content canvas with the same content signature, adapted to `region` (or null). */
-function reuseContent(prevs: (LayerRender | null)[], csig: string, region: PxRect, extent: PxRect, fpad: number): { C: HTMLCanvasElement | null; fields: FieldEntry[] } {
+function reuseContent(prevs: (LayerRender | null)[], csig: string, region: PxRect, extent: PxRect, fpad: number): Reuse {
   for (const p of prevs) {
     if (!p || p.csig !== csig) continue;
     const fields = p.fields ?? [];
-    if (!p.shape) return { C: null, fields };
+    const tight = p.tight;
+    if (!p.shape) return { C: null, fields, tight };
     // Every content pixel the new canvas (and its smart filters' footprint) needs must be in
-    // the previous canvas.
-    const need = intersectRect(extent, expandRect(region, fpad));
-    if (need && !containsRect(p.region, need)) return { C: null, fields };
-    if (sameRect(p.region, region) && !borrowed.has(p.shape)) return { C: p.shape, fields };
+    // the previous canvas (known opaque bounds lie inside it by construction).
+    const need = tight !== undefined ? null : intersectRect(extent, expandRect(region, fpad));
+    if (need && !containsRect(p.region, need)) return { C: null, fields, tight };
+    if (sameRect(p.region, region) && !borrowed.has(p.shape)) return { C: p.shape, fields, tight };
     const C = fresh(region.w, region.h);
     ctx2d(C).drawImage(p.shape, p.region.x - region.x, p.region.y - region.y);
-    return { C, fields };
+    return { C, fields, tight };
   }
-  return { C: null, fields: [] };
+  return { C: null, fields: [], tight: undefined };
 }
 
 function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRender | null)[]): LayerRender | null {
@@ -805,7 +875,7 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
       k.globalAlpha = fill;
       k.drawImage(C, 0, 0);
     }
-    return { region, core: fill > 0 ? core : null, shape: C, behind: [], bounds: layoutBox, csig, extent, fields: reuse.fields.length ? reuse.fields : undefined };
+    return { region, core: fill > 0 ? core : null, shape: C, behind: [], bounds: layoutBox, csig, extent, fields: reuse.fields.length ? reuse.fields : undefined, tight: reuse.C ? reuse.tight : undefined };
   }
 
   // Effects work on everything the content covers (text stroke/warp/descenders, shape stroke,
@@ -813,7 +883,7 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
   const ext = intersectRect(extent, region);
   const effectBounds: LocalRect = ext ? { x: ext.x - region.x, y: ext.y - region.y, w: ext.w, h: ext.h } : { x: 0, y: 0, w: 0, h: 0 };
   const paintBox: LocalRect = { x: layoutBox.x - region.x, y: layoutBox.y - region.y, w: layoutBox.w, h: layoutBox.h };
-  const fieldsP = new LayerFields(C, region, extent, reuse.fields);
+  const fieldsP = new LayerFields(C, region, extent, reuse.fields, reuse.C ? reuse.tight : undefined);
   const sorted = fx
     .map((e) => ({ ...e, stage: effectStage(e.def, e.params) }))
     .sort((a, b) => a.def.order - b.def.order || a.idx - b.idx);
@@ -885,7 +955,7 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
       release(target);
     }
   }
-  return { region, core, shape: C, behind, bounds: layoutBox, csig, extent, fields: fieldsP.entries.length ? fieldsP.entries : undefined };
+  return { region, core, shape: C, behind, bounds: layoutBox, csig, extent, fields: fieldsP.entries.length ? fieldsP.entries : undefined, tight: fieldsP.tight };
 }
 
 /* ================================================================== */

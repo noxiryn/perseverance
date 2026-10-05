@@ -113,7 +113,7 @@ const smoke = defineAsset(
       const side = str(p, 'side', 'right');
       const glow = num(p, 'glow', 0.6);
       const wisps = num(p, 'wisps', 0.5);
-      const { fw, fh, s } = fieldDims(W, H, 170_000);
+      const { fw, fh, s } = fieldDims(W, H, 150_000);
       const fu = s * u; // field px per length unit
       const k = 1 / ((560 * fu) / scale); // noise units per field px (billows ≈ 560 units)
       const nA = simplex(seed);
@@ -122,7 +122,7 @@ const smoke = defineAsset(
       const nD = simplex(seed + 3);
       // big soft billows get a gentle warp; the fine detail gets a stronger, faster warp
       const warpBig = 0.35 + turb * 0.5;
-      const warpDet = 0.2 + turb * 0.65;
+      const warpDet = 0.1 + turb * 0.4;
       const detW = 0.14 + wisps * 0.22;
       const aspect = W / H;
       const n = fw * fh;
@@ -132,12 +132,15 @@ const smoke = defineAsset(
         for (let i = 0; i < fw; i++) {
           const x = i * k;
           const y = j * k;
-          const qx = fbm2(nA, x, y, 3);
-          const qy = fbm2(nA, x + 5.2, y + 1.3, 3);
+          // the large-scale warp is low frequency: two octaves are enough
+          const qx = fbm2(nA, x, y, 2);
+          const qy = fbm2(nA, x + 5.2, y + 1.3, 2);
           const big = fbm2(nC, x + warpBig * qx, y + warpBig * qy, 3) * 0.5 + 0.5;
           const q2x = fbm2(nB, x * 3, y * 3, 2);
           const q2y = fbm2(nB, x * 3 + 3.3, y * 3 - 1.1, 2);
-          const det = fbm2(nD, x * 2.4 + warpDet * q2x + qx, y * 2.4 + warpDet * q2y + qy, 3) * 0.5 + 0.5;
+          // fine cloudy turbulence (multi-octave fbm, gently warped): soft mottling like real
+          // smoke instead of the marbled veins a strong warp produces
+          const det = clamp01((fbm2(nD, x * 3 + warpDet * q2x + qx * 0.6, y * 3 + warpDet * q2y + qy * 0.6, 4, 0.55) * 0.5) * 1.7 + 0.5);
           const f = big * (1 - detW) + det * detW;
           const m = sideMask(side, i / fw, j / fh, coverage, qx * 2.2 + qy * 0.8, aspect);
           const d = smoothstep(0.34, 0.86, f + (m - 0.6) * 0.62) * smoothstep(0.0, 0.45, m);
@@ -168,12 +171,13 @@ const smoke = defineAsset(
           const sy = soft[idx + (j < fh - 1 ? fw : 0)] - soft[idx - (j > 0 ? fw : 0)];
           const facing = clamp01(0.5 + (sx * L.x + sy * L.y) * gk);
           const t = tone[idx];
-          // emissive-looking smoke: brightness follows density and the turbulent detail
-          const br = clamp01(d * 1.15) * (0.55 + 0.45 * t);
-          let c: RGB = mixRGB(deep, mid, clamp01(0.15 + br * 1.1));
-          c = mixRGB(c, lit, clamp01((facing - 0.45) * 1.6 * glow + br * 0.25 * glow));
+          // emissive-looking smoke: brightness follows density, the puffs catch extra light
+          const br = clamp01(d * 1.1) * (0.45 + 0.55 * t);
+          let c: RGB = mixRGB(deep, mid, clamp01(0.12 + br * 1.12));
+          c = mixRGB(c, lit, clamp01((facing - 0.45) * 1.6 * glow + br * 0.22 * glow + (t - 0.6) * 1.4 * glow * d));
           c = mixRGB(c, hot, clamp01((facing - 0.7) * 1.6 * glow * d));
-          const a = clamp01(Math.pow(d, 1.25) * (0.75 + 0.35 * t) * density * 1.3);
+          // only mild alpha modulation by the detail: dense smoke has no see-through veins
+          const a = clamp01(Math.pow(d, 1.15) * (0.86 + 0.2 * t) * density * 1.3);
           px[o] = c.r;
           px[o + 1] = c.g;
           px[o + 2] = c.b;
@@ -184,6 +188,16 @@ const smoke = defineAsset(
       const [c, ctx] = newCanvas(W, H);
       drawUpscaled(ctx, lo, W, H);
       grainInside(ctx, W, H, seed, Math.max(1, 1.6 * u), 0.12);
+      // diffuse colored haze around the billows (scattered light), blurred at field resolution
+      const [hz, hctx] = newCanvas(fw, fh);
+      hctx.filter = `blur(${Math.max(1, 10 * fu)}px)`;
+      hctx.drawImage(lo, 0, 0);
+      hctx.filter = 'none';
+      ctx.save();
+      ctx.globalCompositeOperation = 'destination-over';
+      ctx.globalAlpha = clamp01(0.6 * density + 0.1);
+      drawUpscaled(ctx, hz, W, H);
+      ctx.restore();
       return c;
     },
   },

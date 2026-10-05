@@ -6,7 +6,7 @@ import { clampZoom, fitZoom, formatZoom, nextZoomStep, normalizePan, wheelZoomFa
 import { boxFromDrag, fitRatio, resizeBox, roundCropRect } from './crop';
 import { averageColor, hexToRgb, rgbToHex } from './color';
 import { colorRangeWeights } from './colorRange';
-import { latchModifiers, marqueeRect, type ModifierLatch } from './marquee';
+import { latchModifiers, marqueeRect, shapeInsideCanvas, type ModifierLatch } from './marquee';
 
 const close = (a: number, b: number, eps = 1e-6) => expect(Math.abs(a - b)).toBeLessThan(eps);
 
@@ -294,5 +294,15 @@ describe('marquee', () => {
     latchModifiers(m, true, true);
     expect(m.shift).toBe(true); // pressed again → constrain
     expect(m.alt).toBe(true);
+  });
+});
+
+describe('selection shapes vs canvas', () => {
+  it('only keeps vector shapes that lie inside the canvas', () => {
+    expect(shapeInsideCanvas({ type: 'rect', rect: { x: 0, y: 0, width: 300, height: 300 } }, 1920, 1080)).toBe(true);
+    expect(shapeInsideCanvas({ type: 'rect', rect: { x: -60, y: -60, width: 360, height: 360 } }, 1920, 1080)).toBe(false);
+    expect(shapeInsideCanvas({ type: 'ellipse', rect: { x: 1800, y: 10, width: 200, height: 100 } }, 1920, 1080)).toBe(false);
+    expect(shapeInsideCanvas({ type: 'ellipse', rect: { x: 0, y: 0, width: 1920, height: 1080 } }, 1920, 1080)).toBe(true);
+    expect(shapeInsideCanvas(null, 100, 100)).toBe(false);
   });
 });

@@ -3,9 +3,15 @@ import { produce } from 'immer';
 import type { Document, Layer, RasterLayer } from '../core/types';
 import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeFilterInstance, makeGroupLayer, makeRasterLayer, makeTextLayer } from '../core/document';
 import { effects, filters, type LookDef } from '../registry';
+import { bitmaps } from '../core/bitmaps';
+import { contentSignature } from './preview';
+import { edgeStripPolygons } from './masks';
 import {
   LOOK_META_KEY,
   buildLook,
+  characterInGroup,
+  describeTargetSkips,
+  lookTouchesTarget,
   currentLookId,
   hasLook,
   insertLookDraft,
@@ -115,7 +121,7 @@ describe('insert / strip', () => {
     const groups = lookGroups(next);
     expect(groups).toHaveLength(1);
     expect(groups[0].name).toBe('Look: Test Look');
-    expect(groups[0].meta).toEqual({ lookId: 'test-look' });
+    expect(groups[0].meta).toEqual({ lookId: 'test-look', lookLayerIds: groups[0].childIds });
     expect(groups[0].blendMode).toBe('pass-through');
     expect(next.rootIds[next.rootIds.length - 1]).toBe(groups[0].id);
     expect(groups[0].childIds.map((id) => next.layers[id].name)).toEqual(['Paper', 'Contrast']);
@@ -227,5 +233,144 @@ describe('built-in looks', () => {
       const parts = (l.layerFilters?.length ?? 0) + (l.layerEffects?.length ?? 0) + (l.adjustments?.length ?? 0) + (l.overlays?.length ?? 0);
       expect(parts, l.id).toBeGreaterThan(0);
     }
+  });
+});
+
+/* ---------- review fixes ---------- */
+
+function docWithCharacterGroup() {
+  const { doc, charId, textId } = makeDoc();
+  const g = makeGroupLayer({ name: 'Character' });
+  insertLayerDraft(doc, g);
+  // move the character raster into the group and tag it like the placeholder
+  doc.rootIds = doc.rootIds.filter((id) => id !== charId);
+  g.childIds.push(charId);
+  doc.layers[charId].meta = { placeholder: true, kind: 'character' };
+  const fx = makeRasterLayer({ name: 'FX', bitmapId: 'bm_fx', width: 10, height: 10 });
+  insertLayerDraft(doc, fx, { parentId: g.id });
+  return { doc, groupId: g.id, charId, textId, fxId: fx.id };
+}
+
+describe('group targets', () => {
+  it('redirects a group target to the character inside it', () => {
+    const { doc, groupId, charId } = docWithCharacterGroup();
+    expect(characterInGroup(doc, groupId)).toBe(charId);
+    const r = resolveTarget(doc, groupId);
+    expect(r.targetId).toBe(charId);
+    expect(r.note).toMatch(/inside group/);
+  });
+
+  it('keeps a group without an obvious character and reports the skipped filters', () => {
+    const { doc, groupId, charId } = docWithCharacterGroup();
+    const plain = produce(doc, (d) => {
+      d.layers[charId].meta = undefined;
+    });
+    expect(characterInGroup(plain, groupId)).toBeNull(); // two rasters, none tagged
+    expect(resolveTarget(plain, groupId).targetId).toBe(groupId);
+    const b = buildLook(LOOK, plain, groupId, fakeOverlay);
+    expect(b.filters).toEqual([]);
+    expect(b.effects.map((e) => e.effectId)).toEqual(['t-shadow']);
+    expect(b.targetSkipped).toEqual(['Cel', 'Rim']);
+    expect(describeTargetSkips(b, plain.layers[groupId])).toMatch(/Cel and Rim skipped: groups can’t hold smart filters/);
+  });
+
+  it('explains what whole-document mode leaves out', () => {
+    const { doc } = makeDoc();
+    const b = buildLook(LOOK, doc, null, fakeOverlay);
+    expect(b.targetSkipped).toEqual(['Rim', 'Shadow']);
+    expect(describeTargetSkips(b, null)).toMatch(/Rim and Shadow need a layer target/);
+    const none = buildLook({ ...LOOK, layerFilters: [], layerEffects: [] }, doc, null, fakeOverlay);
+    expect(describeTargetSkips(none, null)).toBe('');
+  });
+
+  it('knows whether a look touches the target', () => {
+    const { doc, charId, adjId } = makeDoc();
+    expect(lookTouchesTarget(LOOK, doc.layers[charId])).toBe(true);
+    expect(lookTouchesTarget(LOOK, doc.layers[adjId])).toBe(false);
+    expect(lookTouchesTarget({ ...LOOK, layerFilters: [], layerEffects: [] }, doc.layers[charId])).toBe(false);
+    expect(lookTouchesTarget(LOOK, null)).toBe(false);
+  });
+});
+
+describe('replacing and removing looks', () => {
+  it('re-targeting a look removes the previous look from the other layer', () => {
+    const { doc, charId, textId } = makeDoc();
+    const first = produce(doc, (d) => {
+      insertLookDraft(d, buildLook(LOOK, d, charId, fakeOverlay), charId);
+    });
+    const other: LookDef = { id: 'other', name: 'Other', category: 'Test', swatch: ['#111'], layerFilters: [{ filterId: 't-cel' }], adjustments: [{ filterId: 't-curves' }] };
+    const second = produce(first, (d) => {
+      insertLookDraft(d, buildLook(other, d, textId, fakeOverlay), textId);
+    });
+    expect(lookGroups(second).map((g) => g.meta?.lookId)).toEqual(['other']);
+    expect(lookMetaOf(second.layers[charId])).toBeNull();
+    expect(second.layers[charId].filters.map((f) => f.filterId)).toEqual(['user-filter']);
+    expect(second.layers[charId].effects).toEqual([]);
+    expect(lookMetaOf(second.layers[textId])?.lookId).toBe('other');
+    expect(currentLookId(second, charId)).toBe('other'); // via the document's look group
+  });
+
+  it('records the look group children and keeps user layers dragged into it', () => {
+    const { doc, charId } = makeDoc();
+    const applied = produce(doc, (d) => {
+      insertLookDraft(d, buildLook(LOOK, d, charId, fakeOverlay), charId);
+    });
+    const g = lookGroups(applied)[0];
+    expect(g.meta?.lookLayerIds).toEqual(g.childIds);
+    const userLayer = makeRasterLayer({ name: 'My Paint', bitmapId: 'bm_user', width: 5, height: 5 });
+    const withUser = produce(applied, (d) => {
+      insertLayerDraft(d, userLayer, { parentId: g.id, index: 1 });
+    });
+    const removed = produce(withUser, (d) => {
+      stripLookDraft(d, charId);
+    });
+    expect(lookGroups(removed)).toHaveLength(0);
+    expect(removed.layers[userLayer.id]).toBeTruthy();
+    // it takes the group's place at the top of the root
+    expect(removed.rootIds[removed.rootIds.length - 1]).toBe(userLayer.id);
+    for (const id of g.childIds) expect(removed.layers[id]).toBeUndefined();
+  });
+
+  it('builds overlays with mask specs without a canvas (mask skipped)', () => {
+    const { doc, charId } = makeDoc();
+    const masked: LookDef = {
+      ...LOOK,
+      overlays: [{ assetId: 'paper', name: 'Paper', mask: { kind: 'edge-strips', width: 0.1 } } as NonNullable<LookDef['overlays']>[number]],
+    };
+    const b = buildLook(masked, doc, charId, fakeOverlay);
+    expect(b.groupLayers.map((l) => l.name)).toContain('Paper');
+  });
+});
+
+describe('edge strip masks', () => {
+  it('cover narrow strips at the requested sides', () => {
+    const both = edgeStripPolygons({ kind: 'edge-strips', width: 0.1 }, 1000, 500);
+    expect(both).toHaveLength(2);
+    const maxX = (p: [number, number][]) => Math.max(...p.map((q) => q[0]));
+    const minX = (p: [number, number][]) => Math.min(...p.map((q) => q[0]));
+    expect(maxX(both[0])).toBeLessThanOrEqual(100);
+    expect(minX(both[1])).toBeGreaterThanOrEqual(900);
+    expect(edgeStripPolygons({ kind: 'edge-strips', width: 0.1, sides: 'left' }, 1000, 500)).toHaveLength(1);
+    // clamped to half the width
+    expect(maxX(edgeStripPolygons({ kind: 'edge-strips', width: 3, sides: 'left' }, 1000, 500)[0])).toBeLessThanOrEqual(500);
+  });
+});
+
+describe('preview content signature', () => {
+  it('ignores selection/guides, follows layers and pixel versions', () => {
+    const { doc, charId } = makeDoc();
+    const sig = contentSignature(doc);
+    const guides = produce(doc, (d) => {
+      d.guides.push({ id: 'g1', orientation: 'vertical', position: 10 });
+    });
+    expect(contentSignature(guides)).toBe(sig);
+    const moved = produce(doc, (d) => {
+      d.layers[charId].opacity = 0.5;
+    });
+    expect(contentSignature(moved)).not.toBe(sig);
+    bitmaps.add({ width: 1, height: 1 } as HTMLCanvasElement, 'bm_char');
+    const withPixels = contentSignature(doc);
+    bitmaps.touch('bm_char');
+    expect(contentSignature(doc)).not.toBe(withPixels);
   });
 });
