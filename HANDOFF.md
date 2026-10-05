@@ -67,18 +67,25 @@ starting point; don't rewrite modules from scratch.
   baked into pixel layers (mask/opacity/blend kept); `doc.background` exports as a bottom
   "Background Color" fill layer and is restored on import.
   - Baked adjustments (`src/io/psdBake.ts`): clipped ones are written at full alpha wherever the clip
-    stack has coverage, which Photoshop's clipping reproduces exactly; unclipped ones over
-    semi-transparent pixels (isolated groups, transparent documents) can't be exact with one pixel
-    layer — they are listed as "baked approximately (soft edges)" in the export toast.
+    stack has coverage (the stack's unpremultiplied colours after the filter, alpha 255 / 0), which
+    Photoshop's clipping — and our renderer's, `src/render/clip.ts` — reproduces: the base with the
+    baked layer clipped to it renders like the original within ±1 (stored premultiplied levels; ±2
+    at soft edges when other clipped layers sit between the base and the adjustment, since their
+    composite is read back at the base's alpha). The backdrop leaves out the base's behind-stage
+    styles (drop shadow, outer glow): they are drawn under the stack and clipped layers never see
+    them. Not reproducible with one pixel layer, so listed as "baked approximately" in the export
+    toast: clipped to a base below 100 % fill (a clipped pixel layer fills the base's whole shape) or
+    whose style adds coverage beyond its shape (centre stroke; inner effects over soft edges), and
+    unclipped ones over semi-transparent pixels (isolated groups, transparent documents).
+    Check: `scripts/smoke.mjs` "psd bake checks" (soft-edged base + clipped vignette / duotone →
+    `buildPsd` → baked layer clipped onto the base, and a .psd write + read).
   - Gradient fill/overlay center offsets are written in Photoshop's convention (percent of the box,
     ±50 % = edge; ours is ±1 = edge). ag-psd stores scale/offset as whole percents: a fill that needs
     rounding stays an editable fill only if the rounded gradient renders within 2 levels, otherwise
     it is written as pixels ("gradient fills exported as pixels"); such overlays are baked.
-  - Known gap (renderer, not io): our clip stacks composite clipped layers with destination-in +
-    source-over, so over a semi-transparent base pixel they add coverage (50 % base + clipped red →
-    alpha 192; Photoshop keeps the base's 128). Any clipped layer over soft base edges therefore
-    looks slightly different in Photoshop, and a re-import of a clipped baked adjustment is not
-    exact at those edges.
+  - Clip stacks now keep the base's coverage like Photoshop (renderer: `compositeClipStack` over a
+    normalized base, `src/render/clip.ts`), so clipped layers over soft base edges match Photoshop and
+    a re-import of a clipped baked adjustment is exact at those edges (see above).
 - **Free Transform on tab switch** (`src/viewport/transform/controller.ts commitTransformInOwnDoc`):
   applied in its own document (with a toast) instead of being dropped.
 - **CI / installers**: Build installers is green since f6ce5d3 (Windows case-clash rename b4d8728 +
@@ -223,5 +230,6 @@ starting point; don't rewrite modules from scratch.
 
 ## Useful tools
 - `scripts/shot.mjs`: screenshot any URL with optional `--eval` setup script (Chromium at `/opt/pw-browsers/chromium`).
-- Dev harness URLs: `?demo=1`, `?panel=<id>`, `?view=1`; `window.__app` exposes registries/stores.
+- Dev harness URLs: `?demo=1`, `?panel=<id>`, `?view=1`; `window.__app` exposes registries/stores,
+  `renderDocument` and `loadPsd()` (PSD export/import + ag-psd's writePsd/readPsd; pixel checks in scripts/smoke.mjs).
 - `scripts/make-icon.mjs`: regenerate `build/icon.png` from `build/icon.svg`.

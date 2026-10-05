@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
  * End-to-end smoke test: drives the editor in headless Chromium against a running dev server
- * (or `vite preview`), exercising templates, every command, every tool and every panel while
- * collecting console errors and exceptions. Screenshots go to --out (default screenshots-tmp/).
+ * (or `vite preview`), checking PSD export of clipped baked adjustments and exercising templates,
+ * every command, every tool and every panel while collecting console errors and exceptions.
+ * Screenshots go to --out (default screenshots-tmp/).
  *
  *   npx vite --port 5300 &   node scripts/smoke.mjs --url http://localhost:5300 [--out dir] [--quick]
  *
- * Exit code 1 if any page error / console error was captured.
+ * Exit code 1 if any check failed or any page error / console error was captured.
  */
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
@@ -50,6 +51,103 @@ const wait = (ms) => page.waitForTimeout(ms);
 await page.goto(url, { waitUntil: 'networkidle' });
 await wait(1500);
 await shot('01-start');
+
+/* ---------- PSD: clipped baked adjustments ---------- */
+// A soft-edged base with a clipped adjustment Photoshop doesn't have must render the same (±1,
+// premultiplied as stored) as the base with the exported baked layer clipped to it, and after a
+// .psd write + read; a base below 100% fill can't be reproduced and is reported as approximate.
+// Clipped layers between the base and the adjustment are read back at the base's alpha, so soft
+// edges may round once more there (±2).
+const psdFailures = await run('psd-bake-checks', async () => {
+  const { bitmaps, documentUtils: D, renderDocument, loadPsd } = window.__app;
+  const { buildPsd, psdToDocument, writePsd, readPsd } = await loadPsd();
+  const W = 200;
+  const H = 150;
+  const canvas = (draw) => {
+    const c = document.createElement('canvas');
+    c.width = W;
+    c.height = H;
+    draw(c.getContext('2d'));
+    return c;
+  };
+  const raster = (doc, c, props) => {
+    const l = Object.assign(D.makeRasterLayer({ name: props.name, bitmapId: bitmaps.add(c), width: W, height: H }), props);
+    D.insertLayerDraft(doc, l, { parentId: null });
+    return l;
+  };
+  const softBase = (g) => {
+    const lg = g.createLinearGradient(0, 0, W, H);
+    lg.addColorStop(0, '#ff3040');
+    lg.addColorStop(0.5, '#30c060');
+    lg.addColorStop(1, '#2040ff');
+    g.fillStyle = lg;
+    g.fillRect(0, 0, W, H);
+    g.globalCompositeOperation = 'destination-in';
+    const rg = g.createRadialGradient(W / 2, H / 2, 10, W / 2, H / 2, 70);
+    rg.addColorStop(0, '#000');
+    rg.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = rg;
+    g.fillRect(0, 0, W, H);
+  };
+  const paint = (g) => {
+    g.fillStyle = 'rgba(250,220,40,0.8)';
+    g.fillRect(W / 2, 0, W / 2, H);
+  };
+  // Stored (premultiplied) channels and alpha within ±1.
+  const diff = (a, b) => {
+    let m = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      m = Math.max(m, Math.abs(a[i + 3] - b[i + 3]));
+      for (let k = 0; k < 3; k++) m = Math.max(m, Math.abs(Math.round((a[i + k] * a[i + 3]) / 255) - Math.round((b[i + k] * b[i + 3]) / 255)));
+    }
+    return m;
+  };
+  const pixels = (doc) => renderDocument(doc, { background: false }).getContext('2d').getImageData(0, 0, W, H).data;
+  const vignette = { filterId: 'vignette', params: { amount: 0.9, size: 0.3, feather: 0.6, color: '#300050' } };
+  const duotone = { filterId: 'duotone', params: { shadow: '#102060', highlight: '#ffd080' } };
+  const cases = [
+    { name: 'vignette', adj: vignette },
+    { name: 'duotone', adj: duotone },
+    { name: 'duotone at 60%', adj: duotone, adjProps: { opacity: 0.6 } },
+    { name: 'duotone over clipped paint', adj: duotone, paint: true },
+    { name: 'duotone at 60% over clipped paint', adj: duotone, adjProps: { opacity: 0.6 }, paint: true, tol: 2 },
+    { name: 'duotone, base with drop shadow', adj: duotone, baseProps: { effects: [{ id: 'fx', effectId: 'drop-shadow', enabled: true, params: { color: '#00ffff', blendMode: 'normal', opacity: 1, distance: 6, size: 10 } }] } },
+    { name: 'duotone, base at 50% fill', adj: duotone, baseProps: { fillOpacity: 0.5 }, approx: true },
+  ];
+  const failures = [];
+  for (const t of cases) {
+    const doc = D.createDocument({ name: t.name, width: W, height: H, background: null });
+    raster(doc, canvas(softBase), { name: 'Base', ...t.baseProps });
+    if (t.paint) raster(doc, canvas(paint), { name: 'Paint', clipped: true });
+    const adj = Object.assign(D.makeAdjustmentLayer({ name: 'Adjustment', ...t.adj }), { clipped: true }, t.adjProps);
+    D.insertLayerDraft(doc, adj, { parentId: null });
+    const built = buildPsd(doc, { bakeStyles: false });
+    const approx = built.approxAdjustments.includes('Adjustment');
+    if (!built.bakedAdjustments.includes('Adjustment')) failures.push(`${t.name}: not baked`);
+    if (approx !== !!t.approx) failures.push(`${t.name}: reported ${approx ? 'approximate' : 'exact'}`);
+    if (t.approx) continue;
+    // The original document with the adjustment replaced by the baked layer, clipped onto the base.
+    const pl = built.psd.children.find((c) => c.name === 'Adjustment');
+    if (!pl?.canvas) {
+      failures.push(`${t.name}: no baked pixels`);
+      continue;
+    }
+    const rebuilt = structuredClone(doc);
+    rebuilt.layers[adj.id] = Object.assign(
+      D.makeRasterLayer({ name: 'Baked', bitmapId: bitmaps.add(pl.canvas), width: pl.canvas.width, height: pl.canvas.height, transform: { x: pl.left, y: pl.top } }),
+      { id: adj.id, clipped: true, opacity: pl.opacity, blendMode: adj.blendMode, mask: adj.mask },
+    );
+    const want = pixels(doc);
+    const d1 = diff(want, pixels(rebuilt));
+    const tol = t.tol ?? 1;
+    if (d1 > tol) failures.push(`${t.name}: baked layer clipped onto the base differs by ${d1}`);
+    const d2 = diff(want, pixels(psdToDocument(readPsd(writePsd(built.psd, { noBackground: true })), 're-import').doc));
+    if (d2 > tol) failures.push(`${t.name}: re-imported PSD differs by ${d2}`);
+  }
+  return failures;
+});
+for (const f of psdFailures ?? []) errors.push(`[psd-bake-checks] ${f}`);
+console.log(`psd bake checks: ${!psdFailures ? 'not run' : psdFailures.length ? `${psdFailures.length} FAILED` : 'ok'}`);
 
 /* ---------- registry inventory ---------- */
 const inventory = await run('inventory', () => {

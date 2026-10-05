@@ -48,6 +48,7 @@ export { shapePath, shapeFillRule, shapeLocalBounds } from './shapes';
 export { createGradient, paintStyle, assetImage } from './paint';
 export { gradientGeometry } from './gradientMath';
 export { renderStats } from './engine';
+export { effectStage } from './effects/common';
 
 export interface RenderOptions {
   /** Output scale relative to document pixels (default 1). */
