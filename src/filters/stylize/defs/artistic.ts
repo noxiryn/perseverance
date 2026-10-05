@@ -289,13 +289,26 @@ export function cutoutQuantize(lab: Float32Array, alpha: Uint8ClampedArray | nul
 /** 3×3 majority (mode) filter on a label map, ignoring pixels marked 255 (transparent). */
 function modeFilter(lbl: Uint8Array, w: number, h: number, K: number): Uint8Array {
   const out = new Uint8Array(lbl);
-  const cnt = new Uint8Array(K);
+  const cnt = new Uint8Array(Math.max(K, 1));
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const i = y * w + x;
       const c0 = lbl[i];
       if (c0 === 255) continue;
-      cnt.fill(0);
+      const up = i - w,
+        dn = i + w;
+      // flat interior (the common case): nothing to vote on
+      if (
+        lbl[i - 1] === c0 &&
+        lbl[i + 1] === c0 &&
+        lbl[up] === c0 &&
+        lbl[dn] === c0 &&
+        lbl[up - 1] === c0 &&
+        lbl[up + 1] === c0 &&
+        lbl[dn - 1] === c0 &&
+        lbl[dn + 1] === c0
+      )
+        continue;
       let bestC = c0,
         bestN = 0;
       for (let dy = -1; dy <= 1; dy++)
@@ -307,6 +320,12 @@ function modeFilter(lbl: Uint8Array, w: number, h: number, K: number): Uint8Arra
             bestN = v;
             bestC = c;
           }
+        }
+      // reset only the touched counters
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++) {
+          const c = lbl[i + dy * w + dx];
+          if (c !== 255) cnt[c] = 0;
         }
       out[i] = bestC;
     }

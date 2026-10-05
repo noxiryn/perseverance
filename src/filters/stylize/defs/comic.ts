@@ -49,6 +49,29 @@ function blurredColor(img: Img, sigma: number) {
   return p;
 }
 
+/**
+ * Darkness plane (1 − luma of the blurred straight color; transparent areas count as paper) from
+ * just two blurred planes — premultiplied luma and alpha — instead of four (mono screens).
+ */
+function blurredDarkness(img: Img, sigma: number): Float32Array {
+  const { width: w, height: h, data } = img;
+  const n = w * h;
+  const L = new Float32Array(n),
+    A = new Float32Array(n);
+  for (let i = 0, j = 0; i < n; i++, j += 4) {
+    const a = data[j + 3] / 255;
+    A[i] = a;
+    L[i] = (data[j] * 0.2126 + data[j + 1] * 0.7152 + data[j + 2] * 0.0722) * (a / 255);
+  }
+  blurPlane(L, w, h, sigma);
+  blurPlane(A, w, h, sigma);
+  for (let i = 0; i < n; i++) {
+    const a = A[i];
+    L[i] = a > 1e-4 ? 1 - Math.min(1, L[i] / a) : 0;
+  }
+  return L;
+}
+
 function darknessFrom(p: { r: Float32Array; g: Float32Array; b: Float32Array }, n: number): Float32Array {
   const d = new Float32Array(n);
   for (let i = 0; i < n; i++) d[i] = 1 - (p.r[i] * 0.2126 + p.g[i] * 0.7152 + p.b[i] * 0.0722) / 255;
@@ -149,10 +172,11 @@ function applyHalftone<T extends Img>(img: T, p: ParamValues, ctx: FilterContext
   const transparent = bool(p.transparentPaper, false);
   const mix = clamp(num(p.mix, 1), 0, 1);
   const orig = mix < 0.999 ? new Uint8ClampedArray(data) : null;
-  const col = blurredColor(img, toneSigma(S));
   const screen = { cell: S, angle, shape, ax, ay, contrast: k };
+  // mono only needs the tone: blur luma + alpha (2 planes) instead of the 4 color planes
+  const col = mode === 'mono' ? null : blurredColor(img, toneSigma(S));
 
-  if (mode === 'cmyk') {
+  if (mode === 'cmyk' && col) {
     const C = new Float32Array(n),
       M = new Float32Array(n),
       Y = new Float32Array(n),
@@ -205,7 +229,7 @@ function applyHalftone<T extends Img>(img: T, p: ParamValues, ctx: FilterContext
           data[j + ch] = paper[ch] * (1 - vc * fC[ch]) * (1 - vm * fM[ch]) * (1 - vy * fY[ch]) * (1 - vk * fK[ch]);
       }
     }
-  } else if (mode === 'color') {
+  } else if (mode === 'color' && col) {
     const P = paper.map((v) => Math.max(1, v));
     const cov = new Float32Array(n);
     for (let i = 0; i < n; i++) {
@@ -239,7 +263,7 @@ function applyHalftone<T extends Img>(img: T, p: ParamValues, ctx: FilterContext
       }
     }
   } else {
-    const dark = darknessFrom(col, n);
+    const dark = blurredDarkness(img, toneSigma(S));
     const out = new Float32Array(n);
     screenPlane(dark, w, h, screen, out);
     for (let i = 0, j = 0; i < n; i++, j += 4) {

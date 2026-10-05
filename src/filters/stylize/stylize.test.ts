@@ -12,7 +12,7 @@ import { vignetteAt } from './defs/light';
 import { cutoutQuantize, fromOklab, toOklab } from './defs/artistic';
 import { separateInks } from './defs/comic';
 import { boxIntegral, quantTable } from './defs/retro';
-import { boundedDistance, boxBlurPlane, coarseField, distanceTransform, insideDistance } from './util';
+import { blurPlane, boundedDistance, boxBlurInterleaved, boxBlurPlane, coarseField, distanceTransform, insideDistance } from './util';
 import { spotLUT } from './screen';
 
 type Img = { data: Uint8ClampedArray; width: number; height: number };
@@ -443,26 +443,47 @@ describe('distance helpers', () => {
 });
 
 describe('fast planes', () => {
-  it('boxBlurPlane matches a naive clamped box blur and preserves constants', () => {
-    const w = 37,
-      h = 23,
-      r = 3;
-    const a = new Float32Array(w * h);
-    for (let i = 0; i < a.length; i++) a[i] = ((i * 7919) % 101) / 100;
-    let ref = Float32Array.from(a);
-    const at = (b: Float32Array, x: number, y: number) => b[Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))];
-    for (let p = 0; p < 2; p++) {
-      const hp = new Float32Array(w * h);
-      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let s0 = 0; for (let k = -r; k <= r; k++) s0 += at(ref, x + k, y); hp[y * w + x] = s0 / (2 * r + 1); }
-      const vp = new Float32Array(w * h);
-      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let s0 = 0; for (let k = -r; k <= r; k++) s0 += at(hp, x, y + k); vp[y * w + x] = s0 / (2 * r + 1); }
-      ref = vp;
+  it('box blur matches a naive clamped box blur (wide, narrow, interleaved) and preserves constants', () => {
+    const naive = (src: Float32Array, w: number, h: number, ch: number, r: number, passes: number) => {
+      let ref = Float32Array.from(src);
+      const at = (b: Float32Array, x: number, y: number, c: number) => b[(Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))) * ch + c];
+      for (let p = 0; p < passes; p++) {
+        const hp = new Float32Array(ref.length);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let c = 0; c < ch; c++) { let s0 = 0; for (let k = -r; k <= r; k++) s0 += at(ref, x + k, y, c); hp[(y * w + x) * ch + c] = s0 / (2 * r + 1); }
+        const vp = new Float32Array(ref.length);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let c = 0; c < ch; c++) { let s0 = 0; for (let k = -r; k <= r; k++) s0 += at(hp, x, y + k, c); vp[(y * w + x) * ch + c] = s0 / (2 * r + 1); }
+        ref = vp;
+      }
+      return ref;
+    };
+    for (const [w, h, ch, r] of [[37, 23, 1, 3], [5, 9, 1, 4], [2, 3, 1, 1], [1, 6, 1, 2], [19, 7, 4, 2], [6, 6, 4, 5]]) {
+      const a = new Float32Array(w * h * ch);
+      for (let i = 0; i < a.length; i++) a[i] = ((i * 7919) % 101) / 100;
+      const ref = naive(a, w, h, ch, r, 2);
+      boxBlurInterleaved(a, w, h, ch, r, 2);
+      for (let i = 0; i < a.length; i++) expect(a[i]).toBeCloseTo(ref[i], 4);
     }
-    boxBlurPlane(a, w, h, r, 2);
-    for (let i = 0; i < a.length; i++) expect(a[i]).toBeCloseTo(ref[i], 4);
-    const c = new Float32Array(w * h).fill(0.7);
-    boxBlurPlane(c, w, h, 5, 3);
+    const c = new Float32Array(37 * 23).fill(0.7);
+    boxBlurPlane(c, 37, 23, 5, 3);
     for (let i = 0; i < c.length; i++) expect(c[i]).toBeCloseTo(0.7, 5);
+  });
+
+  it('small-sigma blurPlane is an exact clamped gaussian', () => {
+    for (const [w, h, sigma] of [[31, 17, 1], [4, 5, 1.6], [40, 3, 0.7]]) {
+      const a = new Float32Array(w * h);
+      for (let i = 0; i < a.length; i++) a[i] = ((i * 4421) % 97) / 96;
+      const r = Math.max(1, Math.ceil(sigma * 3));
+      const k: number[] = [];
+      for (let i = -r; i <= r; i++) k.push(Math.exp(-(i * i) / (2 * sigma * sigma)));
+      const ks = k.reduce((x, y) => x + y, 0);
+      const at = (b: Float32Array, x: number, y: number) => b[Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))];
+      const hp = new Float32Array(w * h);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let s0 = 0; for (let i = -r; i <= r; i++) s0 += at(a, x + i, y) * k[i + r]; hp[y * w + x] = s0 / ks; }
+      const ref = new Float32Array(w * h);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let s0 = 0; for (let i = -r; i <= r; i++) s0 += at(hp, x, y + i) * k[i + r]; ref[y * w + x] = s0 / ks; }
+      blurPlane(a, w, h, sigma);
+      for (let i = 0; i < a.length; i++) expect(a[i]).toBeCloseTo(ref[i], 4);
+    }
   });
 
   it('gaussian blur keeps a flat opaque image flat', () => {

@@ -117,64 +117,78 @@ export function screenPlane(
   const invS = 1 / S;
   const aaScale = S / g;
   const ne = extras?.length ?? 0;
+  // per-cell values are computed once per cell run (cell indices change every ~S px along a row)
+  let lastU = 0x7fffffff,
+    lastV = 0x7fffffff;
+  let cellC = 0,
+    cellT = 0,
+    cellLo = 1,
+    cellHi = 1;
+  const cellX = new Float32Array(Math.max(1, ne));
   for (let y = 0; y < h; y++) {
     const gy = y + 0.5 + p.ay;
+    const o0 = y * w;
     for (let x = 0; x < w; x++) {
       const gx = x + 0.5 + p.ax;
       const u = (gx * cs + gy * sn) * invS;
       const v = (-gx * sn + gy * cs) * invS;
       const iu = Math.floor(u),
         iv = Math.floor(v);
-      const fu = u - iu - 0.5,
-        fv = v - iv - 0.5;
-      // cell center back to image space
-      const uc = (iu + 0.5) * S,
-        vc = (iv + 0.5) * S;
-      let ix = uc * cs - vc * sn - p.ax - 0.5;
-      let iy = uc * sn + vc * cs - p.ay - 0.5;
-      if (ix < 0) ix = 0;
-      else if (ix > w - 1) ix = w - 1;
-      if (iy < 0) iy = 0;
-      else if (iy > h - 1) iy = h - 1;
-      const x0 = ix | 0,
-        y0 = iy | 0;
-      const x1 = x0 < w - 1 ? x0 + 1 : x0,
-        y1 = y0 < h - 1 ? y0 + 1 : y0;
-      const tx = ix - x0,
-        ty = iy - y0;
-      const i00 = y0 * w + x0,
-        i10 = y0 * w + x1,
-        i01 = y1 * w + x0,
-        i11 = y1 * w + x1;
-      const w00 = (1 - tx) * (1 - ty),
-        w10 = tx * (1 - ty),
-        w01 = (1 - tx) * ty,
-        w11 = tx * ty;
-      let c = dark[i00] * w00 + dark[i10] * w10 + dark[i01] * w01 + dark[i11] * w11;
-      if (k !== 1) c = (c - 0.5) * k + 0.5;
-      c = c < 0 ? 0 : c > 1 ? 1 : c;
-      const o = y * w + x;
-      for (let e = 0; e < ne; e++) {
-        const pl = extras![e];
-        extrasOut![e][o] = pl[i00] * w00 + pl[i10] * w10 + pl[i01] * w01 + pl[i11] * w11;
+      const o = o0 + x;
+      if (iu !== lastU || iv !== lastV) {
+        lastU = iu;
+        lastV = iv;
+        // cell center back to image space, bilinear tone lookup
+        const uc = (iu + 0.5) * S,
+          vc = (iv + 0.5) * S;
+        let ix = uc * cs - vc * sn - p.ax - 0.5;
+        let iy = uc * sn + vc * cs - p.ay - 0.5;
+        if (ix < 0) ix = 0;
+        else if (ix > w - 1) ix = w - 1;
+        if (iy < 0) iy = 0;
+        else if (iy > h - 1) iy = h - 1;
+        const x0 = ix | 0,
+          y0 = iy | 0;
+        const x1 = x0 < w - 1 ? x0 + 1 : x0,
+          y1 = y0 < h - 1 ? y0 + 1 : y0;
+        const tx = ix - x0,
+          ty = iy - y0;
+        const i00 = y0 * w + x0,
+          i10 = y0 * w + x1,
+          i01 = y1 * w + x0,
+          i11 = y1 * w + x1;
+        const w00 = (1 - tx) * (1 - ty),
+          w10 = tx * (1 - ty),
+          w01 = (1 - tx) * ty,
+          w11 = tx * ty;
+        let c = dark[i00] * w00 + dark[i10] * w10 + dark[i01] * w01 + dark[i11] * w11;
+        if (k !== 1) c = (c - 0.5) * k + 0.5;
+        cellC = c < 0 ? 0 : c > 1 ? 1 : c;
+        for (let e = 0; e < ne; e++) {
+          const pl = extras![e];
+          cellX[e] = pl[i00] * w00 + pl[i10] * w10 + pl[i01] * w01 + pl[i11] * w11;
+        }
+        if (cellC > 0.0005 && cellC < 0.9995) {
+          cellT = lut[(cellC * LUT_N + 0.5) | 0];
+          // fade spots smaller than a pixel instead of leaving 50% specks (and the same for holes)
+          cellLo = cellT * aaScale * 2;
+          cellHi = (tMax - cellT) * aaScale * 2;
+        }
       }
-      if (c <= 0.0005) {
+      for (let e = 0; e < ne; e++) extrasOut![e][o] = cellX[e];
+      if (cellC <= 0.0005) {
         out[o] = 0;
         continue;
       }
-      if (c >= 0.9995) {
+      if (cellC >= 0.9995) {
         out[o] = 1;
         continue;
       }
-      const t = lut[(c * LUT_N + 0.5) | 0];
-      const m = metric(id, fu, fv);
-      let a = (t - m) * aaScale + 0.5;
+      const m = metric(id, u - iu - 0.5, v - iv - 0.5);
+      let a = (cellT - m) * aaScale + 0.5;
       a = a < 0 ? 0 : a > 1 ? 1 : a;
-      // fade spots smaller than a pixel instead of leaving 50% specks (and the same for holes)
-      const lo = t * aaScale * 2;
-      if (lo < 1) a *= lo;
-      const hi = (tMax - t) * aaScale * 2;
-      if (hi < 1) a = 1 - (1 - a) * hi;
+      if (cellLo < 1) a *= cellLo;
+      if (cellHi < 1) a = 1 - (1 - a) * cellHi;
       out[o] = a;
     }
   }

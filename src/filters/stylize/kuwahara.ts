@@ -6,38 +6,44 @@
 import type { Img } from './util';
 
 /** Box means over (r+1)² windows anchored at (x', y') ∈ [-r, w-1]×[-r, h-1], edge-clamped. */
-function anchoredMeans(src: Float32Array, w: number, h: number, r: number, H: Float32Array, out: Float32Array) {
+function anchoredMeans(src: Float32Array, w: number, h: number, r: number, H: Float32Array, out: Float32Array, sums: Float64Array) {
   const W = w + r;
   const inv = 1 / ((r + 1) * (r + 1));
+  // horizontal running sums: H[y, X] = Σ src[y, clamp(X - r .. X)]
   for (let y = 0; y < h; y++) {
     const row = y * w;
+    const first = src[row],
+      last = src[row + w - 1];
     let sum = 0;
     for (let k = 0; k <= r; k++) {
       const xx = -r + k;
-      sum += src[row + (xx < 0 ? 0 : xx >= w ? w - 1 : xx)];
+      sum += xx < 0 ? first : xx >= w ? last : src[row + xx];
     }
     const ho = y * W;
     for (let X = 0; X < W; X++) {
       H[ho + X] = sum;
-      const xo = X - r; // x'
-      const add = xo + r + 1,
-        rem = xo;
-      sum += src[row + (add < 0 ? 0 : add >= w ? w - 1 : add)] - src[row + (rem < 0 ? 0 : rem >= w ? w - 1 : rem)];
+      const add = X + 1,
+        rem = X - r;
+      sum += (add >= w ? last : src[row + add]) - (rem < 0 ? first : rem >= w ? last : src[row + rem]);
     }
   }
+  // vertical running sums, row by row (one sum per column → sequential memory)
+  sums.fill(0);
+  for (let k = 0; k <= r; k++) {
+    const yy = -r + k;
+    const ro = (yy < 0 ? 0 : yy >= h ? h - 1 : yy) * W;
+    for (let X = 0; X < W; X++) sums[X] += H[ro + X];
+  }
   const Hh = h + r;
-  for (let X = 0; X < W; X++) {
-    let sum = 0;
-    for (let k = 0; k <= r; k++) {
-      const yy = -r + k;
-      sum += H[(yy < 0 ? 0 : yy >= h ? h - 1 : yy) * W + X];
-    }
-    for (let Y = 0; Y < Hh; Y++) {
-      out[Y * W + X] = sum * inv;
-      const yo = Y - r;
-      const add = yo + r + 1,
-        rem = yo;
-      sum += H[(add < 0 ? 0 : add >= h ? h - 1 : add) * W + X] - H[(rem < 0 ? 0 : rem >= h ? h - 1 : rem) * W + X];
+  for (let Y = 0; Y < Hh; Y++) {
+    const o = Y * W;
+    const add = Y + 1,
+      rem = Y - r;
+    const ra = (add >= h ? h - 1 : add) * W;
+    const rr = (rem < 0 ? 0 : rem >= h ? h - 1 : rem) * W;
+    for (let X = 0; X < W; X++) {
+      out[o + X] = sums[X] * inv;
+      sums[X] += H[ra + X] - H[rr + X];
     }
   }
 }
@@ -69,9 +75,10 @@ export function kuwahara<T extends Img>(img: T, radius: number): T {
     pl2[i] = l * l;
   }
   const H = new Float32Array(W * h);
+  const sums = new Float64Array(W);
   const mk = (src: Float32Array) => {
     const o = new Float32Array(W * Hh);
-    anchoredMeans(src, w, h, r, H, o);
+    anchoredMeans(src, w, h, r, H, o, sums);
     return o;
   };
   const mr = mk(pr),
@@ -93,8 +100,9 @@ export function kuwahara<T extends Img>(img: T, radius: number): T {
         sb = 0,
         sa = 0,
         sw = 0;
+      // 4 quadrants, weighted by 1 / variance⁴ (unrolled)
+      let q = q0;
       for (let k = 0; k < 4; k++) {
-        const q = k === 0 ? q0 : k === 1 ? q1 : k === 2 ? q2 : q3;
         const m = ml[q];
         let v = ml2[q] - m * m;
         if (v < 0) v = 0;
@@ -105,6 +113,7 @@ export function kuwahara<T extends Img>(img: T, radius: number): T {
         sb += mb[q] * wt;
         sa += ma[q] * wt;
         sw += wt;
+        q = k === 0 ? q1 : k === 1 ? q2 : q3;
       }
       if (sa <= 1e-9 * sw) continue;
       const inv = 255 / sa;

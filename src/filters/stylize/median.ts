@@ -127,7 +127,17 @@ export function medianImage<T extends Img>(img: T, radius: number, preserveAlpha
     ch[3][i] = data[j + 3];
     if (alpha) alpha[i] = data[j + 3];
   }
-  const out = ch.map((c) => medianChannel(c, w, h, r));
+  // constant planes (e.g. the alpha of an opaque image) are their own median
+  const out = ch.map((c) => {
+    const v0 = c[0];
+    let flat = true;
+    for (let i = 1; i < n; i++)
+      if (c[i] !== v0) {
+        flat = false;
+        break;
+      }
+    return flat ? c : medianChannel(c, w, h, r);
+  });
   for (let i = 0, j = 0; i < n; i++, j += 4) {
     const a = out[3][i];
     if (a === 0) {

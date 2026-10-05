@@ -156,50 +156,56 @@ function gaussKernel(sigma: number): Float32Array {
 }
 
 /**
- * Separable small-kernel convolution of interleaved data (`ch` floats per pixel) in place.
- * Clamp-to-edge. Interior pixels take a branch-free path; the vertical pass runs row by row so
- * memory access stays sequential.
+ * Horizontal small-kernel convolution of one row of a float plane (clamp-to-edge): `src` row at
+ * `row` → `dst`. Interior pixels run a branch-free loop; only the r pixels at each end clamp.
  */
-function convolveSeparable(buf: Float32Array | Uint8ClampedArray, w: number, h: number, ch: number, k: Float32Array) {
-  const r = (k.length - 1) >> 1;
+function convolveRow(src: Float32Array, dst: Float32Array, row: number, w: number, k: Float32Array, r: number) {
   const K = k.length;
-  const stride = w * ch;
-  const tmp = new Float32Array(w * h * ch);
-  for (let y = 0; y < h; y++) {
-    const row = y * stride;
-    for (let x = 0; x < w; x++) {
-      const interior = x >= r && x < w - r;
-      for (let c = 0; c < ch; c++) {
-        let s = 0;
-        if (interior) {
-          let p = row + (x - r) * ch + c;
-          for (let i = 0; i < K; i++, p += ch) s += buf[p] * k[i];
-        } else {
-          for (let i = -r; i <= r; i++) {
-            const xx = x + i < 0 ? 0 : x + i >= w ? w - 1 : x + i;
-            s += buf[row + xx * ch + c] * k[i + r];
-          }
-        }
-        tmp[row + x * ch + c] = s;
-      }
+  const last = row + w - 1;
+  const xa = Math.min(r, w),
+    xb = Math.max(xa, w - r);
+  for (let x = 0; x < xa; x++) {
+    let s = 0;
+    for (let i = 0; i < K; i++) {
+      const q = row + x - r + i;
+      s += src[q < row ? row : q > last ? last : q] * k[i];
     }
+    dst[row + x] = s;
   }
-  const acc = new Float32Array(stride);
+  for (let x = xa; x < xb; x++) {
+    let s = 0;
+    const p = row + x - r;
+    for (let i = 0; i < K; i++) s += src[p + i] * k[i];
+    dst[row + x] = s;
+  }
+  for (let x = xb; x < w; x++) {
+    let s = 0;
+    for (let i = 0; i < K; i++) {
+      const q = row + x - r + i;
+      s += src[q < row ? row : q > last ? last : q] * k[i];
+    }
+    dst[row + x] = s;
+  }
+}
+
+/** Exact separable gaussian on a float plane in place (small sigmas). Clamp-to-edge. */
+function gaussSmallPlane(buf: Float32Array, w: number, h: number, sigma: number) {
+  const k = gaussKernel(sigma);
+  const r = (k.length - 1) >> 1;
+  const tmp = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) convolveRow(buf, tmp, y * w, w, k, r);
+  // vertical: accumulate whole rows (sequential memory)
+  const acc = new Float32Array(w);
   for (let y = 0; y < h; y++) {
     acc.fill(0);
     for (let i = -r; i <= r; i++) {
       const yy = y + i < 0 ? 0 : y + i >= h ? h - 1 : y + i;
-      const src = yy * stride;
+      const src = yy * w;
       const kv = k[i + r];
-      for (let q = 0; q < stride; q++) acc[q] += tmp[src + q] * kv;
+      for (let x = 0; x < w; x++) acc[x] += tmp[src + x] * kv;
     }
-    buf.set(acc, y * stride);
+    buf.set(acc, y * w);
   }
-}
-
-/** Exact separable gaussian on a float plane (for small sigmas). Clamp-to-edge. */
-function gaussSmallPlane(buf: Float32Array, w: number, h: number, sigma: number) {
-  convolveSeparable(buf, w, h, 1, gaussKernel(sigma));
 }
 
 /** Gaussian-like blur of a float plane in place; `sigma` in px. */
@@ -225,8 +231,8 @@ export function boxBlurPlane(buf: Float32Array, w: number, h: number, r: number,
 
 /**
  * Box blur of interleaved data (`ch` floats per pixel) in place, `passes` times (3 ≈ gaussian
- * with sigma = sqrt(r(r+1))). Exactly normalized: a constant image stays constant.
- * (Used instead of core/blur's box blurs, whose windows are one tap wider than their divisor.)
+ * with sigma = sqrt(r(r+1))). Exactly normalized: a constant image stays constant, with sub-pixel
+ * float precision (no 8-bit rounding between passes).
  */
 export function boxBlurInterleaved(buf: Float32Array, w: number, h: number, ch: number, r: number, passes = 3): Float32Array {
   if (r < 1 || w < 1 || h < 1) return buf;
@@ -234,18 +240,48 @@ export function boxBlurInterleaved(buf: Float32Array, w: number, h: number, ch: 
   const stride = w * ch;
   const tmp = new Float32Array(buf.length);
   const sums = new Float64Array(stride);
+  // x ranges where the add / remove taps are clamped
+  const xAdd = Math.max(0, Math.min(w, w - r - 1)); // x < xAdd: add tap x+r+1 inside
+  const xRem = Math.min(w, r + 1); // x >= xRem: remove tap x-r inside (> 0)
   for (let p = 0; p < passes; p++) {
     // horizontal: buf → tmp
     for (let y = 0; y < h; y++) {
       const row = y * stride;
       for (let c = 0; c < ch; c++) {
+        const b0 = row + c;
+        const bl = b0 + (w - 1) * ch;
+        const first = buf[b0],
+          lastV = buf[bl];
         let sum = 0;
-        for (let k = -r; k <= r; k++) sum += buf[row + (k < 0 ? 0 : k >= w ? w - 1 : k) * ch + c];
-        for (let x = 0; x < w; x++) {
-          tmp[row + x * ch + c] = sum * inv;
-          const add = x + r + 1,
-            rem = x - r;
-          sum += buf[row + (add < w ? add : w - 1) * ch + c] - buf[row + (rem > 0 ? rem : 0) * ch + c];
+        for (let k = -r; k <= r; k++) sum += k < 0 ? first : k >= w ? lastV : buf[b0 + k * ch];
+        let o = b0;
+        const xm = Math.min(xAdd, xRem);
+        let x = 0;
+        // left edge: removed tap clamps to the first pixel
+        for (; x < xm; x++, o += ch) {
+          tmp[o] = sum * inv;
+          sum += buf[b0 + (x + r + 1) * ch] - first;
+        }
+        if (xAdd >= xRem) {
+          // interior: both taps inside
+          let ia = b0 + (x + r + 1) * ch,
+            ir = b0 + (x - r) * ch;
+          for (; x < xAdd; x++, o += ch, ia += ch, ir += ch) {
+            tmp[o] = sum * inv;
+            sum += buf[ia] - buf[ir];
+          }
+        } else {
+          // narrow image: both taps clamped
+          for (; x < xRem; x++, o += ch) {
+            tmp[o] = sum * inv;
+            sum += lastV - first;
+          }
+        }
+        // right edge: added tap clamps to the last pixel
+        for (; x < w; x++, o += ch) {
+          tmp[o] = sum * inv;
+          const rem = x - r;
+          sum += lastV - (rem > 0 ? buf[b0 + rem * ch] : first);
         }
       }
     }
@@ -312,11 +348,6 @@ export function blurPlanes(p: Planes, w: number, h: number, sigma: number) {
   blurPlane(p.a, w, h, sigma);
 }
 
-/** Exact small-kernel gaussian on 8-bit RGBA (premultiplied by the caller). */
-function gaussSmallRGBA(img: Img, sigma: number) {
-  convolveSeparable(img.data, img.width, img.height, 4, gaussKernel(sigma));
-}
-
 export function premultiplyInPlace(d: Uint8ClampedArray) {
   for (let j = 0; j < d.length; j += 4) {
     const a = d[j + 3];
@@ -343,22 +374,123 @@ export function unpremultiplyInPlace(d: Uint8ClampedArray) {
   }
 }
 
+/** Premultiplied interleaved float copy of RGBA data (0..255 scale). */
+function premultipliedFloats(d: Uint8ClampedArray): Float32Array {
+  const f = new Float32Array(d.length);
+  for (let j = 0; j < d.length; j += 4) {
+    const a = d[j + 3];
+    f[j + 3] = a;
+    if (a === 255) {
+      f[j] = d[j];
+      f[j + 1] = d[j + 1];
+      f[j + 2] = d[j + 2];
+    } else if (a !== 0) {
+      const m = a / 255;
+      f[j] = d[j] * m;
+      f[j + 1] = d[j + 1] * m;
+      f[j + 2] = d[j + 2] * m;
+    }
+  }
+  return f;
+}
+
+/** Write premultiplied interleaved floats back as straight RGBA. */
+function unpremultiplyFloats(f: Float32Array, d: Uint8ClampedArray) {
+  for (let j = 0; j < d.length; j += 4) {
+    const a = f[j + 3];
+    if (a >= 254.5) {
+      d[j] = f[j];
+      d[j + 1] = f[j + 1];
+      d[j + 2] = f[j + 2];
+      d[j + 3] = 255;
+    } else if (a < 0.5) {
+      d[j] = d[j + 1] = d[j + 2] = d[j + 3] = 0;
+    } else {
+      const m = 255 / a;
+      d[j] = f[j] * m;
+      d[j + 1] = f[j + 1] * m;
+      d[j + 2] = f[j + 2] * m;
+      d[j + 3] = a;
+    }
+  }
+}
+
+/** Exact separable gaussian of interleaved RGBA floats in place (small sigmas). Clamp-to-edge. */
+function gaussSmallRGBA(f: Float32Array, w: number, h: number, sigma: number) {
+  const k = gaussKernel(sigma);
+  const r = (k.length - 1) >> 1;
+  const K = k.length;
+  const stride = w * 4;
+  const tmp = new Float32Array(f.length);
+  const xa = Math.min(r, w),
+    xb = Math.max(xa, w - r);
+  for (let y = 0; y < h; y++) {
+    const row = y * stride;
+    for (let x = 0; x < w; x++) {
+      let s0 = 0,
+        s1 = 0,
+        s2 = 0,
+        s3 = 0;
+      if (x >= xa && x < xb) {
+        let p = row + (x - r) * 4;
+        for (let i = 0; i < K; i++, p += 4) {
+          const kv = k[i];
+          s0 += f[p] * kv;
+          s1 += f[p + 1] * kv;
+          s2 += f[p + 2] * kv;
+          s3 += f[p + 3] * kv;
+        }
+      } else {
+        for (let i = 0; i < K; i++) {
+          const xx = x - r + i;
+          const p = row + (xx < 0 ? 0 : xx >= w ? w - 1 : xx) * 4;
+          const kv = k[i];
+          s0 += f[p] * kv;
+          s1 += f[p + 1] * kv;
+          s2 += f[p + 2] * kv;
+          s3 += f[p + 3] * kv;
+        }
+      }
+      const o = row + x * 4;
+      tmp[o] = s0;
+      tmp[o + 1] = s1;
+      tmp[o + 2] = s2;
+      tmp[o + 3] = s3;
+    }
+  }
+  const acc = new Float32Array(stride);
+  for (let y = 0; y < h; y++) {
+    acc.fill(0);
+    for (let i = -r; i <= r; i++) {
+      const yy = y + i < 0 ? 0 : y + i >= h ? h - 1 : y + i;
+      const src = yy * stride;
+      const kv = k[i + r];
+      for (let q = 0; q < stride; q++) acc[q] += tmp[src + q] * kv;
+    }
+    f.set(acc, y * stride);
+  }
+}
+
 /**
  * Gaussian blur of an RGBA image in place with premultiplied alpha (no dark fringes at
  * transparent edges). `sigma` in image px: exact gaussian for small radii, 3 box passes above.
+ *
+ * This (rather than core/blur's boxBlurImageData) backs Gaussian Blur and every blur-based
+ * filter on purpose: it honours fractional radii (boxBlurImageData rounds to whole px and its
+ * smallest blur is σ≈1.4), keeps float precision between passes (no 8-bit rounding → no banding
+ * on smooth gradients or soft alpha edges), is premultiplied, and its vertical pass walks rows
+ * instead of columns (cache friendly, ~2× faster at 1920×1080).
  */
 export function blurImage<T extends Img>(img: T, sigma: number): T {
   if (!(sigma > 0.2)) return img;
-  premultiplyInPlace(img.data);
-  if (sigma < 1.5) gaussSmallRGBA(img, sigma);
+  const { width: w, height: h } = img;
+  const f = premultipliedFloats(img.data);
+  if (sigma < 1.5) gaussSmallRGBA(f, w, h, sigma);
   else {
-    const { width: w, height: h } = img;
     const r = Math.max(1, Math.round((-1 + Math.sqrt(1 + 4 * sigma * sigma)) / 2));
-    const f = Float32Array.from(img.data);
     boxBlurInterleaved(f, w, h, 4, Math.min(r, Math.max(w, h)), 3);
-    img.data.set(f);
   }
-  unpremultiplyInPlace(img.data);
+  unpremultiplyFloats(f, img.data);
   return img;
 }
 
