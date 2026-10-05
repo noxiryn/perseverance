@@ -67,6 +67,21 @@ starting point; don't rewrite modules from scratch.
   publish one. `release/Perseverance-Setup-0.1.0.exe` on disk predates the module work (stale).
   README install/sharing/build sections describe Releases vs. Actions artifacts.
 
+## Clipping groups like Photoshop (src/render/engine.ts compositeClipStack)
+- A clip stack covers exactly what its base's shape covers (content + mask, whatever its fill opacity):
+  clipped layers only recolour it (`source-atop`; blend modes blend with the stack's unpremultiplied
+  colours, then the stack's alpha is restored), so an opaque layer clipped to a 50%-alpha base pixel
+  shows its own colour at 50% alpha (it used to come out denser: 75%). Behind effects of clipped
+  layers draw like compositeRender (each piece with its own operation). Bases below 100% fill keep
+  showing clipped layers over the uncovered part of their shape (a `gap` canvas); bases whose core
+  reaches beyond their shape (centre stroke, emboss) are split per pixel so those effects stay as they are.
+- Only soft clip-base edges change: interior pixels match the previous renderer within rounding, the
+  four reference templates render identically (they have no clipped layers).
+- Blend-mode pieces unpremultiply through a CPU readback of the piece's rect: a colour-dodge division
+  rounds ties differently on GPU canvases of different sizes, which broke partial == full composites.
+- Checks: `scripts/smoke.mjs` render checks (50% base + clipped red → [255,0,0,128], opacity,
+  multiply, 0% fill base); dirty-rect scenarios `clipped-fill` and `clipped-mixed`.
+
 ## Desktop hardening (electron/, checked with scripts/electron-desktop-check.mjs — 46 checks)
 - Security: sandbox + contextIsolation, no Node in the renderer, IPC sender-frame + type checks,
   file grants (read/write only user-chosen paths, persisted in userData), http(s)-only external links,
@@ -155,5 +170,6 @@ starting point; don't rewrite modules from scratch.
 
 ## Useful tools
 - `scripts/shot.mjs`: screenshot any URL with optional `--eval` setup script (Chromium at `/opt/pw-browsers/chromium`).
-- Dev harness URLs: `?demo=1`, `?panel=<id>`, `?view=1`; `window.__app` exposes registries/stores.
+- Dev harness URLs: `?demo=1`, `?panel=<id>`, `?view=1`; `window.__app` exposes registries/stores and
+  `renderDocument` (pixel checks in scripts/smoke.mjs).
 - `scripts/make-icon.mjs`: regenerate `build/icon.png` from `build/icon.svg`.

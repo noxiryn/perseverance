@@ -1789,13 +1789,182 @@ function compositeRender(acc: Acc, l: Layer, R: LayerRender) {
   markDrawn(acc, R.region);
 }
 
-/** Base layer + clipped layers: clipped content is limited to the base's alpha. */
+/**
+ * The stack canvas of a clipping group (base + clipped layers) while it is built: clipped layers
+ * are drawn onto it with drawAtop.
+ */
+interface ClipStack {
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  w: number;
+  h: number;
+  /**
+   * Coverage of the base's shape the stack does not have yet (alpha = shape − stack alpha), when
+   * the base's core covers less than its shape (fill below 100%). Null when there is none.
+   */
+  gap: HTMLCanvasElement | null;
+}
+
+/**
+ * How a clip base's core covers its shape (the coverage of the clipping group, which ignores fill
+ * opacity like Photoshop): 'shape' = the same coverage (full fill; above effects stay inside the
+ * content), 'fill' = the shape at fill opacity (no above effects), 'mixed' = anything else.
+ */
+function coreCoverage(base: Layer): 'shape' | 'fill' | 'mixed' {
+  const fill = Number.isFinite(base.fillOpacity) ? base.fillOpacity : 1;
+  const above = activeEffects(base)
+    .filter((e) => effectStage(e.def, e.params) === 'above')
+    .map((e) => effectClips(e.def, e.params));
+  if (fill >= 0.999) return above.every((clips) => clips) ? 'shape' : 'mixed';
+  return above.length ? 'mixed' : 'fill';
+}
+
+/**
+ * Split a clip stack whose core may cover more or less than the base's shape (`shape` drawn at
+ * sx, sy): the stack keeps at most the shape's alpha at every pixel (what clipped layers act on),
+ * the rest is returned as `ext` (above effects reaching beyond the content: centre strokes,
+ * emboss) to add back afterwards, and `gap` is the shape alpha the stack does not cover.
+ */
+function splitClipStack(st: ClipStack, shape: HTMLCanvasElement, sx: number, sy: number): HTMLCanvasElement | null {
+  const { w, h } = st;
+  const Rd = acquire(w, h, { read: true });
+  const r = ctx2d(Rd, { willReadFrequently: true });
+  let gi: ImageData;
+  let si: ImageData;
+  try {
+    r.drawImage(st.canvas, 0, 0);
+    gi = r.getImageData(0, 0, w, h);
+    r.clearRect(0, 0, w, h);
+    r.drawImage(shape, sx, sy);
+    si = r.getImageData(0, 0, w, h);
+  } catch (err) {
+    warnOnce('clip stack readback failed', err);
+    release(Rd);
+    return null;
+  }
+  release(Rd);
+  const gd = gi.data;
+  const sd = si.data;
+  let ei: ImageData | null = null;
+  let pi: ImageData | null = null;
+  for (let i = 3; i < gd.length; i += 4) {
+    const ag = gd[i];
+    const as = sd[i];
+    if (ag > as) {
+      // ImageData is unpremultiplied: both parts keep the stack's colour.
+      const ed = (ei ??= new ImageData(w, h)).data;
+      ed[i - 3] = gd[i - 3];
+      ed[i - 2] = gd[i - 2];
+      ed[i - 1] = gd[i - 1];
+      ed[i] = ag - as;
+      gd[i] = as;
+    } else if (ag < as) (pi ??= new ImageData(w, h)).data[i] = as - ag;
+  }
+  if (ei) st.ctx.putImageData(gi, 0, 0);
+  if (pi) {
+    st.gap = acquire(w, h);
+    ctx2d(st.gap).putImageData(pi, 0, 0);
+  }
+  if (!ei) return null;
+  const ext = acquire(w, h);
+  ctx2d(ext).putImageData(ei, 0, 0);
+  return ext;
+}
+
+/**
+ * The part w×h at x, y (canvas px) of `src` at full opacity: its unpremultiplied colours (black
+ * where it is transparent), as a scratch canvas of that size; null when it cannot be read.
+ * Unpremultiplied through a CPU readback: canvas-op divisions (a colour-dodge by 1 − alpha)
+ * round ties differently on GPU canvases of different sizes, and a partial composite works on
+ * smaller canvases than a full one, so it would not reproduce the full render.
+ */
+function opaqueCopy(src: HTMLCanvasElement, x: number, y: number, w: number, h: number): HTMLCanvasElement | null {
+  // Read through a CPU scratch copy (reading `src` itself could move it off the GPU).
+  const R = acquire(w, h, { read: true });
+  const r = ctx2d(R, { willReadFrequently: true });
+  let img: ImageData;
+  try {
+    r.drawImage(src, -x, -y);
+    img = r.getImageData(0, 0, w, h);
+  } catch (err) {
+    warnOnce('clip stack readback failed', err);
+    return null;
+  } finally {
+    release(R);
+  }
+  const d = img.data;
+  for (let i = 3; i < d.length; i += 4) d[i] = 255;
+  const O = acquire(w, h);
+  ctx2d(O).putImageData(img, 0, 0);
+  return O;
+}
+
+/**
+ * Draw `src` (at dx, dy, global alpha `alpha`, composite operation `op`) onto a clip stack the
+ * way Photoshop clips: the stack's coverage never grows beyond the base's shape. Inside what the
+ * stack covers, `src` only recolours it (canvas 'source-atop'; other operations blend with the
+ * stack's colours, then the stack's alpha is restored); the uncovered part of the shape (`gap`)
+ * gets `src` itself, limited to that part.
+ */
+function drawAtop(st: ClipStack, src: HTMLCanvasElement, dx: number, dy: number, alpha: number, op: GlobalCompositeOperation) {
+  const r = intersectRect({ x: dx, y: dy, w: src.width, h: src.height }, { x: 0, y: 0, w: st.w, h: st.h });
+  if (!r) return;
+  const g = st.ctx;
+  const X = op === 'source-over' ? null : opaqueCopy(st.canvas, r.x, r.y, r.w, r.h);
+  if (!X) {
+    g.globalAlpha = alpha;
+    g.globalCompositeOperation = op === 'source-over' ? 'source-atop' : op;
+    g.drawImage(src, dx, dy);
+  } else {
+    // Blend onto the stack's colours at full opacity (so `src` blends with the full colour, never
+    // partly with transparency), then take the stack's alpha back: blend + 'source-atop'.
+    const x = ctx2d(X);
+    x.globalAlpha = alpha;
+    x.globalCompositeOperation = op;
+    x.drawImage(src, dx - r.x, dy - r.y);
+    x.globalAlpha = 1;
+    x.globalCompositeOperation = 'destination-in';
+    x.drawImage(st.canvas, -r.x, -r.y);
+    g.clearRect(r.x, r.y, r.w, r.h);
+    g.drawImage(X, r.x, r.y);
+    release(X);
+  }
+  g.globalAlpha = 1;
+  g.globalCompositeOperation = 'source-over';
+  if (!st.gap) return;
+  // The uncovered part of the shape: + src × gap, and the gap shrinks by src's alpha.
+  const P = acquire(r.w, r.h);
+  const p = ctx2d(P);
+  p.drawImage(st.gap, -r.x, -r.y);
+  p.globalAlpha = alpha;
+  p.globalCompositeOperation = 'source-in';
+  p.drawImage(src, dx - r.x, dy - r.y);
+  g.globalCompositeOperation = 'lighter';
+  g.drawImage(P, r.x, r.y);
+  g.globalCompositeOperation = 'source-over';
+  release(P);
+  const q = ctx2d(st.gap);
+  q.globalAlpha = alpha;
+  q.globalCompositeOperation = 'destination-out';
+  q.drawImage(src, dx, dy);
+  q.globalAlpha = 1;
+  q.globalCompositeOperation = 'source-over';
+}
+
+/**
+ * Base layer + clipped layers (a clipping group, like Photoshop's): the group covers exactly what
+ * the base's shape covers (content + mask, whatever its fill opacity); clipped layers composite
+ * onto the stack with their opacity / blend mode (behind effects included) but never add
+ * coverage beyond the shape — at a 50%-alpha base pixel an opaque clipped layer shows its own
+ * colour at 50% alpha. The stack is then drawn with the base's opacity and blend mode.
+ */
 function compositeClipStack(rc: RC, acc: Acc, base: Layer, R: LayerRender, clipped: Layer[]) {
   const a = Math.max(0, Math.min(1, base.opacity));
   if (a <= 0 || !R.shape) return;
   const reg = R.region;
   // Incremental composite: rebuild only the part of the stack inside the accumulator's clip,
-  // starting on the region's pixel grid (adjustments in the stack see the same pixel phase).
+  // starting on the region's pixel grid (adjustments in the stack see the same pixel phase;
+  // everything else here is per pixel).
   let wr: PxRect | null = reg;
   if (acc.clip) {
     const c = intersectRect(reg, acc.clip);
@@ -1811,9 +1980,20 @@ function compositeClipStack(rc: RC, acc: Acc, base: Layer, R: LayerRender, clipp
   const gx = reg.x - wr.x;
   const gy = reg.y - wr.y;
   if (R.core) g.drawImage(R.core, gx, gy);
+  const st: ClipStack = { canvas: G, ctx: g, w: wr.w, h: wr.h, gap: null };
+  let ext: HTMLCanvasElement | null = null;
+  const cover = coreCoverage(base);
+  if (cover === 'fill') {
+    // The core is the shape at fill opacity: the gap is the shape at 1 − fill.
+    st.gap = acquire(wr.w, wr.h);
+    const k = ctx2d(st.gap);
+    k.globalAlpha = 1 - Math.max(0, base.fillOpacity);
+    k.drawImage(R.shape, gx, gy);
+  } else if (cover === 'mixed') ext = splitClipStack(st, R.shape, gx, gy);
   const gAcc: Acc = { canvas: G, ctx: g, x: wr.x, y: wr.y, w: wr.w, h: wr.h, bounds: wr, root: false, clip: null, cropOf: sameRect(wr, reg) ? undefined : reg };
   for (const c of clipped) {
     if (c.type === 'adjustment') {
+      // Premultiplied lerp: keeps the stack's alpha (nothing to add to the gap).
       applyAdjustment(rc, gAcc, c);
       continue;
     }
@@ -1821,25 +2001,18 @@ function compositeClipStack(rc: RC, acc: Acc, base: Layer, R: LayerRender, clipp
     if (!CR) continue;
     const ca = Math.max(0, Math.min(1, c.opacity));
     if (ca <= 0) continue;
-    const T = acquire(wr.w, wr.h);
-    const t = ctx2d(T);
     const dx = CR.region.x - wr.x;
     const dy = CR.region.y - wr.y;
-    for (const b of CR.behind) {
-      t.globalCompositeOperation = b.op;
-      t.drawImage(b.canvas, dx, dy);
-    }
-    t.globalCompositeOperation = 'source-over';
-    if (CR.core) t.drawImage(CR.core, dx, dy);
-    t.globalCompositeOperation = 'destination-in';
-    t.drawImage(R.shape, gx, gy);
-    g.globalAlpha = ca;
-    g.globalCompositeOperation = c.type === 'group' && c.blendMode === 'pass-through' ? 'source-over' : compositeOp(c.blendMode);
-    g.drawImage(T, 0, 0);
-    g.globalAlpha = 1;
-    g.globalCompositeOperation = 'source-over';
-    release(T);
+    // Like compositeRender: behind pieces with their own operation, then the core.
+    for (const b of CR.behind) drawAtop(st, b.canvas, dx, dy, ca, b.op);
+    if (CR.core) drawAtop(st, CR.core, dx, dy, ca, c.type === 'group' && c.blendMode === 'pass-through' ? 'source-over' : compositeOp(c.blendMode));
   }
+  if (ext) {
+    g.globalCompositeOperation = 'lighter';
+    g.drawImage(ext, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+  }
+  release(ext, st.gap);
   const ctx = acc.ctx;
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
