@@ -40,7 +40,8 @@ const removedStrokes = new Map<string, StrokeStyle>();
 function rememberStroke(layerId: string, stroke: StrokeStyle | null) {
   if (!stroke) return;
   removedStrokes.delete(layerId);
-  removedStrokes.set(layerId, structuredClone(stroke));
+  // JSON clone: `stroke` is usually an immer draft (structuredClone cannot clone proxies).
+  removedStrokes.set(layerId, JSON.parse(JSON.stringify(stroke)) as StrokeStyle);
   if (removedStrokes.size > 64) removedStrokes.delete(removedStrokes.keys().next().value as string);
 }
 

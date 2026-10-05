@@ -18,7 +18,7 @@ ARCHITECTURE.md §3 for each module's full feature list).
 |---|---|---|
 | foundation (core, store, registries, controls, electron) | `src/core`, `src/state`, `src/registry`, `src/editor`, `src/ui/controls`, `electron/` | done |
 | shell (chrome, menus, dock, palette, start screen) | `src/ui/shell`, `src/App.tsx` | **done** (implement + review + fix) |
-| layers-panels (Layers/Properties/Effects/History/Navigator, Layer menu) | `src/panels` | fixing review findings |
+| layers-panels (Layers/Properties/Effects/History/Navigator, Layer menu) | `src/panels` | **done** |
 | paint (brush engine, paint tools, brushes panel) | `src/tools/paint` | fixing review findings |
 | adjustments | `src/filters/adjustments` | **done** |
 | fonts-color (86 bundled fonts, swatches/color/fonts panels) | `src/fonts`, `src/presets` | **done** |
@@ -49,6 +49,9 @@ starting point; don't rewrite modules from scratch.
    - fx-filters `src/filters/ui/apply.ts resolveTarget`: allow editTarget==='mask' on adjustment/fill layers.
    - Optional: FilterDef custom params editor so Levels/Curves/Color Balance/Selective Color/Exposure can use
      openFilterDialog (adjustments currently uses its own AdjustmentDialog for those 5).
+   - renderer: export `renderLayerParts(doc, layer)` (behind-effects + core separately; engine.ts has an internal
+     `renderLayer`) so layers-panels' Rasterize Layer Style is exact for non-Normal blend layers.
+   - (done) NumberField `disabled` prop.
    - macOS: Edit-menu roles intercept Cmd+C/V — canvas copy/paste on mac should also listen to DOM copy/paste events.
 3. **End-to-end smoke test**: `npx vite --port 5300 &` then `node scripts/smoke.mjs --url http://localhost:5300`
    (exercises templates, every command, tool and panel; screenshots in `screenshots-tmp/`).
