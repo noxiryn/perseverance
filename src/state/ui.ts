@@ -31,10 +31,16 @@ export interface Toast {
   timeout: number;
 }
 
+export interface DialogOptions {
+  /** Close when the backdrop is clicked (default true). Heavy editors may opt out. */
+  closeOnBackdrop?: boolean;
+}
+
 export interface DialogEntry {
   id: string;
   component: ComponentType<{ close: (result?: unknown) => void } & Record<string, unknown>>;
   props: Record<string, unknown>;
+  options?: DialogOptions;
   resolve: (v: unknown) => void;
 }
 
@@ -220,12 +226,14 @@ export function dismissToast(id: string) {
 export function openDialog<R = unknown, P extends Record<string, unknown> = Record<string, unknown>>(
   component: ComponentType<{ close: (result?: R) => void } & P>,
   props?: P,
+  options?: DialogOptions,
 ): Promise<R | undefined> {
   return new Promise((resolve) => {
     const entry: DialogEntry = {
       id: uid('dlg_'),
       component: component as unknown as DialogEntry['component'],
       props: (props ?? {}) as Record<string, unknown>,
+      options,
       resolve: resolve as (v: unknown) => void,
     };
     useUI.setState((st) => ({ dialogs: [...st.dialogs, entry] }));

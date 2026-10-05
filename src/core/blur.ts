@@ -23,7 +23,7 @@ function boxBlurH(src: Uint8ClampedArray, dst: Uint8ClampedArray, w: number, h: 
       let ti = row + c;
       const fv = src[ti],
         lv = src[row + (w - 1) * 4 + c];
-      let val = (r + 1) * fv;
+      let val = r * fv;
       for (let j = 0; j < r; j++) val += src[row + Math.min(j, w - 1) * 4 + c];
       for (let x = 0; x < w; x++) {
         const addIdx = x + r < w ? row + (x + r) * 4 + c : -1;
@@ -45,7 +45,7 @@ function boxBlurV(src: Uint8ClampedArray, dst: Uint8ClampedArray, w: number, h: 
       const col = x * 4 + c;
       const fv = src[col],
         lv = src[col + (h - 1) * stride];
-      let val = (r + 1) * fv;
+      let val = r * fv;
       for (let j = 0; j < r; j++) val += src[col + Math.min(j, h - 1) * stride];
       let ti = col;
       for (let y = 0; y < h; y++) {
@@ -81,7 +81,7 @@ export function blurChannel(buf: Float32Array, w: number, h: number, radius: num
   for (let pass = 0; pass < 3; pass++) {
     for (let y = 0; y < h; y++) {
       const row = y * w;
-      let val = (r + 1) * buf[row];
+      let val = r * buf[row];
       for (let j = 0; j < r; j++) val += buf[row + Math.min(j, w - 1)];
       for (let x = 0; x < w; x++) {
         val += buf[row + Math.min(x + r, w - 1)];
@@ -90,7 +90,7 @@ export function blurChannel(buf: Float32Array, w: number, h: number, radius: num
       }
     }
     for (let x = 0; x < w; x++) {
-      let val = (r + 1) * tmp[x];
+      let val = r * tmp[x];
       for (let j = 0; j < r; j++) val += tmp[Math.min(j, h - 1) * w + x];
       for (let y = 0; y < h; y++) {
         val += tmp[Math.min(y + r, h - 1) * w + x];

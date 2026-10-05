@@ -227,20 +227,46 @@ export function colorSelectMask(
   const match = (i: number) =>
     Math.abs(src[i] - r0) + Math.abs(src[i + 1] - g0) + Math.abs(src[i + 2] - b0) + Math.abs(src[i + 3] - a0) <= tol;
   if (contiguous) {
-    const visited = new Uint8Array(w * h);
-    const stack = [sy * w + sx];
-    while (stack.length) {
-      const p = stack.pop()!;
-      if (visited[p]) continue;
-      visited[p] = 1;
-      if (!match(p * 4)) continue;
-      o[p * 4 + 3] = 255;
-      const px = p % w,
-        py = (p / w) | 0;
-      if (px > 0) stack.push(p - 1);
-      if (px < w - 1) stack.push(p + 1);
-      if (py > 0) stack.push(p - w);
-      if (py < h - 1) stack.push(p + w);
+    // Scanline flood fill on typed arrays: each span is filled once and only span seeds are pushed.
+    const filled = new Uint8Array(w * h);
+    let stack = new Int32Array(1024);
+    let sp = 0;
+    const push = (x: number, y: number) => {
+      if (sp + 2 > stack.length) {
+        const n = new Int32Array(stack.length * 2);
+        n.set(stack);
+        stack = n;
+      }
+      stack[sp++] = x;
+      stack[sp++] = y;
+    };
+    const ok = (x: number, y: number) => {
+      const p = y * w + x;
+      return !filled[p] && match(p * 4);
+    };
+    push(sx, sy);
+    while (sp > 0) {
+      const y = stack[--sp];
+      let x = stack[--sp];
+      if (!ok(x, y)) continue;
+      while (x > 0 && ok(x - 1, y)) x--;
+      let upOpen = false;
+      let downOpen = false;
+      for (; x < w && ok(x, y); x++) {
+        const p = y * w + x;
+        filled[p] = 1;
+        o[p * 4 + 3] = 255;
+        if (y > 0) {
+          const u = ok(x, y - 1);
+          if (u && !upOpen) push(x, y - 1);
+          upOpen = u;
+        }
+        if (y < h - 1) {
+          const d = ok(x, y + 1);
+          if (d && !downOpen) push(x, y + 1);
+          downOpen = d;
+        }
+      }
     }
   } else {
     for (let p = 0; p < w * h; p++) if (match(p * 4)) o[p * 4 + 3] = 255;
