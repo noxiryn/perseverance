@@ -5,17 +5,40 @@ import type { LayerKind } from './treeOps';
 
 export type ThumbSize = 'none' | 'small' | 'medium' | 'large';
 
+/**
+ * What a pixel / shape layer thumbnail shows: the entire document, the layer's own bounds
+ * (cropped, like Photoshop's "Layer Bounds"), or 'auto' — bounds for layers that cover less than
+ * about a quarter of the canvas (stickers, small shapes), the entire document otherwise.
+ */
+export type ThumbContent = 'auto' | 'document' | 'bounds';
+
 /** Thumbnail edge per size (rows are thumb + 8 px tall: medium → the reference's ~32px rows). */
 export const THUMB_PX: Record<ThumbSize, number> = { none: 0, small: 18, medium: 24, large: 40 };
 
 const STORAGE_KEY = 'perseverance.layersPanel';
 
-function loadThumbSize(): ThumbSize {
+interface Stored {
+  thumbSize: ThumbSize;
+  thumbContent: ThumbContent;
+}
+
+function loadStored(): Stored {
+  const out: Stored = { thumbSize: 'medium', thumbContent: 'auto' };
   try {
-    const v = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}').thumbSize;
-    return v === 'none' || v === 'small' || v === 'medium' || v === 'large' ? v : 'medium';
+    const v = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as Partial<Record<keyof Stored, unknown>>;
+    if (v.thumbSize === 'none' || v.thumbSize === 'small' || v.thumbSize === 'medium' || v.thumbSize === 'large') out.thumbSize = v.thumbSize;
+    if (v.thumbContent === 'auto' || v.thumbContent === 'document' || v.thumbContent === 'bounds') out.thumbContent = v.thumbContent;
   } catch {
-    return 'medium';
+    /* storage unavailable */
+  }
+  return out;
+}
+
+function save(s: Stored) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+  } catch {
+    /* storage unavailable */
   }
 }
 
@@ -24,6 +47,7 @@ interface LayersPanelState {
   query: string;
   searchOpen: boolean;
   thumbSize: ThumbSize;
+  thumbContent: ThumbContent;
   /** Layers whose effect / smart filter rows are expanded. */
   expanded: Record<ID, boolean>;
   setKinds(k: LayerKind[]): void;
@@ -32,14 +56,18 @@ interface LayersPanelState {
   setSearchOpen(v: boolean): void;
   clearFilter(): void;
   setThumbSize(s: ThumbSize): void;
+  setThumbContent(c: ThumbContent): void;
   toggleExpanded(id: ID, value?: boolean): void;
 }
+
+const initial = loadStored();
 
 export const useLayersPanel = create<LayersPanelState>()((set, get) => ({
   kinds: [],
   query: '',
   searchOpen: false,
-  thumbSize: loadThumbSize(),
+  thumbSize: initial.thumbSize,
+  thumbContent: initial.thumbContent,
   expanded: {},
   setKinds: (kinds) => set({ kinds }),
   toggleKind: (k) => {
@@ -51,11 +79,11 @@ export const useLayersPanel = create<LayersPanelState>()((set, get) => ({
   clearFilter: () => set({ kinds: [], query: '', searchOpen: false }),
   setThumbSize: (thumbSize) => {
     set({ thumbSize });
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ thumbSize }));
-    } catch {
-      /* storage unavailable */
-    }
+    save({ thumbSize, thumbContent: get().thumbContent });
+  },
+  setThumbContent: (thumbContent) => {
+    set({ thumbContent });
+    save({ thumbSize: get().thumbSize, thumbContent });
   },
   toggleExpanded: (id, value) => set((st) => ({ expanded: { ...st.expanded, [id]: value ?? !st.expanded[id] } })),
 }));

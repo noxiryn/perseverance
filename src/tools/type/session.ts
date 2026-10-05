@@ -271,6 +271,22 @@ function startSession(layerId: string, isNew: boolean, prevActiveId: string | nu
   };
   document.addEventListener('selectionchange', onSel);
   s.disposers.push(() => document.removeEventListener('selectionchange', onSel));
+  // The viewport is overflow:hidden but still scrollable from script: focusing/typing in the
+  // textarea must never scroll it (pointer mapping assumes it is unscrolled).
+  const vp = viewport.element();
+  if (vp && host === vp) {
+    const unscroll = () => {
+      if (vp.scrollTop || vp.scrollLeft) {
+        vp.scrollTop = 0;
+        vp.scrollLeft = 0;
+      }
+    };
+    vp.addEventListener('scroll', unscroll);
+    s.disposers.push(() => {
+      vp.removeEventListener('scroll', unscroll);
+      unscroll();
+    });
+  }
   s.disposers.push(useEditor.subscribe(watchStore));
 
   publish();
@@ -699,6 +715,30 @@ function indexAtDoc(l: TextLayer, p: Point): number {
 
 const HANDLE_PX = 9;
 
+/* ---------------- multi-click counting ---------------- */
+
+/**
+ * Chromium reports `detail = 0` on pointerdown, so clicks are counted here: a press within
+ * MULTI_CLICK_MS and MULTI_CLICK_PX (screen) of the previous one increments the count
+ * (1 = caret, 2 = word, 3 = line/paragraph, 4 = all), anything else restarts at 1.
+ */
+const MULTI_CLICK_MS = 500;
+const MULTI_CLICK_PX = 4;
+let lastPress: { t: number; x: number; y: number; count: number } | null = null;
+
+/** Register a press at a viewport (screen) point and return its click count. Exported for tests. */
+export function countPress(x: number, y: number, now = performance.now()): number {
+  const p = lastPress;
+  const count = p && now - p.t <= MULTI_CLICK_MS && Math.abs(x - p.x) <= MULTI_CLICK_PX && Math.abs(y - p.y) <= MULTI_CLICK_PX ? (p.count >= 4 ? 1 : p.count + 1) : 1;
+  lastPress = { t: now, x, y, count };
+  return count;
+}
+
+/** Forget the click sequence (next press counts as a single click). */
+export function resetPressCount() {
+  lastPress = null;
+}
+
 type SessionHit = 'inside' | 'left' | 'right' | 'outside';
 
 /** What a document/screen point hits in the edited text (handles in screen px). */
@@ -740,8 +780,12 @@ export function sessionPointerDown(e: ToolPointerEvent): boolean {
   const l = sessionLayer();
   if (!s || !l) return false;
   const hit = sessionHit(e);
-  if (hit === 'outside') return false;
+  if (hit === 'outside') {
+    resetPressCount();
+    return false;
+  }
   if (hit === 'left' || hit === 'right') {
+    resetPressCount();
     const frame = frameOf(l);
     const loc = frame.inv ? apply(frame.inv, { x: e.docX, y: e.docY }) : { x: 0, y: 0 };
     s.drag = { kind: 'box', edge: hit, startLocalX: loc.x, width0: l.text.boxWidth ?? frame.w, transform0: { ...l.transform }, text0: { ...l.text } };
@@ -749,7 +793,7 @@ export function sessionPointerDown(e: ToolPointerEvent): boolean {
     return true;
   }
   const idx = indexAtDoc(l, { x: e.docX, y: e.docY });
-  const clicks = e.native?.detail ?? 1;
+  const clicks = e.shiftKey ? (resetPressCount(), 1) : countPress(e.screenX, e.screenY);
   if (clicks >= 3) {
     const [a, b] = clicks >= 4 ? [0, s.ta.value.length] : paragraphRangeAt(s.ta.value, idx);
     setSelection(a, b);
@@ -835,6 +879,24 @@ function boxPath(ctx: CanvasRenderingContext2D, frame: TextFrame, w: number, h: 
   ctx.beginPath();
   pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
   ctx.closePath();
+}
+
+/**
+ * Keep the hidden textarea at the caret (viewport-local px; the viewport element is its containing
+ * block) so IME candidate windows open next to it. Clamped inside the viewport so the browser never
+ * scrolls the viewport to reveal it.
+ */
+function placeTextarea(s: Session, caret: Point) {
+  const host = viewport.element();
+  if (!host || s.ta.parentElement !== host) return;
+  const maxX = Math.max(0, host.clientWidth - 4);
+  const maxY = Math.max(0, host.clientHeight - 20);
+  const x = Math.round(Math.min(maxX, Math.max(0, Number.isFinite(caret.x) ? caret.x : 0)));
+  const y = Math.round(Math.min(maxY, Math.max(0, Number.isFinite(caret.y) ? caret.y : 0)));
+  const left = `${x}px`;
+  const top = `${y}px`;
+  if (s.ta.style.left !== left) s.ta.style.left = left;
+  if (s.ta.style.top !== top) s.ta.style.top = top;
 }
 
 /** Draw the edit UI (box, selection, caret). Context is in screen space. */
