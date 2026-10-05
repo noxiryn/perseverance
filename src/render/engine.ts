@@ -651,6 +651,9 @@ function tightFromRead(region: PxRect, extent: PxRect, r: LocalRect, data: Uint8
   return bb ? { x: bb.x + r.x + region.x, y: bb.y + r.y + region.y, w: bb.w, h: bb.h } : null;
 }
 
+/** Margin (output px) read around an alpha request (covers the usual distance-field headroom). */
+const ALPHA_READ_PAD = 24;
+
 /** EffectFields of one layer render: alpha reads and distance fields, cached and shared. */
 class LayerFields implements EffectFields {
   /** Fields used or computed by this render (carried by the LayerRender for later reuse). */
@@ -667,15 +670,30 @@ class LayerFields implements EffectFields {
   ) {}
 
   alpha(r: LocalRect): Uint8Array {
+    // Alpha outside the canvas is 0: a read covering the part of `r` inside the canvas is enough
+    // (a distance field asks for a rect a few px larger than the effect's work rect, which is
+    // clipped to the canvas — no second readback, i.e. no second GPU sync on GPU canvases).
+    const inside = intersectRect(r, { x: 0, y: 0, w: this.C.width, h: this.C.height });
     for (const rd of this.reads) {
       if (sameRect(rd.rect, r)) return rd.data;
       if (containsRect(rd.rect, r)) return subArray(rd.data, rd.rect, r, (n) => new Uint8Array(n));
+      if (inside && containsRect(rd.rect, inside)) {
+        const out = new Uint8Array(r.w * r.h);
+        for (let y = 0; y < inside.h; y++) {
+          const so = (inside.y - rd.rect.y + y) * rd.rect.w + (inside.x - rd.rect.x);
+          out.set(rd.data.subarray(so, so + inside.w), (inside.y - r.y + y) * r.w + (inside.x - r.x));
+        }
+        return out;
+      }
     }
-    const data = readAlphaPadded(this.C, r);
-    this.reads.push({ rect: { ...r }, data });
+    // Read a margin around the request too: the distance fields effects ask for next are a few
+    // px larger (see fieldBucket), and every readback is a full GPU sync on GPU canvases.
+    const rr = expandRect(r, ALPHA_READ_PAD);
+    const data = readAlphaPadded(this.C, rr);
+    this.reads.push({ rect: rr, data });
     if (this.reads.length > 4) this.reads.shift();
-    if (this.tight === undefined) this.tight = tightFromRead(this.region, this.extent, r, data);
-    return data;
+    if (this.tight === undefined) this.tight = tightFromRead(this.region, this.extent, rr, data);
+    return subArray(data, rr, r, (n) => new Uint8Array(n));
   }
 
   distance(mode: DistanceMode, maxDist: number, r: LocalRect): Float32Array {

@@ -37,6 +37,52 @@ const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const px = (value: number) => ({ units: 'Pixels' as const, value: Math.max(0, Math.round(value * 100) / 100) });
 const unitsOf = (u: { value: number } | undefined, d: number) => (u && Number.isFinite(u.value) ? u.value : d);
 
+/** `v` as a whole percent (ag-psd writes percents rounded to integers), or null when it isn't one. */
+function wholePercent(v: number): number | null {
+  const p = v * 100;
+  const r = Math.round(p);
+  return Math.abs(p - r) < 1e-6 ? r / 100 : null;
+}
+
+/**
+ * Gradient center offset → Photoshop. Photoshop stores it in percent of the box (±50 % puts the center
+ * on the box edge); ours is a fraction of the half box (±1 = the edge), so PSD = ours / 2. Null when
+ * it isn't a whole percent (ag-psd would round it and move the gradient); undefined for no offset.
+ */
+export function gradientOffsetToPsd(g: Pick<Gradient, 'offsetX' | 'offsetY'>): { x: number; y: number } | null | undefined {
+  const ox = num(g.offsetX, 0);
+  const oy = num(g.offsetY, 0);
+  if (!ox && !oy) return undefined;
+  const x = wholePercent(ox / 2);
+  const y = wholePercent(oy / 2);
+  return x === null || y === null ? null : { x, y };
+}
+
+/**
+ * The nearest gradient Photoshop's fill data can store: scale and offset rounded the way ag-psd
+ * writes them (whole percents), so fillToPsd accepts it and a re-import gives exactly this gradient.
+ */
+export function representableGradient(g: Gradient): Gradient {
+  const out: Gradient = { ...g, scale: Math.round(Math.max(0.1, num(g.scale, 1)) * 100) / 100 };
+  const ox = num(g.offsetX, 0);
+  const oy = num(g.offsetY, 0);
+  if (ox || oy) {
+    out.offsetX = (Math.round((ox / 2) * 100) / 100) * 2;
+    out.offsetY = (Math.round((oy / 2) * 100) / 100) * 2;
+  }
+  return out;
+}
+
+/** Photoshop gradient offset (fraction of the box) → our offsetX/offsetY (only set when non-zero). */
+function applyPsdOffset(grad: Gradient, o: { x?: number; y?: number } | undefined) {
+  const x = num(o?.x, 0) * 2;
+  const y = num(o?.y, 0) * 2;
+  if (x || y) {
+    grad.offsetX = x;
+    grad.offsetY = y;
+  }
+}
+
 function psdBlend(v: unknown, d: BlendMode): PsdBlendMode {
   return toPsdBlend(typeof v === 'string' ? (v as BlendMode) : d) as PsdBlendMode;
 }
@@ -348,6 +394,12 @@ export function effectsToPsd(effects: LayerEffect[] | undefined): PsdEffectsResu
         break;
       case 'gradient-overlay': {
         const g = isGradient(p.gradient) ? p.gradient : DEFAULT_GRADIENT;
+        // An offset Photoshop can't store exactly would move the overlay: bake it instead.
+        const offset = gradientOffsetToPsd(g);
+        if (offset === null) {
+          reject(e);
+          continue;
+        }
         (info.gradientOverlay ??= []).push({
           present: true,
           showInDialog: true,
@@ -360,7 +412,7 @@ export function effectsToPsd(effects: LayerEffect[] | undefined): PsdEffectsResu
           type: asStyle(g.kind),
           angle: Math.round(normAngle(-num(p.angle, num(g.angle, 90)))),
           scale: Math.max(0.1, num(p.scale, num(g.scale, 1))),
-          offset: { x: num(g.offsetX, 0), y: num(g.offsetY, 0) },
+          offset: offset ?? { x: 0, y: 0 },
           gradient: toPsdGradient(g),
         });
         break;
@@ -503,10 +555,7 @@ export function effectsFromPsd(info: LayerEffectsInfo | undefined, known: (effec
     const angle = normAngle(-num(g.angle, 90));
     const scale = num(g.scale, 1);
     const grad = fromPsdGradient(g.gradient, asStyle(g.type), angle, scale, !!g.reverse);
-    if (g.offset) {
-      grad.offsetX = num(g.offset.x, 0);
-      grad.offsetY = num(g.offset.y, 0);
-    }
+    applyPsdOffset(grad, g.offset);
     push({
       id: uid('ef_'),
       effectId: 'gradient-overlay',
@@ -527,17 +576,26 @@ export function effectsFromPsd(info: LayerEffectsInfo | undefined, known: (effec
 /* fill layers (Photoshop "Solid Color" / "Gradient" fill layers)       */
 /* ------------------------------------------------------------------ */
 
-/** Our fill layer content → PSD vector fill (null for patterns, which stay pixels). */
+/**
+ * Our fill layer content → PSD vector fill. Null when Photoshop's fill data can't reproduce it — a
+ * pattern, or a gradient whose scale/offset isn't a whole percent (ag-psd rounds those) — so the
+ * layer stays plain pixels (which are always written) instead of a fill Photoshop would re-render
+ * differently.
+ */
 export function fillToPsd(fill: FillContent): VectorContent | null {
   if (fill.type === 'solid') return { type: 'color', color: toPsdColor(fill.color) };
   if (fill.type === 'gradient') {
     const g = fill.gradient;
+    const scale = wholePercent(Math.max(0.1, num(g.scale, 1)));
+    const offset = gradientOffsetToPsd(g);
+    if (scale === null || offset === null) return null;
     return {
       ...toPsdGradient(g),
       style: asStyle(g.kind),
-      angle: Math.round(normAngle(-num(g.angle, 90))),
-      scale: Math.max(0.1, num(g.scale, 1)),
+      angle: normAngle(-num(g.angle, 90)),
+      scale,
       reverse: !!g.reverse,
+      ...(offset ? { offset } : {}),
     };
   }
   return null;
@@ -549,6 +607,7 @@ export function fillFromPsd(v: VectorContent | undefined): FillContent | null {
   if (v.type === 'color') return { type: 'solid', color: fromPsdColor(v.color) };
   if (v.type === 'solid') {
     const g = fromPsdGradient(v, asStyle(v.style), normAngle(-num(v.angle, 90)), num(v.scale, 1), !!v.reverse);
+    applyPsdOffset(g, v.offset);
     return { type: 'gradient', gradient: g };
   }
   return null;

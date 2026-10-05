@@ -11,6 +11,7 @@ import { alignedOrigin } from './text';
 import { coverRect, expandRect, intersectRect, unionRect } from './surface';
 import { buildGrid, warpImage } from './meshWarp';
 import { geometrySig, makeRC, structSig } from './engine';
+import { cropExactBackend, probeBackendNow, setCropExactBackend } from './backendProbe';
 import { createDocument, insertLayerDraft, makeFillLayer, makeGroupLayer } from '../core/document';
 
 describe('mesh warp', () => {
@@ -440,5 +441,21 @@ describe('render structure signatures (live-painting region reuse)', () => {
     expect(structSig(makeRC(doc, 1), grad)).toBe(structSig(makeRC(doc, 1), grad));
     expect(structSig(makeRC(doc, 1), g)).toBe(structSig(makeRC(doc, 1), g));
     expect(structSig(makeRC(doc, 0.5), grad)).not.toBe(structSig(makeRC(doc, 1), grad));
+  });
+});
+
+describe('canvas backend probe', () => {
+  it('never throws and is conservative (inexact) where it cannot probe', () => {
+    setCropExactBackend(null);
+    // Not probed yet: answered conservatively without blocking.
+    expect(cropExactBackend()).toBe(false);
+    // jsdom has no canvas backend: the probe reports inexact.
+    expect(probeBackendNow()).toBe(false);
+    expect(cropExactBackend()).toBe(false);
+  });
+  it('keeps a forced result', () => {
+    setCropExactBackend(true);
+    expect(cropExactBackend()).toBe(true);
+    setCropExactBackend(null);
   });
 });

@@ -36,10 +36,14 @@ export function PsdExportDialog({ close }: { close: (r?: PsdExportOptions) => vo
       <div className="io-sep" />
       <div className="io-note">
         Layers, groups, names, opacity, fill, blend modes, visibility, clipping masks and layer masks are preserved. Solid and gradient fill
-        layers stay editable fill layers; text and shape layers are exported as pixel layers (smart filters applied). Brightness/Contrast,
+        layers stay editable fill layers (a gradient offset Photoshop can't store exactly is written as pixels); text and shape layers are exported as pixel layers (smart filters applied). Brightness/Contrast,
         Levels, Curves, Exposure, Vibrance, Hue/Saturation, Color Balance, Black &amp; White, Photo Filter, Channel Mixer, Gradient Map,
         Selective Color, Invert, Posterize and Threshold stay editable adjustment layers; other adjustments (Duotone, Split Toning, Color
         Lookup, Vignette…) are baked into pixel layers. The background colour becomes a bottom “Background Color” layer.
+      </div>
+      <div className="io-note" style={{ marginTop: 6 }}>
+        Baked adjustments match exactly over opaque pixels and inside clipping masks. Over semi-transparent pixels — soft edges in a group
+        or a transparent document — they look slightly denser in Photoshop; the export lists those layers.
       </div>
     </Dialog>
   );

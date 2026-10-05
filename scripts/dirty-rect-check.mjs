@@ -579,9 +579,48 @@ async function e2ePart(opts) {
       return [x0 + (x1 - x0) * t, y0 + (y1 - y0) * t + Math.sin(t * 9) * wobble];
     });
   /** Screen right after the stroke and after the settle delay vs a forced full re-render. */
+  let cloneN = 0;
+  const cloneDoc = (d) => {
+    const suf = `~e2e${++cloneN}`;
+    const map = (id) => id + suf;
+    const layers = {};
+    for (const [id, l] of Object.entries(d.layers)) {
+      const c = structuredClone(l);
+      c.id = map(id);
+      if (Array.isArray(c.childIds)) c.childIds = c.childIds.map(map);
+      layers[map(id)] = c;
+    }
+    return { ...d, id: d.id + suf, layers, rootIds: d.rootIds.map(map) };
+  };
+  const pixels = (c) => {
+    grab.width = c.width;
+    grab.height = c.height;
+    const g2 = grab.getContext('2d', { willReadFrequently: true });
+    g2.clearRect(0, 0, c.width, c.height);
+    g2.drawImage(c, 0, 0);
+    return g2.getImageData(0, 0, c.width, c.height).data;
+  };
+  /**
+   * Durable outputs right after a stroke (no settle yet): renderDocument (exports, merges…) and
+   * the active layer's / document thumbnails must equal from-scratch renders on every backend.
+   */
+  function durable() {
+    const d = doc();
+    const id = st().sessions[docId].activeLayerId;
+    const out = [cmp(pixels(C.renderDocument(d)), pixels(C.renderDocument(cloneDoc(d))))];
+    if (C.renderThumbnail) {
+      out.push(cmp(pixels(C.renderThumbnail(d, null, 160)), pixels(C.renderThumbnail(cloneDoc(d), null, 160))));
+      if (id && d.layers[id]) {
+        const cd = cloneDoc(d);
+        out.push(cmp(pixels(C.renderThumbnail(d, id, 96)), pixels(C.renderThumbnail(cd, `${id}~e2e${cloneN}`, 96))));
+      }
+    }
+    return out.reduce((a, b) => (b.max > a.max ? b : a));
+  }
   async function check(label, afterSettle) {
     await frames(3);
     const now = screen();
+    const dur = durable();
     await sleep(900); // settle delay (approximate GPU work is re-rendered exactly)
     await frames(3);
     const settled = screen();
@@ -591,7 +630,7 @@ async function e2ePart(opts) {
     VP.requestRender();
     await frames(4);
     const full = screen();
-    return { label, now: cmp(now, full), settled: [cmp(settled, full), ...extra].reduce((a, b) => (b.max > a.max ? b : a)) };
+    return { label, now: cmp(now, full), durable: dur, settled: [cmp(settled, full), ...extra].reduce((a, b) => (b.max > a.max ? b : a)) };
   }
   const results = [];
   const views = [
@@ -645,27 +684,6 @@ async function e2ePart(opts) {
   // Canvas Size keeps fill layers and groups as they are (only the document size changes): their
   // renders for the old size must not be reused — by the viewport nor by renderDocument (export).
   const IO = await import('/src/io/imageOps.ts');
-  let cloneN = 0;
-  const cloneDoc = (d) => {
-    const suf = `~e2e${++cloneN}`;
-    const map = (id) => id + suf;
-    const layers = {};
-    for (const [id, l] of Object.entries(d.layers)) {
-      const c = structuredClone(l);
-      c.id = map(id);
-      if (Array.isArray(c.childIds)) c.childIds = c.childIds.map(map);
-      layers[map(id)] = c;
-    }
-    return { ...d, id: d.id + suf, layers, rootIds: d.rootIds.map(map) };
-  };
-  const pixels = (c) => {
-    grab.width = c.width;
-    grab.height = c.height;
-    const g2 = grab.getContext('2d', { willReadFrequently: true });
-    g2.clearRect(0, 0, c.width, c.height);
-    g2.drawImage(c, 0, 0);
-    return g2.getImageData(0, 0, c.width, c.height).data;
-  };
   /** Viewport check plus renderDocument (full and 1/4 scale) vs a from-scratch render of a clone. */
   const checkDoc = (label) =>
     check(label, () => {
@@ -900,12 +918,14 @@ try {
     await page.goto(url.includes('?') ? `${url}&demo=1` : `${url}?demo=1`, { waitUntil: 'networkidle' });
     await page.waitForTimeout(1200);
     const e2e = await page.evaluate(e2ePart, opts);
-    console.log('\nend-to-end (paint tools + viewport, demo document)    after stroke   after settle');
+    console.log('\nend-to-end (paint tools + viewport, demo document)    after stroke   durable**      after settle');
     for (const r of e2e) {
-      const pass = ok(r.settled) && (gpu || ok(r.now));
+      const pass = ok(r.settled) && ok(r.durable) && (gpu || ok(r.now));
       if (!pass) failed = true;
-      console.log(`${(pass ? '  ' : '✗ ') + r.label.padEnd(52)}${(r.now.max <= 1 ? `ok(${r.now.max})` : `max ${r.now.max} ×${r.now.n}`).padEnd(15)}${r.settled.max <= 1 ? `ok(${r.settled.max})` : `FAIL max ${r.settled.max} ×${r.settled.n}`}`);
+      const f = (d, fail = 'FAIL ') => (d.max <= 1 ? `ok(${d.max})` : `${fail}max ${d.max} ×${d.n}`);
+      console.log(`${(pass ? '  ' : '✗ ') + r.label.padEnd(52)}${f(r.now, '').padEnd(15)}${f(r.durable).padEnd(15)}${f(r.settled)}`);
     }
+    console.log('** renderDocument + document / layer thumbnails right after the stroke (before any settle) vs from-scratch renders');
   }
 } finally {
   await browser.close();

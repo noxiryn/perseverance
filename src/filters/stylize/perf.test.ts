@@ -2,7 +2,7 @@
  * The performance rewrites of the creative filters must not change their output: each optimized
  * filter / primitive is compared against its previous implementation (perf.reference.ts, copied
  * from before the rewrite) on random synthetic images with transparency. Everything is
- * bit-identical except the vignette blend (fixed point: within ±1 per channel).
+ * bit-identical.
  */
 import { describe, expect, it } from 'vitest';
 import type { FilterContext, FilterDef } from '../../registry';
@@ -147,18 +147,54 @@ describe('fx filters stay identical after the performance rewrite', () => {
     });
   }
 
-  it('vignette stays within ±1 per channel (fixed-point blend)', () => {
+  it('vignette is bit-identical (shapes, offsets, preview scales)', () => {
     let seed = 100;
-    const params: ParamValues[] = [{}, { roundness: -0.5, feather: 0.8, color: '#ff8020', amount: 0.9 }, { roundness: 1, size: 0.2, feather: 0 }, { center: { x: 0.3, y: 0.8 }, amount: 0.25 }, { size: 1, feather: 1 }];
+    const params: ParamValues[] = [
+      {},
+      { roundness: -0.5, feather: 0.8, color: '#ff8020', amount: 0.9 },
+      { roundness: 1, size: 0.2, feather: 0 },
+      { center: { x: 0.3, y: 0.8 }, amount: 0.25 },
+      { size: 1, feather: 1 },
+      { roundness: -1, amount: 1, color: '#ffffff' },
+      { roundness: 0.35, size: 0, feather: 0.1, amount: 0.37 },
+    ];
     for (const [w, h] of SIZES)
       for (const p of params) {
         const img = makeImage(w, h, seed++);
-        for (const ctx of [ctxOf(w, h), ctxOf(w * 3, h * 2, { offsetX: w * 0.7, offsetY: 5, scale: 0.75 })]) {
+        for (const ctx of [
+          ctxOf(w, h),
+          ctxOf(w * 3, h * 2, { offsetX: w * 0.7, offsetY: 5, scale: 0.75 }),
+          ctxOf(w * 2, h * 2, { offsetX: 3, offsetY: 9, scale: 0.5 }),
+          ctxOf(w, h + 1),
+        ]) {
           const r = compare('vignette', REF.vignette.apply, p, img, ctx);
-          expect(r.max, `${w}x${h} ${JSON.stringify(p)}`).toBeLessThanOrEqual(1);
-          expect(r.count).toBeLessThan(img.data.length * 0.005 + 2);
+          if (r.max !== 0) throw new Error(`vignette ${w}x${h} ${JSON.stringify(p)} ${JSON.stringify(ctx)}: max ${r.max} (${r.count} ch)`);
         }
       }
+  });
+
+  it('vignette: region renders between full renders stay identical to the reference', () => {
+    // dirty-rect painting renders an adjustment layer per region with a new offset each frame,
+    // interleaved with full-document renders (nothing may leak from one call into the next)
+    const W = 240,
+      H = 135;
+    const full = makeImage(W, H, 31, true);
+    const R = rng(77);
+    const p: ParamValues = { amount: 0.8, size: 0.4, feather: 0.6, roundness: -0.3, color: '#102040' };
+    for (let k = 0; k < 30; k++) {
+      const rw = 1 + Math.floor(R() * 60),
+        rh = 1 + Math.floor(R() * 40);
+      const x0 = Math.floor(R() * (W - rw)),
+        y0 = Math.floor(R() * (H - rh));
+      const region = makeImage(rw, rh, 200 + k);
+      const rc = ctxOf(W, H, { offsetX: x0, offsetY: y0 });
+      const r = compare('vignette', REF.vignette.apply, p, region, rc);
+      if (r.max !== 0) throw new Error(`region ${k} ${rw}x${rh}@${x0},${y0}: max ${r.max}`);
+      if (k % 5 === 4) {
+        const f = compare('vignette', REF.vignette.apply, p, full, ctxOf(W, H));
+        if (f.max !== 0) throw new Error(`full render after region ${k}: max ${f.max}`);
+      }
+    }
   });
 
   it('vignette keeps transparent pixels and alpha untouched', () => {

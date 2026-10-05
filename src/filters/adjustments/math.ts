@@ -87,21 +87,27 @@ export function readWords(img: Pixels): Int32Array {
 /**
  * Persistent per-color result memo for the costlier adjustments whose output only depends on the
  * pixel's color (rgb → resulting rgb, both packed r | g << 8 | b << 16). Direct mapped, 2¹⁸
- * slots (slot = imul(rgb, 0x9e3779b1) >>> MEMO_SHIFT), so a rendered thumbnail's ≈ 90k distinct
+ * slots (slot = imul(rgb, 0x9e3779b1) >>> MEMO_SHIFT, ×2 = index of its key), so a rendered thumbnail's ≈ 90k distinct
  * colors mostly fit. A memo belongs to one filter + parameter set (`sig`) and survives between
  * calls: re-rendering an unchanged adjustment layer (live painting below it, thumbnails, region
  * updates) is almost only lookups; a parameter change starts a fresh memo. The few most recent
  * memos are kept (LRU), so several adjustment layers don't evict each other.
+ *
+ * Noisy images (photos, grain: nearly every pixel a new color) would only pay for the random
+ * memory traffic (measured ~1.5-2× slower), so a call stops using the memo when, checked every
+ * MEMO_PROBE (a power of two) misses, it has had fewer hits than misses; what was stored stays valid.
  */
 export const MEMO_BITS = 18;
 export const MEMO_SHIFT = 32 - MEMO_BITS;
+export const MEMO_PROBE = 16384;
 const MEMO_MAX = 4;
 export interface ColorMemo {
   sig: string;
-  /** rgb of the color cached in each slot (−1 = empty) */
-  keys: Int32Array;
-  /** its result */
-  vals: Int32Array;
+  /**
+   * Slot k: entries[2k] = rgb of the cached color (−1 = empty), entries[2k + 1] = its result —
+   * interleaved, so a lookup touches one cache line.
+   */
+  entries: Int32Array;
 }
 const memos: ColorMemo[] = [];
 export function colorMemo(sig: string): ColorMemo {
@@ -118,8 +124,8 @@ export function colorMemo(sig: string): ColorMemo {
   if (memos.length >= MEMO_MAX) {
     m = memos.pop()!;
     m.sig = sig;
-    m.keys.fill(-1);
-  } else m = { sig, keys: new Int32Array(1 << MEMO_BITS).fill(-1), vals: new Int32Array(1 << MEMO_BITS) };
+    m.entries.fill(-1);
+  } else m = { sig, entries: new Int32Array(2 << MEMO_BITS).fill(-1) };
   memos.unshift(m);
   return m;
 }

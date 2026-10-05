@@ -2,7 +2,7 @@
 import { Flame, Lightbulb, Sparkle, Sun, Sunrise, SunDim, Aperture } from 'lucide-react';
 import type { FilterDef } from '../../../registry';
 import type { Img } from '../util';
-import { anchor, blurPlane, bool, clamp, hash, isEmpty, multiresBlurGrid, multiresFactor, num, pixelWords, pt, rgb, sc, smoothstep, str, toPlanes, usesMultires } from '../util';
+import { anchor, blurPlane, bool, clamp, hash, isEmpty, multiresBlurGrid, multiresFactor, num, pt, rgb, sc, smoothstep, str, toPlanes, usesMultires } from '../util';
 import { blurPlaneMultires, downsamplePlane, radialAccumulate, upsamplePlane } from '../ops';
 import { hasTransparency } from '../edges';
 import { boolP, colorP, numP, pctP, pointP, pxP, seedP, selectP } from '../params';
@@ -98,7 +98,7 @@ export const vignette: FilterDef = {
  *    (same |v|), as v² / v^pw plus a column term; the root (sqrt, or the superellipse power for
  *    negative roundness) only runs in the feather band, the inner / outer parts are decided in
  *    the squared space;
- *  - the blend reads whole pixel words and rounds half to even like a byte store.
+ *  - the blend is the plain float mix per channel.
  */
 function vignetteBlend(img: Img, ox: number, oy: number, s: number, o: VignetteShape, amount: number, c0: number, c1: number, c2: number) {
   const { width: w, height: h } = img;
@@ -130,22 +130,19 @@ function vignetteBlend(img: Img, ox: number, oy: number, s: number, o: VignetteS
   const lo = e0 <= 0 ? -1 : (round ? Math.pow(e0, pw) : e0 * e0) * (1 - 1e-9);
   const hi = (round ? Math.pow(e1, pw) : e1 * e1) * (1 + 1e-9);
   const T = new Float64Array(nu);
-  const u = (globalThis as any).__VB ? null : pixelWords(img);
+  const d = img.data;
   const done = new Uint8Array(h);
   // image rows y and m − y have the same |v| when the center row is on a pixel center or edge
   const mirror = Math.round(2 * ((o.cy - oy) * s - 0.5));
   for (let y = 0; y < h; y++) {
     if (done[y]) continue;
     const v = Math.abs(oy + (y + 0.5) * inv - o.cy) * P.iry;
-    if (!vignetteRow(T, UP, nu, round ? Math.pow(v, pw) : v * v, round, pw, lo, hi, e0, e1, amount)) continue; // nothing to blend
-    if (u) vignetteRowWords(u, y * w, w, colIdx, T, c0, c1, c2);
-    else vignetteRowBytes(img.data, y * w, w, colIdx, T, c0, c1, c2);
     const ym = mirror - y;
-    if (ym > y && ym < h && Math.abs(oy + (ym + 0.5) * inv - o.cy) * P.iry === v) {
-      done[ym] = 1;
-      if (u) vignetteRowWords(u, ym * w, w, colIdx, T, c0, c1, c2);
-      else vignetteRowBytes(img.data, ym * w, w, colIdx, T, c0, c1, c2);
-    }
+    const pair = ym > y && ym < h && Math.abs(oy + (ym + 0.5) * inv - o.cy) * P.iry === v;
+    if (pair) done[ym] = 1;
+    if (!vignetteRow(T, UP, nu, round ? Math.pow(v, pw) : v * v, round, pw, lo, hi, e0, e1, amount)) continue; // nothing to blend
+    vignetteRowBlend(d, y * w, w, colIdx, T, c0, c1, c2);
+    if (pair) vignetteRowBlend(d, ym * w, w, colIdx, T, c0, c1, c2);
   }
 }
 
@@ -178,34 +175,11 @@ function vignetteRow(T: Float64Array, UP: Float64Array, nu: number, vp: number, 
 }
 
 /**
- * Blend one row of little-endian pixel words: v + (c − v)·t per channel (the float mix of the
- * byte version), rounded half to even like a byte store. Transparent pixels and t ≤ 0.0005 are skipped.
+ * Blend one row: v + (c − v)·t per channel, stored through the clamped bytes (rounded half to
+ * even). Transparent pixels and t ≤ 0.0005 are skipped. (Byte stores beat word stores with
+ * manual rounding here.)
  */
-function vignetteRowWords(u: Int32Array, i0: number, w: number, colIdx: Int32Array, T: Float64Array, c0: number, c1: number, c2: number) {
-  for (let x = 0, i = i0; x < w; x++, i++) {
-    const t = T[colIdx[x]];
-    if (t <= 0.0005) continue;
-    const px = u[i];
-    if (px >>> 24 === 0) continue;
-    const r0 = px & 255,
-      g0 = (px >> 8) & 255,
-      b0 = (px >> 16) & 255;
-    const r = r0 + (c0 - r0) * t,
-      g = g0 + (c1 - g0) * t,
-      b = b0 + (c2 - b0) * t;
-    // the mix stays within [min(v, c), max(v, c)] ⊂ [0, 255]: round only
-    let ri = (r + 0.5) | 0,
-      gi = (g + 0.5) | 0,
-      bi = (b + 0.5) | 0;
-    if (ri - r === 0.5) ri &= ~1;
-    if (gi - g === 0.5) gi &= ~1;
-    if (bi - b === 0.5) bi &= ~1;
-    u[i] = (px & -16777216) | (bi << 16) | (gi << 8) | ri;
-  }
-}
-
-/** Byte-wise vignetteRowWords (big-endian hosts / unaligned buffers). */
-function vignetteRowBytes(d: Uint8ClampedArray, i0: number, w: number, colIdx: Int32Array, T: Float64Array, c0: number, c1: number, c2: number) {
+function vignetteRowBlend(d: Uint8ClampedArray, i0: number, w: number, colIdx: Int32Array, T: Float64Array, c0: number, c1: number, c2: number) {
   for (let x = 0, j = i0 * 4; x < w; x++, j += 4) {
     const t = T[colIdx[x]];
     if (t <= 0.0005 || d[j + 3] === 0) continue;

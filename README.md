@@ -21,8 +21,8 @@ Installers are built by GitHub Actions (*Build installers*, `.github/workflows/r
 
 - **Releases** — [github.com/noxiryn/perseverance/releases](https://github.com/noxiryn/perseverance/releases).
   Each version tag (e.g. `v0.1.0`) publishes the Windows installer + portable `.exe`, the macOS
-  `.dmg` and the Linux `.AppImage` there. This is the link to give people: no GitHub account
-  needed. (If the page is still empty, no version has been tagged yet — use the next option.)
+  `.dmg` and the Linux `.AppImage` there, and no GitHub account is needed to download them. (If the
+  page is still empty, no version has been tagged yet — use the next option.)
 - **Latest build** — every push builds the Windows installer: **Actions** tab → *Build installers*
   → the newest run with a green check → *Artifacts* → **`perseverance-Windows`**. You must be signed
   in to GitHub; it downloads as a `.zip` holding `Perseverance-Setup-<version>.exe` and
@@ -50,9 +50,12 @@ thumbnail** on the start screen): it walks you from a template to your own chara
 exported thumbnail.
 
 ### Sharing it with friends
-Send them the Releases link (or the `Perseverance-Setup-<version>.exe` file itself): it's a
-standalone installer with nothing else to download. Actions artifacts are a poor fit for sharing —
-they need a GitHub login, come zipped and expire.
+The simplest way is to send them the **`Perseverance-Setup-<version>.exe`** file itself (chat,
+email, a USB stick or a cloud drive): it's a standalone installer with nothing else to download.
+Once a version has been published on the [Releases page](https://github.com/noxiryn/perseverance/releases),
+that link works too and needs no GitHub account — open it first to check it lists the installer
+(it stays empty until the first version tag is pushed). Actions artifacts are a poor fit for
+sharing: they need a GitHub login, come zipped and expire.
 
 Projects save as **`.pgfx`** files that open in any copy of Perseverance:
 - Bundled fonts work everywhere, and fonts you added with **Type → Add Font File…** are embedded
@@ -138,6 +141,11 @@ Windows, macOS and Linux installers and publishes them as a GitHub Release:
 ```bash
 git tag v0.1.0 && git push origin v0.1.0
 ```
+
+The Windows installer is required for a Release. If the macOS or Linux build fails, the Release is
+still published with the installers that did build, and the failed job stays red in the run. Before
+the first tag, run the workflow once by hand (**Actions → Build installers → Run workflow**, with
+*Create a GitHub Release* unticked) to check all three builds.
 
 Windows and macOS file systems are case-insensitive, so two source files whose names differ only
 in case (e.g. `filterDialog.ts` / `FilterDialog.tsx`) break the Windows build even though Linux

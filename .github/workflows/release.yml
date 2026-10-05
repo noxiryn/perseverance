@@ -2,7 +2,10 @@ name: Build installers
 
 # - Every push builds the Windows installer and uploads it as a workflow artifact.
 # - Pushing a tag like v0.1.0 (or running the workflow manually) builds Windows, macOS and
-#   Linux installers and attaches them to a GitHub Release.
+#   Linux installers and attaches them to a GitHub Release. The Windows installer is required;
+#   if the macOS or Linux build fails, the Release still goes out with the installers that built
+#   (the failed job stays red in the run). Run the workflow manually without "Create a GitHub
+#   Release" first to check all three builds.
 on:
   push:
     branches: ['**']
@@ -84,7 +87,8 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
+    # !cancelled(): still publish when only the macOS or Linux build failed (checked below).
+    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,6 +99,19 @@ jobs:
         with:
           path: dist-installers
           merge-multiple: true
+      - name: Check the installers
+        shell: bash
+        run: |
+          ls -la dist-installers || true
+          if ! ls dist-installers/*Setup*.exe >/dev/null 2>&1; then
+            echo "::error::The Windows build failed, so no Release is published."
+            exit 1
+          fi
+          for ext in dmg AppImage; do
+            if ! ls dist-installers/*.$ext >/dev/null 2>&1; then
+              echo "::warning::No .$ext installer (that build failed) - the Release goes out without it."
+            fi
+          done
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:

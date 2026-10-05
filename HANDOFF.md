@@ -53,6 +53,12 @@ starting point; don't rewrite modules from scratch.
   is started synchronously (canvas.toBlob snapshots at call time) before the first await; Save and
   autosave write the committed history step they mark as saved, so undo/redo/edits during a save
   can't mix states.
+- **Dirty flag** (`src/state/editor.ts`): a saved state is a step id **and** its document
+  (`SavedState`, `savedIndexOf`; `markSaved(id, at)`). Coalescing edits (nudge, slider scrub, opacity
+  keys, Styler) never merge into the saved step (they push a new one, so the tab turns dirty); a save
+  whose step changed under the same id during the encode leaves the tab dirty; a saved step in a
+  discarded redo branch or trimmed off the front no longer matches anything. Autosave remembers the
+  written step id + document too, so a change coalesced after an autosave is written next time.
 - **Fonts in projects** (`src/io/projectFonts.ts`, container `fonts` entries): user-added font files
   used by text layers are embedded in .pgfx files and registered for the session on open when
   missing; still-missing families (e.g. system fonts) are named in a warning toast.
@@ -60,12 +66,29 @@ starting point; don't rewrite modules from scratch.
   gradient map, selective color and colorize hue/sat are native both ways; other adjustments are
   baked into pixel layers (mask/opacity/blend kept); `doc.background` exports as a bottom
   "Background Color" fill layer and is restored on import.
+  - Baked adjustments (`src/io/psdBake.ts`): clipped ones are written at full alpha wherever the clip
+    stack has coverage, which Photoshop's clipping reproduces exactly; unclipped ones over
+    semi-transparent pixels (isolated groups, transparent documents) can't be exact with one pixel
+    layer — they are listed as "baked approximately (soft edges)" in the export toast.
+  - Gradient fill/overlay center offsets are written in Photoshop's convention (percent of the box,
+    ±50 % = edge; ours is ±1 = edge). ag-psd stores scale/offset as whole percents: a fill that needs
+    rounding stays an editable fill only if the rounded gradient renders within 2 levels, otherwise
+    it is written as pixels ("gradient fills exported as pixels"); such overlays are baked.
+  - Known gap (renderer, not io): our clip stacks composite clipped layers with destination-in +
+    source-over, so over a semi-transparent base pixel they add coverage (50 % base + clipped red →
+    alpha 192; Photoshop keeps the base's 128). Any clipped layer over soft base edges therefore
+    looks slightly different in Photoshop, and a re-import of a clipped baked adjustment is not
+    exact at those edges.
 - **Free Transform on tab switch** (`src/viewport/transform/controller.ts commitTransformInOwnDoc`):
   applied in its own document (with a toast) instead of being dropped.
 - **CI / installers**: Build installers is green since f6ce5d3 (Windows case-clash rename b4d8728 +
-  electron-builder caches outside the repo). No GitHub Release exists yet — push a tag (`v0.1.0`) to
-  publish one. `release/Perseverance-Setup-0.1.0.exe` on disk predates the module work (stale).
-  README install/sharing/build sections describe Releases vs. Actions artifacts.
+  electron-builder caches outside the repo). No GitHub Release exists yet, and the macOS/Linux jobs
+  have never run (they only run on tags / manual dispatch). Maintainer steps (need the owner's
+  go-ahead): run the workflow manually with *Create a GitHub Release* unticked to check macOS/Linux,
+  then `git tag v0.1.0 && git push origin v0.1.0`, then confirm the Release lists the Setup .exe,
+  portable .exe, .dmg and .AppImage. The release job now publishes when only macOS/Linux failed
+  (Windows installer required, warnings for the missing ones). `release/Perseverance-Setup-0.1.0.exe`
+  on disk predates the module work (stale). README: sharing leads with sending the Setup .exe itself.
 
 ## Desktop hardening (electron/, checked with scripts/electron-desktop-check.mjs — 46 checks)
 - Security: sandbox + contextIsolation, no Node in the renderer, IPC sender-frame + type checks,

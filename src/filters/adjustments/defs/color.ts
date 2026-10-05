@@ -5,7 +5,7 @@
 import { Camera, Gem, Palette, Pipette, Scale, Shuffle, SunMoon } from 'lucide-react';
 import type { ParamDef, ParamValues } from '../../../core/types';
 import type { FilterDef } from '../../../registry';
-import { ALPHA_MASK, MEMO_SHIFT, applyLuts, clamp255, colorMemo, hslToRgbInto, luma, pixelWords, readWords, rgbOf, type Pixels } from '../math';
+import { ALPHA_MASK, MEMO_PROBE, MEMO_SHIFT, applyLuts, colorMemo, hslToRgbInto, luma, pixelWords, readWords, rgbOf, type Pixels } from '../math';
 import { bool, boolP, colorP, num, numP, pctP, selectP, str } from '../params';
 
 const scratch = new Float64Array(3);
@@ -27,8 +27,10 @@ export function vibrancePixels(img: Pixels, vibrance: number, saturation: number
   const u = live ?? readWords(img);
   // results are read back from the live words into the color memo (none on the byte fallback)
   const memo = live ? colorMemo(`vib:${vib}:${sat}`) : null;
-  const ck = memo ? memo.keys : NO_MEMO,
-    cv = memo ? memo.vals : NO_MEMO;
+  const ce = memo ? memo.entries : NO_MEMO;
+  let memoOn = memo !== null,
+    hits = 0,
+    misses = 0;
   const { S, W, SK } = vibranceTables();
   const sat1 = 1 + sat;
   let prev = ~u[0];
@@ -46,12 +48,14 @@ export function vibrancePixels(img: Pixels, vibrance: number, saturation: number
     if (p >>> 24 === 0) continue;
     const rgb = p & 0xffffff;
     let slot = 0;
-    if (memo) {
-      slot = Math.imul(rgb, -1640531535) >>> MEMO_SHIFT;
-      if (ck[slot] === rgb) {
-        u[q] = (p & ALPHA_MASK) | cv[slot];
+    if (memoOn) {
+      slot = (Math.imul(rgb, -1640531535) >>> MEMO_SHIFT) << 1;
+      if (ce[slot] === rgb) {
+        u[q] = (p & ALPHA_MASK) | ce[slot + 1];
+        hits++;
         continue;
       }
+      if ((++misses & (MEMO_PROBE - 1)) === 0 && hits < misses) memoOn = false;
     }
     px: {
       const r = p & 255,
@@ -86,9 +90,9 @@ export function vibrancePixels(img: Pixels, vibrance: number, saturation: number
       d[j + 1] = L + (g - L) * f;
       d[j + 2] = L + (b - L) * f;
     }
-    if (memo) {
-      ck[slot] = rgb;
-      cv[slot] = u[q] & 0xffffff;
+    if (memoOn) {
+      ce[slot] = rgb;
+      ce[slot + 1] = u[q] & 0xffffff;
     }
   }
   return img;
@@ -201,13 +205,16 @@ export function hueSaturationPixels(img: Pixels, p: ParamValues): Pixels {
     hueSatBytes(d, shift, sat, light, T);
     return img;
   }
-  const { packed, alpha } = T;
+  const { packed, alpha, lightLut } = T;
   const sat1 = 1 + sat;
   // Whole pixels as little-endian words (r | g << 8 | b << 16 | a << 24): one load/store each.
   // A pixel equal to the previous one gets the previous result (flat areas, runs of one color);
   // other colors seen before (in this call or an earlier one with the same params) come from
   // the color memo.
-  const { keys: ck, vals: cv } = colorMemo(`hs:${shift}:${sat}:${light}`);
+  const ce = colorMemo(`hs:${shift}:${sat}:${light}`).entries;
+  let memoOn = true,
+    hits = 0,
+    misses = 0;
   let prev = ~u[0];
   for (let i = 0, n = u.length; i < n; i++) {
     const p = u[i];
@@ -218,15 +225,63 @@ export function hueSaturationPixels(img: Pixels, p: ParamValues): Pixels {
     prev = p;
     if (p >>> 24 === 0) continue;
     const rgb = p & 0xffffff;
-    const slot = Math.imul(rgb, -1640531535) >>> MEMO_SHIFT;
-    if (ck[slot] === rgb) {
-      u[i] = (p & ALPHA_MASK) | cv[slot];
-      continue;
+    let slot = 0;
+    if (memoOn) {
+      slot = (Math.imul(rgb, -1640531535) >>> MEMO_SHIFT) << 1;
+      if (ce[slot] === rgb) {
+        u[i] = (p & ALPHA_MASK) | ce[slot + 1];
+        hits++;
+        continue;
+      }
+      if ((++misses & (MEMO_PROBE - 1)) === 0 && hits < misses) memoOn = false;
     }
-    const o = hueSatColor(p & 255, (p >> 8) & 255, (p >> 16) & 255, shift, sat, sat1, light, packed, alpha, T.lightLut);
+    // hueSatColor(), inlined
+    const r = p & 255,
+      g = (p >> 8) & 255,
+      b = (p >> 16) & 255;
+    const M = r > g ? (r > b ? r : b) : g > b ? g : b;
+    const m = r < g ? (r < b ? r : b) : g < b ? g : b;
+    const C = M - m;
+    let o: number;
+    if (C === 0) {
+      const lv = lightLut[r];
+      o = (lv << 16) | (lv << 8) | lv;
+    } else {
+      let sector: number, v: number;
+      if (shift === 0) {
+        v = r + g + b - M - m;
+        sector = r >= g ? (g >= b ? 0 : r >= b ? 5 : 4) : r >= b ? 1 : g >= b ? 2 : 3;
+      } else {
+        let h = M === r ? (g - b) / C : M === g ? (b - r) / C + 2 : (r - g) / C + 4;
+        h += shift;
+        if (h < 0) h += 6;
+        else if (h >= 6) h -= 6;
+        sector = h | 0;
+        const f = h - sector;
+        v = sector & 1 || sector > 5 ? M - C * f : m + C * f;
+      }
+      const t = (M << 8) | m;
+      if (sat > 0) {
+        const L = (M + m) / 2;
+        v = v + (v - L) * alpha[t];
+      } else if (sat < 0) {
+        const L = (M + m) / 2;
+        v = L + (v - L) * sat1;
+      }
+      if (light > 0) v = v + (255 - v) * light;
+      else if (light < 0) v = v + v * light;
+      let vi = v <= 0 ? 0 : v >= 255 ? 255 : (v + 0.5) | 0;
+      if (vi - v === 0.5) vi &= ~1;
+      const pk = packed[t];
+      const hi = pk & 255,
+        lo = pk >> 8;
+      o = sector === 0 ? hi | (vi << 8) | (lo << 16) : sector === 1 ? vi | (hi << 8) | (lo << 16) : sector === 2 ? lo | (hi << 8) | (vi << 16) : sector === 3 ? lo | (vi << 8) | (hi << 16) : sector === 4 ? vi | (lo << 8) | (hi << 16) : hi | (lo << 8) | (vi << 16);
+    }
     u[i] = (p & ALPHA_MASK) | o;
-    ck[slot] = rgb;
-    cv[slot] = o;
+    if (memoOn) {
+      ce[slot] = rgb;
+      ce[slot + 1] = o;
+    }
   }
   return img;
 }
@@ -253,7 +308,9 @@ function hueSatColor(r: number, g: number, b: number, shift: number, sat: number
   } else {
     let h = M === r ? (g - b) / C : M === g ? (b - r) / C + 2 : (r - g) / C + 4;
     h += shift;
-    h = h - 6 * Math.floor(h / 6);
+    // h − 6·floor(h/6) for h ∈ [−4, 8) (bit-identical, no division)
+    if (h < 0) h += 6;
+    else if (h >= 6) h -= 6;
     sector = h | 0;
     const f = h - sector;
     // sectors 0, 2, 4: the mid channel rises (min + C·f); 1, 3, 5 (and a wrap that rounded to 6): it falls
@@ -408,8 +465,10 @@ export function colorBalancePixels(img: Pixels, p: ParamValues): Pixels {
   const live = pixelWords(img);
   const u = live ?? readWords(img);
   const memo = live ? colorMemo(`cb:${sh}:${md}:${hi}:${preserve}`) : null;
-  const ck = memo ? memo.keys : NO_MEMO,
-    cv = memo ? memo.vals : NO_MEMO;
+  const ce = memo ? memo.entries : NO_MEMO;
+  let memoOn = memo !== null,
+    hits = 0,
+    misses = 0;
   let prev = ~u[0];
   for (let q = 0, n = u.length; q < n; q++) {
     const p = u[q];
@@ -425,12 +484,14 @@ export function colorBalancePixels(img: Pixels, p: ParamValues): Pixels {
     if (p >>> 24 === 0) continue;
     const rgb = p & 0xffffff;
     let slot = 0;
-    if (memo) {
-      slot = Math.imul(rgb, -1640531535) >>> MEMO_SHIFT;
-      if (ck[slot] === rgb) {
-        u[q] = (p & ALPHA_MASK) | cv[slot];
+    if (memoOn) {
+      slot = (Math.imul(rgb, -1640531535) >>> MEMO_SHIFT) << 1;
+      if (ce[slot] === rgb) {
+        u[q] = (p & ALPHA_MASK) | ce[slot + 1];
+        hits++;
         continue;
       }
+      if ((++misses & (MEMO_PROBE - 1)) === 0 && hits < misses) memoOn = false;
     }
     const r0 = p & 255,
       g0 = (p >> 8) & 255,
@@ -466,9 +527,9 @@ export function colorBalancePixels(img: Pixels, p: ParamValues): Pixels {
     d[i] = r;
     d[i + 1] = g;
     d[i + 2] = b;
-    if (memo) {
-      ck[slot] = rgb;
-      cv[slot] = u[q] & 0xffffff;
+    if (memoOn) {
+      ce[slot] = rgb;
+      ce[slot + 1] = u[q] & 0xffffff;
     }
   }
   return img;
@@ -818,8 +879,10 @@ export function selectiveColorPixels(img: Pixels, p: ParamValues): Pixels {
   const live = pixelWords(img);
   const u = live ?? readWords(img);
   const memo = live ? colorMemo(`sc:${adj.join(',')}:${relative}`) : null;
-  const ck = memo ? memo.keys : NO_MEMO,
-    cv = memo ? memo.vals : NO_MEMO;
+  const ce = memo ? memo.entries : NO_MEMO;
+  let memoOn = memo !== null,
+    hits = 0,
+    misses = 0;
   let prev = ~u[0];
   for (let q = 0, n = u.length; q < n; q++) {
     const p = u[q];
@@ -835,12 +898,14 @@ export function selectiveColorPixels(img: Pixels, p: ParamValues): Pixels {
     if (p >>> 24 === 0) continue;
     const rgb = p & 0xffffff;
     let slot = 0;
-    if (memo) {
-      slot = Math.imul(rgb, -1640531535) >>> MEMO_SHIFT;
-      if (ck[slot] === rgb) {
-        u[q] = (p & ALPHA_MASK) | cv[slot];
+    if (memoOn) {
+      slot = (Math.imul(rgb, -1640531535) >>> MEMO_SHIFT) << 1;
+      if (ce[slot] === rgb) {
+        u[q] = (p & ALPHA_MASK) | ce[slot + 1];
+        hits++;
         continue;
       }
+      if ((++misses & (MEMO_PROBE - 1)) === 0 && hits < misses) memoOn = false;
     }
     const r = p & 255,
       g = (p >> 8) & 255,
@@ -900,9 +965,9 @@ export function selectiveColorPixels(img: Pixels, p: ParamValues): Pixels {
         d[i + 2] = b + f2 * 255;
       }
     }
-    if (memo) {
-      ck[slot] = rgb;
-      cv[slot] = u[q] & 0xffffff;
+    if (memoOn) {
+      ce[slot] = rgb;
+      ce[slot + 1] = u[q] & 0xffffff;
     }
   }
   return img;

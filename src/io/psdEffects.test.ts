@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Gradient, LayerEffect } from '../core/types';
-import { effectsFromPsd, effectsToPsd, fillFromPsd, fillToPsd, fromPsdColor, fromPsdGradient, toPsdGradient } from './psdEffects';
+import { effectsFromPsd, effectsToPsd, fillFromPsd, fillToPsd, fromPsdColor, fromPsdGradient, gradientOffsetToPsd, representableGradient, toPsdGradient } from './psdEffects';
 
 const fx = (effectId: string, params: LayerEffect['params'], enabled = true): LayerEffect => ({
   id: `e_${effectId}`,
@@ -148,5 +148,56 @@ describe('psd layer effects', () => {
     expect(back).toEqual({ type: 'gradient', gradient: g });
     expect(fillToPsd({ type: 'pattern', assetId: 'paper-texture', scale: 1 })).toBeNull();
     expect(fillFromPsd(undefined)).toBeNull();
+  });
+
+  it('round-trips a gradient fill’s center offset (Photoshop: percent of the box) and exact angles', () => {
+    const g: Gradient = {
+      kind: 'radial',
+      angle: 37.5,
+      scale: 1.4,
+      reverse: false,
+      offsetX: -0.5,
+      offsetY: 0.3,
+      stops: [
+        { offset: 0, color: '#ffe08a' },
+        { offset: 1, color: '#3b1670' },
+      ],
+    };
+    const v = fillToPsd({ type: 'gradient', gradient: g });
+    expect((v as { offset?: unknown }).offset).toEqual({ x: -0.25, y: 0.15 });
+    expect(fillFromPsd(v!)).toEqual({ type: 'gradient', gradient: g });
+  });
+
+  it('keeps gradient fills Photoshop cannot store exactly as pixels', () => {
+    const base: Gradient = { kind: 'radial', angle: 90, scale: 1, stops: [{ offset: 0, color: '#000000' }, { offset: 1, color: '#ffffff' }] };
+    // -0.25 of the half box = -12.5 % of the box: ag-psd writes whole percents only.
+    expect(fillToPsd({ type: 'gradient', gradient: { ...base, offsetX: -0.25 } })).toBeNull();
+    expect(fillToPsd({ type: 'gradient', gradient: { ...base, scale: 1.255 } })).toBeNull();
+    expect(fillToPsd({ type: 'gradient', gradient: { ...base, offsetX: 0, offsetY: 0 } })).not.toBeNull();
+    expect(gradientOffsetToPsd({})).toBeUndefined();
+    expect(gradientOffsetToPsd({ offsetX: 1, offsetY: -1 })).toEqual({ x: 0.5, y: -0.5 });
+  });
+
+  it('rounds a gradient to the nearest one Photoshop can store, which then round-trips exactly', () => {
+    const g: Gradient = { kind: 'radial', angle: 90, scale: 0.624, reverse: false, offsetX: -0.25, offsetY: 0.333, stops: [{ offset: 0, color: '#000000' }, { offset: 1, color: '#ffffff' }] };
+    const near = representableGradient(g);
+    expect(near.scale).toBe(0.62);
+    expect(near.offsetX).toBeCloseTo(-0.24, 9); // −12.5 % of the box → −12 % (as ag-psd rounds)
+    expect(near.offsetY).toBeCloseTo(0.34, 9);
+    const v = fillToPsd({ type: 'gradient', gradient: near });
+    expect(v).not.toBeNull();
+    expect(fillFromPsd(v!)).toEqual({ type: 'gradient', gradient: near });
+    expect(representableGradient({ ...g, offsetX: undefined, offsetY: undefined }).offsetX).toBeUndefined();
+  });
+
+  it('converts gradient overlay offsets and bakes ones Photoshop cannot store', () => {
+    const g: Gradient = { kind: 'radial', angle: 90, scale: 1, offsetX: 0.4, offsetY: -0.2, stops: [{ offset: 0, color: '#000000' }, { offset: 1, color: '#ffffff' }] };
+    const { info } = effectsToPsd([fx('gradient-overlay', { gradient: g })]);
+    expect(info!.gradientOverlay![0].offset).toEqual({ x: 0.2, y: -0.1 });
+    const bg = effectsFromPsd(info)[0].params.gradient as Gradient;
+    expect([bg.offsetX, bg.offsetY]).toEqual([0.4, -0.2]);
+    const odd = effectsToPsd([fx('gradient-overlay', { gradient: { ...g, offsetX: 0.25 } })]);
+    expect(odd.unsupported.map((e) => e.effectId)).toEqual(['gradient-overlay']);
+    expect(odd.info).toBeUndefined();
   });
 });

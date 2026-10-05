@@ -5,13 +5,14 @@
  *    Adjustment layers with a Photoshop equivalent are written as native adjustment layers (see
  *    psdAdjustments.ts); the others (duotone, split toning, color lookup, vignette…) are baked into
  *    a pixel layer showing their effect on what is below them, with the same mask, opacity and
- *    blending. The document background colour becomes a bottom "Background Color" fill layer.
+ *    blending (exact over opaque pixels and inside clipping masks; see psdBake.ts). The document
+ *    background colour becomes a bottom "Background Color" fill layer.
  *  - Import: pixel layers → raster layers (left/top → transform), groups, masks, opacity, blending,
  *    visibility, clipping, supported adjustment layers; our "Background Color" layer becomes the
  *    document background again.
  */
 import { readPsd, writePsd, type Layer as PsdLayer, type Psd, type LayerMaskData } from 'ag-psd';
-import type { AdjustmentLayer, Document, ID, Layer, LayerMask, ParamValues } from '../core/types';
+import type { AdjustmentLayer, Document, FillLayer, ID, Layer, LayerMask, ParamValues } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
 import { createCanvas, ctx2d, opaqueBounds } from '../core/canvas';
 import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeFillLayer, makeGroupLayer, makeRasterLayer, parentOf, siblingsOf } from '../core/document';
@@ -22,8 +23,9 @@ import { saveFile, type OpenedFile } from '../platform';
 import { activeSession, useEditor } from '../state/editor';
 import { openDialog, toast } from '../state/ui';
 import { formatBytes, fromPsdBlend, safeFileName, toPsdBlend } from './math';
-import { effectLabel, effectsFromPsd, effectsToPsd, fillFromPsd, fillToPsd, toPsdColor } from './psdEffects';
+import { effectLabel, effectsFromPsd, effectsToPsd, fillFromPsd, fillToPsd, representableGradient, toPsdColor } from './psdEffects';
 import { fromPsdAdjustment, toPsdAdjustment } from './psdAdjustments';
+import { alphaChannel, finishBakedPixels } from './psdBake';
 import { backgroundLayerOf, baseName, ensureFontsFor } from './util';
 
 /** Name of the bottom fill layer that carries the document background colour in exported PSDs. */
@@ -75,6 +77,13 @@ export interface PsdBuildReport {
   skipped: string[];
   /** Adjustment layers with no PSD equivalent, baked into pixel layers. */
   bakedAdjustments: string[];
+  /**
+   * Baked adjustments that are only approximate: not clipped, over semi-transparent pixels (soft
+   * edges inside an isolated group or a transparent document come out denser in Photoshop).
+   */
+  approxAdjustments: string[];
+  /** Gradient fill layers written as plain pixels (Photoshop's fill data can't hold their geometry closely enough). */
+  rasterizedFills: string[];
   /** Layers whose styles had to be baked into pixels (no Photoshop equivalent). */
   baked: string[];
   /** Groups whose styles could not be exported (folders cannot hold baked pixels). */
@@ -97,9 +106,9 @@ function renderIsolated(doc: Document, rootIds: ID[], overrides: Record<ID, Laye
 /**
  * What an adjustment layer applies to (doc space): everything below it — or, inside an isolated
  * (non pass-through) group, the group's content below it; for a clipped adjustment, its clip base
- * plus the layers clipped to it below the adjustment.
+ * plus the layers clipped to it below the adjustment (`clipped` = the backdrop is a clip stack).
  */
-function adjustmentBackdrop(doc: Document, l: AdjustmentLayer): HTMLCanvasElement {
+function adjustmentBackdrop(doc: Document, l: AdjustmentLayer): { canvas: HTMLCanvasElement; clipped: boolean } {
   if (l.clipped) {
     const sibs = siblingsOf(doc, l.id);
     const i = sibs.indexOf(l.id);
@@ -110,26 +119,61 @@ function adjustmentBackdrop(doc: Document, l: AdjustmentLayer): HTMLCanvasElemen
       // The clip stack composites the base's content at full opacity; its own opacity/blend apply
       // to the whole stack afterwards.
       const solo = { ...base, opacity: 1, clipped: false, blendMode: base.type === 'group' && base.blendMode === 'pass-through' ? 'pass-through' : 'normal' } as Layer;
-      return renderIsolated(doc, sibs.slice(baseIdx, i), { [base.id]: solo });
+      return { canvas: renderIsolated(doc, sibs.slice(baseIdx, i), { [base.id]: solo }), clipped: true };
     }
   }
   for (let p = parentOf(doc, l.id); p; p = parentOf(doc, p)) {
     const g = doc.layers[p];
-    if (g?.type === 'group' && g.blendMode !== 'pass-through') return renderIsolated(doc, g.childIds, {}, l.id);
+    if (g?.type === 'group' && g.blendMode !== 'pass-through') return { canvas: renderIsolated(doc, g.childIds, {}, l.id), clipped: false };
   }
-  return copyCanvas(renderDocument(doc, { below: l.id, background: true }));
+  return { canvas: copyCanvas(renderDocument(doc, { below: l.id, background: true })), clipped: false };
 }
 
-/** An adjustment Photoshop doesn't have, rendered into pixels (doc-sized), or null (unknown filter). */
-function bakeAdjustment(doc: Document, l: AdjustmentLayer): HTMLCanvasElement | null {
+/**
+ * An adjustment Photoshop doesn't have, rendered into pixels (doc-sized), or null (unknown filter).
+ * `opacity` is the layer's total strength (for the soft-edge check, see psdBake.ts).
+ */
+function bakeAdjustment(doc: Document, l: AdjustmentLayer, opacity: number): { canvas: HTMLCanvasElement; approx: boolean } | null {
   const def = filters.get(l.adjustment.filterId);
   if (!def) return null;
-  const c = adjustmentBackdrop(doc, l);
+  const { canvas: c, clipped } = adjustmentBackdrop(doc, l);
   const ctx = ctx2d(c, { willReadFrequently: true });
   const img = ctx.getImageData(0, 0, c.width, c.height);
+  const alpha = alphaChannel(img.data);
   const out = runFilter(def, img, l.adjustment.params, makeFilterContext({ docWidth: doc.width, docHeight: doc.height }));
+  const approx = finishBakedPixels(out.data, alpha, clipped, opacity);
   ctx.putImageData(out, 0, 0);
-  return c;
+  return { canvas: c, approx };
+}
+
+/** Largest per-channel difference allowed between a fill and its Photoshop-storable version. */
+const FILL_ROUNDING_LEVELS = 2;
+
+/**
+ * Photoshop fill data for a fill layer, or null to keep it as plain pixels. ag-psd stores gradient
+ * scale/offset as whole percents: a gradient that needs rounding is only written as an editable fill
+ * when the rounded version renders within FILL_ROUNDING_LEVELS of the original (`full`); otherwise
+ * Photoshop (and a re-import) would show a visibly shifted gradient, so the exact pixels are kept.
+ */
+function fillVectorData(doc: Document, l: FillLayer, full: HTMLCanvasElement | null): ReturnType<typeof fillToPsd> {
+  const exact = fillToPsd(l.fill);
+  if (exact || l.fill.type !== 'gradient' || !full) return exact;
+  const fill = { ...l.fill, gradient: representableGradient(l.fill.gradient) };
+  const vf = fillToPsd(fill);
+  if (!vf) return null;
+  const want = readPixels(full);
+  const near = renderLayerToDoc(doc, { ...l, fill }, { effects: false, mask: false });
+  if (!near || near.width !== full.width || near.height !== full.height) return null;
+  const got = readPixels(near);
+  for (let i = 0; i < want.length; i++) if (Math.abs(want[i] - got[i]) > FILL_ROUNDING_LEVELS) return null;
+  return vf;
+}
+
+function readPixels(c: HTMLCanvasElement): Uint8ClampedArray {
+  const s = createCanvas(c.width, c.height);
+  const ctx = ctx2d(s, { willReadFrequently: true });
+  ctx.drawImage(c, 0, 0);
+  return ctx.getImageData(0, 0, c.width, c.height).data;
 }
 
 /** True when the bottom layer is an opaque, doc-covering "Background" that hides doc.background. */
@@ -173,7 +217,7 @@ function backgroundToPsd(doc: Document): PsdLayer | null {
 
 /** Build the ag-psd structure for a document. */
 export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd } & PsdBuildReport {
-  const report: PsdBuildReport = { skipped: [], bakedAdjustments: [], baked: [], lostGroupStyles: [] };
+  const report: PsdBuildReport = { skipped: [], bakedAdjustments: [], approxAdjustments: [], rasterizedFills: [], baked: [], lostGroupStyles: [] };
   const convert = (id: ID): PsdLayer | null => {
     const l = doc.layers[id];
     if (!l) return null;
@@ -205,16 +249,17 @@ export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd } & 
       if (!inst.enabled) common.hidden = true;
       const a = toPsdAdjustment(inst.filterId, paramsOf(inst.filterId, inst.params));
       if (a) return { ...common, adjustment: a };
-      const baked = bakeAdjustment(doc, l);
+      const baked = bakeAdjustment(doc, l, common.opacity ?? 1);
       if (!baked) {
         report.skipped.push(l.name);
         return null;
       }
       report.bakedAdjustments.push(l.name);
-      const bb = opaqueBounds(baked);
+      if (baked.approx) report.approxAdjustments.push(l.name);
+      const bb = opaqueBounds(baked.canvas);
       if (!bb) return { ...common, top: 0, left: 0, bottom: 0, right: 0 };
       const c = createCanvas(bb.width, bb.height);
-      ctx2d(c).drawImage(baked, bb.x, bb.y, bb.width, bb.height, 0, 0, bb.width, bb.height);
+      ctx2d(c).drawImage(baked.canvas, bb.x, bb.y, bb.width, bb.height, 0, 0, bb.width, bb.height);
       return { ...common, top: bb.y, left: bb.x, bottom: bb.y + bb.height, right: bb.x + bb.width, canvas: c };
     }
     const enabledFx = l.effects.filter((e) => e.enabled);
@@ -227,18 +272,19 @@ export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd } & 
         report.baked.push(`${l.name} (${fx.unsupported.map((e) => effectLabel(e.effectId)).join(', ')})`);
       } else if (fx.info) common.effects = fx.info;
     }
-    if (l.type === 'fill' && !bake) {
-      // Solid/gradient fills stay editable Photoshop fill layers (pixels are written too). Not when
-      // styles are baked: Photoshop re-renders fill layers from this data and would drop them.
-      const vf = fillToPsd(l.fill);
-      if (vf) common.vectorFill = vf;
-    }
     if (!bake && l.fillOpacity < 1) {
       // The renderer applies Fill to the content: export it at full fill and let Photoshop apply it.
       common.fillOpacity = l.fillOpacity;
       source = { ...l, fillOpacity: 1 } as Layer;
     }
     const full = renderLayerToDoc(doc, source, { effects: bake, mask: false });
+    if (source.type === 'fill' && !bake) {
+      // Solid/gradient fills stay editable Photoshop fill layers (pixels are written too). Not when
+      // styles are baked: Photoshop re-renders fill layers from this data and would drop them.
+      const vf = fillVectorData(doc, source, full);
+      if (vf) common.vectorFill = vf;
+      else if (source.fill.type === 'gradient') report.rasterizedFills.push(l.name);
+    }
     const b = full ? opaqueBounds(full) : null;
     if (!full || !b) return { ...common, top: 0, left: 0, bottom: 0, right: 0 };
     const c = createCanvas(b.width, b.height);
@@ -266,7 +312,7 @@ export async function exportPsd(opts: PsdExportOptions): Promise<void> {
     await ensureFontsFor(s.doc);
     // Let the toast paint before the (synchronous) layer rendering and encoding.
     await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
-    const { psd, skipped, bakedAdjustments, baked, lostGroupStyles } = buildPsd(s.doc, opts);
+    const { psd, skipped, bakedAdjustments, approxAdjustments, rasterizedFills, baked, lostGroupStyles } = buildPsd(s.doc, opts);
     const data = writePsd(psd, { generateThumbnail: true, noBackground: true });
     const res = await saveFile({
       title: 'Export PSD',
@@ -281,6 +327,8 @@ export async function exportPsd(opts: PsdExportOptions): Promise<void> {
       notes.push(
         `${bakedAdjustments.length} adjustment layer${bakedAdjustments.length > 1 ? 's' : ''} without a Photoshop equivalent baked into pixels (${list(bakedAdjustments)})`,
       );
+    if (approxAdjustments.length) notes.push(`baked approximately (soft edges): ${list(approxAdjustments)}`);
+    if (rasterizedFills.length) notes.push(`gradient fills exported as pixels: ${list(rasterizedFills)}`);
     if (skipped.length) notes.push(`${skipped.length} unknown adjustment layer${skipped.length > 1 ? 's' : ''} left out (${list(skipped)})`);
     if (baked.length) notes.push(`styles baked into pixels on ${list(baked)}`);
     if (lostGroupStyles.length) notes.push(`group styles not exported: ${list(lostGroupStyles)}`);

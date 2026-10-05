@@ -584,6 +584,8 @@ class BoxStream {
   readonly stride: number;
   readonly size: Int32Array;
   readonly ring: Float32Array[];
+  /** per pass: a view of each ring row (the vertical step reads whole rows without offsets) */
+  readonly rows: Float32Array[][];
   readonly sums: Float64Array[];
   /** next row H_p / V_p produces */
   readonly hNext: Int32Array;
@@ -607,6 +609,7 @@ class BoxStream {
     const stride = (this.stride = w * ch);
     this.size = Int32Array.from(R, (r) => Math.min(h, 2 * r + 3));
     this.ring = Array.from(this.size, (sz) => new Float32Array(sz * stride));
+    this.rows = this.ring.map((rg, p) => Array.from({ length: this.size[p] }, (_, k) => rg.subarray(k * stride, k * stride + stride)));
     this.sums = Array.from(R, () => new Float64Array(stride));
     this.hNext = new Int32Array(P);
     this.vNext = new Int32Array(P);
@@ -633,10 +636,11 @@ class BoxStream {
         for (let q = 0; q < stride; q++) S[q] += Rg[rk + q];
       }
     }
-    const addRow = ((y + r + 1 < h ? y + r + 1 : h - 1) % sz) * stride;
-    const remRow = ((y - r > 0 ? y - r : 0) % sz) * stride;
-    if (alpha === 0) vRow(S, Rg, dst, dOff, addRow, remRow, stride, inv);
-    else vRowExt(S, Rg, dst, dOff, addRow, remRow, ((y - r - 1 > 0 ? y - r - 1 : 0) % sz) * stride, stride, inv, alpha);
+    const rows = this.rows[p];
+    const add = rows[(y + r + 1 < h ? y + r + 1 : h - 1) % sz],
+      rem = rows[(y - r > 0 ? y - r : 0) % sz];
+    if (alpha === 0) vRow(S, add, rem, dst, dOff, stride, inv);
+    else vRowExt(S, add, rem, rows[(y - r - 1 > 0 ? y - r - 1 : 0) % sz], dst, dOff, stride, inv, alpha);
   }
   /** H_p: produce its next row into the ring. */
   produceH(p: number) {
@@ -663,20 +667,26 @@ class BoxStream {
   }
 }
 
-/** Vertical box step for one output row (plain box). */
-function vRow(S: Float64Array, R: Float32Array, dst: Float32Array, dOff: number, addRow: number, remRow: number, n: number, inv: number) {
+/**
+ * Vertical box step for one output row (plain box): out = S·inv, then S += add − rem. (The sum
+ * is held in a local: V8 can't tell the float32 stores from the float64 sums apart and would
+ * reload S[q] otherwise.)
+ */
+function vRow(S: Float64Array, add: Float32Array, rem: Float32Array, dst: Float32Array, dOff: number, n: number, inv: number) {
   for (let q = 0; q < n; q++) {
-    dst[dOff + q] = S[q] * inv;
-    S[q] += R[addRow + q] - R[remRow + q];
+    const s = S[q];
+    dst[dOff + q] = s * inv;
+    S[q] = s + (add[q] - rem[q]);
   }
 }
 
 /** Vertical box step for one output row (extended box: fractional taps at ±(r + 1)). */
-function vRowExt(S: Float64Array, R: Float32Array, dst: Float32Array, dOff: number, addRow: number, remRow: number, upRow: number, n: number, inv: number, alpha: number) {
+function vRowExt(S: Float64Array, addR: Float32Array, remR: Float32Array, upR: Float32Array, dst: Float32Array, dOff: number, n: number, inv: number, alpha: number) {
   for (let q = 0; q < n; q++) {
-    const add = R[addRow + q];
-    dst[dOff + q] = (S[q] + alpha * (R[upRow + q] + add)) * inv;
-    S[q] += add - R[remRow + q];
+    const s = S[q];
+    const add = addR[q];
+    dst[dOff + q] = (s + alpha * (upR[q] + add)) * inv;
+    S[q] = s + (add - remR[q]);
   }
 }
 
