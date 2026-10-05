@@ -5,7 +5,6 @@
 import type { Document, ID } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
 import { ensureFont } from '../fonts/loader';
-import { invalidateRenderCache } from '../render/compositor';
 
 /** Every bitmap id referenced by a document (raster contents + masks + selection). */
 export function docBitmapIds(doc: Document): Set<ID> {
@@ -27,11 +26,6 @@ export function dropBitmaps(ids: Iterable<ID>) {
   if (!drop.size) return;
   const keep = new Set(bitmaps.ids().filter((id) => !drop.has(id)));
   bitmaps.retainOnly(keep, -1);
-}
-
-/** Drop render-cache entries of throw-away layers. */
-export function forgetLayers(ids: Iterable<ID>) {
-  for (const id of ids) invalidateRenderCache(id);
 }
 
 /** Font faces used by the text layers of a document (with the characters they need). */
@@ -72,6 +66,44 @@ export async function loadFonts(list: FontRequest[], timeoutMs = 3000): Promise<
   await Promise.race([all, new Promise((r) => setTimeout(r, timeoutMs))]);
 }
 
+/**
+ * Resolve after the browser has had a chance to paint (e.g. a "Building…" state set right
+ * before a long synchronous task). Falls back to a timer when frames aren't produced (hidden tab).
+ */
+export function nextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => setTimeout(finish, 0));
+    setTimeout(finish, 120);
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Pointer state (background work waits while the user drags/paints)   */
+/* ------------------------------------------------------------------ */
+
+let pointerDown = false;
+let pointerTracking = false;
+
+/** True while a mouse button / pen / finger is down anywhere in the window. */
+export function isPointerDown(): boolean {
+  if (!pointerTracking && typeof window !== 'undefined') {
+    pointerTracking = true;
+    const down = () => (pointerDown = true);
+    const up = () => (pointerDown = false);
+    window.addEventListener('pointerdown', down, true);
+    window.addEventListener('pointerup', up, true);
+    window.addEventListener('pointercancel', up, true);
+    window.addEventListener('blur', up);
+  }
+  return pointerDown;
+}
+
 /* ------------------------------------------------------------------ */
 /* Idle queue: run thumbnail jobs one at a time without blocking input  */
 /* ------------------------------------------------------------------ */
@@ -80,10 +112,19 @@ type Job = { key: string; run: () => void | Promise<void>; priority: number };
 
 const hasIdle = typeof window !== 'undefined' && 'requestIdleCallback' in window;
 
+export interface IdleQueueOptions {
+  /** requestIdleCallback timeout (ms): forces progress even when the page is never idle. Omit to wait for real idle time. */
+  idleTimeout?: number;
+  /** Jobs wait while this returns false (re-checked every 250 ms). */
+  canRun?: () => boolean;
+}
+
 export class IdleQueue {
   private jobs: Job[] = [];
   private running = false;
   private paused = false;
+
+  constructor(private readonly opts: IdleQueueOptions = {}) {}
 
   /** Hold queued jobs (e.g. while a heavy foreground task runs); the running job finishes. */
   pause() {
@@ -108,6 +149,10 @@ export class IdleQueue {
     this.jobs = this.jobs.filter((j) => j.key !== key);
   }
 
+  has(key: string) {
+    return this.jobs.some((j) => j.key === key);
+  }
+
   /** Drop all queued jobs; returns their keys. */
   clear(): string[] {
     const keys = this.jobs.map((j) => j.key);
@@ -123,6 +168,10 @@ export class IdleQueue {
     if (this.running || this.paused || !this.jobs.length) return;
     this.running = true;
     const next = () => {
+      if (this.opts.canRun && !this.opts.canRun()) {
+        window.setTimeout(() => this.schedule(next), 250);
+        return;
+      }
       const job = this.paused ? undefined : this.jobs.shift();
       if (!job) {
         this.running = false;
@@ -136,14 +185,17 @@ export class IdleQueue {
             this.running = false;
             return;
           }
-          schedule(next);
+          this.schedule(next);
         });
     };
-    schedule(next);
+    this.schedule(next);
   }
-}
 
-function schedule(fn: () => void) {
-  if (hasIdle) (window as Window & typeof globalThis).requestIdleCallback(() => fn(), { timeout: 250 });
-  else setTimeout(fn, 16);
+  private schedule(fn: () => void) {
+    if (hasIdle) {
+      const w = window as Window & typeof globalThis;
+      if (this.opts.idleTimeout !== undefined) w.requestIdleCallback(() => fn(), { timeout: this.opts.idleTimeout });
+      else w.requestIdleCallback(() => fn());
+    } else setTimeout(fn, 16);
+  }
 }

@@ -22,6 +22,11 @@ export class ClickCounter {
     return count;
   }
 
+  /** Click count of the latest press (0 after reset / before any press). */
+  get count(): number {
+    return this.last?.count ?? 0;
+  }
+
   /** Forget the sequence (the next press counts as a single click). */
   reset() {
     this.last = null;

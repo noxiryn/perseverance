@@ -222,16 +222,23 @@ export function handleBrushKeys(toolId: string, e: KeyboardEvent, keys: KeyTarge
 
 /* ---------------- Shift-click line memory ---------------- */
 
-const lastPoints = new Map<string, { docId: string; layerId: string; x: number; y: number }>();
-
-export function rememberLastPoint(toolId: string, docId: string, layerId: string, p: { x: number; y: number }) {
-  lastPoints.set(toolId, { docId, layerId, x: p.x, y: p.y });
+/** End of a tool's last stroke; `carry` = distance travelled since its last dab (even joint spacing). */
+export interface LastPoint {
+  x: number;
+  y: number;
+  carry: number;
 }
 
-export function lastPointFor(toolId: string, docId: string, layerId: string): { x: number; y: number } | null {
+const lastPoints = new Map<string, LastPoint & { docId: string; layerId: string }>();
+
+export function rememberLastPoint(toolId: string, docId: string, layerId: string, p: { x: number; y: number; carry?: number }) {
+  lastPoints.set(toolId, { docId, layerId, x: p.x, y: p.y, carry: p.carry ?? 0 });
+}
+
+export function lastPointFor(toolId: string, docId: string, layerId: string): LastPoint | null {
   const p = lastPoints.get(toolId);
   if (!p || p.docId !== docId || p.layerId !== layerId) return null;
-  return { x: p.x, y: p.y };
+  return { x: p.x, y: p.y, carry: p.carry };
 }
 
 /* ---------------- axis lock (Shift while dragging) ---------------- */

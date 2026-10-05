@@ -69,14 +69,22 @@ export class BrushStroke {
   /**
    * Start the stroke at `p` WITHOUT stamping there (Shift-click polylines continue from the
    * previous stroke's end point, which already has a dab — stamping it again would leave a
-   * darker blob at every joint with soft or low-flow brushes). Follow with lineTo().
+   * darker blob at every joint with soft or low-flow brushes). `carry` is the previous stroke's
+   * distance since its last dab (`resumeState`), so spacing stays even across the joint.
+   * Follow with lineTo().
    */
-  beginAt(p: InputPoint): void {
+  beginAt(p: InputPoint, carry = 0): void {
     this.current = { ...p };
     this.stab.push(p);
     this.smoother.push(p);
     this.pending = null;
-    this.spacer.start(p);
+    this.spacer.resume(p, carry);
+  }
+
+  /** Where a Shift-click continuation should resume: the spacing path's end and its carry. */
+  get resumeState(): { x: number; y: number; carry: number } | null {
+    const p = this.spacer.lastPoint;
+    return p ? { x: p.x, y: p.y, carry: this.spacer.carried } : null;
   }
 
   private feed(points: InputPoint[]): Dab[] {

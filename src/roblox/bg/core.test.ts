@@ -3,14 +3,17 @@ import { makeBuffer, type PixelBuffer } from '../pixels';
 import {
   DEFAULT_BG_PARAMS,
   GREEN_PRESET,
+  GREEN_SPILL_BAND,
   applyMask,
   colorDistance,
   computeKeepMask,
   decontaminate,
+  maskChangeBounds,
   paletteFor,
   removeBackground,
   sampleBorderPalette,
   subjectMask,
+  unionRect,
   type BgParams,
 } from './core';
 
@@ -144,10 +147,40 @@ describe('pipeline', () => {
     expect(img.data[7]).toBe(200);
   });
 
-  it('decontaminates green spill on kept pixels', () => {
-    const img = makeBuffer(1, 1, [120, 200, 110, 255]);
-    decontaminate(img, new Uint8ClampedArray([255]), { ...DEFAULT_BG_PARAMS, ...GREEN_PRESET, decontaminate: 1 }, paletteFor(img, { ...DEFAULT_BG_PARAMS, ...GREEN_PRESET }));
-    expect(img.data[1]).toBeLessThanOrEqual(Math.max(img.data[0], img.data[2]) + 1);
+  it('decontaminates green spill only along the cut', () => {
+    // 16×1 row: pixel 0 removed, the rest kept and all green-tinted.
+    const w = 16;
+    const img = makeBuffer(w, 1, [120, 200, 110, 255]);
+    const mask = new Uint8ClampedArray(w).fill(255);
+    mask[0] = 0;
+    const params = { ...DEFAULT_BG_PARAMS, ...GREEN_PRESET, decontaminate: 1 };
+    const res = decontaminate(img, mask, params, paletteFor(img, params));
+    expect(res.changed).toBe(true);
+    // Next to the cut: spill removed.
+    expect(img.data[4 + 1]).toBeLessThanOrEqual(Math.max(img.data[4], img.data[4 + 2]) + 1);
+    // Far from the cut (interior): untouched — green clothing keeps its color.
+    expect([...img.data.slice(15 * 4, 15 * 4 + 3)]).toEqual([120, 200, 110]);
+    expect(res.rect).toMatchObject({ y: 0, height: 1 });
+    expect(res.rect!.x).toBeGreaterThanOrEqual(1);
+    expect(res.rect!.x + res.rect!.width).toBeLessThanOrEqual(GREEN_SPILL_BAND + 2);
+  });
+
+  it('does not decontaminate when nothing is removed or the amount is 0', () => {
+    const img = makeBuffer(4, 1, [120, 200, 110, 255]);
+    const params = { ...DEFAULT_BG_PARAMS, ...GREEN_PRESET, decontaminate: 1 };
+    expect(decontaminate(img, new Uint8ClampedArray(4).fill(255), params, []).changed).toBe(false);
+    const mask = new Uint8ClampedArray([0, 255, 255, 255]);
+    expect(decontaminate(img, mask, { ...params, decontaminate: 0 }, []).changed).toBe(false);
+    expect([...img.data.slice(4, 7)]).toEqual([120, 200, 110]);
+  });
+
+  it('bounds the pixels a delete changes', () => {
+    const mask = new Uint8ClampedArray(5 * 4).fill(255);
+    mask[1 * 5 + 2] = 0;
+    mask[3 * 5 + 3] = 128;
+    expect(maskChangeBounds(mask, 5, 4)).toEqual({ x: 2, y: 1, width: 2, height: 3 });
+    expect(maskChangeBounds(new Uint8ClampedArray(4).fill(255), 2, 2)).toBeNull();
+    expect(unionRect({ x: 0, y: 0, width: 2, height: 2 }, { x: 3, y: 1, width: 1, height: 4 })).toEqual({ x: 0, y: 0, width: 4, height: 5 });
   });
 
   it('removeBackground returns a mask and the palette used', () => {

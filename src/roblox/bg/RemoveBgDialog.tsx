@@ -3,7 +3,7 @@
  * Auto / Color key / Green screen modes, tolerance + softness, feather, shrink edge, spill
  * decontamination, and output as a layer mask (default) or deleted pixels.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Eraser, Pipette, Scissors } from 'lucide-react';
 import { Button, Checkbox, Dialog, Field } from '../../ui/controls';
 import { activeDoc } from '../../state/editor';
@@ -127,6 +127,11 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
     lastOutput = output;
     if (applyRemoveBackground(layerId, params, output)) close(true);
   };
+  // Enter: the Dialog first blurs a focused number field (committing its typed value) and submits
+  // on the next tick — go through a ref so the freshly committed params are the ones applied.
+  const applyRef = useRef(apply);
+  applyRef.current = apply;
+  const submit = useCallback(() => applyRef.current(), []);
 
   if (!layer || !working) {
     return (
@@ -143,7 +148,7 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
       title={`Remove Background — “${layer.name}”`}
       width="min(1180px, 92vw)"
       onClose={() => close()}
-      onSubmit={apply}
+      onSubmit={submit}
       footer={
         <div className="roblox-foot">
           <span className="info">
@@ -214,7 +219,17 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
           <Group title="Edges">
             <SliderRow label="Feather" value={params.feather} min={0} max={20} step={0.1} unit="px" onChange={(feather) => set({ feather })} />
             <SliderRow label="Shrink edge" value={params.shrink} min={0} max={20} step={0.5} unit="px" onChange={(shrink) => set({ shrink })} hint="Erode the cut-out to drop background fringes" />
-            <SliderRow label="Decontaminate" value={params.decontaminate} min={0} max={1} step={0.01} displayScale={100} unit="%" onChange={(decontaminate) => set({ decontaminate })} hint="Remove background color spill from edge pixels (adjusts edge colors)" />
+            <SliderRow
+              label="Decontaminate"
+              value={params.decontaminate}
+              min={0}
+              max={1}
+              step={0.01}
+              displayScale={100}
+              unit="%"
+              onChange={(decontaminate) => set({ decontaminate })}
+              hint="Remove background color spill from the pixels along the cut. This recolors those edge pixels on the layer (interior colors are never changed), even with Layer mask output — set 0% to keep every pixel untouched."
+            />
           </Group>
           <Group title="Output">
             <Seg
@@ -225,7 +240,18 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
               ]}
               onChange={setOutput}
             />
-            <Hint>{output === 'mask' ? 'Non-destructive — refine later by painting on the mask, or disable it with Shift-click on its thumbnail.' : 'Pixels are erased from the layer (undo with Ctrl+Z).'}</Hint>
+            <Hint>
+              {output === 'mask'
+                ? `Non-destructive — refine later by painting on the mask, or disable it with Shift-click on its thumbnail.${params.decontaminate > 0 ? ' Edge decontamination still recolors pixels along the cut.' : ''}`
+                : 'Pixels are erased from the layer (undo with Ctrl+Z).'}
+            </Hint>
+            {output === 'mask' && layer.mask && (
+              <Hint>
+                {layer.mask.enabled === false
+                  ? '⚠ This layer has a disabled mask — applying replaces it (Undo restores it).'
+                  : 'The layer already has a mask — the cut-out is combined with it.'}
+              </Hint>
+            )}
           </Group>
         </div>
       </div>

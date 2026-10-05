@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { LayoutTemplate, Loader2 } from 'lucide-react';
 import { templates, useRegistry, type TemplateDef } from '../registry';
 import { Button, Dialog, SearchInput } from '../ui/controls';
+import { nextPaint } from '../looks/shared';
 import { openTemplate } from './open';
 import { cancelPendingTemplatePreviews, pauseTemplatePreviews, useTemplatePreview } from './previews';
 import './templates.css';
@@ -130,6 +131,8 @@ export function NewFromTemplateDialog({ close }: { close: (result?: string) => v
     pauseTemplatePreviews(true);
     let id: string | null = null;
     try {
+      // Paint the "Building…" overlay before the build starts (it then yields between steps).
+      await nextPaint();
       id = await openTemplate(t.id);
     } finally {
       pauseTemplatePreviews(false);

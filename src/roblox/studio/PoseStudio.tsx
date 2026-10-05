@@ -44,6 +44,7 @@ import {
 } from './types';
 import { CameraControls, FRAMING_OPTIONS, LightingControls, OutputControls, ShadingControls, type PreviewBackground } from './ViewControls';
 import { Chip, ChipGrid, ColorRow, Group, Hint, Seg, SliderRow, SwatchRow } from './ui';
+import { useFrameOverflow, useStickyPreset } from './useFraming';
 
 type Tab = 'pose' | 'look' | 'camera' | 'light' | 'style';
 
@@ -113,8 +114,11 @@ const PART_LABELS: { key: keyof BodyColors; label: string }[] = [
 
 const QUICK_CAMERAS = ['front', 'threeQuarterLeft', 'threeQuarterRight', 'lowHero', 'backShoulder'];
 
-function frameKeyOf(s: StudioState) {
-  return `${s.rig}|${s.pose.preset}|${s.camera.framing}|${s.camera.fov}`;
+/** Everything that changes the framed silhouette enough to re-frame automatically. */
+function frameKeyOf(s: StudioState, cameraPreset: string) {
+  const a = s.appearance;
+  const acc = (Object.keys(a.accessories) as (keyof Accessories)[]).filter((k) => a.accessories[k]).join(',');
+  return `${s.rig}|${s.pose.preset}|${a.hair}|${acc}|${cameraPreset}|${s.camera.framing}|${s.camera.fov}`;
 }
 
 function vecEq(a: Vec3, b: Vec3) {
@@ -172,16 +176,18 @@ export function PoseStudioDialog({ close, layerId }: PoseStudioProps & { close: 
     };
   }, [scene]);
 
-  // Auto framing: recompute target/distance when the rig, preset pose, framing or FOV change.
-  // When re-editing, keep the stored camera until something framing-related changes.
-  const frameKey = `${frameKeyOf(state)}|${aspect.toFixed(4)}`;
+  // Auto framing: recompute target/distance when the rig, preset pose, hair, accessories, camera
+  // preset, framing or FOV change. When re-editing, keep the stored camera until something
+  // framing-related changes.
+  const cameraPreset = useStickyPreset(state.camera.preset);
+  const frameKey = `${frameKeyOf(state, cameraPreset)}|${aspect.toFixed(4)}`;
   const lastFrameKey = useRef<string | null>(editing ? frameKey : null);
   const reframe = useCallback(
     (force = false) => {
       if (!scene) return;
       setState((s) => {
         scene.setCharacter(s);
-        const f = scene.computeFraming(s.camera.framing, s.camera.fov, aspect);
+        const f = scene.computeFraming(s.camera.framing, s.camera.fov, aspect, s.camera.yaw, s.camera.pitch);
         if (!force && vecEq(f.target, s.camera.target) && Math.abs(f.baseDistance - s.camera.baseDistance) < 1e-4) return s;
         return { ...s, camera: { ...s.camera, target: f.target, baseDistance: f.baseDistance, ...(force ? { pan: [0, 0, 0] as Vec3 } : {}) } };
       });
@@ -193,6 +199,8 @@ export function PoseStudioDialog({ close, layerId }: PoseStudioProps & { close: 
     lastFrameKey.current = frameKey;
     reframe();
   }, [scene, frameKey, reframe]);
+  // Hand-edited joints, zoom or pan can still push parts out of the frame: warn in the footer.
+  const overflow = useFrameOverflow(scene, state.camera.framing, aspect, state);
 
   /* ---------------- pose editing ---------------- */
 
@@ -400,13 +408,23 @@ export function PoseStudioDialog({ close, layerId }: PoseStudioProps & { close: 
           <Button variant="ghost" size="small" icon={RotateCcw} onClick={resetAll} title="Reset pose, look, camera and lighting to defaults">
             Reset All
           </Button>
-          <span className="info">
-            {!docSize
-              ? `No document open — a ${frame.width}×${frame.height} document will be created`
-              : editing
-                ? `Transparent render at ${frame.width}×${frame.height} → replaces “${editing.name}” (keeps its position, filters and effects)`
-                : `Transparent render at ${frame.width}×${frame.height} → new layer`}
-          </span>
+          {overflow ? (
+            <span className="info roblox-foot-warn">
+              Part of the character is outside the frame —{' '}
+              <button type="button" className="roblox-link" onClick={() => reframe(true)}>
+                Re-frame
+              </button>{' '}
+              or zoom out.
+            </span>
+          ) : (
+            <span className="info">
+              {!docSize
+                ? `No document open — a ${frame.width}×${frame.height} document will be created`
+                : editing
+                  ? `Transparent render at ${frame.width}×${frame.height} → replaces “${editing.name}” (keeps its position, filters and effects)`
+                  : `Transparent render at ${frame.width}×${frame.height} → new layer`}
+            </span>
+          )}
           <Button onClick={cancel}>Cancel</Button>
           <Button variant="primary" icon={Sparkles} onClick={addToDocument} disabled={!scene || busy}>
             {editing ? 'Update Layer' : 'Add to Document'}

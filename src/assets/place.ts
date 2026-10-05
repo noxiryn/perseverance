@@ -15,6 +15,8 @@ import { resolveParams } from '../filters/engine';
 import { activeDoc, useEditor } from '../state/editor';
 import { toast } from '../state/ui';
 import { viewport } from '../editor/viewport';
+import { assetMeta } from './lib/params';
+import { assetFontsReady, loadAssetFonts } from './lib/fonts';
 
 export interface AssetLayerOptions {
   name?: string;
@@ -49,6 +51,45 @@ export function assetLayerSize(def: AssetDef, docWidth: number, docHeight: numbe
   return { width: Math.max(1, Math.round(width * fit)), height: Math.max(1, Math.round(height * fit)) };
 }
 
+/** True when the asset draws text (its first render may use fallback fonts until they load). */
+export function assetNeedsFonts(assetId: string): boolean {
+  return !!assetMeta.get(assetId)?.fonts;
+}
+
+/**
+ * Await everything an asset needs to render faithfully (currently: the fonts of text-drawing
+ * assets). Template/look builders may call it before `createAssetLayer`. Never rejects.
+ */
+export function prepareAsset(assetId: string): Promise<void> {
+  return assetNeedsFonts(assetId) ? loadAssetFonts() : Promise.resolve();
+}
+
+/**
+ * A text-drawing asset rendered before its fonts were ready used fallback faces: re-render it
+ * into the SAME bitmap once they load, unless the bitmap was edited meanwhile (the bitmap is
+ * brand new and owned by the asset layer, so this only corrects its initial content).
+ */
+function refreshWhenFontsReady(assetId: string, params: ParamValues, bitmapId: ID) {
+  if (!assetNeedsFonts(assetId) || assetFontsReady()) return;
+  const v = bitmaps.version(bitmapId);
+  void loadAssetFonts().then(() => {
+    const c = bitmaps.tryGet(bitmapId);
+    const def = assets.get(assetId);
+    if (!c || !def || bitmaps.version(bitmapId) !== v) return;
+    try {
+      const fresh = def.generate(params, { width: c.width, height: c.height });
+      const ctx = c.getContext('2d');
+      if (!ctx) return;
+      ctx.clearRect(0, 0, c.width, c.height);
+      ctx.drawImage(fresh, 0, 0, c.width, c.height);
+      bitmaps.touch(bitmapId);
+      viewport.requestRender();
+    } catch (err) {
+      console.error(`[assets] font refresh of "${assetId}" failed`, err);
+    }
+  });
+}
+
 export function createAssetLayer(
   assetId: string,
   params: ParamValues | undefined,
@@ -61,9 +102,11 @@ export function createAssetLayer(
   const p = resolveParams(def, params);
   const size = assetLayerSize(def, docWidth, docHeight, opts);
   const canvas = def.generate(p, size);
+  const bitmapId = bitmaps.add(canvas);
+  if (def.category !== USER_CATEGORY) refreshWhenFontsReady(assetId, p, bitmapId);
   const layer = makeRasterLayer({
     name: opts.name ?? def.name,
-    bitmapId: bitmaps.add(canvas),
+    bitmapId,
     width: canvas.width,
     height: canvas.height,
     transform:
@@ -166,6 +209,7 @@ export function regenerateAssetLayer(layerId: ID, params: ParamValues): void {
   if (!canvas) return;
   const bitmapId = bitmaps.add(canvas);
   const p = resolveParams(def, params);
+  refreshWhenFontsReady(assetId, p, bitmapId);
   useEditor.getState().updateLayer<RasterLayer>(
     layerId,
     (d) => {

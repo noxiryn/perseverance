@@ -7,12 +7,12 @@
  * All gestures produce a document-space affine delta D relative to the session start; every
  * target's matrix is D · start, decomposed back into a layer Transform.
  */
-import type { Document, ID, Point, Selection, Transform } from '../../core/types';
+import type { Document, HistoryEntry, ID, Point, Selection, Transform } from '../../core/types';
 import type { ToolPointerEvent } from '../../registry';
 import { bitmaps } from '../../core/bitmaps';
 import { createCanvas, ctx2d } from '../../core/canvas';
 import { isTransformable } from '../../core/document';
-import { pointInPolygon } from '../../core/geometry';
+import { pointInPolygon, rectIntersect } from '../../core/geometry';
 import { viewport } from '../../editor/viewport';
 import { ellipseMask, rectMask, selectionFromCanvas, setSelection } from '../../editor/selection';
 import { activeSession, useEditor } from '../../state/editor';
@@ -36,7 +36,7 @@ import {
 import { layerFrame, transformableLeaves } from '../layers';
 import { MaskFollower } from '../maskFollow';
 import { collectSnapTargets, clearSmartGuides, snapPoint, snapRect, type SnapTargets } from '../snap';
-import { drawSelectionAnts } from '../outline';
+import { drawSelectionAnts, shapeInsideCanvas } from '../outline';
 import { drawHandle, drawLabel, drawPivot, resizeCursorForAngle, rotateCursor } from '../draw';
 import { ACCENT, docToScreenMatrix, fmtPx } from '../state';
 
@@ -94,7 +94,10 @@ export class TransformSession {
   readonly kind: 'layers' | 'selection';
   readonly mode: 'immediate' | 'session';
   readonly docId: ID;
-  readonly baseEntryId: ID;
+  /** History step the session started from (its preview sits on top of it). */
+  baseEntryId: ID;
+  /** Document of that history step (to detect a step being rewritten, e.g. a coalesced commit). */
+  baseDoc: Document;
   targets: TransformTarget[] = [];
   fw = 1;
   fh = 1;
@@ -116,12 +119,19 @@ export class TransformSession {
   private undoStack: { D: Affine; pivot: Point }[] = [];
   private follower: MaskFollower | null | undefined = undefined;
 
-  private constructor(kind: 'layers' | 'selection', mode: 'immediate' | 'session', docId: ID, baseEntryId: ID, label: string) {
+  private constructor(kind: 'layers' | 'selection', mode: 'immediate' | 'session', docId: ID, base: HistoryEntry, label: string) {
     this.kind = kind;
     this.mode = mode;
     this.docId = docId;
-    this.baseEntryId = baseEntryId;
+    this.baseEntryId = base.id;
+    this.baseDoc = base.doc;
     this.label = label;
+  }
+
+  /** The history moved under the session on purpose (e.g. a guide was added): continue from `entry`. */
+  rebase(entry: HistoryEntry) {
+    this.baseEntryId = entry.id;
+    this.baseDoc = entry.doc;
   }
 
   /* ---------------- construction ---------------- */
@@ -139,7 +149,7 @@ export class TransformSession {
       if (other.length) return 'Fill and adjustment layers cover the whole canvas and cannot be transformed.';
       return 'Select a pixel, text, shape layer or group to transform.';
     }
-    const ses = new TransformSession('layers', mode, doc.id, s.history.entries[s.history.index].id, label ?? (mode === 'session' ? 'Free Transform' : 'Transform'));
+    const ses = new TransformSession('layers', mode, doc.id, s.history.entries[s.history.index], label ?? (mode === 'session' ? 'Free Transform' : 'Transform'));
     ses.rootIds = [...ids];
     let allRasterText = true;
     for (const id of movable) {
@@ -189,7 +199,7 @@ export class TransformSession {
     const s = activeSession();
     if (!s) return 'Open a document first.';
     if (!doc.selection) return 'There is no selection to transform.';
-    const ses = new TransformSession('selection', 'session', doc.id, s.history.entries[s.history.index].id, 'Transform Selection');
+    const ses = new TransformSession('selection', 'session', doc.id, s.history.entries[s.history.index], 'Transform Selection');
     const b = doc.selection.bounds;
     ses.selection = doc.selection;
     ses.fw = Math.max(1, b.width);
@@ -594,8 +604,8 @@ export class TransformSession {
       if (this.previewed) useEditor.getState().cancelPreview();
       return false;
     }
-    lastLocalDelta = mul(mul(invert(this.frameStart), this.D), this.frameStart);
     if (this.kind === 'layers') {
+      this.recordDelta();
       this.applyPreview();
       useEditor.getState().commit(this.label);
       return true;
@@ -609,7 +619,7 @@ export class TransformSession {
     const D = this.D;
     let shape: Selection['shape'] = null;
     let c: HTMLCanvasElement;
-    if (sel.shape && isAxisAligned(D, 1e-6)) {
+    if (sel.shape && isAxisAligned(D, 1e-6) && shapeInsideCanvas(sel.shape, doc.width, doc.height)) {
       // Vector rect/ellipse selections are regenerated exactly (no resampling blur at the edges).
       const r = sel.shape.rect;
       const p0 = apply(D, { x: r.x, y: r.y });
@@ -619,9 +629,14 @@ export class TransformSession {
         const x0 = Math.round(rect.x);
         const y0 = Math.round(rect.y);
         rect = { x: x0, y: y0, width: Math.max(1, Math.round(rect.x + rect.width) - x0), height: Math.max(1, Math.round(rect.y + rect.height) - y0) };
-        c = rectMask(doc, rect);
-      } else c = ellipseMask(doc, rect);
-      shape = { type: sel.shape.type, rect };
+        // Keep the vector shape equal to the (canvas-clipped) mask.
+        const clipped = rectIntersect(rect, { x: 0, y: 0, width: doc.width, height: doc.height });
+        c = rectMask(doc, clipped ?? rect);
+        shape = clipped ? { type: 'rect', rect: clipped } : null;
+      } else {
+        c = ellipseMask(doc, rect);
+        shape = shapeInsideCanvas({ type: 'ellipse', rect }, doc.width, doc.height) ? { type: 'ellipse', rect } : null;
+      }
     } else {
       c = createCanvas(doc.width, doc.height);
       const ctx = ctx2d(c);
@@ -633,6 +648,15 @@ export class TransformSession {
     const next = selectionFromCanvas(c, shape);
     setSelection(next, this.label);
     return true;
+  }
+
+  /**
+   * Remember this (layer) transform for Edit ▸ Transform ▸ Again. Selection transforms are not
+   * recorded — repeating them on layers would be surprising.
+   */
+  recordDelta() {
+    if (this.kind !== 'layers' || this.isIdentity()) return;
+    lastLocalDelta = mul(mul(invert(this.frameStart), this.D), this.frameStart);
   }
 
   cancel() {

@@ -43,7 +43,9 @@ export async function buildTemplate(id: string, opts: BuildOptions = {}): Promis
     3500,
   );
   const b = new DocBuilder(spec.name, spec.width, spec.height, spec.background === undefined ? '#ffffff' : spec.background, opts);
+  // Describe the layers (fast), then generate their bitmaps in slices that yield to the browser.
   spec.build(b);
+  await b.flush();
   // doc.meta.characterId lets other openers (start screen, palette) select the placeholder too.
   return { doc: b.finish({ template: id, ...(b.characterId ? { characterId: b.characterId } : {}) }), characterId: b.characterId };
 }

@@ -130,9 +130,16 @@ export const tornBorder = defineAsset(
           e = T * Math.max(0.15, e) + bite;
           E[j * gw + i] = e;
           if (texture > 0 && d < e + T) {
-            const wv = nWear(x * kWear, y * kWear) * 0.8 + nWear(x * kWear2 + 7.7, y * kWear2 + 3.1) * 0.2;
-            WEAR[j * gw + i] = smoothstep(0.05, 0.95, wv);
-            STREAK[j * gw + i] = smoothstep(0.2, 0.9, nFib(x * kStreak, y * kStreak)) * (1 - smoothstep(0, T * 0.9, d));
+            // worn print runs parallel to the nearest edge (dry-brush scuffs, not soft clouds):
+            // stretched noise along the edge, blended across the diagonal so corners have no seam
+            const ex = Math.min(x, W - x);
+            const ey = Math.min(y, H - y);
+            const wv = smoothstep(-T * 0.5, T * 0.5, ey - ex); // 1 → left/right edge
+            const along = (n: (a: number, b: number) => number, k: number, ox: number) =>
+              n(x * k * 0.28 + ox, y * k * 1.9) * (1 - wv) + n(x * k * 1.9 + ox, y * k * 0.28) * wv;
+            const wn = along(nWear, kWear, 0) * 0.75 + along(nWear, kWear2, 7.7) * 0.25;
+            WEAR[j * gw + i] = smoothstep(0.25, 1, wn);
+            STREAK[j * gw + i] = smoothstep(0.35, 0.95, along(nFib, kStreak, 3.3)) * (1 - smoothstep(0, T * 0.8, d));
           }
         }
       }
@@ -157,8 +164,15 @@ export const tornBorder = defineAsset(
       const tileOx = (seed * 73) & 255;
       const tileOy = (seed * 151) & 255;
       const limit = reach * 1.6 + band;
+      // E, WEAR and STREAK share the coarse grid: one bilinear setup per pixel serves all three
+      const gxMax = gw - 1.001;
+      const gyMax = gh - 1.001;
       for (let y = 0; y < H; y++) {
-        const gy = (y + 0.5) / cell + 0.5;
+        let gy = (y + 0.5) / cell + 0.5;
+        if (gy > gyMax) gy = gyMax;
+        const gyi = gy | 0;
+        const ty = gy - gyi;
+        const rowBase = gyi * gw;
         const dyEdge = y + 0.5 < H - y - 0.5 ? y + 0.5 : H - y - 0.5;
         const gRow = ((((y / gs) | 0) + tileOy) & 255) * 256;
         for (let x = 0; x < W; x++) {
@@ -170,7 +184,17 @@ export const tornBorder = defineAsset(
             continue;
           }
           const depth = borderDepth(x + 0.5, y + 0.5, W, H, rc);
-          const e = sampleField(E, gw, gh, (x + 0.5) / cell + 0.5, gy);
+          let gx = (x + 0.5) / cell + 0.5;
+          if (gx > gxMax) gx = gxMax;
+          const gxi = gx | 0;
+          const tx = gx - gxi;
+          const q0 = rowBase + gxi;
+          const q1 = q0 + gw;
+          const w00 = (1 - tx) * (1 - ty);
+          const w10 = tx * (1 - ty);
+          const w01 = (1 - tx) * ty;
+          const w11 = tx * ty;
+          const e = E[q0] * w00 + E[q0 + 1] * w10 + E[q1] * w01 + E[q1 + 1] * w11;
           let v = depth - e;
           if (v > band) continue; // clean paper
           const gi = gRow + ((((x / gs) | 0) + tileOx) & 255);
@@ -189,11 +213,11 @@ export const tornBorder = defineAsset(
           // worn print inside the black: blotchy lighter scuffs, pale streaks, grain and specks
           let k = 0;
           if (texture > 0) {
-            const gx = (x + 0.5) / cell + 0.5;
-            const worn = sampleField(WEAR, gw, gh, gx, gy);
-            const streak = sampleField(STREAK, gw, gh, gx, gy);
-            const speck = grain > 0.93 && grain2 > 0.55 ? 1 : 0;
-            k = texture * (worn * (0.15 + grain * 0.85) * 0.38 + grain * 0.14 + streak * (0.25 + grain * 0.5) + speck * 0.75 * (0.3 + worn));
+            const worn = WEAR[q0] * w00 + WEAR[q0 + 1] * w10 + WEAR[q1] * w01 + WEAR[q1 + 1] * w11;
+            const streak = STREAK[q0] * w00 + STREAK[q0 + 1] * w10 + STREAK[q1] * w01 + STREAK[q1 + 1] * w11;
+            const speck = grain > 0.94 && grain2 > 0.58 ? 1 : 0;
+            // mostly an even near-black with fine grain; scuffs only where the print is worn
+            k = texture * (worn * grain * grain * 0.42 + grain * 0.1 + streak * grain * grain * grain * 0.9 + speck * 0.7 * (0.35 + worn));
             if (k > 1) k = 1;
           }
           const tc = k > 0.6 ? pale : light;

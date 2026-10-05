@@ -7,6 +7,7 @@ import {
   bool,
   clamp01,
   defineEffect,
+  fieldsOf,
   finish,
   num,
   offsetDir,
@@ -23,13 +24,15 @@ import { bevelMaps } from './math';
 function mapCanvas(W: number, H: number, r: LocalRect, map: Uint8Array, color: string, opacity: number): HTMLCanvasElement {
   const [cr, cg, cb] = rgbOf(color);
   const img = new ImageData(r.w, r.h);
-  const d = img.data;
+  // One 32-bit store per covered pixel (RGBA bytes in memory order = little-endian ABGR word).
+  const px32 = new Uint32Array(img.data.buffer);
+  const rgb = (cb << 16) | (cg << 8) | cr;
   const o = clamp01(opacity);
-  for (let i = 0, j = 0; i < map.length; i++, j += 4) {
-    d[j] = cr;
-    d[j + 1] = cg;
-    d[j + 2] = cb;
-    d[j + 3] = map[i] * o;
+  const lut = new Uint32Array(256);
+  for (let v = 0; v < 256; v++) lut[v] = ((Math.round(v * o) << 24) | rgb) >>> 0;
+  for (let i = 0; i < map.length; i++) {
+    const v = map[i];
+    if (v) px32[i] = lut[v];
   }
   const c = acquire(W, H);
   ctx2d(c).putImageData(img, r.x, r.y);
@@ -71,15 +74,22 @@ export const bevel = defineEffect(
       const emboss = str(p.style, 'inner') === 'emboss';
       const r = workRect(args, emboss ? size / 2 + 2 : 2);
       if (!r) return;
-      const a = readAlpha(args.content, r);
-      const { hi, sh } = bevelMaps(a, r.w, r.h, {
-        size,
-        depth: Math.max(0, num(p.depth, 1)),
-        angle: num(p.angle, 120),
-        altitude: num(p.altitude, 30),
-        style: emboss ? 'emboss' : 'inner',
-        soften: Math.max(0, num(p.soften, 0)) * s,
-      });
+      const fields = fieldsOf(args);
+      const a = fields.alpha(r);
+      const { hi, sh } = bevelMaps(
+        a,
+        r.w,
+        r.h,
+        {
+          size,
+          depth: Math.max(0, num(p.depth, 1)),
+          angle: num(p.angle, 120),
+          altitude: num(p.altitude, 30),
+          style: emboss ? 'emboss' : 'inner',
+          soften: Math.max(0, num(p.soften, 0)) * s,
+        },
+        (mode, maxDist) => fields.distance(mode, maxDist, r),
+      );
       const W = args.content.width;
       const H = args.content.height;
       const hc = mapCanvas(W, H, r, hi, str(p.highlightColor, '#ffffff'), num(p.highlightOpacity, 0.75));

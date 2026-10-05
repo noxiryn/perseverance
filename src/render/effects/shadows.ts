@@ -10,9 +10,10 @@ import {
   drawBlurred,
   finish,
   inverseMatte,
+  fieldsOf,
   num,
   offsetDir,
-  readAlpha,
+  offsetSides,
   regionOf,
   sizeSigma,
   softDilate,
@@ -54,7 +55,15 @@ export const dropShadow = defineEffect(
       tint(args.target, str(p.color, '#000000'), num(p.opacity, 0.75));
     },
   },
-  { reach: (p, s) => (Math.max(0, num(p.distance, 10)) + Math.max(0, num(p.size, 12)) * 1.3 + 2) * s },
+  {
+    reach: (p, s) => (Math.max(0, num(p.distance, 10)) + Math.max(0, num(p.size, 12)) * 1.3 + 2) * s,
+    // The blur reaches every side; the offset only grows the region in its own direction.
+    extent: (p, s) => {
+      const dir = offsetDir(num(p.angle, 120));
+      const dist = Math.max(0, num(p.distance, 10)) * s;
+      return offsetSides((Math.max(0, num(p.size, 12)) * 1.3 + 2) * s, dir.x * dist, dir.y * dist);
+    },
+  },
 );
 
 export const innerShadow = defineEffect(
@@ -130,7 +139,7 @@ export const longShadow = defineEffect(
       if (bool(p.fade, false)) {
         const r = sweepRect(regionOf(args).bounds, dir.x * L, dir.y * L, W, H);
         if (!r) return release(c);
-        const a = readAlpha(args.content, r);
+        const a = fieldsOf(args).alpha(r);
         const v = longShadowFade(a, r.w, r.h, dir.x, dir.y, L);
         const img = new ImageData(r.w, r.h);
         const d = img.data;
@@ -159,5 +168,14 @@ export const longShadow = defineEffect(
       finish(args.target, c, num(p.opacity, 1));
     },
   },
-  { reach: (p, s) => (Math.max(0, num(p.length, 60)) + 2) * s },
+  {
+    reach: (p, s) => (Math.max(0, num(p.length, 60)) + 2) * s,
+    // Only the shadow's own direction grows the layer region (a 1500px shadow going down-right
+    // must not allocate 1500px on the other three sides too).
+    extent: (p, s) => {
+      const dir = offsetDir(num(p.angle, 135));
+      const L = Math.max(0, num(p.length, 60)) * s + 1;
+      return offsetSides(2, dir.x * L, dir.y * L);
+    },
+  },
 );

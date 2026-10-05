@@ -70,8 +70,13 @@
   text-overflow: ellipsis;
 }
 .looks-target-name em {
-  color: var(--warning);
   font-style: normal;
+}
+.looks-target-name em.warn {
+  color: var(--warning);
+}
+.looks-target-name em.info {
+  color: var(--text-dim);
 }
 
 .looks-filters {
@@ -199,6 +204,28 @@
   background: var(--accent);
   color: #fff;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+.looks-busy {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.45);
+  color: var(--text-strong);
+}
+.looks-spin {
+  animation: looks-spin 0.9s linear infinite;
+  will-change: transform;
+}
+@keyframes looks-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.looks-card.busy:disabled,
+.looks-card.busy {
+  opacity: 1;
+  cursor: progress;
 }
 .looks-name {
   padding: 5px 6px;

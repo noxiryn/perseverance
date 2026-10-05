@@ -13,6 +13,7 @@ import type { FaceStyle, Framing, JointId, LightSpec, ShadingMode, StudioCamera,
 /** Appearance colors that can be changed in place without rebuilding the character. */
 type ColorSlot = PartRole | 'hair' | 'accent';
 import { GRADIENT_RES, lightDirection, toonGradient, yawOf } from './toon';
+import { fitCamera, maxNdcExtent, supersampleFactor } from './framing';
 
 const DEG = Math.PI / 180;
 
@@ -60,18 +61,47 @@ export class StudioScene {
   private frame = 0;
   private disposed = false;
   aspect = 1;
+  /** True after the browser dropped the WebGL context (driver reset / GPU out of memory). */
+  contextLost = false;
+  /** Called when the WebGL context is lost / restored (the stage shows a message). */
+  onContextLost: (() => void) | null = null;
+  onContextRestored: (() => void) | null = null;
 
   constructor() {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true, powerPreference: 'high-performance' });
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.NoToneMapping;
-    this.outline = new OutlineEffect(this.renderer, { defaultThickness: 0.006, defaultColor: [0, 0, 0], defaultAlpha: 1, defaultKeepAlive: true });
-    // OutlineEffect reads `this.autoClear` but never initializes it.
-    (this.outline as unknown as { autoClear: boolean }).autoClear = true;
+    this.outline = this.makeOutline();
     this.scene.add(this.lightTarget, this.keyLight, this.rimLight, this.fillLight, this.ambient, this.content);
     this.lightTarget.position.set(0, 2.6, 0);
     for (const l of [this.keyLight, this.rimLight, this.fillLight]) l.target = this.lightTarget;
+    const el = this.renderer.domElement;
+    el.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      if (this.disposed) return;
+      this.contextLost = true;
+      this.onContextLost?.();
+    });
+    el.addEventListener('webglcontextrestored', () => {
+      if (this.disposed) return;
+      this.contextLost = false;
+      this.onContextRestored?.();
+      this.requestRender();
+    });
+  }
+
+  /**
+   * OutlineEffect caches one outline ShaderMaterial per source material and never disposes them;
+   * a fresh effect per structural rebuild lets the previous cache be garbage-collected.
+   */
+  private makeOutline(): OutlineEffect {
+    const enabled = this.outline?.enabled ?? true;
+    const o = new OutlineEffect(this.renderer, { defaultThickness: 0.006, defaultColor: [0, 0, 0], defaultAlpha: 1, defaultKeepAlive: false });
+    // OutlineEffect reads `this.autoClear` but never initializes it.
+    (o as unknown as { autoClear: boolean }).autoClear = true;
+    o.enabled = enabled;
+    return o;
   }
 
   get canvas(): HTMLCanvasElement {
@@ -185,6 +215,7 @@ export class StudioScene {
 
   private clearContent() {
     this.content.clear();
+    if (this.buildResources.size) this.outline = this.makeOutline();
     for (const r of this.buildResources) r.dispose();
     this.buildResources.clear();
     this.slotMaterials = [];
@@ -197,6 +228,7 @@ export class StudioScene {
   private clearModel() {
     if (!this.model) return;
     this.content.remove(this.model.pivot);
+    this.outline = this.makeOutline();
     for (const r of this.modelResources) r.dispose();
     this.modelResources.clear();
     this.model.root.traverse((o) => {
@@ -348,13 +380,14 @@ export class StudioScene {
     if (key !== this.model.key) {
       for (const r of this.modelResources) r.dispose();
       this.modelResources.clear();
+      this.outline = this.makeOutline();
       for (const [mesh, orig] of this.model.originals) {
         const list = Array.isArray(orig) ? orig : [orig];
         const next = list.map((m) => {
           if (s.mode === 'smooth') return m;
           const src = m as THREE.MeshStandardMaterial;
           let out: THREE.Material;
-          if (s.mode === 'flat') out = new THREE.MeshBasicMaterial({ color: s.flatColor, side: src.side });
+          if (s.mode === 'flat') out = new THREE.MeshBasicMaterial({ color: s.flatColor, side: src.side, alphaTest: src.alphaTest });
           else
             out = new THREE.MeshToonMaterial({
               color: src.color ? src.color.clone() : new THREE.Color('#cccccc'),
@@ -364,6 +397,13 @@ export class StudioScene {
               transparent: src.transparent,
               alphaTest: src.alphaTest,
               opacity: src.opacity,
+              // GLB/FBX models often carry their colors per vertex, plus emissive/normal detail.
+              vertexColors: !!src.vertexColors,
+              alphaMap: src.alphaMap ?? null,
+              normalMap: src.normalMap ?? null,
+              emissive: src.emissive ? src.emissive.clone() : new THREE.Color(0x000000),
+              emissiveMap: src.emissiveMap ?? null,
+              emissiveIntensity: src.emissiveIntensity ?? 1,
             });
           this.modelResources.add(out);
           return out;
@@ -415,7 +455,7 @@ export class StudioScene {
       color: new THREE.Color(sh.outlineColor).toArray(),
       alpha: 1,
       visible: true,
-      keepAlive: true,
+      keepAlive: false,
     };
     this.content.traverse((o) => {
       const mesh = o as THREE.Mesh;
@@ -451,38 +491,91 @@ export class StudioScene {
     this.requestRender();
   }
 
-  /** Compute the framing target/distance for the current content, framing mode, fov and aspect. */
-  computeFraming(framing: Framing, fov: number, aspect: number): FramingResult {
+  /**
+   * World-space points that must be visible for a framing mode: mesh vertices of the whole figure
+   * (full), of everything above the hips (waist), or of the head subtree plus the top of the
+   * shoulders (head close-up). Very dense imported meshes contribute their bounding-box corners.
+   */
+  private framingPoints(framing: Framing): number[] {
     this.content.updateMatrixWorld(true);
-    let box = new THREE.Box3();
+    const pts: number[] = [];
+    const v = new THREE.Vector3();
+    const collect = (root: THREE.Object3D, minY = -Infinity) => {
+      let total = 0;
+      root.traverseVisible((o) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh) total += mesh.geometry.attributes.position?.count ?? 0;
+      });
+      const dense = total > 250_000;
+      root.traverseVisible((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const pos = mesh.geometry.attributes.position;
+        if (!pos) return;
+        if (dense) {
+          if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+          const bb = mesh.geometry.boundingBox!;
+          for (let k = 0; k < 8; k++) {
+            v.set(k & 1 ? bb.max.x : bb.min.x, k & 2 ? bb.max.y : bb.min.y, k & 4 ? bb.max.z : bb.min.z).applyMatrix4(mesh.matrixWorld);
+            if (v.y >= minY) pts.push(v.x, v.y, v.z);
+          }
+          return;
+        }
+        for (let i = 0; i < pos.count; i++) {
+          mesh.getVertexPosition(i, v);
+          v.applyMatrix4(mesh.matrixWorld);
+          if (v.y >= minY) pts.push(v.x, v.y, v.z);
+        }
+      });
+    };
     if (this.rig) {
-      // Whole figure including hair, weapons and cape.
-      box.setFromObject(this.rig.figure);
       if (framing === 'head') {
-        // Head + hair + head accessories, with the top of the shoulders (icon close-up).
-        box = new THREE.Box3().setFromObject(this.rig.joints.neck ?? this.rig.head);
-        const h = box.max.y - box.min.y;
-        box.min.y -= h * 0.32;
-        box.expandByScalar(0.08);
+        const head = this.rig.joints.neck ?? this.rig.head;
+        collect(head);
+        // Extend below the head by a third of its height (top of the shoulders, cut by the frame).
+        const box = new THREE.Box3().setFromObject(head, true);
+        if (!box.isEmpty()) {
+          const h = box.max.y - box.min.y;
+          box.min.y -= h * 0.32;
+          box.expandByScalar(0.08);
+          for (let k = 0; k < 8; k++) pts.push(k & 1 ? box.max.x : box.min.x, k & 2 ? box.max.y : box.min.y, k & 4 ? box.max.z : box.min.z);
+        }
       } else if (framing === 'waist') {
         const hipY = (this.rig.joints.root ?? this.rig.figure).getWorldPosition(new THREE.Vector3()).y - (this.rig.type === 'R6' ? 1 : 0.2);
-        box.min.y = Math.max(box.min.y, hipY - 0.1);
-      }
+        collect(this.rig.figure, hipY - 0.1);
+      } else collect(this.rig.figure);
     } else if (this.model) {
-      box.setFromObject(this.model.pivot);
-      if (framing !== 'full') {
-        const h = box.max.y - box.min.y;
-        box.min.y = box.max.y - h * (framing === 'head' ? 0.28 : 0.6);
-      }
-    } else box.set(new THREE.Vector3(-2, 0, -1), new THREE.Vector3(2, 5.4, 1));
-    if (box.isEmpty()) box.set(new THREE.Vector3(-2, 0, -1), new THREE.Vector3(2, 5.4, 1));
-    const c = box.getCenter(new THREE.Vector3());
-    const size = box.getSize(new THREE.Vector3());
-    const half = Math.tan((Math.max(5, fov) * DEG) / 2);
-    const horiz = Math.max(size.x, size.z);
-    const margin = framing === 'head' ? 1.22 : 1.08;
-    const dist = Math.max((size.y / 2) / half, (horiz / 2) / (half * Math.max(0.2, aspect))) * margin + horiz / 2;
-    return { target: [c.x, c.y, c.z], baseDistance: Math.max(1, dist) };
+      const box = new THREE.Box3().setFromObject(this.model.pivot);
+      const h = box.max.y - box.min.y;
+      collect(this.model.pivot, framing === 'full' || box.isEmpty() ? -Infinity : box.max.y - h * (framing === 'head' ? 0.28 : 0.6));
+    }
+    if (!pts.length) pts.push(-2, 0, -1, 2, 5.4, 1);
+    return pts;
+  }
+
+  private static framingMargin(framing: Framing) {
+    return framing === 'head' ? 1.2 : 1.07;
+  }
+
+  /**
+   * Compute the framing target/distance for the current content so it fits the frame exactly
+   * (perspective-correct) from the given camera angle, FOV and frame aspect.
+   */
+  computeFraming(framing: Framing, fov: number, aspect: number, yaw: number, pitch: number): FramingResult {
+    const fit = fitCamera(this.framingPoints(framing), yaw, pitch, fov, aspect, StudioScene.framingMargin(framing));
+    if (!fit) return { target: [0, 2.7, 0], baseDistance: 11 };
+    return { target: fit.target, baseDistance: Math.max(0.6, fit.distance) };
+  }
+
+  /**
+   * How far the framed content reaches with the current camera in a frame of `aspect`
+   * (> 1 = parts are cut off by the frame edge).
+   */
+  frameExtent(framing: Framing, aspect: number): number {
+    const cam = this.cam;
+    if (!cam || (!this.rig && !this.model)) return 0;
+    const t: Vec3 = [cam.target[0] + cam.pan[0], cam.target[1] + cam.pan[1], cam.target[2] + cam.pan[2]];
+    return maxNdcExtent(this.framingPoints(framing), t, cam.yaw, cam.pitch, Math.max(0.5, cam.baseDistance * cam.distance), cam.fov, aspect);
   }
 
   /** Raycast the rig at client coordinates → joint id of the clicked body part. */
@@ -532,8 +625,9 @@ export class StudioScene {
    * when the GPU allows it for smooth toon edges.
    */
   renderToCanvas(w: number, h: number): HTMLCanvasElement {
+    if (this.contextLost) throw new Error('The 3D view lost its GPU context (graphics driver reset or out of memory). Close and reopen the dialog, or render at a smaller size.');
     const max = this.maxRenderSize();
-    const ss = Math.max(1, Math.min(2, Math.floor(max / Math.max(w, h))));
+    const ss = supersampleFactor(w, h, max);
     const rw = Math.min(max, Math.round(w * ss)),
       rh = Math.min(max, Math.round(h * ss));
     const prev = this.renderer.getSize(new THREE.Vector2());
@@ -549,11 +643,13 @@ export class StudioScene {
     const ctx = ctx2d(out);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(this.renderer.domElement, 0, 0, rw, rh, 0, 0, w, h);
+    const lost = this.renderer.getContext().isContextLost();
+    if (!lost) ctx.drawImage(this.renderer.domElement, 0, 0, rw, rh, 0, 0, w, h);
     this.renderer.setPixelRatio(prevPR);
     this.renderer.setSize(prev.x, prev.y, false);
     this.camera.aspect = prevAspect;
     this.camera.updateProjectionMatrix();
+    if (lost) throw new Error(`The GPU ran out of memory rendering ${w}×${h} (WebGL context lost). Close and reopen the dialog, then choose a smaller output size.`);
     this.render();
     return out;
   }

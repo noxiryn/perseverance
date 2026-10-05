@@ -155,6 +155,7 @@
 }
 .templates-spin {
   animation: templates-spin 0.9s linear infinite;
+  will-change: transform;
 }
 @keyframes templates-spin {
   to {

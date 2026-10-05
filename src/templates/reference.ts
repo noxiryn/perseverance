@@ -4,6 +4,7 @@
  * shapes and adjustment layers. Anything another module hasn't registered is skipped.
  */
 import { S_CURVE, curves, grad } from '../looks/defs';
+import { tornPolygon } from '../looks/masks';
 import { radial, solidPaint as solid, type DocBuilder } from './builder';
 import { defineTemplate } from './define';
 import { segmentTransform } from './layout';
@@ -15,34 +16,7 @@ export function vignette(b: DocBuilder, amount = 0.6, color = '#000000', size = 
   if (!adj) b.asset('vignette-overlay', { color, amount, softness: 0.6 }, { name: 'Vignette', blendMode: 'multiply' });
 }
 
-/**
- * Trace a polygon whose edges are torn (jagged, seeded) — used for mask shapes such as a torn
- * newspaper strip. Points are in document px; `amp` is the tear depth.
- */
-export function tornPolygon(ctx: CanvasRenderingContext2D, pts: [number, number][], amp: number, seed = 1, step = 14) {
-  let st = seed >>> 0 || 1;
-  const rand = () => {
-    st = (st * 1664525 + 1013904223) >>> 0;
-    return st / 0xffffffff;
-  };
-  ctx.beginPath();
-  pts.forEach(([x, y], i) => {
-    const [nx, ny] = pts[(i + 1) % pts.length];
-    if (i === 0) ctx.moveTo(x, y);
-    const len = Math.hypot(nx - x, ny - y);
-    const n = Math.max(1, Math.round(len / step));
-    // perpendicular unit vector
-    const px = -(ny - y) / (len || 1);
-    const py = (nx - x) / (len || 1);
-    for (let k = 1; k <= n; k++) {
-      const t = k / n;
-      const j = k === n ? 0 : (rand() - 0.5) * 2 * amp;
-      ctx.lineTo(x + (nx - x) * t + px * j, y + (ny - y) * t + py * j);
-    }
-  });
-  ctx.closePath();
-  ctx.fill();
-}
+export { tornPolygon };
 
 /** A katana as editable shapes (blade + guard + grip), from the tip to the hilt end. */
 export function sword(b: DocBuilder, tipX: number, tipY: number, endX: number, endY: number, width: number, steel = '#2a2a2e', edge = '#d8d8dc') {

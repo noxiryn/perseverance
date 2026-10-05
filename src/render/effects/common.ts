@@ -9,7 +9,8 @@
 import type { BlendMode, Gradient, ParamDef, ParamValues } from '../../core/types';
 import type { EffectDef, EffectRenderArgs } from '../../registry';
 import { ctx2d } from '../../core/canvas';
-import { acquire, release } from '../surface';
+import { edgeDistance } from '../distance';
+import { acquire, release, uniformSides, type Sides } from '../surface';
 
 /** Integer rect relative to the effect canvases. */
 export interface LocalRect {
@@ -23,20 +24,61 @@ export interface EffectRegion {
   /** Position of the canvases' top-left in output px (doc px × scale). */
   x: number;
   y: number;
-  /** Bounds of the layer content (the layer's box), relative to the canvases. */
+  /**
+   * Extent of everything the layer content can cover, relative to the canvases and clipped to
+   * them: the raster bounds INCLUDING overflow beyond the layout box (text stroke, warp,
+   * descenders, shape stroke, smart-filter growth). Pixel work (strokes, bevels, sweeps) must
+   * cover this rect, never just the layout box.
+   */
   bounds: LocalRect;
+  /**
+   * The layer's layout box (text box / shape box / bitmap rect) relative to the canvases, NOT
+   * clipped. Only for paint geometry (gradient overlay, gradient-filled stroke).
+   */
+  paintBox: LocalRect;
+}
+
+export type DistanceMode = 'outside' | 'inside';
+
+/**
+ * Per-layer pixel data shared between effects (and cached across re-renders of the same layer
+ * content by the compositor): the content alpha and distance fields to the content edge.
+ */
+export interface EffectFields {
+  /** Alpha (0..255) of the content over a canvas-relative rect (zero outside the canvas). */
+  alpha(r: LocalRect): Uint8Array;
+  /**
+   * Distance (px) from each pixel of a canvas-relative rect to the content edge, exact below
+   * `maxDist` (larger values are clamped to ≥ maxDist). See distance.ts `edgeDistance`.
+   */
+  distance(mode: DistanceMode, maxDist: number, r: LocalRect): Float32Array;
 }
 
 export interface EffectArgsExt extends EffectRenderArgs {
   region?: EffectRegion;
   /** Emit an additional piece composited with its own operation (e.g. bevel highlight/shadow). */
   addPiece?: (canvas: HTMLCanvasElement, op: GlobalCompositeOperation) => void;
+  /** Shared alpha / distance fields of the content (computed on demand when absent). */
+  fields?: EffectFields;
 }
 
 export function regionOf(args: EffectRenderArgs): EffectRegion {
   const r = (args as EffectArgsExt).region;
   if (r) return r;
-  return { x: 0, y: 0, bounds: { x: 0, y: 0, w: args.content.width, h: args.content.height } };
+  const all = { x: 0, y: 0, w: args.content.width, h: args.content.height };
+  return { x: 0, y: 0, bounds: all, paintBox: all };
+}
+
+/** Uncached fields straight from a canvas (effects used outside the compositor). */
+export function directFields(content: HTMLCanvasElement): EffectFields {
+  return {
+    alpha: (r) => readAlpha(content, r),
+    distance: (mode, maxDist, r) => edgeDistance(readAlpha(content, r), r.w, r.h, mode, maxDist),
+  };
+}
+
+export function fieldsOf(args: EffectRenderArgs): EffectFields {
+  return (args as EffectArgsExt).fields ?? directFields(args.content);
 }
 
 /* ---------------- placement metadata ---------------- */
@@ -46,8 +88,13 @@ export interface EffectMeta {
   stage?(p: ParamValues): 'behind' | 'above';
   /** Whether an 'above' effect is clipped to the content alpha (default true). */
   clip?(p: ParamValues): boolean;
-  /** How far (output px) the effect can reach beyond the content edges. */
+  /** How far (output px) the effect can reach beyond the content edges (any direction). */
   reach(p: ParamValues, scale: number): number;
+  /**
+   * Per-side reach (output px) for directional effects (shadows): the layer's padded region
+   * only grows where the effect actually goes. Defaults to `reach` on every side.
+   */
+  extent?(p: ParamValues, scale: number): Sides;
   /**
    * The output depends on where the layer sits in the document (e.g. a pattern anchored to the
    * document origin). Such effects disable reusing a layer's render when the layer is moved.
@@ -87,6 +134,22 @@ export function effectReach(def: EffectDef, p: ParamValues, scale: number): numb
   const m = metas.get(def.id);
   if (m) return Math.max(0, m.reach(p, scale));
   return (num(p.size, 0) * 1.5 + num(p.distance, 0) + num(p.length, 0)) * scale;
+}
+
+/** Per-side reach in output px. */
+export function effectExtent(def: EffectDef, p: ParamValues, scale: number): Sides {
+  const m = metas.get(def.id);
+  if (m?.extent) {
+    const e = m.extent(p, scale);
+    return { l: Math.max(0, e.l), t: Math.max(0, e.t), r: Math.max(0, e.r), b: Math.max(0, e.b) };
+  }
+  return uniformSides(effectReach(def, p, scale));
+}
+
+/** Sides reached by a blur of `blur` px around content shifted by (dx, dy). */
+export function offsetSides(blur: number, dx: number, dy: number): Sides {
+  const b = Math.max(0, blur);
+  return { l: b + Math.max(0, -dx), t: b + Math.max(0, -dy), r: b + Math.max(0, dx), b: b + Math.max(0, dy) };
 }
 
 /* ---------------- params ---------------- */

@@ -97,6 +97,33 @@ describe('fetchAvatar', () => {
     await expect(p).rejects.toMatchObject({ kind: 'aborted' });
   });
 
+  /** Response whose body stream never delivers data nor closes. */
+  const stalled = () => new Response(new ReadableStream({ start() {} }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  it('times out while the JSON body is stalled', async () => {
+    const f = mockFetch(() => stalled());
+    const t0 = Date.now();
+    await expect(fetchAvatar('Builderman', 'full', { fetchImpl: f, timeoutMs: 60 })).rejects.toMatchObject({ kind: 'timeout' });
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  it('times out while the image body is stalled', async () => {
+    const f = mockFetch((url) => {
+      if (url.includes('users.roblox')) return json({ data: [{ id: 7, name: 'Builderman' }] });
+      if (url.includes('thumbnails.roblox')) return json({ data: [{ state: 'Completed', imageUrl: 'https://tr.rbxcdn.com/s.png' }] });
+      return new Response(new ReadableStream({ start() {} }), { status: 200, headers: { 'Content-Type': 'image/png' } });
+    });
+    await expect(fetchAvatar('Builderman', 'full', { fetchImpl: f, timeoutMs: 60 })).rejects.toMatchObject({ kind: 'timeout' });
+  });
+
+  it('can be cancelled while a body is downloading', async () => {
+    const ctrl = new AbortController();
+    const f = mockFetch(() => stalled());
+    const p = fetchAvatar('Builderman', 'full', { fetchImpl: f, signal: ctrl.signal, timeoutMs: 10000 });
+    setTimeout(() => ctrl.abort(), 20);
+    await expect(p).rejects.toMatchObject({ kind: 'aborted' });
+  });
+
   it('handles moderated renders, HTTP errors and still-pending renders', async () => {
     const lookup = json({ data: [{ id: 1, name: 'a_b' }] });
     const blocked = mockFetch((url) => (url.includes('users.roblox') ? lookup.clone() : json({ data: [{ state: 'Blocked' }] })));

@@ -70,6 +70,26 @@ let gBuf = new Float32Array(0);
 let gyBuf = new Int32Array(0);
 let colBuf = new Int32Array(0);
 
+/**
+ * Per-pixel scratch maps (9 bytes/px) are pooled between calls up to this many pixels; larger
+ * maps (e.g. a 4× export of a full-canvas stroked layer) are released after the call instead of
+ * staying allocated for the rest of the session.
+ */
+export const POOLED_MAP_PIXELS = 4 * 1024 * 1024;
+
+function trimMaps() {
+  if (siteBuf.length > POOLED_MAP_PIXELS) {
+    siteBuf = new Uint8Array(0);
+    gBuf = new Float32Array(0);
+    gyBuf = new Int32Array(0);
+  }
+}
+
+/** Currently pooled scratch-map size in pixels (tests / diagnostics). */
+export function pooledMapPixels(): number {
+  return siteBuf.length;
+}
+
 function ensureMap(n: number, w: number) {
   if (siteBuf.length < n) {
     siteBuf = new Uint8Array(n);
@@ -182,6 +202,7 @@ export function edgeDistance(cov: Uint8Array | Uint8ClampedArray, w: number, h: 
       // Pixels in (c1, x) were non-candidates (already resolved); continue from x.
     }
   }
+  trimMaps();
   return out;
 }
 

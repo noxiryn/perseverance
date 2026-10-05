@@ -1,6 +1,6 @@
 /** Stroke: crisp anti-aliased outline from an exact distance transform (outside/inside/center). */
 import { fillWithPaint } from '../paint';
-import { DEFAULT_GRADIENT, P, alphaOfColor, clamp01, defineEffect, isGradient, num, readAlpha, regionOf, rgbOf, str, workRect } from './common';
+import { DEFAULT_GRADIENT, P, alphaOfColor, clamp01, defineEffect, fieldsOf, isGradient, num, regionOf, rgbOf, str, workRect } from './common';
 import { strokeCoverage, type StrokePosition } from './math';
 
 function position(v: unknown): StrokePosition {
@@ -50,8 +50,11 @@ export const stroke = defineEffect(
       if (!r) return;
       const opacity = clamp01(num(p.opacity, 1));
       if (opacity <= 0) return;
-      const a = readAlpha(args.content, r);
-      const cov = strokeCoverage(a, r.w, r.h, size, pos);
+      // Alpha + distance fields are shared with other effects of the layer and cached across
+      // re-renders of the same content (dragging the size/color only re-maps the coverage).
+      const fields = fieldsOf(args);
+      const a = fields.alpha(r);
+      const cov = strokeCoverage(a, r.w, r.h, size, pos, (mode, maxDist) => fields.distance(mode, maxDist, r));
       const gradient = str(p.fillType, 'color') === 'gradient' && isGradient(p.gradient) ? p.gradient : null;
       const color = str(p.color, '#000000');
       const [cr, cg, cb] = gradient ? [255, 255, 255] : rgbOf(color);
@@ -71,7 +74,8 @@ export const stroke = defineEffect(
       const t = args.target;
       t.putImageData(img, r.x, r.y);
       if (gradient) {
-        const b = regionOf(args).bounds;
+        // Gradient geometry follows the layout box (grown by the stroke), like Photoshop.
+        const b = regionOf(args).paintBox;
         const grow = pos === 'inside' ? 0 : pos === 'center' ? size / 2 : size;
         const area = new Path2D();
         area.rect(r.x, r.y, r.w, r.h);

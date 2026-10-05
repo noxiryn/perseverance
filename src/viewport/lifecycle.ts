@@ -2,8 +2,9 @@
  * Module-level store watchers (installed once on import):
  *  - tool lifecycle: calls onDeactivate/onActivate when the active tool changes and resets the
  *    cursor override;
- *  - free-transform watchdog: drops a session whose document/history moved underneath it
- *    (document switch, undo/redo, another command committing);
+ *  - free-transform watchdog: a command committing on top of a live Free Transform preview gets
+ *    the transform split into its own history step first; a session whose document/history moved
+ *    underneath it otherwise (document switch, undo/redo) is dropped;
  *  - remembers the last selection per document for Select ▸ Reselect.
  */
 import type { ID, Selection } from '../core/types';
@@ -11,7 +12,7 @@ import { bitmaps } from '../core/bitmaps';
 import { tools } from '../registry';
 import { viewport } from '../editor/viewport';
 import { useEditor } from '../state/editor';
-import { abandonTransform, activeTransform } from './transform/controller';
+import { abandonTransform, absorbForeignCommit, activeTransform, isTransformRebasing } from './transform/controller';
 import { clearSmartGuides } from './snap';
 import { vpState } from './state';
 
@@ -53,10 +54,17 @@ function install() {
 
     /* free transform watchdog */
     const ses = activeTransform();
-    if (ses) {
+    if (ses && !isTransformRebasing()) {
       const s = st.activeDocId ? st.sessions[st.activeDocId] : null;
       if (!s || s.doc.id !== ses.docId) abandonTransform(ses.docId);
-      else if (s.history.entries[s.history.index]?.id !== ses.baseEntryId) abandonTransform();
+      else {
+        const cur = s.history.entries[s.history.index];
+        if (cur?.id !== ses.baseEntryId || cur.doc !== ses.baseDoc) {
+          // Another command committed on top of the live preview → give the transform its own
+          // step first; anything else (undo/redo/history jump) simply ends the session.
+          if (!absorbForeignCommit(prev)) abandonTransform();
+        }
+      }
     }
 
     /* reselect memory */

@@ -9,7 +9,7 @@ import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { extOf } from '../../platform';
-import { isTextureName, mimeOf, mtlLibsOf, pickMainFile, resourceKey, type ModelFormat } from './modelFiles';
+import { WHITE_PIXEL_PNG, isTextureName, mimeOf, mtlLibsOf, pickMainFile, resourceKey, selectMtlFiles, type ModelFormat } from './modelFiles';
 
 import type { ModelFile } from './modelCache';
 
@@ -29,9 +29,16 @@ export interface LoadedModel {
   triangles: number;
 }
 
-/** 1×1 white PNG used for textures that were not selected (keeps the material color visible). */
-const WHITE_PIXEL =
-  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=';
+/** Stand-in for textures that were not selected (white keeps the material color visible). */
+const WHITE_PIXEL = WHITE_PIXEL_PNG;
+
+const MAP_SLOTS = ['map', 'emissiveMap', 'normalMap', 'bumpMap', 'specularMap', 'alphaMap', 'aoMap', 'lightMap', 'roughnessMap', 'metalnessMap', 'displacementMap'] as const;
+
+/** True when a texture's image is the stand-in for a missing file. */
+function isPlaceholderTexture(t: THREE.Texture | null | undefined): boolean {
+  const img = t?.image as { src?: string } | undefined;
+  return !!img && typeof img.src === 'string' && img.src === WHITE_PIXEL;
+}
 
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -95,10 +102,12 @@ export async function loadModel(files: ModelFile[]): Promise<LoadedModel> {
       const text = new TextDecoder().decode(main.data);
       const loader = new OBJLoader(manager);
       const libs = mtlLibsOf(text).map(resourceKey);
-      const mtl = files.find((f) => libs.includes(resourceKey(f.name))) ?? files.find((f) => extOf(f.name) === 'mtl');
       for (const l of libs) if (!urls.has(l)) missing.add(l);
-      if (mtl) {
-        const creator = new MTLLoader(manager).parse(new TextDecoder().decode(mtl.data), '');
+      // OBJ files may list several material libraries — parse them all as one.
+      const mtls = selectMtlFiles(text, files);
+      if (mtls.length) {
+        const mtlText = mtls.map((m) => new TextDecoder().decode(m.data)).join('\n');
+        const creator = new MTLLoader(manager).parse(mtlText, '');
         creator.preload();
         loader.setMaterials(creator);
       }
@@ -124,6 +133,14 @@ export async function loadModel(files: ModelFile[]): Promise<LoadedModel> {
       mesh.frustumCulled = false;
       for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
         const mm = m as THREE.MeshPhongMaterial;
+        // Textures whose files were not selected: drop the stand-in so the material color shows.
+        const slots = mm as unknown as Record<string, THREE.Texture | null | undefined>;
+        for (const slot of MAP_SLOTS) {
+          if (isPlaceholderTexture(slots[slot])) {
+            slots[slot]!.dispose();
+            slots[slot] = null;
+          }
+        }
         if (mm.map) mm.map.colorSpace = THREE.SRGBColorSpace;
         // Roblox OBJ exports often flag opaque parts as transparent (d 1 / Tr 0) — avoid sorting artifacts.
         if (mm.transparent && mm.opacity >= 0.99 && !mm.alphaMap) mm.transparent = false;

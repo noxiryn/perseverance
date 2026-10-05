@@ -70,6 +70,30 @@ describe('BrushStroke', () => {
     expect(dabs[dabs.length - 1].y).toBeCloseTo(50, 6);
   });
 
+  it('Shift-click continuation keeps even spacing across the joint (carry)', () => {
+    // Step = 0.25 × 20 = 5 px. First stroke 0 → 48: last dab at 45, 3 px carried.
+    const a = new BrushStroke(cfg);
+    a.begin({ x: 0, y: 0, pressure: 1 });
+    const first = a.lineTo({ x: 0, y: 48, pressure: 1 });
+    expect(first[first.length - 1].y).toBeCloseTo(45, 6);
+    const end = a.resumeState!;
+    expect(end.y).toBeCloseTo(48, 6);
+    expect(end.carry).toBeCloseTo(3, 6);
+    const b = new BrushStroke(cfg);
+    b.beginAt({ x: end.x, y: end.y, pressure: 1 }, end.carry);
+    const dabs = b.lineTo({ x: 0, y: 70, pressure: 1 });
+    expect(dabs[0].y).toBeCloseTo(50, 6); // 45 + one step, not 48 + one step
+    expect(dabs.map((d) => Math.round(d.y))).toEqual([50, 55, 60, 65, 70]);
+  });
+
+  it('a carry larger than the (new, smaller) step never stamps behind the start', () => {
+    const s = new BrushStroke(cfg);
+    s.beginAt({ x: 0, y: 0, pressure: 1 }, 40);
+    const dabs = s.lineTo({ x: 0, y: 12, pressure: 1 });
+    expect(dabs[0].y).toBeGreaterThanOrEqual(0);
+    expect(dabs.map((d) => Math.round(d.y))).toEqual([0, 5, 10]);
+  });
+
   it('beginAt never emits a deferred follow-direction dab at the joint', () => {
     const s = new BrushStroke({ ...cfg, followDirection: true });
     s.beginAt({ x: 0, y: 0, pressure: 1 });

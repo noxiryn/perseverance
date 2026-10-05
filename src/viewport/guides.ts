@@ -11,6 +11,7 @@ import { collectSnapTargets, computeValueSnap, snapEnabled, snapThreshold, type 
 import { minorStep } from './rulers';
 import { drawLabel } from './draw';
 import { GUIDE_COLOR, RULER, fmtPx, vpState, type GuideDrag } from './state';
+import { commitBesideTransform } from './transform/controller';
 
 /** Guide under a screen point (within `tol` CSS px), topmost last-added first. */
 export function hitGuide(doc: Document, screen: Point, tol = 4): Guide | null {
@@ -84,25 +85,28 @@ export function endGuideDrag() {
   viewport.requestOverlay();
   const s = activeSession();
   if (!d || !s) return;
-  const st = useEditor.getState();
+  // Guides can be placed while a Free Transform runs (e.g. to snap to them): the guide gets its
+  // own history step and the transform session continues on top of it.
+  const commit: (label: string, recipe: (draft: Document) => void) => void = (label, recipe) =>
+    commitBesideTransform(() => useEditor.getState().commit(label, recipe));
   if (d.id === null) {
     if (d.remove) return;
     const g: Guide = { id: uid('g_'), orientation: d.orientation, position: d.position };
-    st.commit('New Guide', (draft) => {
+    commit('New Guide', (draft) => {
       draft.guides.push(g);
     });
     return;
   }
   const id = d.id;
   if (d.remove) {
-    st.commit('Delete Guide', (draft) => {
+    commit('Delete Guide', (draft) => {
       draft.guides = draft.guides.filter((x) => x.id !== id);
     });
     return;
   }
   const orig = s.doc.guides.find((x) => x.id === id);
   if (!orig || orig.position === d.position) return;
-  st.commit('Move Guide', (draft) => {
+  commit('Move Guide', (draft) => {
     const g = draft.guides.find((x) => x.id === id);
     if (g) g.position = d.position;
   });

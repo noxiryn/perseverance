@@ -42,13 +42,20 @@ export const GREEN_PRESET: Partial<BgParams> = { mode: 'green', tolerance: 30, s
 
 export type RGB = [number, number, number];
 
-/** Perceptual-ish ("redmean") color distance scaled to 0..100. */
-export function colorDistance(r: number, g: number, b: number, pr: number, pg: number, pb: number): number {
+/** Squared "redmean" color distance (unscaled) — compare these, take the root once. */
+function colorDistanceSq(r: number, g: number, b: number, pr: number, pg: number, pb: number): number {
   const rm = (r + pr) / 2;
   const dr = r - pr,
     dg = g - pg,
     db = b - pb;
-  return (Math.sqrt((2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db) / 765) * 100;
+  return (2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db;
+}
+
+const DIST_SCALE = 100 / 765;
+
+/** Perceptual-ish ("redmean") color distance scaled to 0..100. */
+export function colorDistance(r: number, g: number, b: number, pr: number, pg: number, pb: number): number {
+  return Math.sqrt(colorDistanceSq(r, g, b, pr, pg, pb)) * DIST_SCALE;
 }
 
 /**
@@ -139,6 +146,7 @@ export function backgroundDistance(img: PixelBuffer, params: BgParams, palette: 
     return D;
   }
   const pal = palette;
+  const k0 = pal.length;
   for (let i = 0, q = 0; i < n; i++, q += 4) {
     if (d[q + 3] < 16) {
       D[i] = 0;
@@ -147,13 +155,13 @@ export function backgroundDistance(img: PixelBuffer, params: BgParams, palette: 
     const r = d[q],
       g = d[q + 1],
       b = d[q + 2];
-    let best = 1e9;
-    for (let k = 0; k < pal.length; k++) {
+    let best = Infinity;
+    for (let k = 0; k < k0; k++) {
       const c = pal[k];
-      const v = colorDistance(r, g, b, c[0], c[1], c[2]);
+      const v = colorDistanceSq(r, g, b, c[0], c[1], c[2]);
       if (v < best) best = v;
     }
-    D[i] = best;
+    D[i] = Math.sqrt(best) * DIST_SCALE;
   }
   return D;
 }
@@ -229,63 +237,100 @@ export function computeKeepMask(img: PixelBuffer, params: BgParams, palette = pa
   return out;
 }
 
-/** Remove background color spill from kept pixels (in place). */
-export function decontaminate(img: PixelBuffer, mask: Uint8ClampedArray, params: BgParams, palette: RGB[]): PixelBuffer {
+export interface PixelRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface DecontaminateResult {
+  /** True when any pixel color changed. */
+  changed: boolean;
+  /** Bounds of the changed pixels (null when nothing changed). */
+  rect: PixelRect | null;
+}
+
+/** Edge band (px from the removed area) where spill is removed: color keys / green screen. */
+export const DECONTAM_BAND = 3;
+export const GREEN_SPILL_BAND = 6;
+
+/**
+ * Remove background color spill from kept pixels near the cut (in place): partially transparent
+ * pixels and pixels within a few px of the removed area. Interior colors are never touched, so
+ * e.g. green clothing away from the edge keeps its color.
+ */
+export function decontaminate(img: PixelBuffer, mask: Uint8ClampedArray, params: BgParams, palette: RGB[]): DecontaminateResult {
+  const none: DecontaminateResult = { changed: false, rect: null };
   const amount = Math.max(0, Math.min(1, params.decontaminate));
-  if (amount <= 0) return img;
+  if (amount <= 0) return none;
+  const green = params.mode === 'green';
+  if (!green && !palette.length) return none;
   const { width: w, height: h, data: d } = img;
   const n = w * h;
-  if (params.mode === 'green') {
-    for (let i = 0, q = 0; i < n; i++, q += 4) {
-      if (!mask[i]) continue;
-      const r = d[q],
-        g = d[q + 1],
-        b = d[q + 2];
-      const cap = Math.max(r, b);
-      if (g > cap) {
-        const ng = cap + (g - cap) * (1 - amount);
-        // Restore lost luminance a little so skin doesn't go magenta.
-        const lost = (g - ng) * 0.3;
-        d[q] = r + lost * amount;
-        d[q + 1] = ng;
-        d[q + 2] = b + lost * amount;
-      }
-    }
-    return img;
-  }
-  if (!palette.length) return img;
-  // Pixels near the edge: partially transparent, or within a few px of the removed area.
   const inside = new Uint8Array(n);
-  for (let i = 0; i < n; i++) inside[i] = mask[i] >= 250 ? 1 : 0;
+  let anyRemoved = false;
+  for (let i = 0; i < n; i++) {
+    if (mask[i] >= 250) inside[i] = 1;
+    else anyRemoved = true;
+  }
+  if (!anyRemoved) return none;
   const dist = distanceToOutside(inside, w, h, false);
-  const band = 3;
+  const band = green ? GREEN_SPILL_BAND : DECONTAM_BAND;
+  let x0 = w,
+    y0 = h,
+    x1 = -1,
+    y1 = -1;
   for (let i = 0, q = 0; i < n; i++, q += 4) {
     const m = mask[i];
     if (!m) continue;
-    if (inside[i] && dist[i] > band) continue;
+    const di = dist[i];
+    if (inside[i] && di > band) continue;
     const r = d[q],
       g = d[q + 1],
       b = d[q + 2];
-    // nearest background color
-    let best = 1e9,
-      bc = palette[0];
-    for (const c of palette) {
-      const v = colorDistance(r, g, b, c[0], c[1], c[2]);
-      if (v < best) {
-        best = v;
-        bc = c;
+    // Fade the correction out toward the inner edge of the band.
+    const fade = inside[i] ? Math.min(1, (band + 1 - di) / 2) : 1;
+    const k = amount * fade;
+    if (green) {
+      const cap = Math.max(r, b);
+      if (g <= cap) continue;
+      const ng = cap + (g - cap) * (1 - k);
+      // Restore lost luminance a little so skin doesn't go magenta.
+      const lost = (g - ng) * 0.3;
+      d[q] = r + lost * k;
+      d[q + 1] = ng;
+      d[q + 2] = b + lost * k;
+    } else {
+      // Nearest background color.
+      let best = Infinity,
+        bc = palette[0];
+      for (const c of palette) {
+        const v = colorDistanceSq(r, g, b, c[0], c[1], c[2]);
+        if (v < best) {
+          best = v;
+          bc = c;
+        }
       }
+      const edgeA = inside[i] ? Math.min(1, 0.55 + di / (band * 2.2)) : m / 255;
+      const a = Math.max(0.2, edgeA);
+      const fr = (r - (1 - a) * bc[0]) / a;
+      const fg = (g - (1 - a) * bc[1]) / a;
+      const fb = (b - (1 - a) * bc[2]) / a;
+      d[q] = r + (fr - r) * k;
+      d[q + 1] = g + (fg - g) * k;
+      d[q + 2] = b + (fb - b) * k;
     }
-    const edgeA = inside[i] ? Math.min(1, 0.55 + dist[i] / (band * 2.2)) : m / 255;
-    const a = Math.max(0.2, edgeA);
-    const fr = (r - (1 - a) * bc[0]) / a;
-    const fg = (g - (1 - a) * bc[1]) / a;
-    const fb = (b - (1 - a) * bc[2]) / a;
-    d[q] = r + (fr - r) * amount;
-    d[q + 1] = g + (fg - g) * amount;
-    d[q + 2] = b + (fb - b) * amount;
+    if (d[q] !== r || d[q + 1] !== g || d[q + 2] !== b) {
+      const x = i % w,
+        y = (i - x) / w;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
   }
-  return img;
+  return x1 < 0 ? none : { changed: true, rect: { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 } };
 }
 
 /** Multiply the image alpha by the keep-mask (in place). */
@@ -295,12 +340,44 @@ export function applyMask(img: PixelBuffer, mask: Uint8ClampedArray): PixelBuffe
   return img;
 }
 
-/** Full pipeline on a copy: returns { mask, palette } and modifies `img` when decontaminating. */
-export function removeBackground(img: PixelBuffer, params: BgParams): { mask: Uint8ClampedArray; palette: RGB[] } {
+/**
+ * Full pipeline: returns { mask, palette, decontaminated } and modifies `img` in place when
+ * decontaminating (only edge pixels; `decontaminated.rect` bounds the changed area).
+ */
+export function removeBackground(img: PixelBuffer, params: BgParams): { mask: Uint8ClampedArray; palette: RGB[]; decontaminated: DecontaminateResult } {
   const palette = paletteFor(img, params);
   const mask = computeKeepMask(img, params, palette);
-  decontaminate(img, mask, params, palette);
-  return { mask, palette };
+  const decontaminated = decontaminate(img, mask, params, palette);
+  return { mask, palette, decontaminated };
+}
+
+/** Bounds of mask pixels below 255 (pixels whose alpha a 'delete' output changes), or null. */
+export function maskChangeBounds(mask: Uint8ClampedArray, w: number, h: number): PixelRect | null {
+  let x0 = w,
+    y0 = h,
+    x1 = -1,
+    y1 = -1;
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      if (mask[row + x] < 255) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
+  }
+  return x1 < 0 ? null : { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
+}
+
+/** Union of two optional rects. */
+export function unionRect(a: PixelRect | null, b: PixelRect | null): PixelRect | null {
+  if (!a) return b;
+  if (!b) return a;
+  const x = Math.min(a.x, b.x),
+    y = Math.min(a.y, b.y);
+  return { x, y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y };
 }
 
 /** Subject selection heuristic: alpha if the image has transparency, else auto background removal. */

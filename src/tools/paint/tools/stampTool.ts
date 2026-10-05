@@ -95,8 +95,8 @@ export function createStampTool(spec: StampToolSpec): ToolDef {
       if (e) paint(a, a.stroke.end(a.axis.apply(inputPoint(e), e.shiftKey, a.stroke.position)));
       else paint(a, a.stroke.end());
       a.session.commit(spec.label);
-      const pos = a.stroke.position;
-      if (pos) rememberLastPoint(spec.id, a.target.docId, a.target.layerId, pos);
+      const end = a.stroke.resumeState;
+      if (end) rememberLastPoint(spec.id, a.target.docId, a.target.layerId, end);
     } else a.session.cancel();
     a.setup.dispose?.();
     spec.onStrokeEnd?.();
@@ -154,7 +154,7 @@ export function createStampTool(spec: StampToolSpec): ToolDef {
       const last = e.shiftKey ? lastPointFor(spec.id, target.docId, target.layerId) : null;
       if (last) {
         // Continue the polyline from the previous end point without re-stamping the joint.
-        stroke.beginAt({ ...last, pressure: p.pressure });
+        stroke.beginAt({ x: last.x, y: last.y, pressure: p.pressure }, last.carry);
         paint(a, stroke.lineTo(p));
       } else {
         paint(a, stroke.begin(p));

@@ -28,6 +28,7 @@ import {
   createDocument,
   DEFAULT_TEXT,
   insertLayerDraft,
+  removeLayerDraft,
   makeAdjustmentLayer,
   makeFillLayer,
   makeFilterInstance,
@@ -126,6 +127,12 @@ export class DocBuilder {
   /** The main placeholder character (made active when the template opens). */
   characterId: ID | null = null;
   private parents: ID[] = [];
+  /**
+   * Heavy bitmap work (asset generation, character renders, masks) is queued while the template
+   * describes its layers and run by flush(), which yields to the browser between steps so a
+   * "Building…" indicator keeps painting. Layers are inserted right away with reserved bitmap ids.
+   */
+  private jobs: { label: string; run: () => void }[] = [];
 
   constructor(name: string, width: number, height: number, background: Color | null, opts: BuildOptions = {}) {
     this.doc = createDocument({ name, width, height, background });
@@ -209,21 +216,59 @@ export class DocBuilder {
   /* ---------------- generated bitmaps ---------------- */
 
   /** Register a bitmap rendered at preview resolution, scaled to cover the box (x, y, w, h). */
-  private scaledRaster(canvas: HTMLCanvasElement, box: { x: number; y: number; width: number; height: number }, name: string, rotation = 0, flipX = false): RasterLayer {
-    const layer = makeRasterLayer({
-      name,
-      bitmapId: bitmaps.add(canvas),
-      width: canvas.width,
-      height: canvas.height,
-      transform: {
-        x: box.x + box.width / 2 - canvas.width / 2,
-        y: box.y + box.height / 2 - canvas.height / 2,
-        scaleX: (box.width / canvas.width) * (flipX ? -1 : 1),
-        scaleY: box.height / canvas.height,
-        rotation,
-      },
-    });
+  private scaledRaster(canvas: HTMLCanvasElement, box: Box, name: string, rotation = 0, flipX = false): RasterLayer {
+    const layer = makeRasterLayer({ name, bitmapId: bitmaps.add(canvas), width: canvas.width, height: canvas.height });
+    layer.transform = boxTransform(canvas.width, canvas.height, box, rotation, flipX);
     return layer;
+  }
+
+  /** Queue heavy work (see `jobs`). */
+  private defer(label: string, run: () => void) {
+    this.jobs.push({ label, run });
+  }
+
+  /** Remove a layer whose deferred bitmap could not be produced. */
+  private drop(layer: Layer, why: string, e?: unknown) {
+    console.warn(`[templates] ${why} — layer skipped`, e ?? '');
+    removeLayerDraft(this.doc, layer.id);
+    if (this.characterId === layer.id) this.characterId = null;
+  }
+
+  /** Number of queued bitmap steps. */
+  get pendingWork() {
+    return this.jobs.length;
+  }
+
+  /**
+   * Run the queued bitmap work, yielding to the browser whenever a slice exceeds `budgetMs`
+   * (input and painting keep going during long template builds).
+   */
+  async flush(budgetMs = 32): Promise<void> {
+    let t0 = performance.now();
+    while (this.jobs.length) {
+      const job = this.jobs.shift()!;
+      try {
+        job.run();
+      } catch (e) {
+        console.warn(`[templates] ${job.label} failed`, e);
+      }
+      if (this.jobs.length && performance.now() - t0 > budgetMs) {
+        await new Promise((r) => setTimeout(r, 0));
+        t0 = performance.now();
+      }
+    }
+  }
+
+  /** Run all queued bitmap work synchronously. */
+  flushSync() {
+    while (this.jobs.length) {
+      const job = this.jobs.shift()!;
+      try {
+        job.run();
+      } catch (e) {
+        console.warn(`[templates] ${job.label} failed`, e);
+      }
+    }
   }
 
   /**
@@ -241,29 +286,47 @@ export class DocBuilder {
       return null;
     }
     if (o.onlyElement && def.sizing === 'document') return null;
+    let p: ParamValues;
     try {
-      const p = resolveParams(def, params);
-      const full =
-        def.sizing === 'document'
-          ? { x: 0, y: 0, width: this.W, height: this.H }
-          : {
-              width: o.width ?? def.sizing.width,
-              height: o.height ?? def.sizing.height,
-              x: o.x ?? (this.W - (o.width ?? def.sizing.width)) / 2,
-              y: o.y ?? (this.H - (o.height ?? def.sizing.height)) / 2,
-            };
-      const gw = Math.max(4, Math.round(full.width * this.preview));
-      const gh = Math.max(4, Math.round(full.height * this.preview));
-      const canvas = def.generate(p, { width: gw, height: gh });
-      const layer = this.scaledRaster(canvas, full, def.name, o.rotation ?? 0, o.flipX);
-      layer.generator = { kind: `asset:${assetId}`, params: p };
-      layer.blendMode = def.defaultBlendMode ?? 'normal';
-      layer.opacity = def.defaultOpacity ?? 1;
-      return this.add(layer, o);
+      p = resolveParams(def, params);
     } catch (e) {
-      console.warn(`[templates] asset "${assetId}" failed — layer skipped`, e);
+      console.warn(`[templates] asset "${assetId}" has bad params — layer skipped`, e);
       return null;
     }
+    const full =
+      def.sizing === 'document'
+        ? { x: 0, y: 0, width: this.W, height: this.H }
+        : {
+            width: o.width ?? def.sizing.width,
+            height: o.height ?? def.sizing.height,
+            x: o.x ?? (this.W - (o.width ?? def.sizing.width)) / 2,
+            y: o.y ?? (this.H - (o.height ?? def.sizing.height)) / 2,
+          };
+    const gw = Math.max(4, Math.round(full.width * this.preview));
+    const gh = Math.max(4, Math.round(full.height * this.preview));
+    const bitmapId = uid('bmp_');
+    const layer = makeRasterLayer({ name: def.name, bitmapId, width: gw, height: gh });
+    layer.transform = boxTransform(gw, gh, full, o.rotation ?? 0, o.flipX);
+    layer.generator = { kind: `asset:${assetId}`, params: p };
+    layer.blendMode = def.defaultBlendMode ?? 'normal';
+    layer.opacity = def.defaultOpacity ?? 1;
+    this.add(layer, o);
+    this.defer(`asset "${assetId}"`, () => {
+      let canvas: HTMLCanvasElement;
+      try {
+        canvas = def.generate(p, { width: gw, height: gh });
+      } catch (e) {
+        this.drop(layer, `asset "${assetId}" failed`, e);
+        return;
+      }
+      if (canvas.width !== gw || canvas.height !== gh) {
+        layer.width = canvas.width;
+        layer.height = canvas.height;
+        layer.transform = boxTransform(canvas.width, canvas.height, full, o.rotation ?? 0, o.flipX);
+      }
+      bitmaps.add(canvas, bitmapId);
+    });
+    return layer;
   }
 
   /**
@@ -272,47 +335,58 @@ export class DocBuilder {
    * The first one becomes the main character.
    */
   character(c: CharacterOpts, o: LayerOpts = {}): RasterLayer | null {
-    try {
-      const { cx, top, height, rotation, flipX, ...style } = c;
-      const want = Math.max(16, height * this.preview);
-      const render = (h: number) => renderPlaceholderCharacter({ ...style, width: Math.round(h * 0.9), height: Math.round(h) });
-      // Canvas height per figure height depends on the pose; remember it so later builds
-      // (and previews) render the character once instead of measure + re-render.
-      const ratioKey = `${style.pose ?? 'idle'}|${style.style ?? 'shaded'}`;
-      const known = FIGURE_RATIO.get(ratioKey);
-      let canvas = render(want * (known ?? 1.15));
-      let bounds = opaqueBounds(canvas, 8);
-      if (!bounds) return null;
-      if (!known) FIGURE_RATIO.set(ratioKey, canvas.height / bounds.height);
-      // Re-render so the figure itself is `want` px tall (crisper than scaling the raster).
-      const f = want / bounds.height;
-      if (Math.abs(f - 1) > 0.03) {
-        canvas = render(canvas.height * f);
-        bounds = opaqueBounds(canvas, 8) ?? bounds;
+    const { cx, top, height, rotation, flipX, ...style } = c;
+    const bitmapId = uid('bmp_');
+    // Provisional geometry (refined once the figure is rendered and measured).
+    const layer = makeRasterLayer({ name: o.name ?? PLACEHOLDER_NAME, bitmapId, width: 1, height: 1 });
+    layer.transform = boxTransform(1, 1, { x: cx - height * 0.25, y: top, width: height * 0.5, height }, rotation ?? 0, flipX);
+    layer.meta = { placeholder: true, kind: 'character' };
+    this.add(layer, o);
+    if (!this.characterId) this.characterId = layer.id;
+    this.defer('placeholder character', () => {
+      try {
+        const want = Math.max(16, height * this.preview);
+        const render = (h: number) => renderPlaceholderCharacter({ ...style, width: Math.round(h * 0.9), height: Math.round(h) });
+        // Canvas height per figure height depends on the pose; remember it so later builds
+        // (and previews) render the character once instead of measure + re-render.
+        const ratioKey = `${style.pose ?? 'idle'}|${style.style ?? 'shaded'}`;
+        const known = FIGURE_RATIO.get(ratioKey);
+        let canvas = render(want * (known ?? 1.15));
+        let bounds = opaqueBounds(canvas, 8);
+        if (!bounds) {
+          this.drop(layer, 'placeholder character rendered empty');
+          return;
+        }
+        if (!known) FIGURE_RATIO.set(ratioKey, canvas.height / bounds.height);
+        // Re-render so the figure itself is `want` px tall (crisper than scaling the raster).
+        const f = want / bounds.height;
+        if (Math.abs(f - 1) > 0.03) {
+          canvas = render(canvas.height * f);
+          bounds = opaqueBounds(canvas, 8) ?? bounds;
+        }
+        const pad = 2;
+        const bx = Math.max(0, bounds.x - pad);
+        const by = Math.max(0, bounds.y - pad);
+        const bw = Math.min(canvas.width - bx, bounds.width + pad * 2);
+        const bh = Math.min(canvas.height - by, bounds.height + pad * 2);
+        const cropped = createCanvas(bw, bh);
+        cropped.getContext('2d')?.drawImage(canvas, bx, by, bw, bh, 0, 0, bw, bh);
+        const s = height / bounds.height; // doc px per canvas px
+        const box = {
+          x: cx - (bounds.x + bounds.width / 2 - bx) * s,
+          y: top - (bounds.y - by) * s,
+          width: bw * s,
+          height: bh * s,
+        };
+        layer.width = bw;
+        layer.height = bh;
+        layer.transform = boxTransform(bw, bh, box, rotation ?? 0, flipX);
+        bitmaps.add(cropped, bitmapId);
+      } catch (e) {
+        this.drop(layer, 'placeholder character failed', e);
       }
-      const pad = 2;
-      const bx = Math.max(0, bounds.x - pad);
-      const by = Math.max(0, bounds.y - pad);
-      const bw = Math.min(canvas.width - bx, bounds.width + pad * 2);
-      const bh = Math.min(canvas.height - by, bounds.height + pad * 2);
-      const cropped = createCanvas(bw, bh);
-      cropped.getContext('2d')?.drawImage(canvas, bx, by, bw, bh, 0, 0, bw, bh);
-      const s = height / bounds.height; // doc px per canvas px
-      const box = {
-        x: cx - (bounds.x + bounds.width / 2 - bx) * s,
-        y: top - (bounds.y - by) * s,
-        width: bw * s,
-        height: bh * s,
-      };
-      const layer = this.scaledRaster(cropped, box, o.name ?? PLACEHOLDER_NAME, rotation ?? 0, flipX);
-      layer.meta = { placeholder: true, kind: 'character' };
-      this.add(layer, o);
-      if (!this.characterId) this.characterId = layer.id;
-      return layer;
-    } catch (e) {
-      console.warn('[templates] placeholder character failed — layer skipped', e);
-      return null;
-    }
+    });
+    return layer;
   }
 
   /** Raster layer from an arbitrary canvas drawn at full resolution (box = doc px). */
@@ -333,15 +407,20 @@ export class DocBuilder {
   smoke(name: string, opts: SmokeOptions, o: LayerOpts = {}): RasterLayer | null {
     // Prefer the registered asset so the layer can be regenerated with new params later.
     if (assets.has(BILLOW_SMOKE_ID)) return this.asset(BILLOW_SMOKE_ID, { ...opts }, { name, ...o });
-    try {
-      const w = Math.max(8, Math.round(this.W * this.preview));
-      const h = Math.max(8, Math.round(this.H * this.preview));
-      const canvas = smokeCanvas(w, h, opts);
-      return this.add(this.scaledRaster(canvas, { x: 0, y: 0, width: this.W, height: this.H }, name), o);
-    } catch (e) {
-      console.warn('[templates] smoke layer failed — skipped', e);
-      return null;
-    }
+    const w = Math.max(8, Math.round(this.W * this.preview));
+    const h = Math.max(8, Math.round(this.H * this.preview));
+    const bitmapId = uid('bmp_');
+    const layer = makeRasterLayer({ name, bitmapId, width: w, height: h });
+    layer.transform = boxTransform(w, h, { x: 0, y: 0, width: this.W, height: this.H });
+    this.add(layer, o);
+    this.defer('smoke', () => {
+      try {
+        bitmaps.add(smokeCanvas(w, h, opts), bitmapId);
+      } catch (e) {
+        this.drop(layer, 'smoke layer failed', e);
+      }
+    });
+    return layer;
   }
 
   /* ---------------- masks ---------------- */
@@ -352,21 +431,27 @@ export class DocBuilder {
    */
   mask<T extends Layer | null>(layer: T, draw: (ctx: CanvasRenderingContext2D, W: number, H: number) => void, o: { feather?: number; density?: number } = {}): T {
     if (!layer) return layer;
-    try {
-      const w = Math.max(1, Math.round(this.W * this.preview));
-      const h = Math.max(1, Math.round(this.H * this.preview));
-      const c = createCanvas(w, h);
-      const ctx = c.getContext('2d');
-      if (!ctx) return layer;
-      ctx.fillStyle = '#000000';
-      ctx.fillRect(0, 0, w, h);
-      ctx.scale(w / this.W, h / this.H);
-      ctx.fillStyle = '#ffffff';
-      draw(ctx, this.W, this.H);
-      layer.mask = { bitmapId: bitmaps.add(c), enabled: true, density: o.density ?? 1, feather: o.feather ?? 0, inverted: false };
-    } catch (e) {
-      console.warn('[templates] mask failed — skipped', e);
-    }
+    const target: Layer = layer;
+    const bitmapId = uid('bmp_');
+    target.mask = { bitmapId, enabled: true, density: o.density ?? 1, feather: o.feather ?? 0, inverted: false };
+    this.defer('layer mask', () => {
+      try {
+        const w = Math.max(1, Math.round(this.W * this.preview));
+        const h = Math.max(1, Math.round(this.H * this.preview));
+        const c = createCanvas(w, h);
+        const ctx = c.getContext('2d');
+        if (!ctx) throw new Error('no 2D context');
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, w, h);
+        ctx.scale(w / this.W, h / this.H);
+        ctx.fillStyle = '#ffffff';
+        draw(ctx, this.W, this.H);
+        bitmaps.add(c, bitmapId);
+      } catch (e) {
+        console.warn('[templates] mask failed — skipped', e);
+        target.mask = null;
+      }
+    });
     return layer;
   }
 
@@ -519,6 +604,7 @@ export class DocBuilder {
 
   /** Finished document. */
   finish(meta: Record<string, unknown> = {}): Document {
+    this.flushSync();
     this.doc.meta = { ...this.doc.meta, ...meta };
     return this.doc;
   }
@@ -535,3 +621,16 @@ function safeMeasure(t: TextProps): { width: number; height: number } {
 }
 
 export const solidPaint = (color: Color): Paint => ({ type: 'solid', color });
+
+type Box = { x: number; y: number; width: number; height: number };
+
+/** Transform placing a w×h bitmap so it covers `box` (doc px); rotation/flip pivot on the box center. */
+function boxTransform(w: number, h: number, box: Box, rotation = 0, flipX = false) {
+  return {
+    x: box.x + box.width / 2 - w / 2,
+    y: box.y + box.height / 2 - h / 2,
+    scaleX: (box.width / w) * (flipX ? -1 : 1),
+    scaleY: box.height / h,
+    rotation,
+  };
+}

@@ -3,7 +3,7 @@
  * ARCHITECTURE.md §5.4–5.6; anything not registered at apply time is skipped gracefully.
  */
 import type { CurvePoints, CurvesValue, Gradient } from '../core/types';
-import type { LookDef } from '../registry';
+import type { ExtLookDef } from './engine';
 
 /** Linear gradient from [offset, color] pairs. */
 export function grad(stops: [number, string][], kind: Gradient['kind'] = 'linear', angle = 0): Gradient {
@@ -37,7 +37,7 @@ export const FADE_CURVE = curves([
 
 export const LOOK_CATEGORIES = ['Poster', 'Color Grade', 'Comic & Print', 'Atmosphere', 'Retro'] as const;
 
-export const BUILTIN_LOOKS: LookDef[] = [
+export const BUILTIN_LOOKS: ExtLookDef[] = [
   /* ---------------- reference styles ---------------- */
   {
     id: 'gothic-paper',
@@ -96,11 +96,18 @@ export const BUILTIN_LOOKS: LookDef[] = [
     id: 'noir-newspaper',
     name: 'Noir Newspaper',
     category: 'Poster',
-    description: 'Black & white, hard levels, halftone dot screen, newspaper clippings at the edges, heavy shadow and vignette.',
+    description: 'Black & white, hard levels, halftone dot screen, torn newspaper strips along the side edges, heavy shadow and vignette.',
     swatch: ['#0d0d0d', '#5a5a5a', '#bdbdbd', '#efede8'],
     layerEffects: [{ effectId: 'drop-shadow', params: { color: '#000000', opacity: 0.9, angle: 125, distance: 26, spread: 0.1, size: 34 } }],
     overlays: [
-      { assetId: 'newspaper-clippings', params: { columns: 3, tone: '#dcd9d0', density: 0.12, rotation: 6, placement: 'edges', textSize: 1.3 }, opacity: 0.92, name: 'Newspaper Clippings' },
+      // Torn-edged strips down the left/right edges only, so content always stays visible.
+      {
+        assetId: 'newspaper-clippings',
+        params: { columns: 3, tone: '#dcd9d0', density: 0.45, rotation: 6, placement: 'edges', textSize: 1.2, headlines: true, shadow: 0.5 },
+        opacity: 0.95,
+        name: 'Newspaper Clippings',
+        mask: { kind: 'edge-strips', width: 0.11, sides: 'both', tear: 0.008, seed: 5 },
+      },
       { assetId: 'halftone-dots', params: { size: 7, angle: 45, color: '#000000' }, blendMode: 'multiply', opacity: 0.3, name: 'Halftone' },
       { assetId: 'fold-creases', params: { folds: 4, strength: 0.75 }, blendMode: 'overlay', name: 'Fold Lines' },
       { assetId: 'vignette-overlay', params: { color: '#000000', amount: 0.7, softness: 0.6 }, blendMode: 'multiply', name: 'Vignette' },

@@ -3,7 +3,7 @@
  *   POST users.roblox.com/v1/usernames/users → user id
  *   GET  thumbnails.roblox.com/v1/users/avatar[-bust|-headshot] → image URL (retries while Pending)
  *   GET  image → Blob
- * Every request has a timeout and honours an abort signal, so the UI never hangs. Network / CORS
+ * Every request (headers and body) has a timeout and honours an abort signal, so the UI never hangs. Network / CORS
  * failures are reported as AvatarError('network') so the UI can explain the manual fallback.
  */
 
@@ -61,37 +61,59 @@ export function profileUrl(name: string): string {
   return `https://www.roblox.com/users/profile?username=${encodeURIComponent(name)}`;
 }
 
-async function request(url: string, init: RequestInit, opts: FetchOptions, what: string): Promise<Response> {
+/**
+ * One HTTP request whose timeout and cancellation cover the whole exchange — headers AND body:
+ * `read` consumes the body inside the guarded section, raced against the abort so a stalled body
+ * stream can never hang the caller.
+ */
+async function request<T>(url: string, init: RequestInit, opts: FetchOptions, what: string, read: (res: Response) => Promise<T>): Promise<T> {
   const f = opts.fetchImpl ?? fetch;
+  if (opts.signal?.aborted) throw new AvatarError('aborted', 'Cancelled.');
   const ctrl = new AbortController();
-  const onAbort = () => ctrl.abort();
-  if (opts.signal) {
-    if (opts.signal.aborted) throw new AvatarError('aborted', 'Cancelled.');
-    opts.signal.addEventListener('abort', onAbort, { once: true });
-  }
   let timedOut = false;
+  let cancelled = false;
+  const onAbort = () => {
+    cancelled = true;
+    ctrl.abort();
+  };
+  opts.signal?.addEventListener('abort', onAbort, { once: true });
   const timer = setTimeout(() => {
     timedOut = true;
     ctrl.abort();
   }, opts.timeoutMs ?? 12000);
+  // Rejects as soon as the request is aborted (timeout or caller), whatever the fetch / body
+  // implementation does with the signal.
+  const aborted = new Promise<never>((_, reject) => {
+    ctrl.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+  });
+  aborted.catch(() => undefined);
   try {
-    const res = await f(url, { ...init, signal: ctrl.signal });
-    return res;
+    const res = await Promise.race([f(url, { ...init, signal: ctrl.signal }), aborted]);
+    return await Promise.race([read(res), aborted]);
   } catch (err) {
     if (timedOut) throw new AvatarError('timeout', `${what} timed out.`);
-    if (opts.signal?.aborted) throw new AvatarError('aborted', 'Cancelled.');
+    if (cancelled || opts.signal?.aborted) throw new AvatarError('aborted', 'Cancelled.');
+    if (err instanceof AvatarError) throw err;
     throw new AvatarError('network', `${what} failed: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     clearTimeout(timer);
     opts.signal?.removeEventListener('abort', onAbort);
+    // Release the connection / stalled body stream.
+    if (!ctrl.signal.aborted) ctrl.abort();
   }
 }
 
-async function json(res: Response, what: string): Promise<unknown> {
+async function readJson(res: Response, what: string): Promise<unknown> {
   if (res.status === 429) throw new AvatarError('server', 'Roblox is rate-limiting requests — wait a minute and try again.');
   if (!res.ok) throw new AvatarError('server', `${what} returned HTTP ${res.status}.`);
+  let text: string;
   try {
-    return await res.json();
+    text = await res.text();
+  } catch (err) {
+    throw new AvatarError('network', `${what} failed while downloading: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
+    return JSON.parse(text);
   } catch {
     throw new AvatarError('server', `${what} returned an unexpected response.`);
   }
@@ -115,21 +137,22 @@ export async function fetchAvatar(username: string, kind: AvatarKind, opts: Fetc
   if (!name) throw new AvatarError('invalid', 'Enter a valid Roblox username (3–20 letters, numbers or one underscore).');
 
   opts.onStatus?.('Looking up user…');
-  const userRes = await request(
+  const users = (await request(
     'https://users.roblox.com/v1/usernames/users',
     { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ usernames: [name], excludeBannedUsers: false }) },
     opts,
     'User lookup',
-  );
-  const users = (await json(userRes, 'User lookup')) as { data?: { id?: number; name?: string; displayName?: string }[] };
+    (res) => readJson(res, 'User lookup'),
+  )) as { data?: { id?: number; name?: string; displayName?: string }[] };
   const user = users.data?.[0];
   if (!user || typeof user.id !== 'number') throw new AvatarError('notFound', `No Roblox user named “${name}”.`);
 
   let imageUrl = '';
   for (let attempt = 0; attempt < 4; attempt++) {
     opts.onStatus?.(attempt ? 'Avatar render is being generated…' : 'Requesting avatar render…');
-    const res = await request(thumbnailUrl(user.id, kind), { headers: { Accept: 'application/json' } }, opts, 'Avatar render request');
-    const body = (await json(res, 'Avatar render request')) as { data?: { state?: string; imageUrl?: string | null }[] };
+    const body = (await request(thumbnailUrl(user.id, kind), { headers: { Accept: 'application/json' } }, opts, 'Avatar render request', (res) =>
+      readJson(res, 'Avatar render request'),
+    )) as { data?: { state?: string; imageUrl?: string | null }[] };
     const item = body.data?.[0];
     const state = item?.state ?? 'Error';
     if (state === 'Completed' && item?.imageUrl) {
@@ -143,9 +166,10 @@ export async function fetchAvatar(username: string, kind: AvatarKind, opts: Fetc
   if (!imageUrl) throw new AvatarError('pending', 'The avatar render is still being generated — try again in a few seconds.');
 
   opts.onStatus?.('Downloading image…');
-  const imgRes = await request(imageUrl, {}, opts, 'Image download');
-  if (!imgRes.ok) throw new AvatarError('server', `Image download returned HTTP ${imgRes.status}.`);
-  const blob = await imgRes.blob();
+  const blob = await request(imageUrl, {}, opts, 'Image download', async (res) => {
+    if (!res.ok) throw new AvatarError('server', `Image download returned HTTP ${res.status}.`);
+    return res.blob();
+  });
   if (blob.size === 0 || (blob.type && !blob.type.startsWith('image/'))) throw new AvatarError('server', 'The downloaded file is not an image.');
   return { userId: user.id, name: user.name ?? name, displayName: user.displayName ?? user.name ?? name, imageUrl, blob };
 }

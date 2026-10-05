@@ -159,12 +159,17 @@ export function drawCrackLine(ctx: CanvasRenderingContext2D, pts: { x: number; y
   ctx.save();
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
-  // soft shadow
-  ctx.filter = `blur(${Math.max(0.5, 2.2 * u)}px)`;
-  ctx.strokeStyle = rgba('#1a1612', 0.22 * strength);
-  ctx.lineWidth = 7 * u;
-  ctx.stroke(path);
-  ctx.filter = 'none';
+  // soft shadow: stacked translucent strokes (a blur filter here would allocate a filter layer
+  // as large as the whole crack — very slow with software rasterization)
+  for (const [w, a] of [
+    [9, 0.045],
+    [6, 0.06],
+    [3.5, 0.08],
+  ] as const) {
+    ctx.strokeStyle = rgba('#1a1612', a * strength);
+    ctx.lineWidth = w * u;
+    ctx.stroke(path);
+  }
   // light lip below
   ctx.translate(0, 1.6 * u);
   ctx.strokeStyle = rgba('#ffffff', 0.55 * strength);

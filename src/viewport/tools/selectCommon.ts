@@ -7,7 +7,7 @@ import { rectIntersect } from '../../core/geometry';
 import { combine, setSelection, type SelectionMode } from '../../editor/selection';
 import { viewport } from '../../editor/viewport';
 import { activeSession, useEditor } from '../../state/editor';
-import { drawSelectionAnts } from '../outline';
+import { drawSelectionAnts, shapeInsideCanvas } from '../outline';
 import { docToScreenMatrix, vpState } from '../state';
 import { mul, translate } from '../math/affine';
 import { drawLabel } from '../draw';
@@ -50,7 +50,9 @@ export function commitSelectionMask(
 ) {
   const feather = opts.feather ?? 0;
   const m = featherMask(mask, feather);
-  const sel = combine(doc, m, mode, feather > 0 ? null : (opts.shape ?? null));
+  // A vector shape is only kept when it describes the mask exactly (unfeathered, inside the canvas).
+  const shape = feather > 0 || !shapeInsideCanvas(opts.shape ?? null, doc.width, doc.height) ? null : (opts.shape ?? null);
+  const sel = combine(doc, m, mode, shape);
   if (!sel && !doc.selection) return; // nothing selected before or after
   setSelection(sel, sel ? label : 'Deselect');
 }

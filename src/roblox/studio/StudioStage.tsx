@@ -5,6 +5,7 @@
  * body parts and disposes every GPU resource on unmount.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { toast } from '../../state/ui';
 import { StudioScene } from './scene';
 import type { JointId } from './types';
 import type { PreviewBackground } from './ViewControls';
@@ -54,6 +55,12 @@ export function StudioStage({
       return;
     }
     sceneRef.current = scene;
+    scene.onContextLost = () => {
+      const msg = 'The 3D preview lost its GPU context (graphics driver reset or out of video memory). Close and reopen the dialog, or choose a smaller output size.';
+      setError(msg);
+      toast(msg, 'error', 6000);
+    };
+    scene.onContextRestored = () => setError(null);
     frameRef.current?.appendChild(scene.canvas);
     scene.canvas.tabIndex = -1;
     scene.attachControls();

@@ -7,7 +7,7 @@
 import { useEffect, useState } from 'react';
 import { templates } from '../registry';
 import { renderDocument } from '../render/compositor';
-import { docBitmapIds, docFonts, dropBitmaps, forgetLayers, IdleQueue, loadFonts } from '../looks/shared';
+import { docBitmapIds, docFonts, dropBitmaps, IdleQueue, loadFonts } from '../looks/shared';
 import { buildTemplate, hasTemplateSpec } from './define';
 
 export const TEMPLATE_PREVIEW_SIZE = 320;
@@ -15,7 +15,8 @@ export const TEMPLATE_PREVIEW_SIZE = 320;
 const cache = new Map<string, string>();
 const pending = new Map<string, { promise: Promise<string | null>; resolve: (url: string | null) => void }>();
 const listeners = new Set<() => void>();
-const queue = new IdleQueue();
+// The dialog is modal (no editing underneath), so make steady progress even if never idle.
+const queue = new IdleQueue({ idleTimeout: 250 });
 
 /** Cached preview (data URL) or null if not rendered yet. */
 export function getTemplatePreview(id: string): string | null {
@@ -75,7 +76,8 @@ async function renderTemplatePreview(id: string): Promise<string | null> {
     const canvas = renderDocument(doc, { scale });
     return canvas.toDataURL('image/png');
   } finally {
-    forgetLayers(Object.keys(doc.layers));
+    // Render-cache slots of this throw-away document are never hit again; the LRU evicts them
+    // (invalidating would also drop the open document's composites).
     dropBitmaps(docBitmapIds(doc));
   }
 }

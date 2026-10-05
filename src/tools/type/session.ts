@@ -839,11 +839,16 @@ export function sessionPointerUp() {
   focusTextarea();
 }
 
-/** Double click while editing: select the word under the pointer. */
+/**
+ * Double click while editing: select the word under the pointer. Presses are counted in
+ * sessionPointerDown (which already selected the word on the 2nd press); this is the fallback for
+ * sequences it did not see. The browser's dblclick can arrive after a 3rd press was counted (it
+ * fires on the 2nd release): never downgrade a line/all selection to a word then.
+ */
 export function sessionDoubleClick(e: ToolPointerEvent) {
   const s = ses;
   const l = sessionLayer();
-  if (!s || !l || sessionHit(e) !== 'inside') return;
+  if (!s || !l || clicks.count > 2 || sessionHit(e) !== 'inside') return;
   const idx = indexAtDoc(l, { x: e.docX, y: e.docY });
   const [a, b] = wordRangeAt(s.ta.value, idx);
   setSelection(a, b);

@@ -161,7 +161,7 @@ function layoutSide(W: number, H: number, u: number, r: Rand, n: number, mirror:
   for (let k = 0; k < n; k++) {
     const t = n === 1 ? 0.5 : k / (n - 1);
     const W0 = o.width * (0.85 + r() * 0.35);
-    const R = W0 * (3.1 + r() * 1.2) * o.scale;
+    const R = W0 * (2.75 + r() * 0.9) * o.scale;
     const dir: 1 | -1 = r() < 0.5 ? 1 : -1;
     // curls spread over the side band from ~28% height down to ~85%
     let cy = 0;
@@ -251,7 +251,7 @@ export const swirlTendrils = defineAsset(
       P.color('outlineColor', 'Rim color', '#6f63c9'),
       P.num('outlineWidth', 'Rim width', 0, 20, 4, { step: 0.5, unit: 'px' }),
       P.num('count', 'Count', 1, 16, 6),
-      P.num('thickness', 'Thickness', 6, 90, 28, { unit: 'px' }),
+      P.num('thickness', 'Thickness', 6, 90, 32, { unit: 'px' }),
       P.select(
         'side',
         'Side',
@@ -282,7 +282,7 @@ export const swirlTendrils = defineAsset(
       const count = Math.max(1, Math.round(num(p, 'count', 6)));
       const side = str(p, 'side', 'both');
       const o = {
-        width: Math.max(2, num(p, 'thickness', 28) * u),
+        width: Math.max(2, num(p, 'thickness', 32) * u),
         scale: num(p, 'scale', 1),
         angular: str(p, 'style', 'angular') !== 'smooth',
         spurs: num(p, 'spikes', 0),
@@ -309,23 +309,23 @@ export const swirlTendrils = defineAsset(
       const [c, ctx] = newCanvas(W, H);
       ctx.lineJoin = 'miter';
       ctx.miterLimit = 4;
-      // back-most first: lower curls (larger index) are in front
-      for (const g of groups) {
-        const path = new Path2D();
-        for (const poly of g.polys) tracePoly(path, positiveWinding(poly));
-        if (ow > 0) {
-          ctx.save();
-          ctx.translate(ox, oy);
-          ctx.fillStyle = rim;
-          ctx.strokeStyle = rim;
-          ctx.lineWidth = ow * 0.55;
-          ctx.fill(path, 'nonzero');
-          ctx.stroke(path);
-          ctx.restore();
-        }
-        ctx.fillStyle = color;
+      // One silhouette for everything (all polygons share a winding, so nonzero = union): the
+      // rim is a slightly grown copy offset towards the light, drawn behind the whole black
+      // shape, so it only shows along the outer edge — like a cut-paper layer on a colored sheet.
+      const path = new Path2D();
+      for (const g of groups) for (const poly of g.polys) tracePoly(path, positiveWinding(poly));
+      if (ow > 0) {
+        ctx.save();
+        ctx.translate(ox, oy);
+        ctx.fillStyle = rim;
+        ctx.strokeStyle = rim;
+        ctx.lineWidth = ow * 0.55;
         ctx.fill(path, 'nonzero');
+        ctx.stroke(path);
+        ctx.restore();
       }
+      ctx.fillStyle = color;
+      ctx.fill(path, 'nonzero');
       return c;
     },
   },

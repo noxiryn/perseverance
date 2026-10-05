@@ -16,7 +16,7 @@ import { CharacterPanel } from './CharacterPanel';
 import { typeCommands } from './commands';
 import { frameContains, textFrame } from './frame';
 import { CHARACTER_PANEL_ID } from './panelState';
-import { editTextLayer } from './session';
+import { editTextLayer, isEditing } from './session';
 import { TextProperties } from './TextProperties';
 import { typeTool } from './typeTool';
 import { openWarpDialog } from './WarpDialog';
@@ -114,9 +114,20 @@ function freeTransformActive(): boolean {
   }
 }
 
-function onMoveDoubleClick(e: MouseEvent) {
+/**
+ * Fallback until the move tool calls `editTextLayer` from its own onDoubleClick. The decision is
+ * made in the capture phase (before the move tool runs, so a free transform it is about to commit
+ * is still visible) and acted on in the bubble phase, after the viewport has dispatched the event:
+ * when the move tool (or anything else) already handled it — tool switched, an edit session
+ * started, default prevented or propagation stopped — the fallback stays out of the way, so the
+ * two never both fire.
+ */
+let pendingDbl: { e: MouseEvent; id: string; p: Point } | null = null;
+
+function onMoveDoubleClickCapture(e: MouseEvent) {
+  pendingDbl = null;
   const st = useEditor.getState();
-  if (st.activeTool !== 'move') return;
+  if (st.activeTool !== 'move' || isEditing()) return;
   const host = viewport.element();
   if (!host || !(e.target instanceof Node) || !host.contains(e.target)) return;
   if (freeTransformActive()) return; // the move tool commits its free transform on double-click
@@ -131,16 +142,29 @@ function onMoveDoubleClick(e: MouseEvent) {
   if (!id) return;
   const layer = s.doc.layers[id];
   if (!layer || layer.locks.all) return;
-  e.stopPropagation();
-  e.preventDefault();
-  editTextLayer(id, { at: p });
+  pendingDbl = { e, id, p };
 }
 
-type DblWindow = Window & { __perseveranceTypeDblClick?: (e: MouseEvent) => void };
+function onMoveDoubleClickBubble(e: MouseEvent) {
+  const pend = pendingDbl;
+  pendingDbl = null;
+  if (!pend || pend.e !== e || e.defaultPrevented) return;
+  // The move tool handled it itself (editTextLayer switches to the Type tool / starts a session).
+  if (useEditor.getState().activeTool !== 'move' || isEditing()) return;
+  if (!activeSession()?.doc.layers[pend.id]) return;
+  e.preventDefault(); // no native word selection behind the canvas
+  editTextLayer(pend.id, { at: pend.p });
+}
+
+type DblWindow = Window & { __perseveranceTypeDbl?: { capture: (e: MouseEvent) => void; bubble: (e: MouseEvent) => void } };
 const w = window as DblWindow;
-if (w.__perseveranceTypeDblClick) window.removeEventListener('dblclick', w.__perseveranceTypeDblClick, true);
-w.__perseveranceTypeDblClick = onMoveDoubleClick;
-window.addEventListener('dblclick', onMoveDoubleClick, true);
+if (w.__perseveranceTypeDbl) {
+  window.removeEventListener('dblclick', w.__perseveranceTypeDbl.capture, true);
+  window.removeEventListener('dblclick', w.__perseveranceTypeDbl.bubble, false);
+}
+w.__perseveranceTypeDbl = { capture: onMoveDoubleClickCapture, bubble: onMoveDoubleClickBubble };
+window.addEventListener('dblclick', onMoveDoubleClickCapture, true);
+window.addEventListener('dblclick', onMoveDoubleClickBubble, false);
 
 export { editTextLayer, beginEditLayer, beginNewText, commitEditing, cancelEditing, isEditing, editingLayerId, useTypeEditing } from './session';
 export { TEXT_STYLES, getTextStyle } from './styles';

@@ -11,6 +11,7 @@ import { isWarpActive, warpPoint } from './warpMath';
 import { buildGrid, warpImage } from './meshWarp';
 import { fillWithPaint } from './paint';
 import { acquire, release } from './surface';
+import { strokeCoverage } from './effects/math';
 
 export interface TextLayoutLine {
   text: string;
@@ -130,6 +131,16 @@ function fontMetrics(t: TextProps): { ascent: number; descent: number } {
 
 let layoutCache = new WeakMap<TextProps, { gen: number; ready: boolean; layout: TextLayout }>();
 
+/**
+ * Text cache epoch, bumped by `resetTextCaches()` (e.g. when a new unicode-range slice of a font
+ * finished loading: the face's "ready" flag does not change, but glyphs do). It is part of every
+ * text raster key and of text layers' render signatures, so composites rebuild too.
+ */
+let textEpoch = 0;
+export function textCacheEpoch(): number {
+  return textEpoch;
+}
+
 /** Lay out text (wrapping when boxWidth is set). Identical to what the renderer draws. */
 export function layoutTextProps(t: TextProps): TextLayout {
   const gen = cacheGeneration();
@@ -166,8 +177,20 @@ export function layoutTextProps(t: TextProps): TextLayout {
   return layout;
 }
 
+/** Drop every cached text layout and raster (they rebuild lazily with the new epoch). */
 export function resetTextCaches() {
   layoutCache = new WeakMap();
+  flatPixels.clear();
+  textEpoch++;
+}
+
+/**
+ * Drop the cached layout and rasters of one text style (the next measure/render recomputes
+ * them). `invalidateRenderCache(layerId)` calls this for the layer's current text.
+ */
+export function invalidateTextLayout(t: TextProps) {
+  layoutCache.delete(t);
+  slots.delete(`text|${objId(t)}`);
   flatPixels.clear();
 }
 
@@ -313,6 +336,79 @@ export function alignedOrigin(minLocal: number, k: number, f: number): number {
   return (Math.floor(f + k * minLocal + 1e-9) - f) / k;
 }
 
+/** Coverage map → canvas painted with a paint (solid color or the text fill paint) through it. */
+function drawCoverage(
+  ctx: CanvasRenderingContext2D,
+  cov: Uint8Array,
+  wPx: number,
+  hPx: number,
+  paint: (pc: CanvasRenderingContext2D) => void,
+) {
+  const img = new ImageData(wPx, hPx);
+  const px32 = new Uint32Array(img.data.buffer);
+  for (let i = 0; i < cov.length; i++) {
+    const v = cov[i];
+    if (v) px32[i] = ((v << 24) | 0xffffff) >>> 0;
+  }
+  const m = acquire(wPx, hPx);
+  const mc = ctx2d(m);
+  mc.putImageData(img, 0, 0);
+  mc.globalCompositeOperation = 'source-in';
+  paint(mc);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(m, 0, 0);
+  ctx.restore();
+  release(m);
+}
+
+/**
+ * Outline / faux bold for horizontally or vertically scaled glyphs. A canvas stroke would be
+ * scaled with the glyphs (thicker on one axis), so both are built from the scaled glyph coverage
+ * instead: faux bold = isotropic dilation of the glyphs, outline = dilation of the (bold) glyphs
+ * by the stroke width (exact distance field, round joins), drawn behind the fill.
+ */
+function renderFlatAniso(t: TextProps, layout: TextLayout, canvas: HTMLCanvasElement, k: number, ox: number, oy: number) {
+  const wPx = canvas.width;
+  const hPx = canvas.height;
+  const ctx = ctx2d(canvas);
+  const G = acquire(wPx, hPx, { read: true });
+  const g = ctx2d(G, { willReadFrequently: true });
+  g.setTransform(k, 0, 0, k, -ox * k, -oy * k);
+  setupTextCtx(g, t);
+  g.fillStyle = '#ffffff';
+  drawLines(g, t, layout, (c, s) => c.fillText(s, 0, 0));
+  const data = g.getImageData(0, 0, wPx, hPx).data;
+  release(G);
+  let a: Uint8Array = new Uint8Array(wPx * hPx);
+  for (let i = 0, j = 3; i < a.length; i++, j += 4) a[i] = data[j];
+  const size = Math.max(0.5, Number(t.fontSize) || 12);
+  const gscale = Math.sqrt(Math.abs((Number(t.scaleX) || 1) * (Number(t.scaleY) || 1)));
+  if (t.fauxBold) a = strokeCoverage(a, wPx, hPx, size * 0.04 * gscale * 0.5 * k, 'outside');
+  if (t.stroke && t.stroke.width > 0) {
+    const color = t.stroke.color || '#000000';
+    const outline = strokeCoverage(a, wPx, hPx, t.stroke.width * k, 'outside');
+    drawCoverage(ctx, outline, wPx, hPx, (pc) => {
+      pc.fillStyle = color;
+      pc.fillRect(0, 0, wPx, hPx);
+    });
+  }
+  const fill = t.fill ?? { type: 'solid', color: '#000000' };
+  const box: Rect = { x: 0, y: 0, width: layout.width, height: layout.height };
+  drawCoverage(ctx, a, wPx, hPx, (pc) => {
+    if (fill.type === 'solid') {
+      pc.fillStyle = fill.color;
+      pc.fillRect(0, 0, wPx, hPx);
+      return;
+    }
+    pc.setTransform(k, 0, 0, k, -ox * k, -oy * k);
+    const area = new Path2D();
+    area.rect(ox, oy, wPx / k, hPx / k);
+    fillWithPaint(pc, fill, box, area);
+    pc.setTransform(1, 0, 0, 1, 0, 0);
+  });
+}
+
 /** Render the flat (unwarped) text into a canvas: local content with padding P. */
 function renderFlat(t: TextProps, layout: TextLayout, k: number, P: number, fx = 0, fy = 0): LocalContent {
   const ox = alignedOrigin(-P, k, fx);
@@ -320,6 +416,13 @@ function renderFlat(t: TextProps, layout: TextLayout, k: number, P: number, fx =
   const wPx = Math.ceil((layout.width + P - ox) * k);
   const hPx = Math.ceil((layout.height + P - oy) * k);
   const canvas = createCanvas(wPx, hPx);
+  const asx = Math.abs(Number(t.scaleX) || 1);
+  const asy = Math.abs(Number(t.scaleY) || 1);
+  if (Math.abs(asx - asy) > 1e-3 * Math.max(asx, asy) && ((t.stroke && t.stroke.width > 0) || t.fauxBold)) {
+    renderFlatAniso(t, layout, canvas, k, ox, oy);
+    if (t.antiAlias === false) hardenAlpha(canvas);
+    return { canvas, k, ox, oy };
+  }
   const ctx = ctx2d(canvas);
   ctx.setTransform(k, 0, 0, k, -ox * k, -oy * k);
   setupTextCtx(ctx, t);
@@ -329,8 +432,10 @@ function renderFlat(t: TextProps, layout: TextLayout, k: number, P: number, fx =
   // 1) Outline stroke behind the fill.
   if (t.stroke && t.stroke.width > 0) {
     ctx.strokeStyle = t.stroke.color || '#000000';
+    // Drawn in glyph space (scaled by the uniform glyph scale): the outline reaches `width`
+    // output px beyond the faux-bold glyph edge (faux bold itself scales with the glyphs).
     const sxy = Math.max(Math.abs(t.scaleX || 1), Math.abs(t.scaleY || 1)) || 1;
-    ctx.lineWidth = (t.stroke.width * 2 + fauxW) / sxy;
+    ctx.lineWidth = (t.stroke.width * 2) / sxy + fauxW;
     drawLines(ctx, t, layout, (c, s) => c.strokeText(s, 0, 0));
   }
   // 2) Fill (+ faux bold) with the fill paint.
@@ -404,7 +509,7 @@ const FLAT_CACHE_MAX = 3;
 
 function flatPixelsFor(t: TextProps, layout: TextLayout, k: number, P: number): FlatPixels {
   const { warp: _warp, ...rest } = t;
-  const key = `${k.toFixed(5)}|${cacheGeneration()}|${textFontReady(t) ? 1 : 0}|${JSON.stringify(rest)}`;
+  const key = `${k.toFixed(5)}|${cacheGeneration()}|${textEpoch}|${textFontReady(t) ? 1 : 0}|${JSON.stringify(rest)}`;
   const hit = flatPixels.get(key);
   if (hit) {
     flatPixels.delete(key);
@@ -514,7 +619,7 @@ export function renderTextContent(t: TextProps, kRequested: number, fx = 0, fy =
   const k = Math.max(0.01, Math.min(kRequested, MAX_TEXT_SIDE / Math.max(1, maxDim)));
   if (warp || k !== kRequested) fx = fy = 0;
   const key = `text|${objId(t)}`;
-  const sig = `${k.toFixed(5)}|${fx.toFixed(4)}|${fy.toFixed(4)}|${cacheGeneration()}|${textFontReady(t) ? 'r' : 'p'}`;
+  const sig = `${k.toFixed(5)}|${fx.toFixed(4)}|${fy.toFixed(4)}|${cacheGeneration()}|${textEpoch}|${textFontReady(t) ? 'r' : 'p'}`;
   const hit = slots.get<LocalContent>(key, sig);
   if (hit) return hit;
   const content = warp ? warpContent(flatPixelsFor(t, layout, k, P), t, layout) : renderFlat(t, layout, k, P, fx, fy);

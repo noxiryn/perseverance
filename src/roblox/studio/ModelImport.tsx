@@ -19,6 +19,7 @@ import { CAMERA_PRESETS, cameraFromPreset, defaultStudioState, normalizeStudioSt
 import type { Vec3, ViewSettings } from './types';
 import { CameraControls, FRAMING_OPTIONS, LightingControls, OutputControls, ShadingControls, type PreviewBackground } from './ViewControls';
 import { Group, Hint, SliderRow } from './ui';
+import { useFrameOverflow, useStickyPreset } from './useFraming';
 import { MODEL_EXTENSIONS, cacheModelFiles, cachedModelFiles, filesFromDom, loadModel, pickMainFile, type LoadedModel, type ModelFile } from './loaders';
 
 type Tab = 'model' | 'camera' | 'light' | 'style';
@@ -156,15 +157,16 @@ export function ModelImportDialog({ close, files: initialFiles, layerId }: Model
       if (!scene || !model) return;
       setState((s) => {
         scene.setModelView(s.view, s.rotationY);
-        const f = scene.computeFraming(s.view.camera.framing, s.view.camera.fov, aspect);
         const c = s.view.camera;
+        const f = scene.computeFraming(c.framing, c.fov, aspect, c.yaw, c.pitch);
         if (!force && Math.abs(f.baseDistance - c.baseDistance) < 1e-4 && f.target.every((v, i) => Math.abs(v - c.target[i]) < 1e-4)) return s;
         return { ...s, view: { ...s.view, camera: { ...c, target: f.target, baseDistance: f.baseDistance, ...(force ? { pan: [0, 0, 0] as Vec3 } : {}) } } };
       });
     },
     [scene, model, aspect],
   );
-  const frameKey = model ? `${model.mainFile}|${state.view.camera.framing}|${state.view.camera.fov}|${aspect.toFixed(4)}` : '';
+  const cameraPreset = useStickyPreset(state.view.camera.preset);
+  const frameKey = model ? `${model.mainFile}|${model.triangles}|${cameraPreset}|${state.view.camera.framing}|${state.view.camera.fov}|${aspect.toFixed(4)}` : '';
   const lastFrameKey = useRef<string>('');
   const keepStoredCamera = useRef(!!editing);
   useEffect(() => {
@@ -177,6 +179,8 @@ export function ModelImportDialog({ close, files: initialFiles, layerId }: Model
     }
     reframe();
   }, [frameKey, reframe]);
+  // Turning the model, zooming or panning can push parts out of the frame: warn in the footer.
+  const overflow = useFrameOverflow(scene, state.view.camera.framing, aspect, state, !!model && !loading);
 
   /* ---------------- commit ---------------- */
 
@@ -288,11 +292,21 @@ export function ModelImportDialog({ close, files: initialFiles, layerId }: Model
           <Button variant="ghost" size="small" icon={FolderOpen} onClick={chooseFiles}>
             Choose Files…
           </Button>
-          <span className="info">
-            {model
-              ? `${model.name} · ${model.meshCount} ${model.meshCount === 1 ? 'mesh' : 'meshes'} · ${model.triangles.toLocaleString()} triangles → ${frame.width}×${frame.height} transparent render`
-              : STUDIO_EXPORT_HINT}
-          </span>
+          {model && overflow ? (
+            <span className="info roblox-foot-warn">
+              Part of the model is outside the frame —{' '}
+              <button type="button" className="roblox-link" onClick={() => reframe(true)}>
+                Re-frame
+              </button>{' '}
+              or zoom out.
+            </span>
+          ) : (
+            <span className="info">
+              {model
+                ? `${model.name} · ${model.meshCount} ${model.meshCount === 1 ? 'mesh' : 'meshes'} · ${model.triangles.toLocaleString()} triangles → ${frame.width}×${frame.height} transparent render`
+                : STUDIO_EXPORT_HINT}
+            </span>
+          )}
           <Button onClick={cancel}>Cancel</Button>
           <Button variant="primary" icon={Sparkles} onClick={addToDocument} disabled={!model || busy || loading}>
             {editing ? 'Update Layer' : 'Add to Document'}

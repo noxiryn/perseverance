@@ -42,7 +42,8 @@ export const gradientOverlay = defineEffect(
       const p = args.params;
       const src: Gradient = isGradient(p.gradient) ? p.gradient : DEFAULT_GRADIENT;
       const g: Gradient = { ...src, angle: num(p.angle, src.angle ?? 90), scale: Math.max(0.05, num(p.scale, 1)) };
-      const b = regionOf(args).bounds;
+      // Gradient geometry follows the layer's layout box (not its overflow).
+      const b = regionOf(args).paintBox;
       const t = args.target;
       const W = t.canvas.width;
       const H = t.canvas.height;

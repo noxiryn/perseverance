@@ -59,3 +59,24 @@ export function mimeOf(name: string): string {
 export function isTextureName(name: string): boolean {
   return /\.(png|jpe?g|webp|gif|bmp|tga)$/i.test(name);
 }
+
+/**
+ * Valid 1×1 opaque white RGBA PNG, used in place of texture files that were not selected so a
+ * texture lookup multiplies the material color by 1 (the loader also drops such maps afterwards).
+ */
+export const WHITE_PIXEL_PNG =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg==';
+
+/**
+ * The MTL files to parse for an OBJ, in `mtllib` order: every referenced library that was
+ * selected; when none of them match (renamed files), every selected .mtl file.
+ */
+export function selectMtlFiles<T extends { name: string }>(objText: string, files: T[]): T[] {
+  const mtls = files.filter((f) => extOf(f.name) === 'mtl');
+  const out: T[] = [];
+  for (const lib of mtlLibsOf(objText).map(resourceKey)) {
+    const f = mtls.find((x) => resourceKey(x.name) === lib);
+    if (f && !out.includes(f)) out.push(f);
+  }
+  return out.length ? out : mtls;
+}

@@ -57,12 +57,27 @@ export class DabSpacer {
     return this.dir;
   }
 
+  /** Distance travelled since the last emitted dab (see resume). */
+  get carried(): number {
+    return this.carry;
+  }
+
   /** Begin a stroke: emits one dab at the start point. */
   start(p: InputPoint, direction = 0): DabPoint[] {
     this.last = { ...p };
     this.carry = 0;
     this.dir = direction;
     return [{ ...p, direction }];
+  }
+
+  /**
+   * Continue from `p` without emitting a dab, as if `carry` px had already been travelled since
+   * the last dab (Shift-click polylines keep an even spacing across the joint). The carry is
+   * clamped to one step so a smaller brush never places a dab behind `p`.
+   */
+  resume(p: InputPoint, carry = 0) {
+    this.last = { ...p };
+    this.carry = Math.max(0, Math.min(carry, Math.max(MIN_DAB_STEP, this.spacingAt(p.pressure))));
   }
 
   /** Extend the stroke to `p`, returning the dabs placed along the new segment. */

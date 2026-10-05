@@ -25,7 +25,7 @@ import { openColorRange } from './colorRange';
 import { loadLayerSelection, modifySelection, reselect, selectAllLayers, type ModifyKind } from './selectOps';
 import { lastSelectionFor } from './lifecycle';
 import { actualPixels, fitOnScreen, zoomStep } from './tools/navigate';
-import { activeTransform, startFreeTransform, startSelectionTransform, transformAgain } from './transform/controller';
+import { activeTransform, commitBesideTransform, settleTransform, startFreeTransform, startSelectionTransform, transformAgain } from './transform/controller';
 import { requireDoc } from './state';
 
 const hasDoc = () => !!activeSession();
@@ -212,9 +212,11 @@ async function newGuide() {
   const r = await openDialog<NewGuideResult>(NewGuideDialog);
   if (!r || !Number.isFinite(r.position)) return;
   if (!useUI.getState().view.guides) useUI.getState().toggleView('guides', true);
-  useEditor.getState().commit('New Guide', (d) => {
-    d.guides.push({ id: uid('g_'), orientation: r.orientation, position: Math.round(r.position * 100) / 100 });
-  });
+  commitBesideTransform(() =>
+    useEditor.getState().commit('New Guide', (d) => {
+      d.guides.push({ id: uid('g_'), orientation: r.orientation, position: Math.round(r.position * 100) / 100 });
+    }),
+  );
 }
 
 function clearGuides() {
@@ -224,9 +226,11 @@ function clearGuides() {
     toast('There are no guides to clear.', 'info');
     return;
   }
-  useEditor.getState().commit('Clear Guides', (d) => {
-    d.guides = [];
-  });
+  commitBesideTransform(() =>
+    useEditor.getState().commit('Clear Guides', (d) => {
+      d.guides = [];
+    }),
+  );
 }
 
 async function toggleFullscreen() {
@@ -393,4 +397,17 @@ const editCommands: CommandDef[] = [
   },
 ];
 
-export const viewportCommands: CommandDef[] = [...selectCommands, ...viewCommands, ...editCommands];
+/**
+ * Select-menu commands change the document selection: a running Free Transform / Transform
+ * Selection is committed first so it gets its own history step (instead of being swallowed by
+ * the selection step, or silently dropped).
+ */
+const settled = (c: CommandDef): CommandDef => ({
+  ...c,
+  run: () => {
+    settleTransform();
+    return c.run();
+  },
+});
+
+export const viewportCommands: CommandDef[] = [...selectCommands.map(settled), ...viewCommands, ...editCommands];

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { TextWarpStyle, Transform } from '../../core/types';
+import type { Gradient, TextWarpStyle, Transform } from '../../core/types';
 import { warpPoint } from '../../render/warpMath';
 import { BUNDLED_FAMILIES } from '../../fonts/generated/faces';
 import { DEFAULT_WORKSPACE } from '../../state/ui';
@@ -14,6 +14,7 @@ import {
   optionsPatchFromTextPatch,
   parseWeightValue,
   textPropsFromOptions,
+  typographicPatch,
   weightChoices,
   weightLabel,
   weightValue,
@@ -21,6 +22,9 @@ import {
 import { TEXT_STYLES, getTextStyle, presetEffects } from './styles';
 import { LOREM, loremForBox, loremWords } from './lorem';
 import { isCharacterPanelOpen } from './panelState';
+import { ClickCounter } from './clicks';
+import { remapGradient } from './gradientRemap';
+import { gradientGeometry } from '../../render/gradientMath';
 
 describe('caseMap (All Caps index mapping)', () => {
   it('is the identity without uppercase', () => {
@@ -239,6 +243,49 @@ describe('misc', () => {
     expect(loremWords(5).split(' ')).toHaveLength(5);
     expect(loremWords(5)).toMatch(/^[A-Z].*\.$/);
     expect(loremForBox(2000, 10, 30)).toBe(LOREM);
+  });
+
+  it('counts multi-clicks by time and distance (pointerdown.detail is always 0)', () => {
+    const c = new ClickCounter(500, 4);
+    expect(c.press(10, 10, 0)).toBe(1);
+    expect(c.press(11, 12, 200)).toBe(2);
+    expect(c.press(10, 10, 400)).toBe(3);
+    expect(c.press(10, 10, 600)).toBe(4);
+    expect(c.press(10, 10, 700)).toBe(1); // a 5th press starts over
+    expect(c.press(10, 10, 1300)).toBe(1); // too slow
+    expect(c.press(20, 10, 1400)).toBe(1); // too far
+    expect(c.press(20, 10, 1500)).toBe(2);
+    expect(c.count).toBe(2);
+    c.reset();
+    expect(c.count).toBe(0);
+    expect(c.press(20, 10, 1600)).toBe(1);
+  });
+
+  it('keeps only typographic keys when a styled layer updates the tool defaults', () => {
+    const p = typographicPatch({
+      fontSize: 40,
+      fontFamily: 'Anton',
+      letterSpacing: 5,
+      warp: { style: 'arc', bend: 50, horizontal: 0, vertical: 0 },
+      strokeOn: true,
+      strokeWidth: 6,
+      strokeColor: '#ff0000',
+      fillType: 'gradient',
+      stylePreset: 'comic',
+    });
+    expect(p).toEqual({ fontSize: 40, fontFamily: 'Anton', letterSpacing: 5 });
+  });
+
+  it('remaps a gradient between boxes without moving its colours', () => {
+    const from = { x: 0, y: 0, width: 900, height: 180 };
+    const to = { x: 12, y: 40, width: 860, height: 110 };
+    const kinds: Gradient['kind'][] = ['linear', 'reflected', 'radial', 'diamond', 'angle'];
+    for (const kind of kinds) {
+      const g: Gradient = { kind, angle: 30, scale: 1.2, offsetX: 0.1, offsetY: -0.2, stops: [{ offset: 0, color: '#000' }, { offset: 1, color: '#fff' }] };
+      const a = gradientGeometry(g, from) as unknown as Record<string, number>;
+      const b = gradientGeometry(remapGradient(g, from, to), to) as unknown as Record<string, number>;
+      for (const k of Object.keys(a)) if (typeof a[k] === 'number') expect(b[k]).toBeCloseTo(a[k], 6);
+    }
   });
 
   it('detects the Character panel visibility', () => {

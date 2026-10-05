@@ -4,9 +4,19 @@
  * All maps are row-major, `w × h`, 8-bit coverage (0..255) unless noted.
  */
 import { edgeDistance } from '../distance';
-import { blurChannel } from '../../core/blur';
 
 export type StrokePosition = 'outside' | 'inside' | 'center';
+
+/**
+ * Distance field provider for a `w × h` matte: (mode, maxDist) → per-pixel distance to the
+ * matte edge, exact below `maxDist`. The compositor passes cached fields; by default they are
+ * computed from the matte.
+ */
+export type DistanceSource = (mode: 'outside' | 'inside', maxDist: number) => Float32Array;
+
+function directSource(a: Uint8Array | Uint8ClampedArray, w: number, h: number): DistanceSource {
+  return (mode, maxDist) => edgeDistance(a, w, h, mode, maxDist);
+}
 
 const c01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
@@ -17,14 +27,21 @@ const c01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
  *  - center: a band of `size` px centered on the edge (not clipped)
  * Anti-aliased (sub-pixel accurate distances), round joins.
  */
-export function strokeCoverage(a: Uint8Array | Uint8ClampedArray, w: number, h: number, size: number, position: StrokePosition): Uint8Array {
+export function strokeCoverage(
+  a: Uint8Array | Uint8ClampedArray,
+  w: number,
+  h: number,
+  size: number,
+  position: StrokePosition,
+  dist: DistanceSource = directSource(a, w, h),
+): Uint8Array {
   const n = w * h;
   const out = new Uint8Array(n);
   if (!(size > 0) || !n) return out;
   // coverage = clamp(size + .5 − d) — written as tight branches (hot loop over every pixel).
   const lim = size + 0.5;
   if (position === 'outside') {
-    const d = edgeDistance(a, w, h, 'outside', size + 2);
+    const d = dist('outside', size + 2);
     for (let i = 0; i < n; i++) {
       if (a[i] >= 128) {
         out[i] = 255;
@@ -35,7 +52,7 @@ export function strokeCoverage(a: Uint8Array | Uint8ClampedArray, w: number, h: 
       out[i] = v >= 1 ? 255 : (v * 255 + 0.5) | 0;
     }
   } else if (position === 'inside') {
-    const d = edgeDistance(a, w, h, 'inside', size + 2);
+    const d = dist('inside', size + 2);
     for (let i = 0; i < n; i++) {
       const ai = a[i];
       if (ai < 128) {
@@ -48,9 +65,14 @@ export function strokeCoverage(a: Uint8Array | Uint8ClampedArray, w: number, h: 
     }
   } else {
     const half = size / 2;
-    const dOut = edgeDistance(a, w, h, 'outside', half + 2);
-    const dIn = edgeDistance(a, w, h, 'inside', half + 2);
-    for (let i = 0; i < n; i++) out[i] = Math.round(c01(half + 0.5 - (a[i] >= 128 ? dIn[i] : dOut[i])) * 255);
+    const hl = half + 0.5;
+    const dOut = dist('outside', half + 2);
+    const dIn = dist('inside', half + 2);
+    for (let i = 0; i < n; i++) {
+      const v = hl - (a[i] >= 128 ? dIn[i] : dOut[i]);
+      if (v <= 0) continue;
+      out[i] = v >= 1 ? 255 : (v * 255 + 0.5) | 0;
+    }
   }
   return out;
 }
@@ -146,21 +168,76 @@ export function shadeSplit(nx: number, ny: number, lx: number, ly: number, lz: n
 }
 
 /**
+ * Separable 3-pass box blur (≈ gaussian) of a float field with clamped edges, in place. Same
+ * result as core `blurChannel`, but the vertical pass walks rows (cache friendly) instead of
+ * columns, which is several times faster on large fields.
+ */
+export function blurField(buf: Float32Array, w: number, h: number, radius: number): Float32Array {
+  const r = Math.max(1, Math.round(radius));
+  if (!w || !h) return buf;
+  const tmp = new Float32Array(buf.length);
+  const acc = new Float64Array(w);
+  const inv = 1 / (r + r + 1);
+  for (let pass = 0; pass < 3; pass++) {
+    // rows: buf → tmp
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      let val = r * buf[row];
+      for (let j = 0; j < r; j++) val += buf[row + (j < w ? j : w - 1)];
+      for (let x = 0; x < w; x++) {
+        const xa = x + r;
+        val += buf[row + (xa < w ? xa : w - 1)];
+        tmp[row + x] = val * inv;
+        const xs = x - r;
+        val -= buf[row + (xs > 0 ? xs : 0)];
+      }
+    }
+    // columns, row by row: tmp → buf
+    for (let x = 0; x < w; x++) acc[x] = r * tmp[x];
+    for (let j = 0; j < r; j++) {
+      const row = (j < h ? j : h - 1) * w;
+      for (let x = 0; x < w; x++) acc[x] += tmp[row + x];
+    }
+    for (let y = 0; y < h; y++) {
+      const ya = y + r;
+      const add = (ya < h ? ya : h - 1) * w;
+      const ys = y - r;
+      const sub = (ys > 0 ? ys : 0) * w;
+      const out = y * w;
+      for (let x = 0; x < w; x++) {
+        const v = acc[x] + tmp[add + x];
+        buf[out + x] = v * inv;
+        acc[x] = v - tmp[sub + x];
+      }
+    }
+  }
+  return buf;
+}
+
+/**
  * Bevel highlight / shadow maps (0..255 including coverage). For 'inner' the maps must be clipped
  * to the content alpha by the caller; 'emboss' extends half the size outside the shape.
  */
-export function bevelMaps(a: Uint8Array | Uint8ClampedArray, w: number, h: number, o: BevelOptions): { hi: Uint8Array; sh: Uint8Array } {
+export function bevelMaps(
+  a: Uint8Array | Uint8ClampedArray,
+  w: number,
+  h: number,
+  o: BevelOptions,
+  dist: DistanceSource = directSource(a, w, h),
+): { hi: Uint8Array; sh: Uint8Array } {
   const n = w * h;
   const hi = new Uint8Array(n);
   const sh = new Uint8Array(n);
   const size = Math.max(0.5, o.size);
   if (!n) return { hi, sh };
   const H = new Float32Array(n);
-  const cov = new Float32Array(n);
-  if (o.style === 'emboss') {
+  const emboss = o.style === 'emboss';
+  let cov: Float32Array | null = null;
+  if (emboss) {
+    cov = new Float32Array(n);
     const half = size / 2;
-    const dIn = edgeDistance(a, w, h, 'inside', half + 2);
-    const dOut = edgeDistance(a, w, h, 'outside', half + 2);
+    const dIn = dist('inside', half + 2);
+    const dOut = dist('outside', half + 2);
     for (let i = 0; i < n; i++) {
       const inside = a[i] >= 128;
       const sd = inside ? dIn[i] : -dOut[i];
@@ -168,23 +245,32 @@ export function bevelMaps(a: Uint8Array | Uint8ClampedArray, w: number, h: numbe
       cov[i] = inside ? 1 : c01(half + 0.5 - dOut[i]);
     }
   } else {
-    const dIn = edgeDistance(a, w, h, 'inside', size + 2);
+    const dIn = dist('inside', size + 2);
+    const inv = 1 / size;
     for (let i = 0; i < n; i++) {
-      H[i] = a[i] >= 128 ? size * bevelProfile(dIn[i] / size) : 0;
-      cov[i] = 1;
+      if (a[i] < 128) continue;
+      // inlined bevelProfile: 1 − (1 − u)²
+      let u = dIn[i] * inv;
+      if (u > 1) u = 1;
+      const m = 1 - u;
+      H[i] = size * (1 - m * m);
     }
   }
   // A distance field has pixel-level noise along curved/diagonal edges; differentiating it
   // shows up as ridges across the bevel slope. A light intrinsic blur (≈ Photoshop "Smooth")
   // removes them; `soften` adds on top.
   const smooth = Math.min(4, Math.max(1, Math.round(size / 6)));
-  blurChannel(H, w, h, smooth + (o.soften > 0.5 ? o.soften : 0));
+  blurField(H, w, h, smooth + (o.soften > 0.5 ? o.soften : 0));
   const DEG = Math.PI / 180;
   const alt = Math.max(0, Math.min(90, o.altitude)) * DEG;
   const lx = Math.cos(o.angle * DEG) * Math.cos(alt);
   const ly = -Math.sin(o.angle * DEG) * Math.cos(alt);
   const lz = Math.sin(alt);
   const D = Math.max(0, o.depth);
+  // Shading (inlined shadeSplit — no per-pixel allocation): the surface normal is (−∇H·D, 1).
+  const flat = lz;
+  const hiK = flat < 1 ? 255 / (1 - flat) : 0;
+  const shK = flat > 0 ? 255 / flat : 0;
   for (let y = 0; y < h; y++) {
     const row = y * w;
     const up = y > 0 ? row - w : row;
@@ -192,7 +278,7 @@ export function bevelMaps(a: Uint8Array | Uint8ClampedArray, w: number, h: numbe
     const fy = y > 0 && y < h - 1 ? 0.5 : 1;
     for (let x = 0; x < w; x++) {
       const i = row + x;
-      const c = cov[i];
+      const c = cov ? cov[i] : 1;
       if (c <= 0) continue;
       const l = x > 0 ? i - 1 : i;
       const r = x < w - 1 ? i + 1 : i;
@@ -200,9 +286,18 @@ export function bevelMaps(a: Uint8Array | Uint8ClampedArray, w: number, h: numbe
       const gx = (H[r] - H[l]) * fx;
       const gy = (H[dn + x] - H[up + x]) * fy;
       if (gx === 0 && gy === 0) continue;
-      const [hv, sv] = shadeSplit(-gx * D, -gy * D, lx, ly, lz);
-      if (hv > 0) hi[i] = Math.round(c01(hv) * c * 255);
-      if (sv > 0) sh[i] = Math.round(c01(sv) * c * 255);
+      const nx = -gx * D;
+      const ny = -gy * D;
+      const sdot = (nx * lx + ny * ly + lz) / Math.sqrt(nx * nx + ny * ny + 1);
+      if (sdot > flat) {
+        let v = (sdot - flat) * hiK;
+        if (v > 255) v = 255;
+        hi[i] = (v * c + 0.5) | 0;
+      } else {
+        let v = (flat - sdot) * shK;
+        if (v > 255) v = 255;
+        sh[i] = (v * c + 0.5) | 0;
+      }
     }
   }
   return { hi, sh };

@@ -63,6 +63,57 @@ export function isEmptyRect(r: PxRect | null | undefined): boolean {
   return !r || r.w <= 0 || r.h <= 0;
 }
 
+export function containsRect(outer: PxRect, inner: PxRect): boolean {
+  return inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h;
+}
+
+export function sameRect(a: PxRect, b: PxRect): boolean {
+  return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+}
+
+/* ---------------- per-side margins ---------------- */
+
+/** Per-side growth (output px): how far something reaches beyond a rect on each side. */
+export interface Sides {
+  l: number;
+  t: number;
+  r: number;
+  b: number;
+}
+
+export const NO_SIDES: Sides = Object.freeze({ l: 0, t: 0, r: 0, b: 0 }) as Sides;
+
+export function uniformSides(n: number): Sides {
+  const v = Math.max(0, n);
+  return { l: v, t: v, r: v, b: v };
+}
+
+export function maxSides(a: Sides, b: Sides): Sides {
+  return { l: Math.max(a.l, b.l), t: Math.max(a.t, b.t), r: Math.max(a.r, b.r), b: Math.max(a.b, b.b) };
+}
+
+export function addSides(a: Sides, n: number): Sides {
+  return { l: a.l + n, t: a.t + n, r: a.r + n, b: a.b + n };
+}
+
+/** Sides seen from the other direction (what must be present for an output area to be complete). */
+export function flipSides(s: Sides): Sides {
+  return { l: s.r, t: s.b, r: s.l, b: s.t };
+}
+
+export function maxSide(s: Sides): number {
+  return Math.max(s.l, s.t, s.r, s.b);
+}
+
+/** Grow a rect by per-side amounts (each rounded up to whole pixels). */
+export function expandSides(r: PxRect, s: Sides): PxRect {
+  const l = Math.ceil(Math.max(0, s.l));
+  const t = Math.ceil(Math.max(0, s.t));
+  const rr = Math.ceil(Math.max(0, s.r));
+  const b = Math.ceil(Math.max(0, s.b));
+  return { x: r.x - l, y: r.y - t, w: r.w + l + rr, h: r.h + t + b };
+}
+
 /** Hard limit for any intermediate canvas side (Chromium supports up to 32767, keep memory sane). */
 export const MAX_SIDE = 16384;
 

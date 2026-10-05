@@ -3,10 +3,12 @@
  * exposes it reactively for the move tool's options bar.
  */
 import { create } from 'zustand';
-import { activeSession, useEditor } from '../../state/editor';
+import { uid } from '../../core/ids';
+import { HISTORY_LIMIT, activeSession, useEditor, type EditorState } from '../../state/editor';
 import { toast } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
 import { TransformSession, lastTransformDelta } from './session';
+import { splitForeignCommit } from './historySplit';
 import { requireDoc } from '../state';
 
 interface TransformStoreState {
@@ -92,6 +94,89 @@ export function cancelTransform() {
   const { ses, prevTool } = uninstall();
   if (ses) ses.cancel();
   restoreTool(prevTool);
+}
+
+/**
+ * Commit a running Free Transform / Transform Selection (if any) as its own history step. Call
+ * before a command changes the document so the transform is not swallowed by that step.
+ */
+export function settleTransform() {
+  if (activeTransform()) commitTransform();
+}
+
+let rebasing = false;
+
+/** True while commitBesideTransform runs (the lifecycle watchdog then leaves the session alone). */
+export function isTransformRebasing(): boolean {
+  return rebasing;
+}
+
+/**
+ * Run a document commit (e.g. adding a guide) WITHOUT ending a running transform session: the
+ * live preview is lifted, `commit` runs on the clean document, and the session continues on top
+ * of the new history step.
+ */
+export function commitBesideTransform(commit: () => void) {
+  const ses = activeTransform();
+  const s = activeSession();
+  if (!ses || !s || s.doc.id !== ses.docId) {
+    commit();
+    return;
+  }
+  rebasing = true;
+  try {
+    if (ses.previewed) useEditor.getState().cancelPreview();
+    commit();
+  } finally {
+    rebasing = false;
+  }
+  const after = activeSession();
+  if (!after || after.doc.id !== ses.docId || activeTransform() !== ses) return;
+  ses.rebase(after.history.entries[after.history.index]);
+  if (ses.previewed) ses.applyPreview();
+  viewport.requestOverlay();
+}
+
+/**
+ * Another module committed a history step while a Free Transform preview was live. The store
+ * produced that step from the previewed document, so the transform is already inside it: split it
+ * into its own "Free Transform" step right before the foreign one, end the session and tell the
+ * user. Returns false when the change is not a plain commit on top of the preview (the caller then
+ * just drops the session).
+ */
+export function absorbForeignCommit(prev: EditorState): boolean {
+  const ses = activeTransform();
+  if (!ses || ses.kind !== 'layers' || !ses.previewed) return false;
+  const a = useEditor.getState().sessions[ses.docId];
+  const b = prev.sessions[ses.docId];
+  if (!a || !b) return false;
+  const before = b.history.entries[b.history.index];
+  // The preview must have been live on top of the base step right before this change.
+  if (!before || before.id !== ses.baseEntryId || b.doc === before.doc) return false;
+  const split = splitForeignCommit({
+    history: { entries: a.history.entries, index: a.history.index, savedIndex: a.savedIndex },
+    knownIds: new Set(b.history.entries.map((e) => e.id)),
+    baseEntryId: ses.baseEntryId,
+    baseDoc: ses.baseDoc,
+    previewDoc: b.doc,
+    label: ses.label,
+    newId: () => uid('h_'),
+    limit: HISTORY_LIMIT,
+  });
+  if (!split) return false;
+  const foreignLabel = split.entries[split.index].label;
+  const { prevTool } = uninstall();
+  ses.recordDelta();
+  ses.previewed = false;
+  useEditor.setState((cur) => ({
+    sessions: {
+      ...cur.sessions,
+      [ses.docId]: { ...a, history: { entries: split.entries, index: split.index }, savedIndex: split.savedIndex, dirty: split.index !== split.savedIndex },
+    },
+  }));
+  restoreTool(prevTool);
+  toast(`${ses.label} was applied before “${foreignLabel}”.`, 'info');
+  return true;
 }
 
 /**

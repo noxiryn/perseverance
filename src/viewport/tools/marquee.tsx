@@ -4,7 +4,8 @@
  * styles; feather + anti-alias; drag inside a selection moves its outline; click deselects.
  */
 import { Circle, SquareDashed } from 'lucide-react';
-import type { Point, Rect } from '../../core/types';
+import type { Document, Point, Rect } from '../../core/types';
+import { rectIntersect } from '../../core/geometry';
 import { latchModifiers, marqueeRect } from '../math/marquee';
 import type { ToolDef, ToolPointerEvent } from '../../registry';
 import { ellipseMask, rectMask, type SelectionMode } from '../../editor/selection';
@@ -13,7 +14,7 @@ import { activeSession, toolOptions, useToolOptions } from '../../state/editor';
 import { Checkbox, NumberField, Select, IconButton } from '../../ui/controls';
 import { ArrowRightLeft } from 'lucide-react';
 import { clearSmartGuides, collectSnapTargets, snapPoint, type SnapTargets } from '../snap';
-import { strokeAnts } from '../outline';
+import { shapeInsideCanvas, strokeAnts } from '../outline';
 import { drawLabel } from '../draw';
 import { fmtPx, isTemporarilySuspended, vpState } from '../state';
 import {
@@ -59,6 +60,8 @@ interface MarqueeDrag {
   /** Space-drag repositioning: last pointer position. */
   spaceLast: Point | null;
 }
+
+const docRect = (doc: Document): Rect => ({ x: 0, y: 0, width: doc.width, height: doc.height });
 
 /** Update the constrain modifiers of a drag from the current key state. */
 const applyModifiers = (d: MarqueeDrag, shiftKey: boolean, altKey: boolean) => latchModifiers(d, shiftKey, altKey);
@@ -165,16 +168,21 @@ function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
     const s = activeSession();
     if (!d || !s) return;
     const r = currentRect(d);
-    if (!d.moved || r.width < 1 || r.height < 1) {
+    // The selection never extends past the canvas: clip the marquee to it.
+    const clipped = r.width >= 1 && r.height >= 1 ? rectIntersect(r, docRect(s.doc)) : null;
+    if (!d.moved || !clipped || clipped.width < 1 || clipped.height < 1) {
       if (d.mode === 'new') deselect();
       return;
     }
     const o = toolOptions(id, MARQUEE_DEFAULTS);
-    let mask = kind === 'rect' ? rectMask(s.doc, r) : ellipseMask(s.doc, r);
+    let mask = kind === 'rect' ? rectMask(s.doc, clipped) : ellipseMask(s.doc, r);
     if (kind === 'ellipse' && !o.antiAlias) mask = hardenMask(mask);
+    // The vector shape must describe the (clipped) mask exactly: a rect is clipped with it; an
+    // ellipse reaching past the canvas edge is no longer an ellipse, so it is stored as a plain mask.
+    const shape: Rect | null = kind === 'rect' ? clipped : shapeInsideCanvas({ type: 'ellipse', rect: r }, s.doc.width, s.doc.height) ? r : null;
     commitSelectionMask(s.doc, mask, d.mode, kind === 'rect' ? 'Rectangular Marquee' : 'Elliptical Marquee', {
       feather: o.feather,
-      shape: { type: kind, rect: r },
+      shape: shape ? { type: kind, rect: shape } : null,
     });
   };
 
@@ -184,20 +192,33 @@ function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
       return;
     }
     const d = drag;
-    if (!d || !d.moved) return;
-    const r = currentRect(d);
-    const p0 = viewport.docToScreen({ x: r.x, y: r.y });
-    const p1 = viewport.docToScreen({ x: r.x + r.width, y: r.y + r.height });
-    const path = new Path2D();
-    if (kind === 'rect') {
-      const x0 = Math.round(p0.x) + 0.5;
-      const y0 = Math.round(p0.y) + 0.5;
-      path.rect(x0, y0, Math.round(p1.x) - Math.round(p0.x), Math.round(p1.y) - Math.round(p0.y));
-    } else {
-      path.ellipse((p0.x + p1.x) / 2, (p0.y + p1.y) / 2, Math.abs(p1.x - p0.x) / 2, Math.abs(p1.y - p0.y) / 2, 0, 0, Math.PI * 2);
+    const doc = activeSession()?.doc;
+    if (!d || !d.moved || !doc) return;
+    const full = currentRect(d);
+    // Preview exactly what will be selected: the marquee clipped to the canvas.
+    const r = kind === 'rect' ? rectIntersect(full, docRect(doc)) : full;
+    if (r) {
+      const p0 = viewport.docToScreen({ x: r.x, y: r.y });
+      const p1 = viewport.docToScreen({ x: r.x + r.width, y: r.y + r.height });
+      const path = new Path2D();
+      ctx.save();
+      if (kind === 'rect') {
+        const x0 = Math.round(p0.x) + 0.5;
+        const y0 = Math.round(p0.y) + 0.5;
+        path.rect(x0, y0, Math.round(p1.x) - Math.round(p0.x), Math.round(p1.y) - Math.round(p0.y));
+      } else {
+        const c0 = viewport.docToScreen({ x: 0, y: 0 });
+        const c1 = viewport.docToScreen({ x: doc.width, y: doc.height });
+        ctx.beginPath();
+        ctx.rect(Math.round(c0.x), Math.round(c0.y), Math.round(c1.x) - Math.round(c0.x) + 1, Math.round(c1.y) - Math.round(c0.y) + 1);
+        ctx.clip();
+        path.ellipse((p0.x + p1.x) / 2, (p0.y + p1.y) / 2, Math.abs(p1.x - p0.x) / 2, Math.abs(p1.y - p0.y) / 2, 0, 0, Math.PI * 2);
+      }
+      strokeAnts(ctx, path);
+      ctx.restore();
     }
-    strokeAnts(ctx, path);
-    drawLabel(ctx, [`W: ${fmtPx(r.width)} px`, `H: ${fmtPx(r.height)} px`], viewport.docToScreen(d.b));
+    const size = r ?? { width: 0, height: 0 };
+    drawLabel(ctx, [`W: ${fmtPx(size.width)} px`, `H: ${fmtPx(size.height)} px`], viewport.docToScreen(d.b));
   };
 
   const onDeactivate = () => {

@@ -141,7 +141,11 @@ export function ShapeOptionsBar() {
         onGradient={(g, phase) => set('fillGradient', g, phase)}
       />
       <span className="shape-opts-label">Stroke</span>
-      <StrokeButton value={{ on: view.strokeOn, color: view.strokeColor, width: view.strokeWidth, align: view.strokeAlign, dash: view.strokeDash }} onOn={(on) => setShapeOptions(toolId, view, layer, on && !(view.strokeWidth > 0) ? { strokeOn: true, strokeWidth: 4 } : { strokeOn: on }, 'commit', 'Shape Stroke')}onColor={(c, phase) => set('strokeColor', c, phase)} />
+      <StrokeButton
+        value={{ on: view.strokeOn, color: view.strokeColor, width: view.strokeWidth, align: view.strokeAlign, dash: view.strokeDash }}
+        onOn={(on) => setShapeOptions(toolId, view, layer, on && !(view.strokeWidth > 0) ? { strokeOn: true, strokeWidth: 4 } : { strokeOn: on }, 'commit', 'Shape Stroke')}
+        onColor={(c, phase) => set('strokeColor', c, phase)}
+      />
       <NumberField
         value={view.strokeWidth}
         min={0}

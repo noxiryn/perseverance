@@ -118,10 +118,25 @@ export class PixelLRU {
 
 /* ---------------- slots ---------------- */
 
+/**
+ * A memory-holding object shared between cache entries (a canvas, a typed array). Entries list
+ * their resources; each resource counts once against the budget however many entries hold it
+ * (e.g. a moved layer's shifted render shares the canvases of the render it was made from).
+ */
+export type Resource = HTMLCanvasElement | OffscreenCanvas | ArrayBufferView | { width: number; height: number };
+
+/** Pixel-equivalent size of a resource (typed arrays: 4 bytes = 1 px). */
+export function resourcePixels(o: Resource): number {
+  if (ArrayBuffer.isView(o)) return Math.ceil(o.byteLength / 4);
+  const c = o as { width?: number; height?: number };
+  return (c.width ?? 0) * (c.height ?? 0);
+}
+
 interface SlotEntry {
   sig: string;
   value: unknown;
   pixels: number;
+  res: Resource[] | null;
 }
 
 interface Slot {
@@ -131,13 +146,49 @@ interface Slot {
   composite?: boolean;
 }
 
+export interface SlotSetOptions {
+  layerId?: ID;
+  composite?: boolean;
+  max?: number;
+  /** Shared resources held by the value (counted once across all entries). */
+  res?: (Resource | null | undefined)[];
+}
+
 export class SlotCache {
   private map = new Map<string, Slot>();
   private total = 0;
+  private refs = new Map<object, { n: number; px: number }>();
   constructor(
     public budget = 40 * 1024 * 1024,
     public perKey = 2,
   ) {}
+
+  private addEntry(e: SlotEntry) {
+    this.total += e.pixels;
+    if (!e.res) return;
+    for (const r of e.res) {
+      const ref = this.refs.get(r);
+      if (ref) ref.n++;
+      else {
+        const px = resourcePixels(r);
+        this.refs.set(r, { n: 1, px });
+        this.total += px;
+      }
+    }
+  }
+
+  private dropEntry(e: SlotEntry) {
+    this.total -= e.pixels;
+    if (!e.res) return;
+    for (const r of e.res) {
+      const ref = this.refs.get(r);
+      if (!ref) continue;
+      if (--ref.n <= 0) {
+        this.refs.delete(r);
+        this.total -= ref.px;
+      }
+    }
+  }
 
   get<T>(key: string, sig: string): T | undefined {
     const slot = this.map.get(key);
@@ -160,31 +211,58 @@ export class SlotCache {
     return e ? { sig: e.sig, value: e.value as T } : undefined;
   }
 
-  set<T>(key: string, sig: string, value: T, pixels: number, opts: { layerId?: ID; composite?: boolean; max?: number } = {}): T {
+  /** Values of every entry of a slot, most recent first (does not touch the LRU order). */
+  values<T>(key: string): T[] {
+    const slot = this.map.get(key);
+    return slot ? slot.entries.map((e) => e.value as T) : [];
+  }
+
+  set<T>(key: string, sig: string, value: T, pixels: number, opts: SlotSetOptions = {}): T {
     let slot = this.map.get(key);
     if (!slot) slot = { entries: [], layerId: opts.layerId, composite: opts.composite };
     else this.map.delete(key);
     const old = slot.entries.findIndex((e) => e.sig === sig);
-    if (old >= 0) this.total -= slot.entries.splice(old, 1)[0].pixels;
-    slot.entries.unshift({ sig, value, pixels });
-    this.total += pixels;
+    let res: Resource[] | null = null;
+    if (opts.res) {
+      const seen = new Set<object>();
+      for (const r of opts.res) if (r && !seen.has(r)) seen.add(r);
+      res = seen.size ? ([...seen] as Resource[]) : null;
+    }
+    const entry: SlotEntry = { sig, value, pixels, res };
+    // Count the new entry before dropping the old one so shared resources never hit zero refs.
+    this.addEntry(entry);
+    if (old >= 0) this.dropEntry(slot.entries.splice(old, 1)[0]);
+    slot.entries.unshift(entry);
     const max = Math.max(1, opts.max ?? this.perKey);
-    while (slot.entries.length > max) this.total -= slot.entries.pop()!.pixels;
+    while (slot.entries.length > max) this.dropEntry(slot.entries.pop()!);
     this.map.set(key, slot);
     this.evict(key);
     return value;
   }
 
-  /** Clear everything, or the slots of one layer plus every composite slot. */
-  clear(layerId?: ID) {
+  /** Drop one slot. */
+  delete(key: string) {
+    const slot = this.map.get(key);
+    if (!slot) return;
+    for (const e of slot.entries) this.dropEntry(e);
+    this.map.delete(key);
+  }
+
+  /**
+   * Clear everything, or the slots tagged with `layerId` plus (unless `composites` is false)
+   * every composite slot.
+   */
+  clear(layerId?: ID, opts: { composites?: boolean } = {}) {
     if (layerId === undefined) {
       this.map.clear();
+      this.refs.clear();
       this.total = 0;
       return;
     }
+    const composites = opts.composites !== false;
     for (const [k, s] of this.map) {
-      if (s.layerId === layerId || s.composite) {
-        for (const e of s.entries) this.total -= e.pixels;
+      if (s.layerId === layerId || (composites && s.composite)) {
+        for (const e of s.entries) this.dropEntry(e);
         this.map.delete(k);
       }
     }
@@ -203,7 +281,7 @@ export class SlotCache {
     for (const [k, s] of this.map) {
       if (this.total <= this.budget * 0.85) break;
       if (k === keep) continue;
-      for (const e of s.entries) this.total -= e.pixels;
+      for (const e of s.entries) this.dropEntry(e);
       this.map.delete(k);
     }
   }
