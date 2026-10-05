@@ -32,8 +32,10 @@ jobs:
     env:
       # Unsigned builds (no code-signing certificates configured).
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
-      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+      # Keep tool caches OUTSIDE the project: package.json has "type": "module", which would make
+      # electron-builder's extracted helper scripts (CommonJS .js) fail to run inside the repo.
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/../eb-cache/electron-builder
+      ELECTRON_CACHE: ${{ github.workspace }}/../eb-cache/electron
     steps:
       - uses: actions/checkout@v4
 
@@ -45,7 +47,7 @@ jobs:
       - name: Cache Electron downloads
         uses: actions/cache@v4
         with:
-          path: .cache
+          path: ${{ github.workspace }}/../eb-cache
           key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
