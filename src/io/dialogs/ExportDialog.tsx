@@ -160,7 +160,13 @@ export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc:
     >
       <div className="io-export">
         <div className="io-export-preview">
-          {error ? <div className="io-error" style={{ padding: 24, textAlign: 'center' }}>Cannot export: {error}</div> : <canvas ref={previewRef} />}
+          {error ? (
+            <div className="io-error" style={{ padding: 24, textAlign: 'center' }}>
+              Cannot export: {error}
+            </div>
+          ) : (
+            <canvas ref={previewRef} />
+          )}
           {out && !error && (
             <span className="io-export-badge">
               {out.width} × {out.height} px
@@ -169,88 +175,110 @@ export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc:
           {busy && <span className="io-export-busy">Rendering…</span>}
         </div>
         <div className="io-export-side">
-          <div className="io-form-label">File name</div>
-          <TextInput value={fileName} onChange={setFileName} />
+          <div className="io-export-controls">
+            <div className="io-form-label">File name</div>
+            <TextInput value={fileName} onChange={setFileName} />
 
-          <div className="io-form-label">Format</div>
-          <div className="io-seg">
-            {FORMATS.map((f) => (
-              <button key={f.value} className={o.format === f.value ? 'active' : ''} onClick={() => setFormat(f.value)}>
-                {f.label}
-              </button>
-            ))}
-          </div>
+            <div className="io-form-label">Format</div>
+            <div className="io-seg">
+              {FORMATS.map((f) => (
+                <button key={f.value} className={o.format === f.value ? 'active' : ''} onClick={() => setFormat(f.value)}>
+                  {f.label}
+                </button>
+              ))}
+            </div>
 
-          {lossy && (
-            <>
-              <div className="io-form-label">Quality</div>
-              <Slider value={Math.round(o.quality * 100)} min={1} max={100} unit="%" onChange={(v) => set('quality', v / 100)} />
-            </>
-          )}
+            {lossy && (
+              <>
+                <div className="io-form-label">Quality</div>
+                <Slider value={Math.round(o.quality * 100)} min={1} max={100} unit="%" onChange={(v) => set('quality', v / 100)} />
+              </>
+            )}
 
-          <div className="io-form-label">Size</div>
-          <div className="io-size-chips">
-            <button className={`io-chip${!preset ? ' active' : ''}`} onClick={() => set('presetId', null)}>
-              Document
-              <small>
-                {Math.round(doc.width * o.scale)} × {Math.round(doc.height * o.scale)}
-              </small>
-            </button>
-            {SIZE_PRESETS.map((p) => (
-              <button key={p.id} className={`io-chip${preset?.id === p.id ? ' active' : ''}`} onClick={() => set('presetId', p.id)}>
-                {p.label}
+            <div className="io-form-label">Size</div>
+            <div className="io-size-chips">
+              <button className={`io-chip${!preset ? ' active' : ''}`} onClick={() => set('presetId', null)}>
+                Document
                 <small>
-                  {p.width} × {p.height}
+                  {Math.round(doc.width * o.scale)} × {Math.round(doc.height * o.scale)}
                 </small>
               </button>
-            ))}
-          </div>
-
-          {preset ? (
-            <>
-              <div className="io-form-label">Fit</div>
-              <div className="io-seg">
-                <button className={o.fit === 'cover' ? 'active' : ''} onClick={() => set('fit', 'cover')} title="Fill the frame, cropping the edges">
-                  Cover (crop)
+              {SIZE_PRESETS.map((p) => (
+                <button key={p.id} className={`io-chip${preset?.id === p.id ? ' active' : ''}`} onClick={() => set('presetId', p.id)}>
+                  {p.label}
+                  <small>
+                    {p.width} × {p.height}
+                  </small>
                 </button>
-                <button className={o.fit === 'fit' ? 'active' : ''} onClick={() => set('fit', 'fit')} title="Fit inside the frame with borders">
-                  Fit (letterbox)
-                </button>
-              </div>
-              {fitNote && <div className="io-note" style={{ marginTop: 4 }}>{fitNote}</div>}
-            </>
-          ) : (
-            <>
-              <div className="io-form-label">Scale</div>
-              <div className="ui-row">
-                <div className="io-seg" style={{ flex: 1 }}>
-                  {SCALES.map((s) => (
-                    <button key={s} className={o.scale === s ? 'active' : ''} onClick={() => set('scale', s)}>
-                      {s}×
-                    </button>
-                  ))}
-                </div>
-                <NumberField value={o.scale * 100} min={25} max={400} step={1} unit="%" width={64} onChange={(v) => set('scale', Math.round(v) / 100)} />
-              </div>
-            </>
-          )}
-
-          <div className="io-form-label">Options</div>
-          <div className="ui-row">
-            <Checkbox
-              checked={o.format === 'jpeg' || o.fillBackground}
-              disabled={o.format === 'jpeg'}
-              onChange={(v) => set('fillBackground', v)}
-              label={o.format === 'jpeg' ? 'Background (JPEG has no transparency)' : 'Fill background'}
-            />
-          </div>
-          {(o.format === 'jpeg' || o.fillBackground) && (
-            <div className="ui-row" style={{ paddingLeft: 19 }}>
-              <ColorField value={o.background} onChange={(c) => set('background', c)} showHex />
+              ))}
             </div>
-          )}
-          <div className="ui-row">
-            <Checkbox checked={o.trim} onChange={(v) => set('trim', v)} label="Trim transparent pixels" />
+
+            {preset ? (
+              <>
+                <div className="io-form-label">Fit</div>
+                <div className="io-seg">
+                  <button
+                    className={o.fit === 'cover' ? 'active' : ''}
+                    onClick={() => set('fit', 'cover')}
+                    title="Fill the frame, cropping the edges"
+                  >
+                    Cover (crop)
+                  </button>
+                  <button
+                    className={o.fit === 'fit' ? 'active' : ''}
+                    onClick={() => set('fit', 'fit')}
+                    title="Fit inside the frame with borders"
+                  >
+                    Fit (letterbox)
+                  </button>
+                </div>
+                {fitNote && (
+                  <div className="io-note" style={{ marginTop: 4 }}>
+                    {fitNote}
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="io-form-label">Scale</div>
+                <div className="ui-row">
+                  <div className="io-seg" style={{ flex: 1 }}>
+                    {SCALES.map((s) => (
+                      <button key={s} className={o.scale === s ? 'active' : ''} onClick={() => set('scale', s)}>
+                        {s}×
+                      </button>
+                    ))}
+                  </div>
+                  <NumberField
+                    value={o.scale * 100}
+                    min={25}
+                    max={400}
+                    step={1}
+                    unit="%"
+                    width={64}
+                    onChange={(v) => set('scale', Math.round(v) / 100)}
+                  />
+                </div>
+              </>
+            )}
+
+            <div className="io-form-label">Options</div>
+            <div className="ui-row">
+              <Checkbox
+                checked={o.format === 'jpeg' || o.fillBackground}
+                disabled={o.format === 'jpeg'}
+                onChange={(v) => set('fillBackground', v)}
+                label={o.format === 'jpeg' ? 'Background (JPEG has no transparency)' : 'Fill background'}
+              />
+            </div>
+            {(o.format === 'jpeg' || o.fillBackground) && (
+              <div className="ui-row" style={{ paddingLeft: 19 }}>
+                <ColorField value={o.background} onChange={(c) => set('background', c)} showHex />
+              </div>
+            )}
+            <div className="ui-row">
+              <Checkbox checked={o.trim} onChange={(v) => set('trim', v)} label="Trim transparent pixels" />
+            </div>
           </div>
 
           <div className="io-export-stats">

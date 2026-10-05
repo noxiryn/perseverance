@@ -119,7 +119,14 @@ async function resolveTarget(s: DocSession, action: string): Promise<ReturnType<
 }
 
 /** Apply a doc-space source canvas to the target (one undo step). */
-function applySource(s: DocSession, target: Exclude<ReturnType<typeof pixelTarget>, null> | 'new', src: HTMLCanvasElement, rect: ReturnType<typeof selectionRect>, label: string, o: { blendMode: BlendMode; opacity: number; preserveTransparency: boolean }) {
+function applySource(
+  s: DocSession,
+  target: Exclude<ReturnType<typeof pixelTarget>, null> | 'new',
+  src: HTMLCanvasElement,
+  rect: ReturnType<typeof selectionRect>,
+  label: string,
+  o: { blendMode: BlendMode; opacity: number; preserveTransparency: boolean },
+) {
   const doc = s.doc;
   if (target === 'new') {
     const bmp = createCanvas(doc.width, doc.height);
@@ -131,9 +138,7 @@ function applySource(s: DocSession, target: Exclude<ReturnType<typeof pixelTarge
     useEditor.getState().addLayer(layer, { label });
   } else {
     const patch =
-      target.kind === 'mask'
-        ? drawDocCanvasOnMask(target.bitmapId, src, rect, o)
-        : drawDocCanvasOnRaster(target.layer, src, rect, o);
+      target.kind === 'mask' ? drawDocCanvasOnMask(target.bitmapId, src, rect, o) : drawDocCanvasOnRaster(target.layer, src, rect, o);
     if (!patch) {
       toast('The area does not overlap the layer.', 'info');
       return;

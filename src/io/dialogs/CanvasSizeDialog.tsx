@@ -102,9 +102,21 @@ export function CanvasSizeDialog({ close, doc }: { close: (r?: CanvasSizeResult)
       </div>
       <div className="io-form-grid">
         <span className="ui-label">{relative ? 'Width (+/−)' : 'Width'}</span>
-        <NumberField value={toShown(w, doc.width)} unit={unit} step={unit === 'px' ? 1 : 0.1} onChange={(v) => setW(clampPx(fromShown(v, doc.width)))} width={140} />
+        <NumberField
+          value={toShown(w, doc.width)}
+          unit={unit}
+          step={unit === 'px' ? 1 : 0.1}
+          onChange={(v) => setW(clampPx(fromShown(v, doc.width)))}
+          width={140}
+        />
         <span className="ui-label">{relative ? 'Height (+/−)' : 'Height'}</span>
-        <NumberField value={toShown(h, doc.height)} unit={unit} step={unit === 'px' ? 1 : 0.1} onChange={(v) => setH(clampPx(fromShown(v, doc.height)))} width={140} />
+        <NumberField
+          value={toShown(h, doc.height)}
+          unit={unit}
+          step={unit === 'px' ? 1 : 0.1}
+          onChange={(v) => setH(clampPx(fromShown(v, doc.height)))}
+          width={140}
+        />
         <span className="ui-label">Units</span>
         <div className="ui-row">
           <Select
@@ -133,12 +145,22 @@ export function CanvasSizeDialog({ close, doc }: { close: (r?: CanvasSizeResult)
         <div className="ui-row">
           <Select value={ext} options={EXT_OPTIONS} onChange={setExt} width={150} />
           {ext === 'other' && <ColorField value={other} onChange={setOther} />}
-          {ext !== 'transparent' && ext !== 'other' && <span className="ui-swatch" style={{ width: 20, height: 20 }}><span style={{ background: extColor() ?? 'transparent' }} /></span>}
+          {ext !== 'transparent' && ext !== 'other' && (
+            <span className="ui-swatch" style={{ width: 20, height: 20 }}>
+              <span style={{ background: extColor() ?? 'transparent' }} />
+            </span>
+          )}
         </div>
       </div>
       <div className="io-note" style={{ marginTop: 10 }}>
-        New size: <b>{w} × {h} px</b>.{' '}
-        {hasBackground ? 'The extension color fills new area on the Background layer.' : 'There is no Background layer — new areas will be transparent.'}
+        New size:{' '}
+        <b>
+          {w} × {h} px
+        </b>
+        .{' '}
+        {hasBackground
+          ? 'The extension color fills new area on the Background layer.'
+          : 'There is no Background layer — new areas will be transparent.'}
       </div>
     </Dialog>
   );

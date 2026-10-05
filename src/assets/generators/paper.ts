@@ -7,10 +7,11 @@ import { createNoise2D } from '../../core/noise';
 import { fieldDims, fillGrain, noiseField, paintField } from '../lib/field';
 import { FONT } from '../lib/fonts';
 import { tornLine } from '../lib/geom';
+import { simplex } from '../lib/noise';
 import { P, defineAsset } from '../lib/params';
 import { drawCrackLine, drawFibers, drawScratches, paintPaper, walkLine } from '../lib/surface';
 import type { Pt, Rand, RGB } from '../lib/util';
-import { TAU, bool, drawUpscaled, makeRand, newCanvas, num, rgbOf, rgba, shade, smoothstep, str, tracePoly, unitOf } from '../lib/util';
+import { TAU, bool, cssRGB, drawUpscaled, makeRand, newCanvas, num, rgbOf, rgba, shade, smoothstep, str, tracePoly, unitOf } from '../lib/util';
 import { capitalize, fakeHeadline, fakeSentence } from '../lib/words';
 
 /* ------------------------------------------------------------------ */
@@ -159,59 +160,67 @@ const grungePaper = defineAsset(
 /* crumpled-paper                                                      */
 /* ------------------------------------------------------------------ */
 
-interface WorleyLevel {
-  cell: number;
-  gw: number;
-  gh: number;
-  sx: Float32Array;
-  sy: Float32Array;
-  shadeV: Float32Array;
+/**
+ * Crumpled paper as a flat-shaded random height mesh: a jittered grid split into triangles
+ * (random diagonals), vertex heights from multi-octave noise + jitter. Adjacent facets share
+ * vertices, so the shading reads like real folded paper; crease lines are drawn along edges
+ * where neighbouring facets meet at a sharp angle.
+ */
+export interface CrumpleMesh {
+  cols: number;
+  rows: number;
+  /** vertex positions (x, y) and heights */
+  vx: Float32Array;
+  vy: Float32Array;
+  vh: Float32Array;
+  /** per quad: 0 = split along (i,j)-(i+1,j+1), 1 = the other diagonal */
+  diag: Uint8Array;
 }
 
-function worleyLevel(fw: number, fh: number, cell: number, r: Rand, L: [number, number, number], tilt: number): WorleyLevel {
-  const gw = Math.ceil(fw / cell) + 2;
-  const gh = Math.ceil(fh / cell) + 2;
-  const n = gw * gh;
-  const sx = new Float32Array(n);
-  const sy = new Float32Array(n);
-  const shadeV = new Float32Array(n);
-  for (let j = 0; j < gh; j++)
-    for (let i = 0; i < gw; i++) {
-      const k = j * gw + i;
-      sx[k] = (i - 1 + 0.1 + r() * 0.8) * cell;
-      sy[k] = (j - 1 + 0.1 + r() * 0.8) * cell;
-      const nx = (r() - 0.5) * 2 * tilt;
-      const ny = (r() - 0.5) * 2 * tilt;
-      const nl = Math.hypot(nx, ny, 1);
-      shadeV[k] = (nx * L[0] + ny * L[1] + L[2]) / nl;
+export function crumpleMesh(W: number, H: number, cell: number, r: Rand, heightAt: (x: number, y: number) => number, jitterH: number): CrumpleMesh {
+  const cols = Math.max(2, Math.ceil(W / cell) + 2);
+  const rows = Math.max(2, Math.ceil(H / cell) + 2);
+  const n = (cols + 1) * (rows + 1);
+  const vx = new Float32Array(n);
+  const vy = new Float32Array(n);
+  const vh = new Float32Array(n);
+  const cw = (W + cell * 2) / cols;
+  const ch = (H + cell * 2) / rows;
+  for (let j = 0; j <= rows; j++)
+    for (let i = 0; i <= cols; i++) {
+      const k = j * (cols + 1) + i;
+      const x = -cell + i * cw + (i > 0 && i < cols ? (r() - 0.5) * cw * 0.8 : 0);
+      const y = -cell + j * ch + (j > 0 && j < rows ? (r() - 0.5) * ch * 0.8 : 0);
+      vx[k] = x;
+      vy[k] = y;
+      vh[k] = heightAt(x, y) + (r() - 0.5) * jitterH;
     }
-  return { cell, gw, gh, sx, sy, shadeV };
+  const diag = new Uint8Array(cols * rows);
+  for (let q = 0; q < diag.length; q++) diag[q] = r() < 0.5 ? 0 : 1;
+  return { cols, rows, vx, vy, vh, diag };
 }
 
-/** Nearest-cell shade and edge closeness (d2 - d1) for a point. */
-function worleyAt(lv: WorleyLevel, x: number, y: number, out: { shade: number; edge: number }) {
-  const ci = Math.floor(x / lv.cell) + 1;
-  const cj = Math.floor(y / lv.cell) + 1;
-  let d1 = 1e9;
-  let d2 = 1e9;
-  let best = 0;
-  for (let j = cj - 1; j <= cj + 1; j++) {
-    if (j < 0 || j >= lv.gh) continue;
-    for (let i = ci - 1; i <= ci + 1; i++) {
-      if (i < 0 || i >= lv.gw) continue;
-      const k = j * lv.gw + i;
-      const dx = lv.sx[k] - x;
-      const dy = lv.sy[k] - y;
-      const d = dx * dx + dy * dy;
-      if (d < d1) {
-        d2 = d1;
-        d1 = d;
-        best = k;
-      } else if (d < d2) d2 = d;
-    }
+/** Unit normal (z up) and Lambert term of triangle (a, b, c) for light (lx, ly, lz). Pure. */
+export function facetLight(m: CrumpleMesh, a: number, b: number, c: number, lx: number, ly: number, lz: number): { lit: number; nx: number; ny: number; nz: number } {
+  const ux = m.vx[b] - m.vx[a];
+  const uy = m.vy[b] - m.vy[a];
+  const uz = m.vh[b] - m.vh[a];
+  const wx = m.vx[c] - m.vx[a];
+  const wy = m.vy[c] - m.vy[a];
+  const wz = m.vh[c] - m.vh[a];
+  let nx = uy * wz - uz * wy;
+  let ny = uz * wx - ux * wz;
+  let nz = ux * wy - uy * wx;
+  if (nz < 0) {
+    nx = -nx;
+    ny = -ny;
+    nz = -nz;
   }
-  out.shade = lv.shadeV[best];
-  out.edge = Math.sqrt(d2) - Math.sqrt(d1);
+  const l = Math.hypot(nx, ny, nz) || 1;
+  nx /= l;
+  ny /= l;
+  nz /= l;
+  return { lit: nx * lx + ny * ly + nz * lz, nx, ny, nz };
 }
 
 const crumpledPaper = defineAsset(
@@ -219,14 +228,14 @@ const crumpledPaper = defineAsset(
     id: 'crumpled-paper',
     name: 'Crumpled Paper',
     category: 'Paper & Grunge',
-    tags: ['paper', 'crumpled', 'wrinkles', 'creases', 'texture'],
+    tags: ['paper', 'crumpled', 'wrinkles', 'creases', 'texture', 'facets'],
     sizing: 'document',
     defaultBlendMode: 'multiply',
     defaultOpacity: 1,
     params: [
       P.color('tone', 'Tone', '#ebe7de'),
       P.pct('crumple', 'Crumple', 0.7),
-      P.num('scale', 'Facet size', 40, 400, 150, { unit: 'px' }),
+      P.num('scale', 'Facet size', 40, 400, 170, { unit: 'px' }),
       P.angle('light', 'Light angle', 125),
       P.pct('grain', 'Grain', 0.45),
       P.seed(21),
@@ -237,37 +246,92 @@ const crumpledPaper = defineAsset(
       const tone = rgbOf(str(p, 'tone', '#ebe7de'));
       const crumple = num(p, 'crumple', 0.7);
       const la = (num(p, 'light', 125) * Math.PI) / 180;
-      const Lr: [number, number, number] = [Math.cos(la), -Math.sin(la), 1.1];
-      const ll = Math.hypot(...Lr);
-      const L: [number, number, number] = [Lr[0] / ll, Lr[1] / ll, Lr[2] / ll];
+      const Lx = Math.cos(la) * 0.75;
+      const Ly = -Math.sin(la) * 0.75;
+      const Lz = 0.66;
       const r = makeRand(seed);
-      const { fw, fh, s } = fieldDims(W, H, 230_000);
-      const fu = s * u; // field px per unit
-      const big = worleyLevel(fw, fh, Math.max(6, num(p, 'scale', 150) * fu), r, L, 0.55);
-      const small = worleyLevel(fw, fh, Math.max(4, num(p, 'scale', 150) * 0.38 * fu), r, L, 0.35);
-      const wn = createNoise2D(seed + 3);
-      const wf = 1 / (big.cell * 1.7);
-      const wa = big.cell * 0.28;
-      const base = L[2] / 1; // shade of a flat facet
-      const o1 = { shade: 0, edge: 0 };
-      const o2 = { shade: 0, edge: 0 };
-      const edgeW = Math.max(0.8, 1.6 * fu);
-      const img = paintField(fw, fh, (_i, x, y, px, o) => {
-        const wx = x + wn(x * wf, y * wf) * wa;
-        const wy = y + wn(x * wf + 31.7, y * wf - 12.3) * wa;
-        worleyAt(big, wx, wy, o1);
-        worleyAt(small, wx * 1.03 + 5, wy * 1.03 - 3, o2);
-        let lum = 1 + crumple * ((o1.shade - base) * 0.55 + (o2.shade - base) * 0.25);
-        // crease lines: thin dark seam with a light lip
-        if (o1.edge < edgeW * 2.2) lum -= crumple * 0.07 * (1 - o1.edge / (edgeW * 2.2));
-        if (o2.edge < edgeW) lum -= crumple * 0.03 * (1 - o2.edge / edgeW);
-        px[o] = tone.r * lum;
-        px[o + 1] = tone.g * lum;
-        px[o + 2] = tone.b * lum;
-        px[o + 3] = 255;
-      });
+      const cell = Math.max(8, num(p, 'scale', 170) * u * 0.42);
+      const nz = simplex(seed + 3);
+      const kb = 1 / (cell * 4.5);
+      const relief = cell * 0.5 * crumple;
+      const mesh = crumpleMesh(
+        W,
+        H,
+        cell,
+        r,
+        (x, y) => relief * (nz(x * kb, y * kb) + 0.5 * nz(x * kb * 2.1 + 9.7, y * kb * 2.1 - 4.4) + 0.25 * nz(x * kb * 4.3 - 2.2, y * kb * 4.3 + 7.1)),
+        cell * 0.32 * crumple,
+      );
       const [c, ctx] = newCanvas(W, H);
-      drawUpscaled(ctx, img, W, H);
+      ctx.fillStyle = rgba(tone, 1);
+      ctx.fillRect(0, 0, W, H);
+      const { cols, rows, vx, vy, diag } = mesh;
+      const stride = cols + 1;
+      const ll = Math.hypot(Lx, Ly, Lz);
+      const lx = Lx / ll;
+      const ly = Ly / ll;
+      const lz = Lz / ll;
+      type Tri = [number, number, number];
+      const tris: { t: Tri; lit: number; nx: number; ny: number; nz: number }[] = [];
+      for (let j = 0; j < rows; j++)
+        for (let i = 0; i < cols; i++) {
+          const a = j * stride + i;
+          const b = a + 1;
+          const d = a + stride;
+          const e = d + 1;
+          const pair: Tri[] = diag[j * cols + i] ? [[a, b, d], [b, e, d]] : [[a, b, e], [a, e, d]];
+          for (const t of pair) tris.push({ t, ...facetLight(mesh, t[0], t[1], t[2], lx, ly, lz) });
+        }
+      // flat-shaded facets (a 1px stroke in the same color hides anti-aliasing seams)
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = 1;
+      for (const f of tris) {
+        const lum = Math.max(0.62, 1 + (f.lit - lz) * 0.85);
+        const col = cssRGB({ r: Math.min(255, tone.r * lum), g: Math.min(255, tone.g * lum), b: Math.min(255, tone.b * lum) });
+        ctx.beginPath();
+        ctx.moveTo(vx[f.t[0]], vy[f.t[0]]);
+        ctx.lineTo(vx[f.t[1]], vy[f.t[1]]);
+        ctx.lineTo(vx[f.t[2]], vy[f.t[2]]);
+        ctx.closePath();
+        ctx.fillStyle = col;
+        ctx.strokeStyle = col;
+        ctx.fill();
+        ctx.stroke();
+      }
+      // crease lines on sharp folds: dark seam + light lip on the lit side
+      const edgeMap = new Map<number, number>();
+      const dark = new Path2D();
+      const lightP = new Path2D();
+      const ox = -1.2 * u * lx;
+      const oy = -1.2 * u * ly;
+      tris.forEach((f, idx) => {
+        for (let k = 0; k < 3; k++) {
+          const p0 = f.t[k];
+          const p1 = f.t[(k + 1) % 3];
+          const key = p0 < p1 ? p0 * 1e6 + p1 : p1 * 1e6 + p0;
+          const other = edgeMap.get(key);
+          if (other === undefined) {
+            edgeMap.set(key, idx);
+            continue;
+          }
+          const g = tris[other];
+          const cosA = f.nx * g.nx + f.ny * g.ny + f.nz * g.nz;
+          if (cosA > 0.985 || r() > 0.75) continue;
+          dark.moveTo(vx[p0], vy[p0]);
+          dark.lineTo(vx[p1], vy[p1]);
+          lightP.moveTo(vx[p0] + ox, vy[p0] + oy);
+          lightP.lineTo(vx[p1] + ox, vy[p1] + oy);
+        }
+      });
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = rgba(shade(tone, -0.5), 0.22 * crumple);
+      ctx.lineWidth = Math.max(0.6, 1.1 * u);
+      ctx.stroke(dark);
+      ctx.strokeStyle = rgba('#ffffff', 0.35 * crumple);
+      ctx.lineWidth = Math.max(0.5, 0.8 * u);
+      ctx.stroke(lightP);
+      ctx.restore();
       const grain = num(p, 'grain', 0.45);
       ctx.save();
       ctx.globalCompositeOperation = 'overlay';

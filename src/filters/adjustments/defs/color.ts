@@ -587,7 +587,7 @@ export const channelMixer: FilterDef = {
 
 export const SELECTIVE_RANGES = ['reds', 'yellows', 'greens', 'cyans', 'blues', 'magentas', 'whites', 'neutrals', 'blacks'] as const;
 export type SelectiveRange = (typeof SELECTIVE_RANGES)[number];
-const RANGE_LABELS: Record<SelectiveRange, string> = {
+export const RANGE_LABELS: Record<SelectiveRange, string> = {
   reds: 'Reds',
   yellows: 'Yellows',
   greens: 'Greens',
@@ -697,6 +697,8 @@ export function selectiveColorPixels(img: Pixels, p: ParamValues): Pixels {
 
 const selectiveParams = (): ParamDef[] => {
   const out: ParamDef[] = [
+    // Which range the editor shows. Kept as a param (catalog key) for the generic ParamEditor, but
+    // it doesn't affect pixels: the panel editor holds it as view state (presets.VIEW_ONLY_KEYS).
     selectP(
       'range',
       'Colors',

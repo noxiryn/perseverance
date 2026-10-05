@@ -27,7 +27,7 @@ describe('pgfx container', () => {
       ['bmp_b', 3, 4, 5],
       ['bmp_c', 1, 1, 0],
     ]);
-    expect([...out.blobs[0].data]).toEqual([...blobs[0].data as Uint8Array]);
+    expect([...out.blobs[0].data]).toEqual([...(blobs[0].data as Uint8Array)]);
     expect([...out.blobs[1].data]).toEqual([...fakePng(5, 9)]);
     expect(out.blobs[2].data.byteLength).toBe(0);
   });
@@ -54,7 +54,9 @@ describe('pgfx container', () => {
 
   it('rejects invalid input', () => {
     expect(() => unpackContainer(new Uint8Array([1, 2, 3]))).toThrow(/signature/);
-    const buf = new Uint8Array(packContainer({ version: 1, app: 'x', document: {} }, [{ id: 'z', width: 1, height: 1, data: fakePng(16, 0) }]));
+    const buf = new Uint8Array(
+      packContainer({ version: 1, app: 'x', document: {} }, [{ id: 'z', width: 1, height: 1, data: fakePng(16, 0) }]),
+    );
     expect(() => unpackContainer(buf.subarray(0, buf.byteLength - 4))).toThrow(/truncated/);
     const future = new Uint8Array(buf);
     new DataView(future.buffer).setUint16(4, 999, true);

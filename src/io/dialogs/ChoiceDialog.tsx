@@ -27,7 +27,12 @@ function ChoiceDialog({ close, title, message, detail, choices, defaultValue }: 
       onClose={() => close(undefined)}
       onSubmit={def ? () => close(def) : undefined}
       footer={choices.map((c, i) => (
-        <Button key={c.value} variant={c.variant} autoFocus={c.value === def || (!def && i === choices.length - 1)} onClick={() => close(c.value)}>
+        <Button
+          key={c.value}
+          variant={c.variant}
+          autoFocus={c.value === def || (!def && i === choices.length - 1)}
+          onClick={() => close(c.value)}
+        >
           {c.label}
         </Button>
       ))}

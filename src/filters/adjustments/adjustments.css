@@ -442,3 +442,128 @@ button.adjustments-heading:hover {
   border-radius: var(--radius-sm);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
 }
+
+/* ---------- generic stacks / exposure log slider ---------- */
+
+.adjustments-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ---------- selective color ---------- */
+
+.adjustments-sc {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.adjustments-sc-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.adjustments-sc-name {
+  color: var(--text-strong);
+  font-size: var(--fs-sm);
+}
+.adjustments-sc-ranges {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+.adjustments-sc-chip {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 14px;
+  max-width: 26px;
+  height: 16px;
+  padding: 0;
+  border-radius: 3px;
+  border: 1px solid #3a3a3a;
+  cursor: pointer;
+  outline-offset: 1px;
+}
+.adjustments-sc-chip.gap {
+  margin-left: 6px;
+}
+.adjustments-sc-chip:hover {
+  border-color: #8a8a8a;
+}
+.adjustments-sc-chip.current {
+  outline: 2px solid var(--accent);
+  border-color: #000;
+}
+.adjustments-sc-chip:focus-visible {
+  outline: 2px solid var(--accent-strong);
+}
+.adjustments-sc-chip .dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-strong);
+  box-shadow: 0 0 0 1.5px var(--bg-panel, #1a1a1a);
+}
+
+/* ---------- destructive adjustment dialog ---------- */
+
+/* Keep the canvas visible behind the dialog (live on-canvas preview). */
+.ui-dialog-backdrop:has(.adjustments-dialog) {
+  background: rgba(0, 0, 0, 0.14);
+}
+.adjustments-dialog {
+  will-change: transform;
+}
+.adjustments-dialog .ui-dialog {
+  position: relative;
+}
+.adjustments-dialog .ui-dialog-head {
+  cursor: move;
+  user-select: none;
+}
+.adjustments-dialog-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.adjustments-dialog-title .target {
+  font-weight: 400;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  padding-left: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+.adjustments-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.adjustments-dialog-body .adjustments-preset-row {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
+.adjustments-dialog-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+}
+.adjustments-dialog-hint {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

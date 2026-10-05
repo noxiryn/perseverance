@@ -107,11 +107,7 @@ export function opBakedTransform(
   if (op === 'rotate90cw' || op === 'rotate90ccw') {
     if (t.skewX) return null;
     // Local axes rotate with the pixels: the new local x axis is the old y axis → scales swap.
-    return {
-      width: lh,
-      height: lw,
-      transform: { ...t, x: c.x - lh / 2, y: c.y - lw / 2, scaleX: t.scaleY, scaleY: t.scaleX },
-    };
+    return { width: lh, height: lw, transform: { ...t, x: c.x - lh / 2, y: c.y - lw / 2, scaleX: t.scaleY, scaleY: t.scaleX } };
   }
   if (op === 'rotate180') return { width: lw, height: lh, transform: { ...t, x: c.x - lw / 2, y: c.y - lh / 2 } };
   // Flips: the pixel flip absorbs the mirror; rotation and skew change sign.
@@ -200,7 +196,13 @@ export type FitMode = 'cover' | 'fit';
  * Placement of a source (sw×sh) inside a target (tw×th): scale and top-left offset.
  * cover = fill the target (cropping), fit = letterbox inside the target.
  */
-export function fitRect(sw: number, sh: number, tw: number, th: number, mode: FitMode): { scale: number; x: number; y: number; width: number; height: number } {
+export function fitRect(
+  sw: number,
+  sh: number,
+  tw: number,
+  th: number,
+  mode: FitMode,
+): { scale: number; x: number; y: number; width: number; height: number } {
   const s = mode === 'cover' ? Math.max(tw / sw, th / sh) : Math.min(tw / sw, th / sh);
   const width = sw * s;
   const height = sh * s;
@@ -222,7 +224,11 @@ export function formatBytes(n: number): string {
 
 /** Replace characters that are invalid in file names. */
 export function safeFileName(name: string, fallback = 'Untitled'): string {
-  const s = name.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_').replace(/\s+/g, ' ').trim().replace(/^\.+/, '');
+  const s = name
+    .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\.+/, '');
   return s.slice(0, 120) || fallback;
 }
 
@@ -407,7 +413,13 @@ export type StrokeLocation = 'inside' | 'center' | 'outside';
  * Coverage (0..255) of a stroke of `width` px around a binary mask (alpha ≥ 128 = selected).
  * Anti-aliased by ~1px. `alpha` is the mask's alpha channel (length w*h).
  */
-export function strokeCoverage(alpha: Uint8Array | Uint8ClampedArray, w: number, h: number, width: number, location: StrokeLocation): Uint8ClampedArray {
+export function strokeCoverage(
+  alpha: Uint8Array | Uint8ClampedArray,
+  w: number,
+  h: number,
+  width: number,
+  location: StrokeLocation,
+): Uint8ClampedArray {
   const n = w * h;
   const inside = new Uint8Array(n);
   const outside = new Uint8Array(n);

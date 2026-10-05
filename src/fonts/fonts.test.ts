@@ -3,7 +3,7 @@ import type { FontDef } from '../registry';
 import { detectFormat, infoFromFileName, parseFontFile, readNameTable, weightFromStyleName } from './sfnt';
 import { filterFonts, groupByCategory, previewScale, previewWeight, scoreFont, weightName, weightsHint } from './search';
 import { groupLocalFonts } from './system';
-import { findIndex } from './VirtualList';
+import { anchoredScrollTop, findIndex } from './VirtualList';
 import { CATALOG, guessCategory, POPULAR_FAMILIES } from './catalog';
 import { BUNDLED_FAMILIES, LATIN_FACES } from './generated/faces';
 
@@ -258,6 +258,53 @@ describe('virtual list index', () => {
     expect(findIndex(offsets, 30)).toBe(1);
     expect(findIndex(offsets, 100)).toBe(3);
     expect(findIndex(offsets, 999)).toBe(3);
+  });
+});
+
+describe('virtual list scroll anchoring', () => {
+  const offsetsOf = (heights: number[]) => {
+    const o = [0];
+    for (const h of heights) o.push(o[o.length - 1] + h);
+    return o;
+  };
+  const rows = (keys: string[], h = 30) => ({ keys, offsets: offsetsOf(keys.map((k) => (k.startsWith('h:') ? 24 : h))) });
+
+  it('keeps the first visible row in place when rows are inserted above', () => {
+    const before = rows(['h:Display', 'a:Anton', 'a:Bangers', 'h:Serif', 'a:Cinzel', 'a:IM Fell English', 'a:Playfair']);
+    // Starring "IM Fell English" inserts a Favorites section at the top.
+    const after = rows(['h:fav', 'f:IM Fell English', ...before.keys]);
+    const st = before.offsets[4]; // Cinzel at the top of the viewport
+    const next = anchoredScrollTop((i) => before.keys[i], before.offsets, after.keys, after.offsets, st, 90);
+    expect(next).toBe(st + 24 + 30);
+    expect(after.offsets[after.keys.indexOf('a:Cinzel')]).toBe(next);
+  });
+
+  it('keeps a partially scrolled row at the same screen offset', () => {
+    const before = rows(['a', 'b', 'c', 'd', 'e']);
+    const after = rows(['x', 'a', 'b', 'c', 'd', 'e']);
+    const next = anchoredScrollTop((i) => before.keys[i], before.offsets, after.keys, after.offsets, 45, 60);
+    expect(next).toBe(75);
+  });
+
+  it('skips rows that disappeared and anchors on the next visible survivor', () => {
+    const before = rows(['f:Anton', 'a:Bangers', 'a:Cinzel', 'a:Oswald']);
+    const after = rows(['a:Bangers', 'a:Cinzel', 'a:Oswald']); // un-starred: favorites row removed
+    const next = anchoredScrollTop((i) => before.keys[i], before.offsets, after.keys, after.offsets, 10, 60);
+    expect(next).toBe(0); // Bangers was at 30 (20px below the top) → stays 20px below
+  });
+
+  it('stays at the top and gives up when nothing survives', () => {
+    const before = rows(['a', 'b', 'c']);
+    expect(anchoredScrollTop((i) => before.keys[i], before.offsets, ['z', 'a'], offsetsOf([30, 30]), 0, 60)).toBeNull();
+    expect(anchoredScrollTop((i) => before.keys[i], before.offsets, ['x', 'y'], offsetsOf([30, 30]), 20, 60)).toBeNull();
+    expect(anchoredScrollTop((i) => before.keys[i], before.offsets, [], [0], 20, 60)).toBeNull();
+  });
+
+  it('follows row height changes (preview size slider)', () => {
+    const keys = ['a', 'b', 'c', 'd'];
+    const small = offsetsOf([40, 40, 40, 40]);
+    const big = offsetsOf([80, 80, 80, 80]);
+    expect(anchoredScrollTop((i) => keys[i], small, keys, big, 80, 60)).toBe(160);
   });
 });
 

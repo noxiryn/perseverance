@@ -194,16 +194,44 @@ export function presetsFor(filterId: string): AdjustmentPreset[] {
   return [...fromRegistry, ...base.filter((p) => !names.has(p.name.toLowerCase()))];
 }
 
-/** Stable comparison key of resolved params. */
-function key(v: unknown): string {
-  return JSON.stringify(v, (_k, val) => (typeof val === 'number' ? Math.round(val * 1000) / 1000 : val));
+/**
+ * Params that only choose what the editor shows (they don't change pixels): ignored when
+ * comparing params, so viewing another Selective Color range is neither an edit nor "Custom".
+ */
+export const VIEW_ONLY_KEYS: Record<string, readonly string[]> = {
+  'selective-color': ['range'],
+};
+
+/** Stable comparison key (sorted object keys; numbers rounded to 1e-3 when `round`). */
+function key(v: unknown, round = true): string {
+  return JSON.stringify(v, (_k, val) => {
+    if (typeof val === 'number') return round ? Math.round(val * 1000) / 1000 : val;
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(val).sort()) out[k] = (val as Record<string, unknown>)[k];
+      return out;
+    }
+    return val;
+  });
+}
+
+/** Resolved params without the view-only keys of `filterId`. */
+function comparable(def: Pick<FilterDef, 'id' | 'params'> | undefined, params: ParamValues): ParamValues {
+  const full = def ? resolveParams(def, params) : { ...params };
+  for (const k of (def && VIEW_ONLY_KEYS[def.id]) ?? []) delete full[k];
+  return full;
+}
+
+/** True when two param sets produce the same result (defaults filled in, view-only keys ignored). */
+export function sameParams(def: Pick<FilterDef, 'id' | 'params'> | undefined, a: ParamValues, b: ParamValues): boolean {
+  return key(comparable(def, a), false) === key(comparable(def, b), false);
 }
 
 /** Name of the preset matching the current params ('Default' / null for custom). */
 export function matchPreset(def: FilterDef, params: ParamValues, presets: AdjustmentPreset[]): string | null {
-  const cur = key(resolveParams(def, params));
-  if (cur === key(resolveParams(def, {}))) return 'Default';
-  for (const p of presets) if (key(resolveParams(def, p.params)) === cur) return p.name;
+  const cur = key(comparable(def, params));
+  if (cur === key(comparable(def, {}))) return 'Default';
+  for (const p of presets) if (key(comparable(def, p.params)) === cur) return p.name;
   return null;
 }
 

@@ -48,6 +48,11 @@ export interface EffectMeta {
   clip?(p: ParamValues): boolean;
   /** How far (output px) the effect can reach beyond the content edges. */
   reach(p: ParamValues, scale: number): number;
+  /**
+   * The output depends on where the layer sits in the document (e.g. a pattern anchored to the
+   * document origin). Such effects disable reusing a layer's render when the layer is moved.
+   */
+  docAnchored?: boolean;
 }
 
 const metas = new Map<string, EffectMeta>();
@@ -64,6 +69,12 @@ export function effectMeta(id: string): EffectMeta | undefined {
 /** Stage of an effect instance (param-dependent for stroke). */
 export function effectStage(def: EffectDef, p: ParamValues): 'behind' | 'above' {
   return metas.get(def.id)?.stage?.(p) ?? def.stage;
+}
+
+/** Whether an effect's output only depends on the content (not on its document position). */
+export function effectTranslationSafe(id: string): boolean {
+  const m = metas.get(id);
+  return !!m && !m.docAnchored;
 }
 
 /** Whether an 'above' effect is clipped to the content alpha. */

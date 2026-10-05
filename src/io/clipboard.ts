@@ -138,7 +138,13 @@ function clearSelectedPixels(s: DocSession, label: string): boolean {
   const target = pixelTarget(s);
   const layer = s.activeLayerId ? doc.layers[s.activeLayerId] : null;
   if (!target || !layer) {
-    toast(layer ? `“${layer.name}” is a ${layer.type} layer — clearing pixels needs a pixel layer. Rasterize it first.` : 'Select a layer first.', 'warning', 4000);
+    toast(
+      layer
+        ? `“${layer.name}” is a ${layer.type} layer — clearing pixels needs a pixel layer. Rasterize it first.`
+        : 'Select a layer first.',
+      'warning',
+      4000,
+    );
     return false;
   }
   if (layer.locks.all || layer.locks.pixels) {

@@ -45,7 +45,12 @@ export function TrimDialog({ close }: { close: (r?: TrimResult) => void }) {
       </div>
       <div className="io-form-row2">
         {(['top', 'bottom', 'left', 'right'] as const).map((k) => (
-          <Checkbox key={k} checked={sides[k]} onChange={(v) => setSides((s) => ({ ...s, [k]: v }))} label={k[0].toUpperCase() + k.slice(1)} />
+          <Checkbox
+            key={k}
+            checked={sides[k]}
+            onChange={(v) => setSides((s) => ({ ...s, [k]: v }))}
+            label={k[0].toUpperCase() + k.slice(1)}
+          />
         ))}
       </div>
     </Dialog>

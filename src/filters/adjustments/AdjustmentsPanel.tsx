@@ -2,7 +2,8 @@
  * Adjustments panel (id 'adjustments'): "Add an adjustment" icon grid of every filter flagged
  * `adjustment: true` (read reactively from the registry, so other modules' adjustments such as
  * Vignette appear too), optional one-click preset list, and the editor of the active
- * adjustment layer. Click = new adjustment layer above the active layer; Alt-click = clipped.
+ * adjustment layer. Click = new adjustment layer above the active layer (it joins the clipping
+ * group it lands in); Alt-click = inverted clipping (clipped to the layer below).
  */
 import { useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, SlidersHorizontal } from 'lucide-react';
@@ -43,9 +44,9 @@ function AddGrid({
               <button
                 key={def.id}
                 className={`adjustments-add-btn${activeFilterId === def.id ? ' current' : ''}`}
-                title={`${def.name}\n${clipDefault ? 'Click: clipped to the layer below · Alt-click: unclipped' : 'Click: new adjustment layer · Alt-click: clipped to the layer below'}`}
+                title={`${def.name}\n${clipDefault ? 'Click: new layer clipped to the layer below · Alt-click: unclipped' : 'Click: new adjustment layer (joins a clipping group it lands in) · Alt-click: toggle clipping'}`}
                 aria-label={`Add ${def.name} adjustment`}
-                onClick={(e) => createAdjustmentLayer(def.id, { clipped: e.altKey ? !clipDefault : clipDefault })}
+                onClick={(e) => createAdjustmentLayer(def.id, { invertClip: e.altKey })}
                 onMouseEnter={() => onHover(def)}
                 onFocus={() => onHover(def)}
                 onBlur={() => onHover(null)}
@@ -86,13 +87,13 @@ function PresetList({ rows }: { rows: FilterDef[][] }) {
                     <button
                       key={p.name}
                       className="adjustments-preset-item"
-                      title={`New ${def.name} layer: ${p.name} (Alt-click: ${clipDefault ? 'unclipped' : 'clipped'})`}
+                      title={`New ${def.name} layer: ${p.name} (Alt-click: ${clipDefault ? 'unclipped' : 'toggle clipping'})`}
                       onClick={(e) =>
                         createAdjustmentLayer(def.id, {
                           params: p.params,
                           name: p.name,
                           label: `New ${def.name} Layer`,
-                          clipped: e.altKey ? !clipDefault : clipDefault,
+                          invertClip: e.altKey,
                         })
                       }
                     >

@@ -192,7 +192,13 @@ export function FillDialog({ close }: { close: (r?: FillSpec) => void }) {
             {pattern && pattern.sizing !== 'document' && (
               <>
                 <span className="ui-label">Pattern scale</span>
-                <Slider value={Math.round(spec.patternScale * 100)} min={10} max={400} unit="%" onChange={(v) => set('patternScale', v / 100)} />
+                <Slider
+                  value={Math.round(spec.patternScale * 100)}
+                  min={10}
+                  max={400}
+                  unit="%"
+                  onChange={(v) => set('patternScale', v / 100)}
+                />
               </>
             )}
             {pattern && pattern.sizing === 'document' && (

@@ -4,25 +4,69 @@
  * reset, toggle clip/visibility, delete. Also helpers shared by the Auto commands.
  */
 import type { AdjustmentLayer, Document, ID, ParamValues, RasterLayer } from '../../core/types';
-import { flattenIds, isAncestor, makeAdjustmentLayer, nextLayerName } from '../../core/document';
+import { flattenIds, insertLayerDraft, isAncestor, makeAdjustmentLayer, nextLayerName, siblingsOf } from '../../core/document';
 import { createCanvas, ctx2d } from '../../core/canvas';
 import { transformMatrix } from '../../core/geometry';
-import { filters } from '../../registry';
+import { filters, type FilterDef } from '../../registry';
 import { activeSession, useEditor } from '../../state/editor';
 import { toast, useUI } from '../../state/ui';
 import { getSelectionMask } from '../../editor/selection';
 import { defaultParams, resolveParams } from '../engine';
 import { useAdjustmentsPrefs } from './prefs';
+import { sameParams } from './presets';
 
 export const NO_DOC_MESSAGE = 'Open or create a document first (File ▸ New or File ▸ Open).';
 
+export interface InsertionPoint {
+  aboveId?: ID | null;
+  parentId?: ID | null;
+  index?: number;
+}
+
 /**
- * Create an adjustment layer for `filterId` above the active layer and select it.
- * Returns the new layer id, or null (with a toast) when it cannot be created.
+ * Where a new adjustment layer goes — the same rule as the Layers panel (layerOps.insertNewLayer):
+ * at the top of an expanded active group, otherwise directly above the active layer (top of the
+ * root when nothing is active). `inClipGroup` is true when that spot is inside a clipping group —
+ * above a clipped layer, or between a base layer and the layers clipped to it. A layer inserted
+ * there must be clipped too, otherwise it would silently become the new base of the clipped
+ * layers above it and change what they affect.
+ */
+export function adjustmentInsertion(doc: Document, activeLayerId: ID | null | undefined): { at: InsertionPoint; inClipGroup: boolean } {
+  const active = activeLayerId ? doc.layers[activeLayerId] : undefined;
+  if (!active) return { at: { parentId: null, index: doc.rootIds.length }, inClipGroup: false };
+  if (active.type === 'group' && !active.collapsed) {
+    return { at: { parentId: active.id, index: active.childIds.length }, inClipGroup: false };
+  }
+  const sibs = siblingsOf(doc, active.id);
+  const aboveId = sibs[sibs.indexOf(active.id) + 1];
+  const above = aboveId ? doc.layers[aboveId] : undefined;
+  return { at: { aboveId: active.id }, inClipGroup: !!active.clipped || !!above?.clipped };
+}
+
+export interface ClipOptions {
+  /** Force the clipping state (overrides everything else). */
+  clipped?: boolean;
+  /** Alt-click: invert the automatic clipping state. */
+  invertClip?: boolean;
+  /** Ignore the panel's "Clip to Layer by Default" preference (only follow the clipping group). */
+  ignoreClipPref?: boolean;
+}
+
+/** Clipping state of a new adjustment layer: joins the clipping group it lands in, or follows the preference. */
+export function resolveClipped(o: ClipOptions, inClipGroup: boolean, clipByDefault: boolean): boolean {
+  if (o.clipped !== undefined) return o.clipped;
+  const auto = inClipGroup || (!o.ignoreClipPref && clipByDefault);
+  return o.invertClip ? !auto : auto;
+}
+
+/**
+ * Create an adjustment layer for `filterId` above the active layer (or at the top of an expanded
+ * active group) and select it. Inside a clipping group the new layer is clipped as well, so the
+ * existing stack keeps affecting the same layers. Returns the new layer id, or null (with a toast).
  */
 export function createAdjustmentLayer(
   filterId: string,
-  opts: { clipped?: boolean; params?: ParamValues; name?: string; label?: string; reveal?: boolean } = {},
+  opts: ClipOptions & { params?: ParamValues; name?: string; label?: string; reveal?: boolean } = {},
 ): ID | null {
   const s = activeSession();
   if (!s) {
@@ -40,9 +84,9 @@ export function createAdjustmentLayer(
   }
   const params = { ...defaultParams(def.params), ...structuredClone(opts.params ?? {}) };
   const layer = makeAdjustmentLayer({ name: opts.name ?? nextLayerName(s.doc, def.name), filterId, params });
-  layer.clipped = opts.clipped ?? useAdjustmentsPrefs.getState().clipByDefault;
-  const aboveId = s.activeLayerId && s.doc.layers[s.activeLayerId] ? s.activeLayerId : null;
-  useEditor.getState().addLayer(layer, { aboveId, label: opts.label ?? `New ${def.name} Layer` });
+  const { at, inClipGroup } = adjustmentInsertion(s.doc, s.activeLayerId);
+  layer.clipped = resolveClipped(opts, inClipGroup, useAdjustmentsPrefs.getState().clipByDefault);
+  useEditor.getState().commit(opts.label ?? `New ${def.name} Layer`, (d) => insertLayerDraft(d, layer, at), { activeLayerId: layer.id });
   if (opts.reveal) revealEditor();
   return layer.id;
 }
@@ -71,11 +115,31 @@ export function previewAdjustmentParams(layerId: ID, params: ParamValues) {
   });
 }
 
+/** Params of `layerId` in the committed (history) document — what an edit is compared against. */
+function committedParams(layerId: ID): ParamValues | null {
+  const s = activeSession();
+  const l = s?.history.entries[s.history.index]?.doc.layers[layerId];
+  return l && l.type === 'adjustment' ? l.adjustment.params : null;
+}
+
+/**
+ * True when `params` would not change the committed layer. Then any live preview is reverted
+ * and no history entry is recorded (clicking a slider without moving it, Tab out of a field,
+ * Reset on an untouched layer…), so the document doesn't turn dirty for nothing.
+ */
+function isNoop(def: FilterDef | undefined, layerId: ID, params: ParamValues): boolean {
+  const base = committedParams(layerId);
+  if (!base || !sameParams(def, base, params)) return false;
+  useEditor.getState().cancelPreview();
+  return true;
+}
+
 /** Commit params as one (coalesced) history step. */
 export function commitAdjustmentParams(layerId: ID, params: ParamValues, label?: string) {
   const l = adjustmentOf(activeSession()?.doc, layerId);
   if (!l) return;
   const def = filters.get(l.adjustment.filterId);
+  if (isNoop(def, layerId, params)) return;
   useEditor.getState().commit(
     label ?? `Edit ${def?.name ?? 'Adjustment'}`,
     (d) => {
@@ -92,6 +156,7 @@ export function setAdjustmentParams(layerId: ID, params: ParamValues, label: str
   if (!l) return;
   const def = filters.get(l.adjustment.filterId);
   const full = def ? resolveParams(def, structuredClone(params)) : structuredClone(params);
+  if (isNoop(def, layerId, full)) return;
   useEditor.getState().commit(label, (d) => {
     const t = d.layers[layerId];
     if (t?.type === 'adjustment') t.adjustment.params = full;

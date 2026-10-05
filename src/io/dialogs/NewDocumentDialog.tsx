@@ -73,7 +73,10 @@ export function NewDocumentDialog({ close, initial }: { close: (r?: NewDocumentS
   const groups = useMemo(() => {
     const out: { cat: string; items: Item[] }[] = [];
     if (recent.length)
-      out.push({ cat: 'Recent', items: recent.map((r, i) => ({ key: `recent-${i}`, name: `${r.width} × ${r.height}`, width: r.width, height: r.height })) });
+      out.push({
+        cat: 'Recent',
+        items: recent.map((r, i) => ({ key: `recent-${i}`, name: `${r.width} × ${r.height}`, width: r.width, height: r.height })),
+      });
     const cats = [...PRESET_CATEGORIES, ...new Set(presets.map((p) => p.category).filter((c) => !PRESET_CATEGORIES.includes(c)))];
     for (const cat of cats) {
       const items = presets
@@ -152,7 +155,13 @@ export function NewDocumentDialog({ close, initial }: { close: (r?: NewDocumentS
               onClick={() => pick(it, activeGroup.cat === 'Recent')}
               onDoubleClick={() => {
                 pick(it, activeGroup.cat === 'Recent');
-                close({ name: activeGroup.cat === 'Recent' ? name : it.name, width: it.width, height: it.height, background: bg, customColor: custom });
+                close({
+                  name: activeGroup.cat === 'Recent' ? name : it.name,
+                  width: it.width,
+                  height: it.height,
+                  background: bg,
+                  customColor: custom,
+                });
               }}
               title={it.description}
             >
@@ -218,7 +227,11 @@ export function NewDocumentDialog({ close, initial }: { close: (r?: NewDocumentS
             <Button size="small" variant="ghost" icon={ArrowLeftRight} disabled={square} onClick={swap} title="Swap width and height">
               Swap
             </Button>
-            {square && <span className="io-faint" style={{ fontSize: 'var(--fs-sm)' }}>Square</span>}
+            {square && (
+              <span className="io-faint" style={{ fontSize: 'var(--fs-sm)' }}>
+                Square
+              </span>
+            )}
           </div>
           <div className="io-form-label">Background</div>
           <div className="ui-row">

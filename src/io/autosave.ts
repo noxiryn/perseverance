@@ -23,6 +23,8 @@ export interface RecoveryEntry {
   data: ArrayBuffer;
   /** Small JPEG data URL of the composite (for the recovery dialog). */
   thumb?: string;
+  /** Project path on disk (desktop), so a recovered document saves back to its file. */
+  filePath?: string | null;
 }
 
 /** Small composite preview for the recovery list (never throws). */
@@ -131,7 +133,16 @@ async function autosaveTick(force = false) {
       // The document may have been saved or closed while encoding.
       const cur = useEditor.getState().sessions[id];
       if (!cur || !cur.dirty) continue;
-      await putRecovery({ id, name: s.doc.name, time: Date.now(), width: s.doc.width, height: s.doc.height, data, thumb: thumbnailOf(s.doc) });
+      await putRecovery({
+        id,
+        name: s.doc.name,
+        time: Date.now(),
+        width: s.doc.width,
+        height: s.doc.height,
+        data,
+        thumb: thumbnailOf(s.doc),
+        filePath: s.filePath,
+      });
       lastRun.set(id, Date.now());
       lastEntry.set(id, entry);
     }
@@ -160,7 +171,7 @@ export async function recoverEntries(entries: RecoveryEntry[]) {
   for (const e of entries) {
     try {
       const doc = await decodeProject(e.data);
-      useEditor.getState().openDocument(doc, { label: 'Recovered' });
+      useEditor.getState().openDocument(doc, { label: 'Recovered', filePath: typeof e.filePath === 'string' ? e.filePath : null });
       markDirty(doc.id);
       // Track the entry so closing the recovered document without saving discards it.
       if (doc.id !== e.id) await removeRecovery(e.id);

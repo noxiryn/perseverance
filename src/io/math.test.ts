@@ -169,8 +169,18 @@ describe('trimBounds', () => {
   it('transparent', () => {
     const b = img(10, 8, (x, y) => (x >= 2 && x <= 6 && y >= 3 && y <= 4 ? [255, 0, 0, 255] : [0, 0, 0, 0]));
     expect(trimBounds(b, 'transparent')).toEqual({ x: 2, y: 3, width: 5, height: 2 });
-    expect(trimBounds(b, 'transparent', undefined, { top: true, bottom: false, left: true, right: false })).toEqual({ x: 2, y: 3, width: 8, height: 5 });
-    expect(trimBounds(img(3, 3, () => [0, 0, 0, 0]), 'transparent')).toBeNull();
+    expect(trimBounds(b, 'transparent', undefined, { top: true, bottom: false, left: true, right: false })).toEqual({
+      x: 2,
+      y: 3,
+      width: 8,
+      height: 5,
+    });
+    expect(
+      trimBounds(
+        img(3, 3, () => [0, 0, 0, 0]),
+        'transparent',
+      ),
+    ).toBeNull();
   });
   it('color', () => {
     const b = img(6, 6, (x, y) => (x === 4 && y === 1 ? [0, 0, 0, 255] : [255, 255, 255, 255]));

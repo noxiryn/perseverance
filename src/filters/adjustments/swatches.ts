@@ -5,9 +5,9 @@
  * Lookup looks. Pure (returns CSS strings) so it is unit-testable without a DOM.
  */
 import type { ParamValues } from '../../core/types';
-import { LUT_SIZE, isKnownLook, lookCube } from './looks';
+import { applyLookRgb, isKnownLook } from './looks';
 import { colorizeSaturation } from './defs/color';
-import { apply3DLut, clamp01, hslToRgbInto } from './math';
+import { clamp01, hslToRgbInto } from './math';
 import { bool, isGradient, num, str } from './params';
 
 const hex2 = (v: number) =>
@@ -35,15 +35,15 @@ export function lookPaletteCss(preset: string, intensity = 1): string | null {
   const key = `${preset}|${intensity.toFixed(2)}`;
   const hit = lookCache.get(key);
   if (hit) return hit;
-  const data = new Uint8ClampedArray(LOOK_SAMPLES.length * 4);
-  LOOK_SAMPLES.forEach(([r, g, b], i) => data.set([r, g, b, 255], i * 4));
-  apply3DLut({ data, width: LOOK_SAMPLES.length, height: 1 }, lookCube(preset), LUT_SIZE, clamp01(intensity));
+  // Evaluate the look directly on the 7 samples (no cube: expanding the preset list stays instant).
+  const out = new Float64Array(3);
   const n = LOOK_SAMPLES.length;
   const stops: string[] = [];
-  for (let i = 0; i < n; i++) {
-    const c = rgbHex(data[i * 4], data[i * 4 + 1], data[i * 4 + 2]);
+  LOOK_SAMPLES.forEach(([r, g, b], i) => {
+    applyLookRgb(preset, r, g, b, intensity, out);
+    const c = rgbHex(out[0], out[1], out[2]);
     stops.push(`${c} ${((i / n) * 100).toFixed(1)}%`, `${c} ${(((i + 1) / n) * 100).toFixed(1)}%`);
-  }
+  });
   const css = `linear-gradient(90deg, ${stops.join(', ')})`;
   lookCache.set(key, css);
   return css;

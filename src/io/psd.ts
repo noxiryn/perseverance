@@ -40,7 +40,12 @@ function toPsdAdjustment(filterId: string, raw: ParamValues): PsdAdjustment | nu
   const p = paramsOf(filterId, raw);
   switch (filterId) {
     case 'brightness-contrast':
-      return { type: 'brightness/contrast', brightness: Math.round(n(p.brightness, 0)), contrast: Math.round(n(p.contrast, 0)), useLegacy: false };
+      return {
+        type: 'brightness/contrast',
+        brightness: Math.round(n(p.brightness, 0)),
+        contrast: Math.round(n(p.contrast, 0)),
+        useLegacy: false,
+      };
     case 'levels':
       return {
         type: 'levels',
@@ -54,7 +59,8 @@ function toPsdAdjustment(filterId: string, raw: ParamValues): PsdAdjustment | nu
       };
     case 'curves': {
       const c = (p.curves as CurvesValue | undefined) ?? { rgb: IDENTITY, r: IDENTITY, g: IDENTITY, b: IDENTITY };
-      const ch = (pts: CurvePoints | undefined) => (pts?.length ? pts : IDENTITY).map(([x, y]) => ({ input: Math.round(x), output: Math.round(y) }));
+      const ch = (pts: CurvePoints | undefined) =>
+        (pts?.length ? pts : IDENTITY).map(([x, y]) => ({ input: Math.round(x), output: Math.round(y) }));
       return { type: 'curves', rgb: ch(c.rgb), red: ch(c.r), green: ch(c.g), blue: ch(c.b) };
     }
     case 'exposure':
@@ -65,7 +71,15 @@ function toPsdAdjustment(filterId: string, raw: ParamValues): PsdAdjustment | nu
       if (p.colorize) return null;
       return {
         type: 'hue/saturation',
-        master: { a: 0, b: 0, c: 0, d: 0, hue: Math.round(n(p.hue, 0)), saturation: Math.round(n(p.saturation, 0)), lightness: Math.round(n(p.lightness, 0)) },
+        master: {
+          a: 0,
+          b: 0,
+          c: 0,
+          d: 0,
+          hue: Math.round(n(p.hue, 0)),
+          saturation: Math.round(n(p.saturation, 0)),
+          lightness: Math.round(n(p.lightness, 0)),
+        },
       };
     case 'invert':
       return { type: 'invert' };
@@ -81,14 +95,24 @@ function toPsdAdjustment(filterId: string, raw: ParamValues): PsdAdjustment | nu
 function fromPsdAdjustment(a: PsdAdjustment): { filterId: string; params: ParamValues; name: string } | null {
   switch (a.type) {
     case 'brightness/contrast':
-      return { filterId: 'brightness-contrast', name: 'Brightness/Contrast', params: { brightness: a.brightness ?? 0, contrast: a.contrast ?? 0 } };
+      return {
+        filterId: 'brightness-contrast',
+        name: 'Brightness/Contrast',
+        params: { brightness: a.brightness ?? 0, contrast: a.contrast ?? 0 },
+      };
     case 'levels': {
       const c = a.rgb;
       return {
         filterId: 'levels',
         name: 'Levels',
         params: c
-          ? { inBlack: c.shadowInput, inWhite: c.highlightInput, outBlack: c.shadowOutput, outWhite: c.highlightOutput, gamma: c.midtoneInput || 1 }
+          ? {
+              inBlack: c.shadowInput,
+              inWhite: c.highlightInput,
+              outBlack: c.shadowOutput,
+              outWhite: c.highlightOutput,
+              gamma: c.midtoneInput || 1,
+            }
           : {},
       };
     }
@@ -182,7 +206,8 @@ export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd } & 
       // Folders carry no pixels: their styles can only travel as native Photoshop effects.
       const fx = effectsToPsd(l.effects);
       if (fx.info) common.effects = fx.info;
-      if (fx.unsupported.length) report.lostGroupStyles.push(`${l.name} (${fx.unsupported.map((e) => effectLabel(e.effectId)).join(', ')})`);
+      if (fx.unsupported.length)
+        report.lostGroupStyles.push(`${l.name} (${fx.unsupported.map((e) => effectLabel(e.effectId)).join(', ')})`);
       if (l.fillOpacity < 1) common.fillOpacity = l.fillOpacity;
       const children = l.childIds.map(convert).filter((c): c is PsdLayer => !!c);
       return { ...common, opened: !l.collapsed, children };
@@ -253,7 +278,8 @@ export async function exportPsd(opts: PsdExportOptions): Promise<void> {
     if (!res) return;
     const list = (a: string[]) => `${a.slice(0, 3).join(', ')}${a.length > 3 ? '…' : ''}`;
     const notes: string[] = [];
-    if (skipped.length) notes.push(`${skipped.length} adjustment layer${skipped.length > 1 ? 's' : ''} without a PSD equivalent skipped (${list(skipped)})`);
+    if (skipped.length)
+      notes.push(`${skipped.length} adjustment layer${skipped.length > 1 ? 's' : ''} without a PSD equivalent skipped (${list(skipped)})`);
     if (baked.length) notes.push(`styles baked into pixels on ${list(baked)}`);
     if (lostGroupStyles.length) notes.push(`group styles not exported: ${list(lostGroupStyles)}`);
     const size = formatBytes(data.byteLength);
@@ -287,7 +313,13 @@ function maskFromPsd(doc: Document, m: LayerMaskData | undefined): LayerMask | n
   ctx.fillStyle = `rgb(${d},${d},${d})`;
   ctx.fillRect(0, 0, c.width, c.height);
   ctx.drawImage(m.canvas, m.left ?? 0, m.top ?? 0);
-  return { bitmapId: bitmaps.add(c), enabled: !m.disabled, density: m.userMaskDensity ?? 1, feather: m.userMaskFeather ?? 0, inverted: false };
+  return {
+    bitmapId: bitmaps.add(c),
+    enabled: !m.disabled,
+    density: m.userMaskDensity ?? 1,
+    feather: m.userMaskFeather ?? 0,
+    inverted: false,
+  };
 }
 
 /** Convert an ag-psd structure to a Document (bitmaps are registered in the store). */
@@ -347,7 +379,12 @@ export function psdToDocument(psd: Psd, name: string): { doc: Document; unsuppor
         });
       } else {
         // Empty pixel layer: keep it as a paintable doc-sized layer.
-        layer = makeRasterLayer({ name: l.name || 'Layer', bitmapId: bitmaps.create(doc.width, doc.height), width: doc.width, height: doc.height });
+        layer = makeRasterLayer({
+          name: l.name || 'Layer',
+          bitmapId: bitmaps.create(doc.width, doc.height),
+          width: doc.width,
+          height: doc.height,
+        });
       }
       applyCommon(layer, l, false);
       insertLayerDraft(doc, layer, { parentId });
@@ -355,7 +392,12 @@ export function psdToDocument(psd: Psd, name: string): { doc: Document; unsuppor
   };
   if (psd.children?.length) add(psd.children, null);
   else if (psd.canvas) {
-    const layer = makeRasterLayer({ name: 'Background', bitmapId: bitmaps.add(psd.canvas), width: psd.canvas.width, height: psd.canvas.height });
+    const layer = makeRasterLayer({
+      name: 'Background',
+      bitmapId: bitmaps.add(psd.canvas),
+      width: psd.canvas.width,
+      height: psd.canvas.height,
+    });
     insertLayerDraft(doc, layer, {});
   } else throw new Error('the PSD contains no readable layers');
   return { doc, unsupported, styled };
@@ -372,6 +414,7 @@ export async function importPsd(file: OpenedFile): Promise<Document> {
     toast('This PSD is not in RGB mode — colors may look different.', 'warning', 4000);
   const { doc, unsupported } = psdToDocument(psd, baseName(file.name));
   useEditor.getState().openDocument(doc, { label: 'Open PSD' });
-  if (unsupported) toast(`${unsupported} PSD adjustment/special layer${unsupported > 1 ? 's were' : ' was'} not supported and skipped`, 'warning', 4500);
+  if (unsupported)
+    toast(`${unsupported} PSD adjustment/special layer${unsupported > 1 ? 's were' : ' was'} not supported and skipped`, 'warning', 4500);
   return doc;
 }

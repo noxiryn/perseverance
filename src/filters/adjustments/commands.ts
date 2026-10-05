@@ -1,6 +1,9 @@
 /**
- * Menus: Image ▸ Adjustments (destructive, via the filter dialog), Layer ▸ New Adjustment Layer,
+ * Menus: Image ▸ Adjustments (destructive), Layer ▸ New Adjustment Layer,
  * Image ▸ Auto Tone / Auto Contrast / Auto Color, Image ▸ Adjustments ▸ Desaturate.
+ * Destructive adjustments open fx-filters' openFilterDialog(id, { mode: 'destructive' }), except
+ * the ones with a dedicated editor (Levels, Curves, Color Balance, Selective Color, Exposure) and
+ * edits of a non-pixel layer's mask, which open this module's AdjustmentDialog.
  * Adjustment commands are kept in sync with the filters registry, so adjustments registered by
  * other modules (e.g. Vignette) show up automatically.
  */
@@ -11,7 +14,9 @@ import { activeDoc, activeSession } from '../../state/editor';
 import { toast } from '../../state/ui';
 import { renderDocument } from '../../render/compositor';
 import { analysisMask, autoColorCurves, autoContrastParams, autoToneCurves } from './auto';
-import { activeRasterTarget, editRasterPixels, readTargetPixels } from './apply';
+import { activeRasterTarget, editRasterPixels, readTargetPixels, runAdjustment, targetFilterContext } from './apply';
+import { CUSTOM_EDITOR_IDS } from './AdjustmentParams';
+import { openAdjustmentDialog } from './AdjustmentDialog';
 import { computeHistogram, readDownscaled } from './histogram';
 import { createAdjustmentLayer, layersAbove, NO_DOC_MESSAGE } from './layers';
 import { applyLuts } from './math';
@@ -39,7 +44,23 @@ function applyDestructive(def: FilterDef) {
   if (!s) return toast(NO_DOC_MESSAGE, 'info');
   const layer = s.activeLayerId ? s.doc.layers[s.activeLayerId] : null;
   if (!layer) return toast(`Select a layer to apply ${def.name}.`, 'info');
-  if (layer.type === 'adjustment' || layer.type === 'group' || layer.type === 'fill') {
+  const onMask = s.editTarget === 'mask' && !!layer.mask;
+  const nonPixel = layer.type === 'adjustment' || layer.type === 'group' || layer.type === 'fill';
+  // The layer mask is the edit target: adjust the mask, whatever the layer type (e.g. Ctrl+I
+  // inverts an adjustment layer's mask). Checked before rejecting non-pixel layers.
+  if (onMask && !def.params.length) {
+    const target = activeRasterTarget(`apply ${def.name}`);
+    if (target) editRasterPixels(target, def.name, (img) => runAdjustment(def, img, {}, targetFilterContext(target)));
+    return;
+  }
+  if (CUSTOM_EDITOR_IDS.has(def.id) || (onMask && nonPixel)) {
+    void openAdjustmentDialog(def).catch((err) => {
+      console.error(err);
+      toast(`Couldn't open the ${def.name} dialog.`, 'error');
+    });
+    return;
+  }
+  if (nonPixel) {
     const what = layer.type === 'group' ? 'a group' : layer.type === 'adjustment' ? 'an adjustment layer' : 'a fill layer';
     return toast(`${def.name} can't be applied to ${what}. Use Layer ▸ New Adjustment Layer ▸ ${def.name} instead.`, 'warning');
   }
@@ -158,8 +179,10 @@ export function runAuto(kind: AutoKind) {
   const img = readDownscaled(composite, 640);
   const res = autoParams(kind, img, null);
   if (!res) return toast(`${label}: the image already uses its full tonal range — nothing to change.`, 'info');
-  const id = createAdjustmentLayer(res.filterId, { params: res.params, name: label, label, clipped: false });
-  if (id) toast(`${label} added as a ${res.filterId === 'levels' ? 'Levels' : 'Curves'} adjustment layer.`, 'success');
+  // The history label says what happened (the shell announces it: "Auto Contrast (Levels Layer)
+  // completed."), so no extra toast. Inside a clipping group the layer joins it.
+  const kindName = res.filterId === 'levels' ? 'Levels' : 'Curves';
+  createAdjustmentLayer(res.filterId, { params: res.params, name: label, label: `${label} (${kindName} Layer)`, ignoreClipPref: true });
 }
 
 function desaturate() {

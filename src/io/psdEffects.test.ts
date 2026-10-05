@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 import type { Gradient, LayerEffect } from '../core/types';
 import { effectsFromPsd, effectsToPsd, fillFromPsd, fillToPsd, fromPsdColor, fromPsdGradient, toPsdGradient } from './psdEffects';
 
-const fx = (effectId: string, params: LayerEffect['params'], enabled = true): LayerEffect => ({ id: `e_${effectId}`, effectId, enabled, params });
+const fx = (effectId: string, params: LayerEffect['params'], enabled = true): LayerEffect => ({
+  id: `e_${effectId}`,
+  effectId,
+  enabled,
+  params,
+});
 
 /** Our → PSD → our, ignoring generated ids. */
 const roundTrip = (list: LayerEffect[]) =>
@@ -15,7 +20,18 @@ describe('psd layer effects', () => {
       fx('inner-shadow', { color: '#000000', blendMode: 'normal', opacity: 0.5, angle: -45, distance: 3, choke: 0.1, size: 6 }, false),
       fx('outer-glow', { color: '#ffcc00', blendMode: 'screen', opacity: 0.8, spread: 0.2, size: 30 }),
       fx('inner-glow', { color: '#ffffff', blendMode: 'overlay', opacity: 0.4, choke: 0, size: 12, source: 'center' }),
-      fx('bevel', { style: 'emboss', depth: 2.5, size: 9, soften: 2, angle: 110, altitude: 40, highlightColor: '#ffffee', highlightOpacity: 0.7, shadowColor: '#220000', shadowOpacity: 0.6 }),
+      fx('bevel', {
+        style: 'emboss',
+        depth: 2.5,
+        size: 9,
+        soften: 2,
+        angle: 110,
+        altitude: 40,
+        highlightColor: '#ffffee',
+        highlightOpacity: 0.7,
+        shadowColor: '#220000',
+        shadowOpacity: 0.6,
+      }),
       fx('satin', { color: '#333333', blendMode: 'multiply', opacity: 0.45, angle: 19, distance: 11, size: 14, invert: false }),
       fx('color-overlay', { color: '#c4141c', blendMode: 'color', opacity: 0.9 }),
       fx('stroke', { size: 6, position: 'inside', blendMode: 'normal', opacity: 1, fillType: 'color', color: '#ffffff' }),
@@ -118,7 +134,16 @@ describe('psd layer effects', () => {
 
   it('round-trips solid and gradient fill layers; patterns stay pixels', () => {
     expect(fillFromPsd(fillToPsd({ type: 'solid', color: '#c4141c' })!)).toEqual({ type: 'solid', color: '#c4141c' });
-    const g: Gradient = { kind: 'reflected', angle: 45, scale: 0.8, reverse: false, stops: [{ offset: 0, color: '#000000' }, { offset: 0.6, color: '#ff8800' }] };
+    const g: Gradient = {
+      kind: 'reflected',
+      angle: 45,
+      scale: 0.8,
+      reverse: false,
+      stops: [
+        { offset: 0, color: '#000000' },
+        { offset: 0.6, color: '#ff8800' },
+      ],
+    };
     const back = fillFromPsd(fillToPsd({ type: 'gradient', gradient: g })!);
     expect(back).toEqual({ type: 'gradient', gradient: g });
     expect(fillToPsd({ type: 'pattern', assetId: 'paper-texture', scale: 1 })).toBeNull();

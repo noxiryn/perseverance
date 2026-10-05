@@ -23,6 +23,9 @@ const AXES = [
   { ch: 'B', left: 'Yellow', right: 'Blue', from: '#e3cf35', to: '#3d6ee0' },
 ] as const;
 
+/** Keys that change the value of a focused range input. */
+export const RANGE_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End']);
+
 export function ColorBalanceEditor({
   values,
   onChange,
@@ -75,7 +78,10 @@ export function ColorBalanceEditor({
               aria-label={`${TONES.find((t) => t.value === tone)?.label} ${a.left} to ${a.right}`}
               onChange={(e) => set(key, Number(e.target.value), false)}
               onPointerUp={(e) => set(key, Number((e.target as HTMLInputElement).value), true)}
-              onKeyUp={(e) => set(key, Number((e.target as HTMLInputElement).value), true)}
+              onKeyUp={(e) => {
+                // Only keys that move a range input end an edit (not Tab / Shift / modifiers).
+                if (RANGE_KEYS.has(e.key)) set(key, Number((e.target as HTMLInputElement).value), true);
+              }}
               onDoubleClick={() => set(key, 0, true)}
             />
             <span className={`r${v > 0 ? ' on' : ''}`}>{a.right}</span>

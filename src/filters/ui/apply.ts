@@ -16,7 +16,7 @@ import { activeSession, useEditor } from '../../state/editor';
 import { getSelectionMask } from '../../editor/selection';
 import { viewport } from '../../editor/viewport';
 import { getLayerSize, renderLayerContent } from '../../render/compositor';
-import { blendSelection } from './selectionBlend';
+import { blendSelection, diffBounds } from './selectionBlend';
 
 export type ApplyMode = 'smart' | 'destructive';
 
@@ -208,12 +208,14 @@ export function computeDestructive(def: FilterDef, params: ParamValues, t: Filte
   let out = runFilter(def, work, resolveParams(def, params), targetContext(t, 1));
   if (out.width !== w || out.height !== h) out = work; // contract violation guard
   const sel = selectionAlpha(t, w, h, 1);
-  if (!sel) return { out, rect: { x: 0, y: 0, width: w, height: h } };
-  const rect = alphaBounds(sel, w, h);
-  if (!rect) return { out: new ImageData(orig, w, h), rect: null };
-  blendSelection(orig, out.data, sel);
-  return { out, rect };
+  if (sel) {
+    if (!alphaBounds(sel, w, h)) return { out: new ImageData(orig, w, h), rect: null };
+    blendSelection(orig, out.data, sel);
+  }
+  // history patches only need the pixels that actually changed
+  return { out, rect: diffBounds(orig, out.data, w, h) };
 }
+
 
 /** Apply a filter destructively and commit one history step. Returns false when nothing changed. */
 export function applyDestructive(def: FilterDef, params: ParamValues, t: FilterTarget, precomputed?: { out: ImageData; rect: Rect | null; before?: ImageData }): boolean {
@@ -266,6 +268,13 @@ export function applySmart(def: FilterDef, params: ParamValues, layerId: ID): vo
   viewport.requestRender();
 }
 
+/** User-facing explanation when a destructive application changed nothing. */
+export function noChangeMessage(def: FilterDef, t: FilterTarget): string {
+  return t.doc.selection
+    ? 'The selection doesn’t overlap this layer’s pixels — nothing was filtered.'
+    : `${def.name} didn’t change any pixels on “${t.layer.name}” (is the layer empty?).`;
+}
+
 /** Apply without a dialog (filter.last, gallery, parameterless filters). */
 export function applyFilterNow(filterId: string, params: ParamValues, requested: 'auto' | ApplyMode = 'auto'): { ok: boolean; mode?: ApplyMode; error?: string } {
   const def = filters.get(filterId);
@@ -278,7 +287,7 @@ export function applyFilterNow(filterId: string, params: ParamValues, requested:
     return { ok: true, mode };
   }
   const ok = applyDestructive(def, params, r.target);
-  return ok ? { ok, mode } : { ok: false, error: 'The selection doesn’t overlap this layer — nothing was filtered.' };
+  return ok ? { ok, mode } : { ok: false, error: noChangeMessage(def, r.target) };
 }
 
 /* ------------------------------------------------------------------ */

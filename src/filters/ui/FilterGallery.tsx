@@ -14,7 +14,7 @@ import { activeSession } from '../../state/editor';
 import { toast } from '../../state/ui';
 import { renderDocument } from '../../render/compositor';
 import { renderPlaceholderCharacter } from '../../roblox/placeholder';
-import { applyDestructive, applySmart, committedDoc, effectiveMode, lastModeFor, resolveTarget, selectionAlpha, targetContext, targetSource, type FilterTarget } from './apply';
+import { applyDestructive, applySmart, committedDoc, effectiveMode, lastModeFor, noChangeMessage, resolveTarget, selectionAlpha, targetContext, targetSource, type FilterTarget } from './apply';
 import { blendSelection } from './selectionBlend';
 import { fitImage, paramsKey, runOnCopy } from './preview';
 import { getLastFilter, rememberParams, rememberedParams, setLastFilter } from './memory';
@@ -237,7 +237,7 @@ export function FilterGallery({ initialFilterId, close }: FilterGalleryProps & {
     window.setTimeout(() => {
       try {
         if (smart) applySmart(sel, params, t.layer.id);
-        else if (!applyDestructive(sel, params, t)) toast('The selection doesn’t overlap this layer — nothing was filtered.', 'warning');
+        else if (!applyDestructive(sel, params, t)) toast(noChangeMessage(sel, t), 'warning');
         rememberParams(sel.id, params);
         setLastFilter({ filterId: sel.id, params, mode: lastModeFor(t, smart ? 'smart' : 'destructive') });
         close('ok');

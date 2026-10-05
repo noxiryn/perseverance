@@ -14,6 +14,7 @@ import {
   applySmart,
   effectiveMode,
   lastModeFor,
+  noChangeMessage,
   selectionAlpha,
   targetBitmapId,
   targetContext,
@@ -245,7 +246,7 @@ export function FilterDialog({ filterId, mode, target, initialParams, close }: F
         } else {
           smartPrev.clear();
           const done = bmpPrev ? bmpPrev.commit(def, params, paramsKey(filterId, params, 'd')) : false;
-          if (!done) toast('The selection doesn’t overlap this layer — nothing was filtered.', 'warning');
+          if (!done) toast(noChangeMessage(def, target), 'warning');
         }
         finished.current = true;
         rememberParams(filterId, params);

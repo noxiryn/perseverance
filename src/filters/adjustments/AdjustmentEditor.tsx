@@ -1,24 +1,21 @@
 /**
  * Editor for one adjustment layer (shared by the Adjustments panel and the Properties panel):
- * header (icon, name, clip / visibility / reset / delete), preset dropdown, then the params —
- * custom Levels and Curves editors with the histogram of the layers below, a Photoshop-style
- * Color Balance editor, ParamEditor for the rest. Edits preview live and commit as coalesced history steps.
+ * header (icon, name, clip / visibility / reset / delete), preset dropdown, then the params
+ * (AdjustmentParams: custom Levels / Curves editors over the histogram of the layers below,
+ * Photoshop-style Color Balance, Selective Color and Exposure editors, ParamEditor for the rest).
+ * Edits preview live and commit as coalesced history steps; edits that change nothing are dropped.
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Eye, EyeOff, RotateCcw, SquareArrowDownLeft, Trash2, WandSparkles } from 'lucide-react';
-import type { AdjustmentLayer, CurvesValue, ID, ParamValue, ParamValues } from '../../core/types';
+import type { AdjustmentLayer, ID, ParamValues } from '../../core/types';
 import { filters, gradientPresets, useRegistry } from '../../registry';
 import { useEditor } from '../../state/editor';
 import { toast } from '../../state/ui';
-import { Button, CurvesEditor, IconButton, IDENTITY_CURVES, ParamEditor, Select } from '../../ui/controls';
+import { Button, IconButton, Select } from '../../ui/controls';
 import { parentOf, siblingsOf } from '../../core/document';
 import { resolveParams } from '../engine';
 import { autoContrastParams, autoToneCurves } from './auto';
-import { clippedBins } from './HistogramCanvas';
-import { isCurves } from './params';
-import { LevelsEditor } from './LevelsEditor';
-import { ColorBalanceEditor } from './ColorBalanceEditor';
-import { presetSwatchCss } from './swatches';
+import { AdjustmentParams, HISTOGRAM_IDS } from './AdjustmentParams';
 import { isCustomName, matchPreset, presetsFor } from './presets';
 import {
   commitAdjustmentParams,
@@ -31,15 +28,6 @@ import {
 } from './layers';
 import { useBelowHistogram, useElementWidth } from './useBelowHistogram';
 import './adjustments.css';
-
-/** Palette preview of the selected Color Lookup look (sample colors through the look). */
-function LookStrip({ values }: { values: ParamValues }) {
-  const css = presetSwatchCss('color-lookup', values);
-  if (!css) return null;
-  return (
-    <div className="adjustments-look-strip" style={{ background: css }} title="Shadows · skin · red · foliage · sky · highlights through the look" />
-  );
-}
 
 function useLayer(layerId: ID): AdjustmentLayer | null {
   return useEditor((s) => {
@@ -69,13 +57,15 @@ export function AdjustmentEditor({ layerId, context = 'panel' }: { layerId: ID; 
   const def = layer ? all.find((f) => f.id === layer.adjustment.filterId) : undefined;
   const clipBase = useClipBaseName(layerId);
   const [bodyRef, width] = useElementWidth<HTMLDivElement>(context === 'panel' ? 260 : 230);
-  const needsHistogram = def?.id === 'levels' || def?.id === 'curves';
-  const histogram = useBelowHistogram(layer ? layerId : null, !!needsHistogram);
+  const needsHistogram = !!def && HISTOGRAM_IDS.has(def.id);
+  const histogram = useBelowHistogram(layer ? layerId : null, needsHistogram);
+  // Bumped when a preset / reset / auto replaces the params, so editors holding view state
+  // (Color Balance tone, Selective Color range) re-open on what the preset changed.
+  const [paramsEpoch, setParamsEpoch] = useState(0);
 
   const values = useMemo(() => (def && layer ? resolveParams(def, layer.adjustment.params) : {}), [def, layer]);
   const presets = useMemo(() => (def ? presetsFor(def.id) : []), [def, gradients]);
   const current = def ? matchPreset(def, values, presets) : null;
-  const curvesHist = useMemo(() => (histogram ? clippedBins(histogram.lum) : undefined), [histogram]);
 
   if (!layer) return <div className="ui-empty">Select an adjustment layer to edit its settings.</div>;
   if (!def) {
@@ -87,8 +77,10 @@ export function AdjustmentEditor({ layerId, context = 'panel' }: { layerId: ID; 
   const Icon = def.icon;
   const change = (next: ParamValues) => previewAdjustmentParams(layerId, next);
   const commit = (next: ParamValues) => commitAdjustmentParams(layerId, next);
-  const onParam = (_k: string, _v: ParamValue, next: ParamValues) => change(next);
-  const onParamCommit = (_k: string, _v: ParamValue, next: ParamValues) => commit(next);
+  const replace = (next: ParamValues, label: string) => {
+    setAdjustmentParams(layerId, next, label);
+    setParamsEpoch((n) => n + 1);
+  };
 
   const presetOptions = [
     ...(current === null ? [{ value: '__custom', label: 'Custom' }] : []),
@@ -97,9 +89,9 @@ export function AdjustmentEditor({ layerId, context = 'panel' }: { layerId: ID; 
   ];
   const applyPreset = (name: string) => {
     if (name === '__custom') return;
-    if (name === 'Default') return resetAdjustment(layerId);
+    if (name === 'Default') return replace({}, `Reset ${def.name}`);
     const p = presets.find((x) => x.name === name);
-    if (p) setAdjustmentParams(layerId, p.params, `${def.name}: ${p.name}`);
+    if (p) replace(p.params, `${def.name}: ${p.name}`);
   };
 
   const auto = () => {
@@ -107,15 +99,13 @@ export function AdjustmentEditor({ layerId, context = 'panel' }: { layerId: ID; 
     if (def.id === 'levels') {
       const p = autoContrastParams(histogram);
       if (!p) return toast('Levels: the image already uses its full tonal range.', 'info');
-      setAdjustmentParams(layerId, { ...values, ...p, gamma: 1, outBlack: 0, outWhite: 255 }, 'Auto Levels');
+      replace({ ...values, ...p, gamma: 1, outBlack: 0, outWhite: 255 }, 'Auto Levels');
     } else {
       const c = autoToneCurves(histogram);
       if (!c) return toast('Curves: the image already uses its full tonal range.', 'info');
-      setAdjustmentParams(layerId, { curves: c }, 'Auto Curves');
+      replace({ curves: c }, 'Auto Curves');
     }
   };
-
-  const curvesValue: CurvesValue = isCurves(values.curves) ? values.curves : IDENTITY_CURVES;
 
   const clipButton = (
     <IconButton
@@ -135,7 +125,17 @@ export function AdjustmentEditor({ layerId, context = 'panel' }: { layerId: ID; 
       onClick={() => toggleVisible(layerId)}
     />
   );
-  const resetButton = <IconButton icon={RotateCcw} size="sm" title="Reset to defaults" onClick={() => resetAdjustment(layerId)} />;
+  const resetButton = (
+    <IconButton
+      icon={RotateCcw}
+      size="sm"
+      title="Reset to defaults"
+      onClick={() => {
+        resetAdjustment(layerId);
+        setParamsEpoch((n) => n + 1);
+      }}
+    />
+  );
   const deleteButton = <IconButton icon={Trash2} size="sm" title="Delete adjustment layer" onClick={() => deleteAdjustmentLayer(layerId)} />;
   const clipText = layer.clipped ? `Clipped to ${clipBase ? `“${clipBase}”` : 'the layer below'}` : 'Affects all layers below';
 
@@ -186,29 +186,15 @@ export function AdjustmentEditor({ layerId, context = 'panel' }: { layerId: ID; 
       )}
 
       <div className="adjustments-editor-body" ref={bodyRef}>
-        {def.id === 'levels' ? (
-          <LevelsEditor values={values} onChange={change} onCommit={commit} histogram={histogram} width={Math.max(160, width)} />
-        ) : def.id === 'curves' ? (
-          <div className="adjustments-curves">
-            <CurvesEditor
-              value={curvesValue}
-              size={Math.max(160, Math.min(width, 320))}
-              histogram={curvesHist}
-              onChange={(c) => change({ ...values, curves: c })}
-              onCommit={(c) => commit({ ...values, curves: c })}
-            />
-            <div className="adjustments-hint">Click to add a point · drag to move · drag off the grid to remove</div>
-          </div>
-        ) : def.id === 'color-balance' ? (
-          <ColorBalanceEditor values={values} onChange={change} onCommit={commit} />
-        ) : def.params.length ? (
-          <>
-            <ParamEditor defs={def.params} values={values} onChange={onParam} onCommit={onParamCommit} />
-            {def.id === 'color-lookup' && <LookStrip values={values} />}
-          </>
-        ) : (
-          <div className="adjustments-hint">{def.description ?? 'This adjustment has no settings.'}</div>
-        )}
+        <AdjustmentParams
+          key={paramsEpoch}
+          def={def}
+          values={values}
+          onChange={change}
+          onCommit={commit}
+          histogram={histogram}
+          width={width}
+        />
       </div>
     </div>
   );

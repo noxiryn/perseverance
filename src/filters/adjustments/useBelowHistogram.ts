@@ -2,7 +2,7 @@
  * React hooks: histogram of the composite *below* an adjustment layer (what the adjustment
  * receives), recomputed only when something below actually changes; element width observer.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Document, ID } from '../../core/types';
 import { bitmaps } from '../../core/bitmaps';
 import { flattenIds } from '../../core/document';
@@ -13,6 +13,19 @@ import { computeHistogram, type Histogram } from './histogram';
 import { analysisMask } from './auto';
 
 const MAX_SIDE = 420;
+
+/** Bitmaps (layer pixels and masks) of the layers below `layerId`. */
+export function belowBitmapIds(doc: Document, layerId: ID): Set<ID> {
+  const order = flattenIds(doc);
+  const idx = order.indexOf(layerId);
+  const out = new Set<ID>();
+  for (const id of idx < 0 ? order : order.slice(0, idx)) {
+    const l = doc.layers[id];
+    if (l?.type === 'raster') out.add(l.bitmapId);
+    if (l?.mask) out.add(l.mask.bitmapId);
+  }
+  return out;
+}
 
 /** Identity-based signature of everything that influences the composite below `layerId`. */
 function belowSignature(doc: Document, layerId: ID): unknown[] {
@@ -26,6 +39,37 @@ function belowSignature(doc: Document, layerId: ID): unknown[] {
     if (l?.mask) sig.push(bitmaps.version(l.mask.bitmapId));
   }
   return sig;
+}
+
+/**
+ * A counter that increases when one of the bitmaps below `layerId` changes. Pixel-only commits
+ * (Auto Tone, brush strokes) and undo/redo of them keep the same document object, so the
+ * document alone can't tell the histogram to refresh. Coalesced to one bump per frame.
+ */
+function useBelowBitmapTick(doc: Document | null, layerId: ID | null, enabled: boolean): number {
+  const [tick, setTick] = useState(0);
+  const ids = useMemo(
+    () => (enabled && doc && layerId && doc.layers[layerId] ? belowBitmapIds(doc, layerId) : new Set<ID>()),
+    [doc, layerId, enabled],
+  );
+  const relevant = useRef(ids);
+  relevant.current = ids;
+  useEffect(() => {
+    if (!enabled) return;
+    let raf = 0;
+    const unsub = bitmaps.subscribe((id) => {
+      if (raf || !relevant.current.has(id)) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        setTick((t) => t + 1);
+      });
+    });
+    return () => {
+      unsub();
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [enabled]);
+  return tick;
 }
 
 function sameSig(a: unknown[], b: unknown[]): boolean {
@@ -45,6 +89,7 @@ export function useBelowHistogram(layerId: ID | null, enabled = true): Histogram
   const doc = useActiveDoc();
   const [hist, setHist] = useState<Histogram | null>(null);
   const sigRef = useRef<{ layerId: ID; sig: unknown[] } | null>(null);
+  const tick = useBelowBitmapTick(doc, layerId, enabled);
 
   useEffect(() => {
     if (!enabled || !doc || !layerId || !doc.layers[layerId]) {
@@ -68,7 +113,8 @@ export function useBelowHistogram(layerId: ID | null, enabled = true): Histogram
       prev ? 160 : 0,
     );
     return () => window.clearTimeout(t);
-  }, [doc, layerId, enabled]);
+    // `tick` re-runs the signature check when pixels below change without a new document.
+  }, [doc, layerId, enabled, tick]);
 
   return hist;
 }

@@ -101,6 +101,13 @@
 .fc-sw-hint {
   margin-top: 4px;
 }
+/* Recent colors: one fixed row (extra colors are clipped) so nothing below it ever reflows. */
+.fc-sw-grid.fc-sw-recent {
+  height: 19px;
+  padding: 2px;
+  margin: -2px;
+  overflow: hidden;
+}
 .fc-sw-foot {
   display: flex;
   align-items: center;
@@ -144,6 +151,31 @@
   font-family: var(--font-mono);
   font-size: 9px;
   color: var(--text-dim);
+}
+
+.fc-extract-note {
+  margin-top: -4px;
+}
+.fc-extract-note.warn {
+  color: var(--warning);
+}
+
+/* ---------------- Confirm dialog ---------------- */
+.fc-pal-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+  line-height: 1.45;
+}
+.fc-pal-confirm p {
+  margin: 0;
+  white-space: normal;
+}
+.fc-pal-confirm b {
+  font-weight: 500;
+  color: var(--text-strong);
 }
 
 /* ---------------- Color panel ---------------- */

@@ -79,16 +79,37 @@ export function ImageSizeDialog({ close, doc }: { close: (r?: ImageSizeResult) =
       }
     >
       <div className="io-note" style={{ marginBottom: 12 }}>
-        Current: {doc.width} × {doc.height} px ({formatBytes(doc.width * doc.height * 4)}) → New: <b>{w} × {h} px</b> ({formatBytes(w * h * 4)})
+        Current: {doc.width} × {doc.height} px ({formatBytes(doc.width * doc.height * 4)}) → New:{' '}
+        <b>
+          {w} × {h} px
+        </b>{' '}
+        ({formatBytes(w * h * 4)})
       </div>
       <div className="io-form-grid" style={{ gridTemplateColumns: '96px 1fr auto' }}>
         <span className="ui-label">Width</span>
-        <NumberField value={shown(w, doc.width)} min={unit === 'px' ? 1 : 0.1} step={unit === 'px' ? 1 : 0.1} unit={unit} onChange={(v) => setWidth(fromShown(v, doc.width))} />
+        <NumberField
+          value={shown(w, doc.width)}
+          min={unit === 'px' ? 1 : 0.1}
+          step={unit === 'px' ? 1 : 0.1}
+          unit={unit}
+          onChange={(v) => setWidth(fromShown(v, doc.width))}
+        />
         <div style={{ gridRow: 'span 2' }} className="io-link-btn">
-          <IconButton icon={link ? Link : Unlink} active={link} title={link ? 'Constrain proportions (on)' : 'Constrain proportions (off)'} onClick={() => setLink(!link)} />
+          <IconButton
+            icon={link ? Link : Unlink}
+            active={link}
+            title={link ? 'Constrain proportions (on)' : 'Constrain proportions (off)'}
+            onClick={() => setLink(!link)}
+          />
         </div>
         <span className="ui-label">Height</span>
-        <NumberField value={shown(h, doc.height)} min={unit === 'px' ? 1 : 0.1} step={unit === 'px' ? 1 : 0.1} unit={unit} onChange={(v) => setHeight(fromShown(v, doc.height))} />
+        <NumberField
+          value={shown(h, doc.height)}
+          min={unit === 'px' ? 1 : 0.1}
+          step={unit === 'px' ? 1 : 0.1}
+          unit={unit}
+          onChange={(v) => setHeight(fromShown(v, doc.height))}
+        />
         <span className="ui-label">Units</span>
         <Select
           value={unit}
@@ -130,9 +151,7 @@ export function ImageSizeDialog({ close, doc }: { close: (r?: ImageSizeResult) =
         <span />
       </div>
       <div className="io-note" style={{ marginTop: 10 }}>
-        {distorts ? (
-          <span style={{ color: 'var(--warning)' }}>The aspect ratio changes — layers will be stretched. </span>
-        ) : null}
+        {distorts ? <span style={{ color: 'var(--warning)' }}>The aspect ratio changes — layers will be stretched. </span> : null}
         All layers, masks, the selection and guides are scaled. Text and shapes stay editable.
       </div>
     </Dialog>

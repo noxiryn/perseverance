@@ -1,9 +1,14 @@
 /**
  * Parametric "Color Lookup" looks. Each look is a pure function RGB (0..1) → RGB (0..1) that is
- * sampled once into a 33³ cube (cached), then applied with trilinear interpolation.
+ * sampled once into a LUT_SIZE³ cube (cached), then applied with tetrahedral interpolation.
  * No external LUT files: everything is procedural and works offline.
+ *
+ * Performance: a cube is built on first use, on the main thread, so the per-sample code is kept
+ * allocation-free — colors are parsed once at module load, hue pulls run in a single HSL pass,
+ * constant vectors are hoisted. Swatches evaluate the look functions directly on their few
+ * sample colors (`applyLookRgb`) instead of building cubes.
  */
-import { build3DLut, clamp01, gradientLutFloat, hslToRgbInto, rgbOf, rgbToHslInto, sCurve } from './math';
+import { build3DLut, clamp01, gradientLutFloat, rgbOf, sCurve } from './math';
 
 export const LOOK_PRESETS: [string, string][] = [
   ['teal-orange', 'Teal & Orange'],
@@ -18,7 +23,11 @@ export const LOOK_PRESETS: [string, string][] = [
   ['royal', 'Royal'],
 ];
 
-export const LUT_SIZE = 33;
+/**
+ * Cube resolution. The looks are smooth functions, so 25³ samples with tetrahedral
+ * interpolation stay within about one 8-bit level of 33³ and build 2.3× faster.
+ */
+export const LUT_SIZE = 25;
 
 type Vec = Float64Array; // [r, g, b] in 0..1
 
@@ -30,62 +39,110 @@ const smooth = (e0: number, e1: number, x: number) => {
 
 function saturate(c: Vec, f: number) {
   const l = L(c);
-  for (let i = 0; i < 3; i++) c[i] = l + (c[i] - l) * f;
+  c[0] = l + (c[0] - l) * f;
+  c[1] = l + (c[1] - l) * f;
+  c[2] = l + (c[2] - l) * f;
 }
 
 function contrast(c: Vec, k: number) {
-  for (let i = 0; i < 3; i++) c[i] = sCurve(clamp01(c[i]), k);
+  c[0] = sCurve(clamp01(c[0]), k);
+  c[1] = sCurve(clamp01(c[1]), k);
+  c[2] = sCurve(clamp01(c[2]), k);
 }
 
-/** ASC-CDL style slope / offset / power per channel. */
-function cdl(c: Vec, slope: number[], offset: number[], power: number[]) {
-  for (let i = 0; i < 3; i++) c[i] = Math.pow(Math.max(0, c[i] * slope[i] + offset[i]), power[i]);
+/** ASC-CDL style slope / offset / power per channel (constant vectors, hoisted by the callers). */
+function cdl(c: Vec, slope: Vec, offset: Vec, power: Vec) {
+  c[0] = Math.pow(Math.max(0, c[0] * slope[0] + offset[0]), power[0]);
+  c[1] = Math.pow(Math.max(0, c[1] * slope[1] + offset[1]), power[1]);
+  c[2] = Math.pow(Math.max(0, c[2] * slope[2] + offset[2]), power[2]);
+}
+const v3 = (a: number, b: number, c: number): Vec => Float64Array.of(a, b, c);
+
+/** Luma-neutral chroma of a color (r − luma, g − luma, b − luma in 0..1), parsed once. */
+function chroma(hex: string): Vec {
+  const [r, g, b] = rgbOf(hex);
+  const lt = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return v3(r / 255 - lt, g / 255 - lt, b / 255 - lt);
 }
 
 /** Adds the chroma of the given colors in shadows / highlights (luma-neutral). */
-function splitTone(c: Vec, shadow: string | null, sAmt: number, highlight: string | null, hAmt: number) {
+function splitTone(c: Vec, shadow: Vec | null, sAmt: number, highlight: Vec | null, hAmt: number) {
   const l = clamp01(L(c));
   if (shadow) {
-    const [r, g, b] = rgbOf(shadow).map((v) => v / 255);
-    const lt = 0.299 * r + 0.587 * g + 0.114 * b;
     const w = (1 - smooth(0.05, 0.65, l)) * Math.min(1, l * 8) * sAmt;
-    c[0] += (r - lt) * w;
-    c[1] += (g - lt) * w;
-    c[2] += (b - lt) * w;
+    c[0] += shadow[0] * w;
+    c[1] += shadow[1] * w;
+    c[2] += shadow[2] * w;
   }
   if (highlight) {
-    const [r, g, b] = rgbOf(highlight).map((v) => v / 255);
-    const lt = 0.299 * r + 0.587 * g + 0.114 * b;
     const w = smooth(0.35, 0.95, l) * Math.min(1, (1 - l) * 8) * hAmt;
-    c[0] += (r - lt) * w;
-    c[1] += (g - lt) * w;
-    c[2] += (b - lt) * w;
+    c[0] += highlight[0] * w;
+    c[1] += highlight[1] * w;
+    c[2] += highlight[2] * w;
   }
 }
 
 function clampVec(c: Vec) {
-  for (let i = 0; i < 3; i++) c[i] = clamp01(c[i]);
+  c[0] = clamp01(c[0]);
+  c[1] = clamp01(c[1]);
+  c[2] = clamp01(c[2]);
 }
 
-const hsl = new Float64Array(3);
-const tmp = new Float64Array(3);
+/** A hue pull: move hue toward `target` by `amount` (0..1) and scale saturation inside a window. */
+interface HuePull {
+  center: number;
+  width: number;
+  target: number;
+  amount: number;
+  satMul: number;
+}
 
-/** Move hue toward `target` by `amount` (0..1) and scale saturation, inside a hue window. */
-function pullHue(c: Vec, center: number, width: number, target: number, amount: number, satMul: number) {
-  rgbToHslInto(c[0] * 255, c[1] * 255, c[2] * 255, hsl);
-  if (hsl[1] < 0.02) return;
-  let dh = hsl[0] - center;
-  dh = ((dh + 540) % 360) - 180;
-  const w = 1 - smooth(width * 0.5, width, Math.abs(dh));
-  if (w <= 0) return;
-  let dt = target - hsl[0];
-  dt = ((dt + 540) % 360) - 180;
-  const h = hsl[0] + dt * amount * w;
-  const s = clamp01(hsl[1] * (1 + (satMul - 1) * w));
-  hslToRgbInto(h, s, hsl[2], tmp);
-  c[0] = tmp[0] / 255;
-  c[1] = tmp[1] / 255;
-  c[2] = tmp[2] / 255;
+function hue2rgb(p: number, q: number, t: number): number {
+  if (t < 0) t += 1;
+  if (t > 1) t -= 1;
+  if (t < 1 / 6) return p + (q - p) * 6 * t;
+  if (t < 1 / 2) return q;
+  if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+  return p;
+}
+
+/**
+ * Apply hue pulls in one RGB → HSL → RGB round trip (pulls are evaluated sequentially in HSL,
+ * which equals applying them one after another since the round trip is lossless).
+ */
+function pullHues(c: Vec, pulls: readonly HuePull[]) {
+  const r = c[0],
+    g = c[1],
+    b = c[2];
+  const max = r > g ? (r > b ? r : b) : g > b ? g : b;
+  const min = r < g ? (r < b ? r : b) : g < b ? g : b;
+  if (max === min) return;
+  const l = (max + min) / 2;
+  const d = max - min;
+  let s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  h *= 60;
+  let changed = false;
+  for (let i = 0; i < pulls.length; i++) {
+    if (s < 0.02) break;
+    const p = pulls[i];
+    let dh = h - p.center;
+    dh = ((dh + 540) % 360) - 180;
+    const w = 1 - smooth(p.width * 0.5, p.width, Math.abs(dh));
+    if (w <= 0) continue;
+    let dt = p.target - h;
+    dt = ((dt + 540) % 360) - 180;
+    h = h + dt * p.amount * w;
+    s = clamp01(s * (1 + (p.satMul - 1) * w));
+    changed = true;
+  }
+  if (!changed) return;
+  const hh = (((h % 360) + 360) % 360) / 360;
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const pp = 2 * l - q;
+  c[0] = hue2rgb(pp, q, hh + 1 / 3);
+  c[1] = hue2rgb(pp, q, hh);
+  c[2] = hue2rgb(pp, q, hh - 1 / 3);
 }
 
 function gradientSampler(stops: [number, string][]) {
@@ -101,6 +158,27 @@ function gradientSampler(stops: [number, string][]) {
     out[2] = lut[k + 2] / 255;
   };
 }
+
+/* ---------------- per-look constants (parsed once) ---------------- */
+
+const TEAL_ORANGE_PULLS: readonly HuePull[] = [
+  { center: 30, width: 70, target: 28, amount: 0.35, satMul: 1.25 }, // skin / warm → orange, richer
+  { center: 190, width: 130, target: 188, amount: 0.5, satMul: 0.95 }, // cool & green → teal
+];
+const TO_SHADOW = chroma('#0b5c66');
+const TO_HIGH = chroma('#ffad6b');
+const STEEL_SLOPE = v3(0.9, 0.98, 1.08);
+const STEEL_OFFSET = v3(-0.02, 0, 0.035);
+const STEEL_POWER = v3(1.05, 1, 0.95);
+const STEEL_SHADOW = chroma('#10243f');
+const STEEL_HIGH = chroma('#dfeaff');
+const GOLD_SLOPE = v3(1.1, 1, 0.8);
+const GOLD_OFFSET = v3(0.02, 0.01, -0.02);
+const GOLD_POWER = v3(0.95, 1, 1.12);
+const GOLD_SHADOW = chroma('#4a2a0a');
+const GOLD_HIGH = chroma('#ffd27a');
+const FADED_SHADOW = chroma('#2f5a52');
+const FADED_HIGH = chroma('#f5d9a8');
 
 const toxicMap = gradientSampler([
   [0, '#020a03'],
@@ -118,10 +196,9 @@ const mapped = new Float64Array(3);
 
 const LOOK_FNS: Record<string, (c: Vec) => void> = {
   'teal-orange'(c) {
-    pullHue(c, 30, 70, 28, 0.35, 1.25); // skin / warm → orange, richer
-    pullHue(c, 190, 130, 188, 0.5, 0.95); // cool & green → teal
+    pullHues(c, TEAL_ORANGE_PULLS);
     contrast(c, 1.2);
-    splitTone(c, '#0b5c66', 0.45, '#ffad6b', 0.2);
+    splitTone(c, TO_SHADOW, 0.45, TO_HIGH, 0.2);
   },
   'bleach-bypass'(c) {
     const l = L(c);
@@ -151,14 +228,14 @@ const LOOK_FNS: Record<string, (c: Vec) => void> = {
   },
   'cold-steel'(c) {
     saturate(c, 0.45);
-    cdl(c, [0.9, 0.98, 1.08], [-0.02, 0, 0.035], [1.05, 1, 0.95]);
+    cdl(c, STEEL_SLOPE, STEEL_OFFSET, STEEL_POWER);
     contrast(c, 1.2);
-    splitTone(c, '#10243f', 0.35, '#dfeaff', 0.15);
+    splitTone(c, STEEL_SHADOW, 0.35, STEEL_HIGH, 0.15);
   },
   golden(c) {
-    cdl(c, [1.1, 1, 0.8], [0.02, 0.01, -0.02], [0.95, 1, 1.12]);
+    cdl(c, GOLD_SLOPE, GOLD_OFFSET, GOLD_POWER);
     saturate(c, 1.1);
-    splitTone(c, '#4a2a0a', 0.3, '#ffd27a', 0.35);
+    splitTone(c, GOLD_SHADOW, 0.3, GOLD_HIGH, 0.35);
     contrast(c, 1.1);
   },
   'faded-film'(c) {
@@ -167,7 +244,7 @@ const LOOK_FNS: Record<string, (c: Vec) => void> = {
     c[1] = 0.08 + c[1] * 0.84;
     c[2] = 0.1 + c[2] * 0.8;
     saturate(c, 0.78);
-    splitTone(c, '#2f5a52', 0.3, '#f5d9a8', 0.25);
+    splitTone(c, FADED_SHADOW, 0.3, FADED_HIGH, 0.25);
   },
   'cross-process'(c) {
     const l = L(c);
@@ -225,4 +302,37 @@ export function lookCube(id: string): Float32Array {
 
 export function isKnownLook(id: string): boolean {
   return id in LOOK_FNS;
+}
+
+const one = new Float64Array(3);
+
+/**
+ * Exact look result for one color (0..255 in → 0..255 out in `out`), mixed with the original by
+ * `intensity`. No cube is built: used for the small palette previews.
+ */
+export function applyLookRgb(id: string, r: number, g: number, b: number, intensity: number, out: Float64Array): void {
+  const fn = LOOK_FNS[id];
+  one[0] = r / 255;
+  one[1] = g / 255;
+  one[2] = b / 255;
+  if (fn) {
+    fn(one);
+    clampVec(one);
+  }
+  const t = clamp01(intensity);
+  out[0] = r + (one[0] * 255 - r) * t;
+  out[1] = g + (one[1] * 255 - g) * t;
+  out[2] = b + (one[2] * 255 - b) * t;
+}
+
+/**
+ * Build the cube of a look during idle time so its first use doesn't stall an interaction
+ * (e.g. the default Teal & Orange when a Color Lookup layer is added).
+ */
+export function prewarmLook(id: string): void {
+  if (cache.has(id) || !isKnownLook(id) || typeof window === 'undefined') return;
+  const run = () => lookCube(id);
+  const ric = (window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
+  if (ric) ric(run, { timeout: 4000 });
+  else window.setTimeout(run, 1500);
 }

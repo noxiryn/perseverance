@@ -121,7 +121,11 @@ export function resampleCanvas(src: HTMLCanvasElement, w: number, h: number): HT
  * of the canvas when larger) — or open it as a new document when nothing is open.
  * `at` places the image's top-left at a document position instead (paste in place).
  */
-export function placeCanvas(canvas: HTMLCanvasElement, name: string, opts: { at?: { x: number; y: number }; label?: string; quiet?: boolean } = {}) {
+export function placeCanvas(
+  canvas: HTMLCanvasElement,
+  name: string,
+  opts: { at?: { x: number; y: number }; label?: string; quiet?: boolean } = {},
+) {
   const s = activeSession();
   if (!s) {
     openImageAsDocument(canvas, name);

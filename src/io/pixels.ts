@@ -35,7 +35,12 @@ export interface DrawOptions {
  * Draw a doc-space canvas onto a raster layer's bitmap (through the inverse layer transform),
  * returning the history patch. `docRect` limits the affected area (defaults to the whole layer).
  */
-export function drawDocCanvasOnRaster(layer: RasterLayer, src: HTMLCanvasElement, docRect: Rect | null, o: DrawOptions = {}): BitmapPatch | null {
+export function drawDocCanvasOnRaster(
+  layer: RasterLayer,
+  src: HTMLCanvasElement,
+  docRect: Rect | null,
+  o: DrawOptions = {},
+): BitmapPatch | null {
   const rect = docRect ? localRectFor(layer, docRect) : { x: 0, y: 0, width: layer.width, height: layer.height };
   if (!rect) return null;
   const m = transformMatrix(layer.transform, layer.width, layer.height).inverse();
@@ -71,10 +76,17 @@ export function drawDocCanvasOnRaster(layer: RasterLayer, src: HTMLCanvasElement
 }
 
 /** Draw a doc-space canvas onto a doc-sized mask bitmap (grayscale), returning the patch. */
-export function drawDocCanvasOnMask(maskBitmapId: string, src: HTMLCanvasElement, docRect: Rect | null, o: DrawOptions = {}): BitmapPatch | null {
+export function drawDocCanvasOnMask(
+  maskBitmapId: string,
+  src: HTMLCanvasElement,
+  docRect: Rect | null,
+  o: DrawOptions = {},
+): BitmapPatch | null {
   const c = bitmaps.tryGet(maskBitmapId);
   if (!c) return null;
-  const rect = docRect ? clampRect({ x: docRect.x - 1, y: docRect.y - 1, width: docRect.width + 2, height: docRect.height + 2 }, c.width, c.height) : null;
+  const rect = docRect
+    ? clampRect({ x: docRect.x - 1, y: docRect.y - 1, width: docRect.width + 2, height: docRect.height + 2 }, c.width, c.height)
+    : null;
   if (docRect && !rect) return null;
   return bitmaps.edit(
     maskBitmapId,
@@ -89,7 +101,10 @@ export function drawDocCanvasOnMask(maskBitmapId: string, src: HTMLCanvasElement
 }
 
 /** Doc-sized canvas filled with `color` (or a fill callback), clipped to the selection when present. */
-export function selectionClippedFill(doc: Document, paint: (ctx: CanvasRenderingContext2D, w: number, h: number) => void): HTMLCanvasElement {
+export function selectionClippedFill(
+  doc: Document,
+  paint: (ctx: CanvasRenderingContext2D, w: number, h: number) => void,
+): HTMLCanvasElement {
   const c = createCanvas(doc.width, doc.height);
   const ctx = ctx2d(c);
   paint(ctx, doc.width, doc.height);

@@ -27,7 +27,14 @@ export const PRESET_CATEGORIES: DocPresetDef['category'][] = ['Roblox', 'Social'
 
 export const FALLBACK_PRESETS: DocPresetDef[] = [
   { id: 'io-roblox-icon', name: 'Roblox Icon', category: 'Roblox', width: 512, height: 512, description: 'Experience icon' },
-  { id: 'io-roblox-thumb', name: 'Roblox Thumbnail', category: 'Roblox', width: 1920, height: 1080, description: '16:9 experience thumbnail' },
+  {
+    id: 'io-roblox-thumb',
+    name: 'Roblox Thumbnail',
+    category: 'Roblox',
+    width: 1920,
+    height: 1080,
+    description: '16:9 experience thumbnail',
+  },
   { id: 'io-thumb-720', name: 'Thumbnail 720p', category: 'Video', width: 1280, height: 720, description: 'YouTube-style thumbnail' },
 ];
 
@@ -39,7 +46,9 @@ export function allPresets(): DocPresetDef[] {
 export function readRecentSizes(): RecentSize[] {
   const v = readJSON<unknown>(RECENT_SIZES_KEY, []);
   return Array.isArray(v)
-    ? v.filter((s): s is RecentSize => !!s && Number.isFinite((s as RecentSize).width) && Number.isFinite((s as RecentSize).height)).slice(0, 6)
+    ? v
+        .filter((s): s is RecentSize => !!s && Number.isFinite((s as RecentSize).width) && Number.isFinite((s as RecentSize).height))
+        .slice(0, 6)
     : [];
 }
 

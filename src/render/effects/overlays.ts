@@ -126,5 +126,5 @@ export const patternOverlay = defineEffect(
       t.restore();
     },
   },
-  { reach: () => 0 },
+  { reach: () => 0, docAnchored: true },
 );

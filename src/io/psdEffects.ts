@@ -83,9 +83,14 @@ export function fromPsdColor(c: PsdColor | undefined, d = '#000000'): string {
 /* ------------------------------------------------------------------ */
 
 export function toPsdGradient(g: Gradient): EffectSolidGradient {
-  const stops = [...(g.stops?.length ? g.stops : [{ offset: 0, color: '#000000' }, { offset: 1, color: '#ffffff' }])].sort(
-    (a, b) => a.offset - b.offset,
-  );
+  const stops = [
+    ...(g.stops?.length
+      ? g.stops
+      : [
+          { offset: 0, color: '#000000' },
+          { offset: 1, color: '#ffffff' },
+        ]),
+  ].sort((a, b) => a.offset - b.offset);
   return {
     name: 'Custom',
     type: 'solid',
@@ -124,12 +129,21 @@ export function fromPsdGradient(
 ): Gradient {
   const cs = g?.type === 'solid' && g.colorStops?.length ? g.colorStops : null;
   if (!cs) {
-    return { kind, angle, scale, reverse, stops: [{ offset: 0, color: '#000000' }, { offset: 1, color: '#ffffff' }] };
+    return {
+      kind,
+      angle,
+      scale,
+      reverse,
+      stops: [
+        { offset: 0, color: '#000000' },
+        { offset: 1, color: '#ffffff' },
+      ],
+    };
   }
   const os = g?.opacityStops?.length ? g.opacityStops : [{ opacity: 1, location: 0, midpoint: 0.5 }];
-  const locs = [...new Set([...cs.map((s) => s.location), ...os.map((s) => s.location)].map((l) => Math.round(clamp01(l) * 1e4) / 1e4))].sort(
-    (a, b) => a - b,
-  );
+  const locs = [
+    ...new Set([...cs.map((s) => s.location), ...os.map((s) => s.location)].map((l) => Math.round(clamp01(l) * 1e4) / 1e4)),
+  ].sort((a, b) => a - b);
   const stops: GradientStop[] = locs.map((loc) => {
     const rgb = lerpStops(cs, loc, (s) => {
       const p = parseColor(fromPsdColor(s.color));
@@ -169,7 +183,11 @@ export interface PsdEffectsResult {
   unsupported: LayerEffect[];
 }
 
-function shadowToPsd(p: ParamValues, enabled: boolean, defaults: { distance: number; size: number; spreadKey: 'spread' | 'choke' }): LayerEffectShadow {
+function shadowToPsd(
+  p: ParamValues,
+  enabled: boolean,
+  defaults: { distance: number; size: number; spreadKey: 'spread' | 'choke' },
+): LayerEffectShadow {
   return {
     present: true,
     showInDialog: true,

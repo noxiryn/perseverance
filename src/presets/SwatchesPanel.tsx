@@ -12,7 +12,7 @@ import { IconButton, SearchInput, showContextMenu, showMenuAt, type MenuItem } f
 import { describeColor, normalizeHex, opaqueHex } from './colorMath';
 import { DEFAULT_PALETTE_ID } from './palettes';
 import { MY_SWATCHES_ID, useUserPalettes, type UserPalette } from './userPalettes';
-import { openExtractPalette, promptText } from './dialogs';
+import { confirmAction, openExtractPalette, promptText } from './dialogs';
 import './presets.css';
 
 const PALETTE_KEY = 'perseverance.swatches.palette';
@@ -64,6 +64,47 @@ export function addPrimaryToSwatches() {
   }
   useUserPalettes.getState().addSwatch(MY_SWATCHES_ID, color);
   toast(`Added ${color} to My Swatches`, 'success');
+}
+
+/** Ask, then delete a user palette (palettes are app data — not undoable with Edit ▸ Undo). */
+export async function deleteUserPalette(id: string): Promise<boolean> {
+  if (id === MY_SWATCHES_ID) return clearMySwatches();
+  const p = useUserPalettes.getState().palettes.find((x) => x.id === id);
+  if (!p) return false;
+  const ok = await confirmAction({
+    title: 'Delete Palette',
+    message: (
+      <>
+        Delete the palette <b>“{p.name}”</b> ({p.swatches.length} color{p.swatches.length === 1 ? '' : 's'})?
+      </>
+    ),
+    detail: 'This cannot be undone.',
+    confirm: 'Delete',
+  });
+  if (!ok) return false;
+  useUserPalettes.getState().deletePalette(id);
+  if (readPaletteId() === id) selectSwatchPalette(DEFAULT_PALETTE_ID);
+  toast(`Deleted palette “${p.name}”`, 'success');
+  return true;
+}
+
+/** Ask, then remove every color from My Swatches. */
+export async function clearMySwatches(): Promise<boolean> {
+  const n = useUserPalettes.getState().palettes.find((x) => x.id === MY_SWATCHES_ID)?.swatches.length ?? 0;
+  if (!n) {
+    toast('My Swatches is already empty', 'info');
+    return false;
+  }
+  const ok = await confirmAction({
+    title: 'Clear My Swatches',
+    message: `Remove all ${n} color${n === 1 ? '' : 's'} from My Swatches?`,
+    detail: 'This cannot be undone.',
+    confirm: 'Clear',
+  });
+  if (!ok) return false;
+  useUserPalettes.getState().deletePalette(MY_SWATCHES_ID);
+  toast('My Swatches cleared', 'success');
+  return true;
 }
 
 export async function extractPaletteFlow() {
@@ -192,7 +233,7 @@ export function SwatchesPanel() {
               if (n) useUserPalettes.getState().renamePalette(up.id, n);
             },
           },
-          { label: 'Delete Palette', run: () => deletePalette(up.id) },
+          { label: 'Delete Palette…', run: () => void deleteUserPalette(up.id) },
         );
       }
     } else {
@@ -205,14 +246,6 @@ export function SwatchesPanel() {
       });
     }
     showContextMenu(e, items);
-  };
-
-  const deletePalette = (id: string) => {
-    const p = userById.get(id);
-    if (!p) return;
-    useUserPalettes.getState().deletePalette(id);
-    if (paletteId === id) choosePalette(DEFAULT_PALETTE_ID);
-    toast(id === MY_SWATCHES_ID ? 'My Swatches cleared' : `Deleted palette “${p.name}”`, 'success');
   };
 
   const selUser = sel ? userById.get(sel.paletteId) : undefined;
@@ -275,34 +308,6 @@ export function SwatchesPanel() {
       </div>
 
       <div className="fc-sw-body">
-        {recent.length > 0 && !results && (
-          <div className="fc-sw-group">
-            <div className="fc-sw-label">Recent</div>
-            <div className="fc-sw-grid">
-              {recent.slice(0, 15).map((c) => (
-                <div
-                  key={c}
-                  className="fc-sw-cell"
-                  style={{ background: c }}
-                  title={`${describeColor(c)}  ${c}\nClick: foreground · Alt-click: background`}
-                  onClick={(e) => (e.altKey ? setBackground(c) : setForeground(c))}
-                  onContextMenu={(e) =>
-                    showContextMenu(e, [
-                      { label: 'Set as Foreground', run: () => setForeground(c) },
-                      { label: 'Set as Background', run: () => setBackground(c) },
-                      { label: `Copy ${c}`, run: () => copyHex(c) },
-                      {
-                        label: 'Add to My Swatches',
-                        run: () => useUserPalettes.getState().addSwatch(MY_SWATCHES_ID, opaqueHex(c)),
-                      },
-                    ])
-                  }
-                />
-              ))}
-            </div>
-          </div>
-        )}
-
         {results ? (
           results.length ? (
             results.map((r) => (
@@ -321,7 +326,7 @@ export function SwatchesPanel() {
                 <div className="fc-sw-label">
                   {active.name}
                   {userById.has(active.id) && (
-                    <button className="fc-sw-link" onClick={() => deletePalette(active.id)} title="Delete this palette">
+                    <button className="fc-sw-link" onClick={() => void deleteUserPalette(active.id)} title="Delete this palette…">
                       delete
                     </button>
                   )}
@@ -334,6 +339,37 @@ export function SwatchesPanel() {
                 <div className="fc-sw-label">My Swatches</div>
                 {grid({ id: MY_SWATCHES_ID, name: 'My Swatches', colors: mySwatches.swatches.map((s) => s.color) }, mySwatches.swatches.map((s, index) => ({ color: s.color, index })), true)}
                 {!mySwatches.swatches.length && <div className="fc-note fc-sw-hint">Click + to save the foreground color here.</div>}
+              </div>
+            )}
+            {recent.length > 0 && (
+              <div className="fc-sw-group">
+                <div className="fc-sw-label">Recent</div>
+                <div className="fc-sw-grid fc-sw-recent">
+                  {recent.slice(0, 24).map((c) => (
+                    <div
+                      key={c}
+                      className="fc-sw-cell"
+                      style={{ background: c }}
+                      title={`${describeColor(c)}  ${c}\nClick: foreground · Alt-click: background`}
+                      // Picking a recent color doesn't reorder the row (the same spot keeps the same color).
+                      onClick={(e) => (e.altKey ? useEditor.getState().setSecondaryColor(c) : useEditor.getState().setPrimaryColor(c))}
+                      onContextMenu={(e) =>
+                        showContextMenu(e, [
+                          { label: 'Set as Foreground', run: () => useEditor.getState().setPrimaryColor(c) },
+                          { label: 'Set as Background', run: () => useEditor.getState().setSecondaryColor(c) },
+                          { label: `Copy ${c}`, run: () => copyHex(c) },
+                          {
+                            label: 'Add to My Swatches',
+                            run: () => {
+                              useUserPalettes.getState().addSwatch(MY_SWATCHES_ID, opaqueHex(c));
+                              toast(`Added ${opaqueHex(c)} to My Swatches`, 'success');
+                            },
+                          },
+                        ])
+                      }
+                    />
+                  ))}
+                </div>
               </div>
             )}
           </>
@@ -373,11 +409,9 @@ export function swatchesPanelMenu() {
     { label: 'Add Foreground to My Swatches', run: addPrimaryToSwatches },
     { label: 'Extract Palette from Image…', run: () => void extractPaletteFlow() },
     {
-      label: 'Clear My Swatches',
-      run: () => {
-        useUserPalettes.getState().deletePalette(MY_SWATCHES_ID);
-        toast('My Swatches cleared', 'success');
-      },
+      label: 'Clear My Swatches…',
+      disabled: !useUserPalettes.getState().palettes.find((p) => p.id === MY_SWATCHES_ID)?.swatches.length,
+      run: () => void clearMySwatches(),
     },
     { label: 'Show Default Swatches', run: () => selectSwatchPalette(DEFAULT_PALETTE_ID) },
   ];

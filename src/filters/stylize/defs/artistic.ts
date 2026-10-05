@@ -8,6 +8,7 @@ import {
   blurPlane,
   bool,
   clamp,
+  coarseField,
   fbmValue,
   hash,
   isEmpty,
@@ -454,6 +455,10 @@ export const watercolor: FilterDef = {
     const amp = bleed * r * 0.9 + bleed * 1.5 * s;
     const wd = wash.data;
     const tmp = new Uint8ClampedArray(4);
+    // smooth wobble on a coarse grid (finest octave ≈ 8 document px)
+    const wstep = Math.max(1, Math.min(4, Math.floor(2 * s)));
+    const fx = amp > 0.2 ? coarseField(w, h, wstep, (x, y) => fbmValue(((x + ax) / s) * 0.03, ((y + ay) / s) * 0.03, seed, 3) - 0.5) : null;
+    const fy = amp > 0.2 ? coarseField(w, h, wstep, (x, y) => fbmValue(((x + ax) / s) * 0.03 + 9.1, ((y + ay) / s) * 0.03 - 4.7, seed + 1, 3) - 0.5) : null;
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x,
@@ -462,10 +467,8 @@ export const watercolor: FilterDef = {
         const X = (x + ax) / s,
           Y = (y + ay) / s;
         let R: number, G: number, B: number;
-        if (amp > 0.2) {
-          const nx = fbmValue(X * 0.03, Y * 0.03, seed, 3) - 0.5,
-            ny = fbmValue(X * 0.03 + 9.1, Y * 0.03 - 4.7, seed + 1, 3) - 0.5;
-          sampleBilinear(wd, w, h, x + nx * amp * 2, y + ny * amp * 2, tmp, 0, 'clamp');
+        if (fx && fy) {
+          sampleBilinear(wd, w, h, x + fx[i] * amp * 2, y + fy[i] * amp * 2, tmp, 0, 'clamp');
           R = tmp[0];
           G = tmp[1];
           B = tmp[2];
@@ -677,6 +680,11 @@ export const inkWash: FilterDef = {
     for (let i = 0; i < n; i++) D[i] = 1 - quantizeSmooth(L[i], levels, 0.45);
     if (bleed > 0.3) blurPlane(D, w, h, bleed * 0.6);
     const line = edges > 0 ? outlineCoverage(img, { thickness: Math.max(0.8, 2.2 * s), threshold: 0.3, smooth: Math.max(0.8, s), minLength: Math.max(3, Math.round(5 * s)) }) : null;
+    // low-frequency fields on coarse grids: bleed offsets (≈10 px detail) and ink load (≈60 px)
+    const bstep = Math.max(1, Math.min(4, Math.floor(2 * s)));
+    const bx = bleed > 0.3 ? coarseField(w, h, bstep, (x, y) => (fbmValue(((x + ax) / s) * 0.05, ((y + ay) / s) * 0.05, seed, 2) - 0.5) * bleed * 1.5) : null;
+    const by = bleed > 0.3 ? coarseField(w, h, bstep, (x, y) => (fbmValue(((x + ax) / s) * 0.05 + 5.3, ((y + ay) / s) * 0.05 + 1.7, seed + 1, 2) - 0.5) * bleed * 1.5) : null;
+    const loadF = coarseField(w, h, Math.max(1, Math.min(8, Math.floor(8 * s))), (x, y) => 0.82 + 0.3 * (fbmValue(((x + ax) / s) * 0.008, ((y + ay) / s) * 0.008, seed + 2, 2) - 0.5));
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x,
@@ -686,15 +694,12 @@ export const inkWash: FilterDef = {
           Y = (y + ay) / s;
         // wet bleed: sample the wash with a noisy offset, uneven ink load
         let d = D[i];
-        if (bleed > 0.3) {
-          const nx = (fbmValue(X * 0.05, Y * 0.05, seed, 2) - 0.5) * bleed * 1.5;
-          const ny = (fbmValue(X * 0.05 + 5.3, Y * 0.05 + 1.7, seed + 1, 2) - 0.5) * bleed * 1.5;
-          const xx = clamp(Math.round(x + nx), 0, w - 1),
-            yy = clamp(Math.round(y + ny), 0, h - 1);
+        if (bx && by) {
+          const xx = clamp(Math.round(x + bx[i]), 0, w - 1),
+            yy = clamp(Math.round(y + by[i]), 0, h - 1);
           d = D[yy * w + xx];
         }
-        const load = 0.82 + 0.3 * (fbmValue(X * 0.008, Y * 0.008, seed + 2, 2) - 0.5);
-        d = clamp(d * load, 0, 1);
+        d = clamp(d * loadF[i], 0, 1);
         if (line) {
           // dry brush: the outline breaks up where the brush runs out of ink
           const dry = smoothstep(0.25, 0.55, fbmValue(X * 0.06, Y * 0.02, seed + 3, 3));

@@ -56,6 +56,7 @@ export function FontSelect({
         <Popover anchor={anchor} onClose={close} width={330} className="fc-fontpop">
           <FontPicker
             value={value}
+            onClose={close}
             onPick={(family) => {
               setAnchor(null);
               if (family !== value) onChange(family);

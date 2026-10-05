@@ -1,8 +1,9 @@
 /**
  * Dialogs of the Swatches panel: "Extract palette from image" (k-means / median cut on the active
- * layer or the composite) and a small text prompt (rename swatch / palette).
+ * layer or the composite), a small text prompt (rename swatch / palette) and a confirmation
+ * (deleting palettes / clearing swatches — these are not part of the document's undo history).
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Button, Dialog, Field, Select, Slider, Tabs, TextInput } from '../ui/controls';
 import { openDialog, toast } from '../state/ui';
 import { activeDoc, activeLayer } from '../state/editor';
@@ -78,6 +79,44 @@ export async function promptText(title: string, label: string, initial = '', con
   return t ? t : null;
 }
 
+/* ------------------------------ confirm ------------------------------ */
+
+type ConfirmProps = {
+  title: string;
+  message: ReactNode;
+  detail?: ReactNode;
+  confirm: string;
+};
+
+function ConfirmDialog({ close, title, message, detail, confirm }: ConfirmProps & { close: (ok?: boolean) => void }) {
+  return (
+    <Dialog
+      title={title}
+      width={380}
+      onClose={() => close()}
+      onSubmit={() => close(true)}
+      footer={
+        <>
+          <Button onClick={() => close()}>Cancel</Button>
+          <Button variant="danger" onClick={() => close(true)}>
+            {confirm}
+          </Button>
+        </>
+      }
+    >
+      <div className="fc-pal-confirm">
+        <p>{message}</p>
+        {detail && <p className="fc-note">{detail}</p>}
+      </div>
+    </Dialog>
+  );
+}
+
+/** Ask before a destructive, non-undoable action. Resolves true when confirmed. */
+export async function confirmAction(opts: ConfirmProps): Promise<boolean> {
+  return !!(await openDialog<boolean, ConfirmProps>(ConfirmDialog, opts));
+}
+
 /* ------------------------------ extract ------------------------------ */
 
 type Source = 'layer' | 'composite';
@@ -132,9 +171,20 @@ function ExtractPaletteDialog({ close }: { close: (id?: string) => void }) {
 
   const pixels = useMemo(() => readSourcePixels(source), [source]);
   const colors = useMemo(() => (pixels ? extractPalette(pixels, count, method) : []), [pixels, count, method]);
+  /** A palette needs at least two colors to be useful. */
+  const canCreate = colors.length >= 2;
+  // Near-duplicate colors are merged, so flat artwork can yield fewer colors than requested.
+  const shortfall =
+    colors.length > 0 && colors.length < count
+      ? `Only ${colors.length} distinct color${colors.length === 1 ? '' : 's'} found${
+          source === 'layer' || method === 'kmeans'
+            ? ` — try ${[source === 'layer' ? 'Whole Image' : '', method === 'kmeans' ? 'Median Cut' : ''].filter(Boolean).join(' or ')} for more`
+            : ''
+        }.${canCreate ? '' : ' A palette needs at least 2 colors.'}`
+      : null;
 
   const create = () => {
-    if (!colors.length) return;
+    if (!canCreate) return;
     const id = useUserPalettes.getState().createPalette(name, colors.map((c) => c.color));
     toast(`Palette “${name.trim() || 'Palette'}” created (${colors.length} colors)`, 'success');
     close(id);
@@ -149,7 +199,7 @@ function ExtractPaletteDialog({ close }: { close: (id?: string) => void }) {
       footer={
         <>
           <Button onClick={() => close()}>Cancel</Button>
-          <Button variant="primary" disabled={!colors.length} onClick={create}>
+          <Button variant="primary" disabled={!canCreate} onClick={create}>
             Create Palette
           </Button>
         </>
@@ -199,6 +249,7 @@ function ExtractPaletteDialog({ close }: { close: (id?: string) => void }) {
             </div>
           )}
         </div>
+        {shortfall && <div className={`fc-note fc-extract-note${canCreate ? '' : ' warn'}`}>{shortfall}</div>}
         <Field label="Name">
           <TextInput
             value={name}

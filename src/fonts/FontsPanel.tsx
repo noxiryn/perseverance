@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Monitor, MousePointerClick, Plus, Type as TypeIcon } from 'lucide-react';
 import { fonts, useRegistry, type FontDef } from '../registry';
 import { useEditor } from '../state/editor';
+import { isDesktop } from '../platform';
 import { toast } from '../state/ui';
 import { SearchInput, Slider, showContextMenu, type MenuItem } from '../ui/controls';
 import { applyFontFamily, setTypeToolFont } from './apply';
@@ -61,7 +62,7 @@ export function FontsPanel() {
   const [query, setQuery] = useState('');
   const [size, setSize] = useState(preview.size);
   const listRef = useRef<VirtualListHandle>(null);
-  const filter = (preview.category || 'all') as FontFilter;
+  const savedFilter = (preview.category || 'all') as FontFilter;
 
   useEffect(() => maybeLoadSystemFonts(), []);
   useEffect(() => setSize(preview.size), [preview.size]);
@@ -72,9 +73,17 @@ export function FontsPanel() {
     return [...SPECIAL_FILTERS, ...user, ...cats];
   }, [list]);
 
+  // The saved category may have no chip right now ("System" before system fonts load or in a
+  // browser, "My Fonts" after the last user font was removed): wait for system fonts while they
+  // load, otherwise show everything.
+  const chipShown = chips.some((c) => c.value === savedFilter);
+  const waitingForSystem = !chipShown && savedFilter === 'System' && (sys === 'loading' || (sys === 'idle' && isDesktop));
+  const filter: FontFilter = chipShown ? savedFilter : 'all';
+
   const rows = useMemo<Row[]>(() => {
     const ctx = { favorites, recents };
     const out: Row[] = [];
+    if (waitingForSystem) return out;
     if (filter === 'all' && !query.trim()) {
       const byFamily = new Map(list.map((f) => [f.family, f]));
       const popular = POPULAR_FAMILIES.map((p) => byFamily.get(p)).filter((f): f is FontDef => !!f);
@@ -88,7 +97,7 @@ export function FontsPanel() {
       filterFonts(list, query, filter, ctx).forEach((f) => out.push({ kind: 'font', key: `a:${f.family}`, font: f }));
     }
     return out;
-  }, [list, favorites, recents, filter, query]);
+  }, [list, favorites, recents, filter, query, waitingForSystem]);
 
   useEffect(() => listRef.current?.scrollToTop(), [filter, query]);
 
@@ -153,7 +162,7 @@ export function FontsPanel() {
           {chips.map((c) => (
             <button
               key={c.value}
-              className={`fc-chip${filter === c.value ? ' active' : ''}`}
+              className={`fc-chip${filter === c.value && !waitingForSystem ? ' active' : ''}`}
               onClick={() => setPreview({ category: c.value })}
             >
               {c.label}
@@ -201,11 +210,15 @@ export function FontsPanel() {
         itemKey={(r) => r.key}
         empty={
           <div className="ui-empty">
-            {filter === 'favorites'
-              ? 'No favorites yet — click ☆ on a font to keep it here.'
-              : filter === 'recent'
-                ? 'Fonts you apply will show up here.'
-                : 'No fonts match your search.'}
+            {waitingForSystem
+              ? 'Loading system fonts…'
+              : filter === 'favorites'
+                ? 'No favorites yet — click ☆ on a font to keep it here.'
+                : filter === 'recent'
+                  ? 'Fonts you apply will show up here.'
+                  : query.trim()
+                    ? `No fonts match “${query.trim()}”.`
+                    : 'No fonts in this category.'}
           </div>
         }
         renderItem={(r) =>

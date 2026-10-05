@@ -10,6 +10,7 @@
  * `fontWeightFor` (nearest available weight), optional per-entry `text` in `ensureDocumentFonts`.
  */
 import { invalidateRenderCache } from '../render/compositor';
+import { resetTextCaches } from '../render/text';
 import { viewport } from '../editor/viewport';
 import { useEditor } from '../state/editor';
 
@@ -58,15 +59,28 @@ export function isFamilyInUse(family: string): boolean {
   return false;
 }
 
-/** Re-render the canvas after a face that documents use has finished loading. */
+/**
+ * Re-render the canvas after faces that documents use have finished loading. Only the text layers
+ * using one of those families are invalidated (composites above them are rebuilt anyway), so the
+ * cached smart filters / effects of every other layer survive. The explicit invalidation is needed
+ * because a newly loaded unicode-range slice (e.g. more kanji of a Japanese family) does not
+ * change the renderer's font-ready key; text layouts are re-measured too (cheap: they are
+ * recomputed lazily, and other layers' cached pixels stay valid).
+ */
 function refreshIfUsed(families: Iterable<string>) {
-  for (const f of families) {
-    if (isFamilyInUse(f)) {
-      invalidateRenderCache();
-      viewport.requestRender();
-      return;
+  const wanted = new Set<string>();
+  for (const f of families) wanted.add(normFamily(f));
+  if (!wanted.size) return;
+  const ids: string[] = [];
+  for (const s of Object.values(useEditor.getState().sessions)) {
+    for (const l of Object.values(s.doc.layers)) {
+      if (l.type === 'text' && wanted.has(normFamily(l.text.fontFamily || ''))) ids.push(l.id);
     }
   }
+  if (!ids.length) return;
+  resetTextCaches();
+  for (const id of ids) invalidateRenderCache(id);
+  viewport.requestRender();
 }
 
 /** Whether a face is ready for canvas rendering. */

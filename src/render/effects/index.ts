@@ -12,5 +12,5 @@ export function registerEffects() {
   effects.registerMany(EFFECT_DEFS);
 }
 
-export { effectClips, effectMeta, effectReach, effectStage } from './common';
+export { effectClips, effectMeta, effectReach, effectStage, effectTranslationSafe } from './common';
 export type { EffectArgsExt, EffectRegion } from './common';

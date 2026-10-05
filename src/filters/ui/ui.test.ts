@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { FilterDef } from '../../registry';
-import { blendSelection } from './selectionBlend';
+import { blendSelection, diffBounds } from './selectionBlend';
 import { categoriesOf, categoryRank, isBrowsableFilter, matchesQuery, sortFilters } from './galleryModel';
 import { getLastFilter, rememberParams, rememberedParams, setLastFilter, subscribeLastFilter } from './memory';
 
@@ -54,6 +54,19 @@ describe('selection blending', () => {
     expect(out[9]).toBe(200);
     expect(out[11]).toBeGreaterThan(120);
     expect(out[11]).toBeLessThan(135);
+  });
+});
+
+describe('diff bounds', () => {
+  it('finds the changed rectangle (or null)', () => {
+    const w = 6,
+      h = 5;
+    const a = new Uint8ClampedArray(w * h * 4);
+    const b = new Uint8ClampedArray(a);
+    expect(diffBounds(a, b, w, h)).toBeNull();
+    b[(1 * w + 2) * 4 + 1] = 9;
+    b[(3 * w + 4) * 4 + 3] = 9;
+    expect(diffBounds(a, b, w, h)).toEqual({ x: 2, y: 1, width: 3, height: 3 });
   });
 });
 

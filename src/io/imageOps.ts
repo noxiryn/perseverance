@@ -3,7 +3,18 @@
  * for resampled/rotated pixels (the old ones stay referenced by history), the document JSON is
  * updated through commit().
  */
-import type { Document, Guide, ID, LayerEffect, Rect, Selection, ShapeProps, TextProps, Transform, TransformableLayer } from '../core/types';
+import type {
+  Document,
+  Guide,
+  ID,
+  LayerEffect,
+  Rect,
+  Selection,
+  ShapeProps,
+  TextProps,
+  Transform,
+  TransformableLayer,
+} from '../core/types';
 import { bitmaps } from '../core/bitmaps';
 import { createCanvas, ctx2d, ctxRead } from '../core/canvas';
 import { uid } from '../core/ids';
@@ -96,7 +107,9 @@ export function scaleShapeProps(sh: ShapeProps, sx: number, sy: number): ShapePr
     height: Math.max(1, r2(sh.height * sy)),
     cornerRadius: r2(sh.cornerRadius * k),
     lineWidth: r2(sh.lineWidth * k),
-    stroke: sh.stroke ? { ...sh.stroke, width: r2(sh.stroke.width * k), ...(sh.stroke.dash ? { dash: sh.stroke.dash.map((v) => r2(v * k)) } : {}) } : null,
+    stroke: sh.stroke
+      ? { ...sh.stroke, width: r2(sh.stroke.width * k), ...(sh.stroke.dash ? { dash: sh.stroke.dash.map((v) => r2(v * k)) } : {}) }
+      : null,
   };
 }
 
@@ -138,7 +151,15 @@ export function resizeImage(newW: number, newH: number, opts: { method?: Resampl
       const b = maskBounds(c);
       if (b) {
         const shape = doc.selection.shape
-          ? { ...doc.selection.shape, rect: { x: doc.selection.shape.rect.x * sx, y: doc.selection.shape.rect.y * sy, width: doc.selection.shape.rect.width * sx, height: doc.selection.shape.rect.height * sy } }
+          ? {
+              ...doc.selection.shape,
+              rect: {
+                x: doc.selection.shape.rect.x * sx,
+                y: doc.selection.shape.rect.y * sy,
+                width: doc.selection.shape.rect.width * sx,
+                height: doc.selection.shape.rect.height * sy,
+              },
+            }
           : null;
         selection = { bitmapId: bitmaps.add(c), bounds: b, shape };
       }
@@ -273,7 +294,11 @@ export function resizeCanvas(newW: number, newH: number, dx: number, dy: number,
       const b = maskBounds(c);
       if (b) {
         const sh = doc.selection.shape;
-        selection = { bitmapId: bitmaps.add(c), bounds: b, shape: sh ? { ...sh, rect: { ...sh.rect, x: sh.rect.x + dx, y: sh.rect.y + dy } } : null };
+        selection = {
+          bitmapId: bitmaps.add(c),
+          bounds: b,
+          shape: sh ? { ...sh, rect: { ...sh.rect, x: sh.rect.x + dx, y: sh.rect.y + dy } } : null,
+        };
       }
     }
   }
@@ -372,7 +397,8 @@ export function rotateCanvas(op: CanvasOp) {
     if (l.type === 'raster') {
       const baked = opBakedTransform(op, l.transform, l.width, l.height, W, H);
       const src = bitmaps.tryGet(l.bitmapId);
-      if (baked && src) newRaster.set(l.id, { id: bitmaps.add(opCanvas(op, src)), w: baked.width, h: baked.height, transform: baked.transform });
+      if (baked && src)
+        newRaster.set(l.id, { id: bitmaps.add(opCanvas(op, src)), w: baked.width, h: baked.height, transform: baked.transform });
     }
     if (l.mask && !newMasks.has(l.mask.bitmapId)) {
       const src = bitmaps.tryGet(l.mask.bitmapId);

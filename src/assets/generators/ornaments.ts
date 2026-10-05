@@ -168,7 +168,7 @@ function drawChain(ctx: CanvasRenderingContext2D, a: Pt, b: Pt, sag: number, lin
   for (let i = 0; i <= 200; i++) raw.push(quadPoint(a, ctrl, b, i / 200));
   const pts = resample(raw, link * 0.74);
   const base = rgbOf(metal);
-  const thick = link * 0.2;
+  const thick = link * 0.15;
   const drawLink = (i: number, face: boolean) => {
     const p0 = pts[i];
     const p1 = pts[Math.min(pts.length - 1, i + 1)];
@@ -185,10 +185,10 @@ function drawChain(ctx: CanvasRenderingContext2D, a: Pt, b: Pt, sag: number, lin
     g.addColorStop(0.85, rgba(shade(base, 0.15), 1));
     g.addColorStop(1, rgba(shade(base, -0.7), 1));
     if (face) {
-      ctx.lineWidth = thick + 2;
-      ctx.strokeStyle = rgba('#000000', 0.75);
+      ctx.lineWidth = thick + Math.max(1, link * 0.03);
+      ctx.strokeStyle = rgba('#000000', 0.6);
       ctx.beginPath();
-      ctx.ellipse(0, 0, link * 0.5, link * 0.3, 0, 0, TAU);
+      ctx.ellipse(0, 0, link * 0.48, link * 0.34, 0, 0, TAU);
       ctx.stroke();
       ctx.lineWidth = thick;
       ctx.strokeStyle = g;
@@ -197,16 +197,16 @@ function drawChain(ctx: CanvasRenderingContext2D, a: Pt, b: Pt, sag: number, lin
       ctx.lineWidth = thick * 0.25;
       ctx.strokeStyle = rgba('#ffffff', 0.55);
       ctx.beginPath();
-      ctx.ellipse(0, 0, link * 0.5, link * 0.3, 0, Math.PI * 1.15, Math.PI * 1.55);
+      ctx.ellipse(0, 0, link * 0.48, link * 0.34, 0, Math.PI * 1.15, Math.PI * 1.55);
       ctx.stroke();
     } else {
       ctx.fillStyle = rgba('#000000', 0.75);
       ctx.beginPath();
-      ctx.roundRect(-link * 0.52 - 1, -thick * 0.65 - 1, link * 1.04 + 2, thick * 1.3 + 2, thick * 0.6);
+      ctx.roundRect(-link * 0.5 - 1, -thick * 0.55 - 1, link * 1.0 + 2, thick * 1.1 + 2, thick * 0.55);
       ctx.fill();
       ctx.fillStyle = g;
       ctx.beginPath();
-      ctx.roundRect(-link * 0.52, -thick * 0.65, link * 1.04, thick * 1.3, thick * 0.6);
+      ctx.roundRect(-link * 0.5, -thick * 0.55, link * 1.0, thick * 1.1, thick * 0.55);
       ctx.fill();
     }
     ctx.restore();
@@ -532,8 +532,9 @@ function crossPath(style: string, w: number, h: number): Path2D {
         p.lineTo(c.x - nx * pinch, c.y - ny * pinch);
         p.closePath();
       }
+      // same (counter-clockwise) winding as the arms so the nonzero fill unions them
       p.moveTo(c.x + bar * 0.7, c.y);
-      p.arc(c.x, c.y, bar * 0.7, 0, TAU);
+      p.arc(c.x, c.y, bar * 0.7, 0, TAU, true);
       break;
     }
     case 'orthodox': {
@@ -554,7 +555,7 @@ function crossPath(style: string, w: number, h: number): Path2D {
       const armL = cx - gspan / 2 + bar * 0.6;
       const armR = cx + gspan / 2 - bar * 0.6;
       const gy = h * 0.34;
-      p.rect(cx - bar / 2, top, bar, h * 0.72 - top + h * 0.06);
+      p.rect(cx - bar / 2, top, bar, h * 0.82 - top);
       p.rect(armL, gy, armR - armL, bar);
       const bud = (x: number, y: number, dx: number, dy: number) => {
         const rr = bar * 0.62;
@@ -657,10 +658,10 @@ const crosses = defineAsset(
           ctx.strokeStyle = str(p, 'outlineColor', '#f2f2f2');
           ctx.stroke(path);
           ctx.fillStyle = str(p, 'outlineColor', '#f2f2f2');
-          ctx.fill(path, 'evenodd');
+          ctx.fill(path, 'nonzero');
         }
         ctx.fillStyle = str(p, 'color', '#0d0d0d');
-        ctx.fill(path, style === 'celtic' ? 'evenodd' : 'nonzero');
+        ctx.fill(path, 'nonzero');
         ctx.restore();
       }
       const distress = num(p, 'distress', 0.2);

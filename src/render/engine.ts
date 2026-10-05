@@ -27,7 +27,7 @@ import { fillWithPaint } from './paint';
 import { renderShapeContent, shapeLocalBounds } from './shapes';
 import { layoutTextProps, renderTextContent, textFontReady, textLocalBounds, type LocalContent } from './text';
 import { MAX_SIDE, acquire, coverRect, expandRect, fresh, intersectRect, release, unionRect, type PxRect } from './surface';
-import { effectClips, effectReach, effectStage, type EffectArgsExt } from './effects';
+import { effectClips, effectReach, effectStage, effectTranslationSafe, type EffectArgsExt } from './effects';
 
 /* ================================================================== */
 /* Types                                                               */
@@ -91,7 +91,7 @@ interface Acc {
 const borrowed = new WeakSet<HTMLCanvasElement>();
 
 /** Simple counters for profiling (window.__app tests read them). */
-export const renderStats = { layerRenders: 0, layerHits: 0, docRenders: 0, docHits: 0, adjustments: 0, snapshotHits: 0 };
+export const renderStats = { layerRenders: 0, layerHits: 0, translateHits: 0, docRenders: 0, docHits: 0, adjustments: 0, snapshotHits: 0 };
 
 /* ================================================================== */
 /* Context & signatures                                                */
@@ -310,15 +310,88 @@ function flagsKey(f: RenderFlags): string {
   return `${f.effects ? 'e' : ''}${f.mask ? 'm' : ''}${f.filters ? 'f' : ''}`;
 }
 
+/* ---------------- translation reuse ---------------- */
+
+interface TranslatedEntry {
+  render: LayerRender;
+  /** Integer output-px translation of the layer when the render was built. */
+  ex: number;
+  ey: number;
+  margin: number;
+}
+
+const fracQ = (v: number) => {
+  const f = v - Math.floor(v);
+  const q = Math.round(f * 256) / 256;
+  return q >= 1 ? 0 : q;
+};
+
+/**
+ * Signature of everything a transformable layer's render depends on EXCEPT its integer
+ * position (content identity, effects, rotation/scale/skew, fill/knockout, sub-pixel phase).
+ * Null when the render depends on the document position (masks, smart filters, doc-anchored
+ * effects) — then a moved layer is rendered from scratch.
+ */
+function translationSig(l: Layer, flags: RenderFlags, m: DOMMatrix): string | null {
+  if (l.type !== 'raster' && l.type !== 'text' && l.type !== 'shape') return null;
+  if (flags.mask && l.mask?.enabled) return null;
+  if (flags.filters && hasFilters(l.filters)) return null;
+  if (flags.effects && l.effects?.some((e) => e.enabled && !effectTranslationSafe(e.effectId))) return null;
+  const t = l.transform;
+  const content =
+    l.type === 'raster'
+      ? `r${l.bitmapId}.${bitmaps.version(l.bitmapId)}.${l.width}x${l.height}`
+      : l.type === 'text'
+        ? `t${objId(l.text)}g${cacheGeneration()}${textFontReady(l.text) ? 'r' : 'p'}`
+        : `s${objId(l.shape)}`;
+  const fill = Number.isFinite(l.fillOpacity) ? l.fillOpacity : 1;
+  const knock = fill * Math.max(0, Math.min(1, l.opacity)) < 0.999 ? 1 : 0;
+  return `${content}|e${flags.effects ? objId(l.effects) : 0}|${t.rotation}|${t.scaleX}|${t.scaleY}|${t.skewX ?? 0}|${fill}|${knock}|${fracQ(m.e)},${fracQ(m.f)}`;
+}
+
+function shiftRender(r: LayerRender, dx: number, dy: number): LayerRender {
+  return {
+    region: { x: r.region.x + dx, y: r.region.y + dy, w: r.region.w, h: r.region.h },
+    core: r.core,
+    shape: r.shape,
+    behind: r.behind,
+    bounds: { x: r.bounds.x + dx, y: r.bounds.y + dy, w: r.bounds.w, h: r.bounds.h },
+  };
+}
+
+function containsRect(outer: PxRect, inner: PxRect): boolean {
+  return inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h;
+}
+
 /** Render (or fetch from cache) a non-adjustment layer. Null when it draws nothing. */
 export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): LayerRender | null {
   if (l.type === 'adjustment') return null;
-  const key = `L|${l.id}|${rc.s.toFixed(5)}|${flagsKey(flags)}`;
+  const fk = flagsKey(flags);
+  const key = `L|${l.id}|${rc.s.toFixed(5)}|${fk}`;
   const sig = `${layerSig(rc, l)}|${rc.W}x${rc.H}`;
   const hit = slots.get<LayerRender | null>(key, sig);
   if (hit !== undefined) {
     renderStats.layerHits++;
     return hit;
+  }
+  // A moved layer (same content, integer delta) reuses its previous render, shifted: dragging a
+  // layer with strokes/shadows never recomputes its effects.
+  const geom = layerGeometry(l, rc.s);
+  const tsig = geom ? translationSig(l, flags, geom.m) : null;
+  const tkey = `LT|${l.id}|${rc.s.toFixed(5)}|${fk}`;
+  const tfull = tsig ? `${tsig}|${rc.W}x${rc.H}` : '';
+  if (tsig && geom) {
+    const prev = slots.get<TranslatedEntry>(tkey, tfull);
+    if (prev) {
+      const dx = Math.round(geom.m.e) - prev.ex;
+      const dy = Math.round(geom.m.f) - prev.ey;
+      const moved = shiftRender(prev.render, dx, dy);
+      if (containsRect(expandRect({ x: 0, y: 0, w: rc.W, h: rc.H }, prev.margin), moved.region)) {
+        renderStats.translateHits++;
+        slots.set(key, sig, moved, 0, { layerId: l.id, max: 2 });
+        return moved;
+      }
+    }
   }
   renderStats.layerRenders++;
   let r: LayerRender | null = null;
@@ -327,6 +400,15 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
   } catch (err) {
     warnOnce(`layer ${l.id} (${l.type}) failed to render`, err);
     r = null;
+  }
+  if (r && tsig && geom && !(r.core && borrowed.has(r.core))) {
+    // Only unclipped renders can be shifted (a clipped one is missing pixels elsewhere).
+    const margin = (flags.effects ? effectsReach(l, rc.s) : 0) + (flags.filters ? filterPad(l.filters, rc.s) : 0);
+    const b = boundsOfMatrixRect(geom.m, geom.local);
+    const full = expandRect(coverRect(b.x, b.y, b.w, b.h), margin);
+    if (full.x === r.region.x && full.y === r.region.y && full.w === r.region.w && full.h === r.region.h) {
+      slots.set(tkey, tfull, { render: r, ex: Math.round(geom.m.e), ey: Math.round(geom.m.f), margin } satisfies TranslatedEntry, 0, { layerId: l.id, max: 1 });
+    }
   }
   let pixels = 0;
   if (r) {

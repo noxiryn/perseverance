@@ -56,14 +56,18 @@ export function StarButton({ family, size = 12 }: { family: string; size?: numbe
   );
 }
 
-export function FontPicker({ value, onPick }: { value: string; onPick: (family: string) => void }) {
+const rowHeight = (r: Row) => (r.kind === 'header' ? HEADER_H : ROW_H);
+const rowKey = (r: Row) => r.key;
+
+export function FontPicker({ value, onPick, onClose }: { value: string; onPick: (family: string) => void; onClose?: () => void }) {
   const list = useRegistry(fonts);
   const favorites = useFontPrefs((s) => s.favorites);
   const recents = useFontPrefs((s) => s.recents);
   const sys = useSystemFonts((s) => s.status);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<FontFilter>('all');
-  const [hl, setHl] = useState(-1);
+  /** Highlighted row, by key (row indices shift when favorites / recents / system fonts change). */
+  const [hlKey, setHlKey] = useState<string | null>(null);
   const listRef = useRef<VirtualListHandle>(null);
 
   useEffect(() => maybeLoadSystemFonts(), []);
@@ -74,11 +78,14 @@ export function FontPicker({ value, onPick }: { value: string; onPick: (family: 
     return [...SPECIAL_FILTERS, ...user, ...cats];
   }, [list]);
 
+  // A filter whose chip is gone (e.g. "My Fonts" after removing the last user font) falls back to All.
+  const activeFilter: FontFilter = chips.some((c) => c.value === filter) ? filter : 'all';
+
   const rows = useMemo<Row[]>(() => {
     const ctx = { favorites, recents };
     const out: Row[] = [];
     const byFamily = new Map(list.map((f) => [f.family, f]));
-    if (filter === 'all' && !query.trim()) {
+    if (activeFilter === 'all' && !query.trim()) {
       const rec = recents.map((r) => byFamily.get(r)).filter((f): f is FontDef => !!f).slice(0, 5);
       if (rec.length) {
         out.push({ kind: 'header', key: 'h:recent', label: 'Recent' });
@@ -94,33 +101,48 @@ export function FontPicker({ value, onPick }: { value: string; onPick: (family: 
         g.fonts.forEach((f) => out.push({ kind: 'font', key: `a:${f.family}`, font: f }));
       }
     } else {
-      filterFonts(list, query, filter, ctx).forEach((f) => out.push({ kind: 'font', key: `a:${f.family}`, font: f }));
+      filterFonts(list, query, activeFilter, ctx).forEach((f) => out.push({ kind: 'font', key: `a:${f.family}`, font: f }));
     }
     return out;
-  }, [list, favorites, recents, filter, query]);
+  }, [list, favorites, recents, activeFilter, query]);
+
+  const rowIndex = useMemo(() => new Map(rows.map((r, i) => [r.key, i])), [rows]);
+  const hl = hlKey != null ? (rowIndex.get(hlKey) ?? -1) : -1;
+  const latest = useRef({ rows, rowIndex });
+  latest.current = { rows, rowIndex };
 
   const fontCount = rows.reduce((n, r) => n + (r.kind === 'font' && r.key.startsWith('a:') ? 1 : 0), 0);
 
-  // Highlight the current family when opening / when the list changes.
-  const lastRows = useRef<Row[] | null>(null);
+  // Jump to the current family when the popover opens and when the search / category changes.
+  // Other list changes (starring a font, recents, system fonts arriving) keep the user's place —
+  // the list anchors the first visible row.
+  const viewKey = `${activeFilter}\u0000${query.trim()}`;
+  const lastView = useRef<string | null>(null);
   useEffect(() => {
-    if (lastRows.current === rows) return;
-    const first = lastRows.current === null;
-    lastRows.current = rows;
-    let idx = rows.findIndex((r) => r.kind === 'font' && r.key === `a:${value}`);
-    if (idx < 0 || (!first && query)) idx = rows.findIndex((r) => r.kind === 'font');
-    setHl(idx);
-    if (idx >= 0) requestAnimationFrame(() => listRef.current?.scrollToIndex(idx, first ? 'center' : 'auto'));
-    else listRef.current?.scrollToTop();
-  }, [rows, value, query]);
+    if (lastView.current === viewKey) return;
+    const first = lastView.current === null;
+    lastView.current = viewKey;
+    const current = `a:${value}`;
+    const firstFont = rows.find((r) => r.kind === 'font')?.key ?? null;
+    const target = !query.trim() && rowIndex.has(current) ? current : firstFont;
+    setHlKey(target);
+    if (target === current && target) {
+      // After layout (the list measures its viewport first).
+      requestAnimationFrame(() => {
+        const i = latest.current.rowIndex.get(target);
+        if (i !== undefined) listRef.current?.scrollToIndex(i, 'center');
+      });
+    } else if (!first) listRef.current?.scrollToTop();
+  }, [viewKey, rows, rowIndex, value, query]);
 
   const move = (dir: 1 | -1) => {
+    if (!rows.length) return;
     let i = hl;
     for (let n = 0; n < rows.length; n++) {
       i = (i + dir + rows.length) % rows.length;
       if (rows[i].kind === 'font') break;
     }
-    setHl(i);
+    setHlKey(rows[i].key);
     listRef.current?.scrollToIndex(i);
   };
 
@@ -138,6 +160,13 @@ export function FontPicker({ value, onPick }: { value: string; onPick: (family: 
           e.preventDefault();
           e.stopPropagation();
           move(e.key === 'ArrowDown' ? 1 : -1);
+        } else if (e.key === 'Escape') {
+          // The search field swallows key events, so the popover never sees Escape: handle it
+          // here — first clear the search, then close.
+          e.preventDefault();
+          e.stopPropagation();
+          if (query) setQuery('');
+          else onClose?.();
         } else if (e.key === 'Enter') {
           const r = rows[hl];
           if (r?.kind === 'font') {
@@ -156,7 +185,7 @@ export function FontPicker({ value, onPick }: { value: string; onPick: (family: 
         }}
       >
         {chips.map((c) => (
-          <button key={c.value} className={`fc-chip${filter === c.value ? ' active' : ''}`} onClick={() => setFilter(c.value)}>
+          <button key={c.value} className={`fc-chip${activeFilter === c.value ? ' active' : ''}`} onClick={() => setFilter(c.value)}>
             {c.label}
           </button>
         ))}
@@ -165,13 +194,13 @@ export function FontPicker({ value, onPick }: { value: string; onPick: (family: 
         className="fc-picker-list"
         items={rows}
         listRef={listRef}
-        itemHeight={(r) => (r.kind === 'header' ? HEADER_H : ROW_H)}
-        itemKey={(r) => r.key}
+        itemHeight={rowHeight}
+        itemKey={rowKey}
         empty={
           <div className="ui-empty">
-            {filter === 'favorites'
+            {activeFilter === 'favorites'
               ? 'No favorites yet — click ☆ next to a font.'
-              : filter === 'recent'
+              : activeFilter === 'recent'
                 ? 'Fonts you use will show up here.'
                 : 'No fonts match your search.'}
           </div>
@@ -183,7 +212,7 @@ export function FontPicker({ value, onPick }: { value: string; onPick: (family: 
             <div
               className={`fc-picker-row${i === hl ? ' hl' : ''}${r.font.family === value ? ' current' : ''}`}
               title={`${r.font.family} — ${r.font.category}${r.font.tags?.length ? ` · ${r.font.tags.slice(0, 3).join(', ')}` : ''}`}
-              onPointerEnter={() => setHl(i)}
+              onPointerEnter={() => setHlKey(r.key)}
               onClick={() => pick(r.font)}
             >
               <StarButton family={r.font.family} />
