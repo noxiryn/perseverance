@@ -380,6 +380,24 @@ async function rendererPart(opts) {
     d.__base = d.layers[d.rootIds[0]].bitmapId;
     return d;
   }, { strokes: (d) => [{ target: d.__paint }, { target: d.__base, erase: true }] });
+  // Adjustment layers with blend modes over semi-transparent pixels (blended on the CPU, keep alpha).
+  await run('adj-blend-transparent', () => {
+    const d = doc0(null);
+    d.__paint = addRaster(d, { seed: 6 }).bitmapId;
+    addAdj(d, 'invert', {}, { blendMode: 'multiply' });
+    addAdj(d, 'hue-saturation', { hue: 90, saturation: 40 }, { blendMode: 'color', opacity: 0.7 });
+    addAdj(d, 'levels', { inBlack: 30, gamma: 1.3 }, { blendMode: 'overlay', mask: { feather: 6 } });
+    return d;
+  }, { strokes: [{ erase: true }, {}] });
+  await run('adj-blend-clipped', () => {
+    const d = doc0(null);
+    const b = addRaster(d, { name: 'base', seed: 7, props: { fillOpacity: 0.8 } });
+    addAdj(d, 'invert', {}, { clipped: true, blendMode: 'multiply' });
+    addAdj(d, 'hue-saturation', { hue: -70 }, { clipped: true, blendMode: 'luminosity' });
+    addAdj(d, 'curves', {}, { clipped: true, blendMode: 'soft-light', opacity: 0.6 });
+    d.__paint = b.bitmapId;
+    return d;
+  }, { strokes: [{ erase: true }, {}] });
   await run('masked', () => {
     const d = doc0();
     d.__paint = addRaster(d, { mask: { feather: 0 } }).bitmapId;

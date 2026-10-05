@@ -33,7 +33,7 @@ import { applyFilterStack, compositeOp, makeFilterContext, resolveParams, runFil
 import { cacheGeneration, objId, slots, type Resource } from './cache';
 import { edgeDistance } from './distance';
 import { applyMask, lerpInto, maskAlpha } from './mask';
-import { coreExceedsShape, normalizeClipBase, opaqueWhereCovered } from './clip';
+import { blendAtop, coreExceedsShape, normalizeClipBase } from './clip';
 import { cropExactBackend } from './backendProbe';
 import { alignGrid, alignRect, changesSince, effectInfluence, effectUsesFields, fieldBucket, filtersLocal, isPixelExact, mapDirtyRect, type ChangeEntry } from './region';
 import { fillWithPaint } from './paint';
@@ -2065,31 +2065,14 @@ function applyAdjustment(rc: RC, acc: Acc, adj: AdjustmentLayer) {
     if (mk?.temp) release(mk.canvas);
     return;
   }
-  // Blend mode: the result is B(backdrop, filtered) "atop" the backdrop — its colour blended over
-  // the backdrop's straight colour, its alpha the backdrop's (an adjustment never changes
-  // coverage, also over semi-transparent pixels). Opaque copies of both are blended, then the
-  // backdrop's alpha is applied. The backdrop copy is taken first: filters may work in place.
-  const blend = adj.blendMode && adj.blendMode !== 'normal' ? compositeOp(adj.blendMode) : null;
-  let backdrop: ImageData | null = null;
-  if (blend) {
-    backdrop = ctx.createImageData(r.w, r.h);
-    opaqueWhereCovered(img.data, img.data, backdrop.data);
-  }
+  // Blend mode: B(backdrop, filtered) "atop" the backdrop, computed on the CPU (see blendAtop):
+  // the stack keeps its alpha. The backdrop copy is taken first: filters may work in place.
+  const blend = adj.blendMode && adj.blendMode !== 'normal' ? adj.blendMode : null;
+  const backdrop = blend ? img.data.slice() : null;
   const out = runFilter(def, img, inst.params, makeFilterContext({ docWidth: rc.doc.width, docHeight: rc.doc.height, offsetX: abs.x / rc.s, offsetY: abs.y / rc.s, scale: rc.s }));
+  if (blend && backdrop) blendAtop(backdrop, out.data, blend, out.data);
   const F = acquire(r.w, r.h);
-  const f = ctx2d(F);
-  if (blend && backdrop) {
-    opaqueWhereCovered(out.data, backdrop.data, out.data);
-    const O = acquire(r.w, r.h);
-    ctx2d(O).putImageData(out, 0, 0);
-    f.putImageData(backdrop, 0, 0);
-    f.globalCompositeOperation = blend;
-    f.drawImage(O, 0, 0);
-    f.globalCompositeOperation = 'destination-in';
-    f.drawImage(acc.canvas, -r.x, -r.y);
-    f.globalCompositeOperation = 'source-over';
-    release(O);
-  } else f.putImageData(out, 0, 0);
+  ctx2d(F).putImageData(out, 0, 0);
   lerpInto(ctx, F, opacity, mk?.canvas ?? null, r.x, r.y);
   release(F);
   if (mk?.temp) release(mk.canvas);

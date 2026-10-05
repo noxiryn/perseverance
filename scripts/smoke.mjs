@@ -51,6 +51,67 @@ await page.goto(url, { waitUntil: 'networkidle' });
 await wait(1500);
 await shot('01-start');
 
+/* ---------- render checks (pixel cases, through window.__app.renderDocument) ---------- */
+// Each case builds a small document and returns failure messages (empty when the pixels are right).
+const RENDER_CHECKS = {
+  // An adjustment layer with a blend mode keeps the alpha of what it adjusts (also at
+  // semi-transparent pixels, clipped or not) and blends the unpremultiplied colours.
+  'adjustment blend keeps alpha': () => {
+    const a = window.__app;
+    const D = a.documentUtils;
+    const lum = (c) => 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
+    const setLum = (c, l) => {
+      const d = l - lum(c);
+      const o = c.map((v) => v + d);
+      const L = lum(o),
+        n = Math.min(...o),
+        x = Math.max(...o);
+      const k = Math.min(n < 0 ? L / (L - n) : 1, x > 1 ? (1 - L) / (x - L) : 1);
+      return o.map((v) => L + (v - L) * k);
+    };
+    const hard = (b, s) => (s <= 0.5 ? 2 * b * s : b + (2 * s - 1) - b * (2 * s - 1));
+    const expect = {
+      multiply: (b, s) => b.map((v, i) => v * s[i]),
+      overlay: (b, s) => b.map((v, i) => hard(s[i], v)),
+      color: (b, s) => setLum(s, lum(b)),
+    };
+    const build = (mode, clipped) => {
+      const doc = D.createDocument({ width: 100, height: 100, background: null });
+      const r = D.makeRasterLayer({ bitmapId: a.bitmaps.create(100, 100, 'rgba(200,120,60,0.5)'), width: 100, height: 100 });
+      doc.layers[r.id] = r;
+      doc.rootIds = [r.id];
+      if (mode) {
+        const adj = D.makeAdjustmentLayer({ filterId: 'invert' });
+        adj.clipped = clipped;
+        adj.blendMode = mode;
+        doc.layers[adj.id] = adj;
+        doc.rootIds.push(adj.id);
+      }
+      return doc;
+    };
+    const px = (doc) => Array.from(a.renderDocument(doc, { background: false }).getContext('2d').getImageData(50, 50, 1, 1).data);
+    const base = px(build(null));
+    const cb = base.slice(0, 3).map((v) => v / 255);
+    const cs = cb.map((v) => 1 - v);
+    const fails = [];
+    for (const mode of Object.keys(expect)) {
+      const want = expect[mode](cb, cs).map((v) => Math.round(255 * v));
+      for (const clipped of [false, true]) {
+        const got = px(build(mode, clipped));
+        const bad = got[3] !== base[3] || want.some((v, i) => Math.abs(v - got[i]) > 2);
+        if (bad) fails.push(`${mode}${clipped ? ' (clipped)' : ''}: got ${got}, want ${want},${base[3]}`);
+      }
+    }
+    return fails;
+  },
+};
+for (const [name, fn] of Object.entries(RENDER_CHECKS)) {
+  const fails = await run(`render-check:${name}`, fn);
+  if (fails === null) continue;
+  for (const f of fails) errors.push(`[render-check:${name}] ${f}`);
+  console.log(`render check ${fails.length ? 'FAILED' : 'ok'}: ${name}`);
+}
+
 /* ---------- registry inventory ---------- */
 const inventory = await run('inventory', () => {
   const a = window.__app;

@@ -22,6 +22,7 @@
  *     core reaches beyond the shape; there, clipped content keeps the absolute amount the shape
  *     allows and never paints over effect pixels outside the content).
  */
+import type { BlendMode } from '../core/types';
 
 /** Whether any pixel's alpha in `core` exceeds the one in `shape` (RGBA, same length). */
 export function coreExceedsShape(core: Uint8ClampedArray, shape: Uint8ClampedArray): boolean {
@@ -59,22 +60,135 @@ export function normalizeClipBase(core: Uint8ClampedArray, shape: Uint8ClampedAr
   }
 }
 
+/* ---------------- adjustment layers with a blend mode ---------------- */
+
+type Sep = (b: number, s: number) => number;
+const softD = (b: number) => (b <= 0.25 ? ((16 * b - 12) * b + 4) * b : Math.sqrt(b));
+const hardLight: Sep = (b, s) => (s <= 0.5 ? b * 2 * s : b + (2 * s - 1) - b * (2 * s - 1));
+
+/** Separable blend functions B(Cb, Cs) on 0..1 colours (W3C Compositing and Blending). */
+const SEPARABLE: Partial<Record<BlendMode, Sep>> = {
+  multiply: (b, s) => b * s,
+  screen: (b, s) => b + s - b * s,
+  overlay: (b, s) => hardLight(s, b),
+  darken: (b, s) => Math.min(b, s),
+  lighten: (b, s) => Math.max(b, s),
+  'color-dodge': (b, s) => (b === 0 ? 0 : s >= 1 ? 1 : Math.min(1, b / (1 - s))),
+  'color-burn': (b, s) => (b >= 1 ? 1 : s <= 0 ? 0 : 1 - Math.min(1, (1 - b) / s)),
+  'linear-dodge': (b, s) => Math.min(1, b + s),
+  'hard-light': hardLight,
+  'soft-light': (b, s) => (s <= 0.5 ? b - (1 - 2 * s) * b * (1 - b) : b + (2 * s - 1) * (softD(b) - b)),
+  difference: (b, s) => Math.abs(b - s),
+  exclusion: (b, s) => b + s - 2 * b * s,
+};
+
+/** Per separable mode: round(255·B(b/255, s/255)) at [b << 8 | s]. */
+const luts = new Map<BlendMode, Uint8ClampedArray>();
+function lutOf(mode: BlendMode, f: Sep): Uint8ClampedArray {
+  let t = luts.get(mode);
+  if (!t) {
+    t = new Uint8ClampedArray(65536);
+    for (let b = 0; b < 256; b++) for (let s = 0; s < 256; s++) t[(b << 8) | s] = Math.round(255 * f(b / 255, s / 255));
+    luts.set(mode, t);
+  }
+  return t;
+}
+
+// Non-separable modes (hue, saturation, color, luminosity): SetLum / SetSat / ClipColor of the
+// spec on a scratch colour.
+const C3 = new Float64Array(3);
+const lum3 = (r: number, g: number, b: number) => 0.3 * r + 0.59 * g + 0.11 * b;
+const sat3 = (r: number, g: number, b: number) => Math.max(r, g, b) - Math.min(r, g, b);
+/** C3 = SetSat((r, g, b), s). */
+function setSat(r: number, g: number, b: number, s: number) {
+  const mx = Math.max(r, g, b),
+    mn = Math.min(r, g, b);
+  if (mx <= mn) {
+    C3[0] = C3[1] = C3[2] = 0;
+    return;
+  }
+  const k = s / (mx - mn);
+  C3[0] = (r - mn) * k;
+  C3[1] = (g - mn) * k;
+  C3[2] = (b - mn) * k;
+}
+/** C3 = SetLum(C3, l) (with ClipColor). */
+function setLum(l: number) {
+  const d = l - lum3(C3[0], C3[1], C3[2]);
+  const r = C3[0] + d,
+    g = C3[1] + d,
+    b = C3[2] + d;
+  const L = lum3(r, g, b);
+  const n = Math.min(r, g, b),
+    x = Math.max(r, g, b);
+  let kn = 1,
+    kx = 1;
+  if (n < 0) kn = L / (L - n);
+  if (x > 1) kx = (1 - L) / (x - L);
+  const k = Math.min(kn, kx);
+  C3[0] = L + (r - L) * k;
+  C3[1] = L + (g - L) * k;
+  C3[2] = L + (b - L) * k;
+}
+
 /**
- * "Atop" blending prep for adjustment layers with a blend mode: `out` = `src`'s straight colour,
- * alpha 255 wherever `coverage` (RGBA, alpha at +3) has any alpha, 0,0,0,0 elsewhere. Blending one
- * opaque copy over another then evaluates B(Cb, Cs) exactly; destination-in with the original
- * alpha puts the coverage back (the result keeps the backdrop's alpha).
+ * An adjustment layer's blend: `out` = B(backdrop, filtered) "atop" the backdrop — the blend of the
+ * straight colours of `back` (the backdrop, RGBA as read back) and `src` (the filter output; its
+ * alpha is ignored), with the backdrop's alpha (an adjustment never changes coverage, also over
+ * semi-transparent pixels). Pixels the backdrop doesn't cover become 0,0,0,0. `out` may be `src`.
+ * Computed here rather than with canvas blend operations: those round differently on GPU and CPU
+ * canvases (which one a scratch canvas is depends on its size and history), and blending
+ * semi-transparent pixels on a canvas changes their alpha.
  */
-export function opaqueWhereCovered(src: Uint8ClampedArray, coverage: Uint8ClampedArray, out: Uint8ClampedArray): void {
-  const n = Math.min(src.length, coverage.length, out.length);
-  for (let i = 3; i < n; i += 4) {
-    if (coverage[i] === 0) {
-      out[i - 3] = out[i - 2] = out[i - 1] = out[i] = 0;
+export function blendAtop(back: Uint8ClampedArray, src: Uint8ClampedArray, mode: BlendMode, out: Uint8ClampedArray): void {
+  const n = Math.min(back.length, src.length, out.length);
+  const f = SEPARABLE[mode];
+  const lut = f ? lutOf(mode, f) : null;
+  const ns = mode === 'hue' || mode === 'saturation' || mode === 'color' || mode === 'luminosity';
+  for (let i = 0; i < n; i += 4) {
+    const a = back[i + 3];
+    if (a === 0) {
+      out[i] = out[i + 1] = out[i + 2] = out[i + 3] = 0;
       continue;
     }
-    out[i - 3] = src[i - 3];
-    out[i - 2] = src[i - 2];
-    out[i - 1] = src[i - 1];
-    out[i] = 255;
+    const br = back[i],
+      bg = back[i + 1],
+      bb = back[i + 2];
+    const sr = src[i],
+      sg = src[i + 1],
+      sb = src[i + 2];
+    if (lut) {
+      out[i] = lut[(br << 8) | sr];
+      out[i + 1] = lut[(bg << 8) | sg];
+      out[i + 2] = lut[(bb << 8) | sb];
+    } else if (ns) {
+      const r0 = br / 255,
+        g0 = bg / 255,
+        b0 = bb / 255;
+      const r1 = sr / 255,
+        g1 = sg / 255,
+        b1 = sb / 255;
+      if (mode === 'hue') {
+        setSat(r1, g1, b1, sat3(r0, g0, b0));
+        setLum(lum3(r0, g0, b0));
+      } else if (mode === 'saturation') {
+        setSat(r0, g0, b0, sat3(r1, g1, b1));
+        setLum(lum3(r0, g0, b0));
+      } else {
+        const color = mode === 'color';
+        C3[0] = color ? r1 : r0;
+        C3[1] = color ? g1 : g0;
+        C3[2] = color ? b1 : b0;
+        setLum(color ? lum3(r0, g0, b0) : lum3(r1, g1, b1));
+      }
+      out[i] = Math.round(255 * C3[0]);
+      out[i + 1] = Math.round(255 * C3[1]);
+      out[i + 2] = Math.round(255 * C3[2]);
+    } else {
+      out[i] = sr;
+      out[i + 1] = sg;
+      out[i + 2] = sb;
+    }
+    out[i + 3] = a;
   }
 }
