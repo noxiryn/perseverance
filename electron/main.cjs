@@ -13,6 +13,13 @@ const INDEX_HTML = path.join(__dirname, '..', 'dist', 'index.html');
 const CLOSE_ACK_TIMEOUT_MS = Number(process.env.PERSEVERANCE_CLOSE_TIMEOUT_MS) || 4000;
 const CLOSE_RETRY_TIMEOUT_MS = 10000;
 /**
+ * The renderer acknowledged a close request but the user clicks close again this long afterwards:
+ * its unsaved-changes prompt may be lost or stuck, so a native "Quit Anyway" is offered.
+ */
+const REPEAT_CLOSE_MS = Number(process.env.PERSEVERANCE_REPEAT_CLOSE_MS) || 3000;
+/** After the user chose to close/quit, a window that still hasn't gone away is destroyed. */
+const FORCE_CLOSE_MS = 5000;
+/**
  * Only these permissions are ever granted, and only to the app's own page: system fonts in the font
  * picker, clipboard image paste/copy, and View ▸ Full Screen (HTML fullscreen API).
  */
@@ -20,10 +27,8 @@ const ALLOWED_PERMISSIONS = new Set(['local-fonts', 'clipboard-read', 'clipboard
 
 /** @type {BrowserWindow | null} */
 let win = null;
-/** Files requested before the window could receive them (Explorer double-click / CLI args / Finder). */
-const pendingOpen = [];
 /** @type {ReturnType<typeof lib.createLogger>} */
-let log = lib.createLogger(null);
+let log = lib.createLogger(earlyLogFile());
 /** @type {lib.FileGrants} */
 let grants = new lib.FileGrants(null);
 let windowStateFile = null;
@@ -33,8 +38,10 @@ let forceClose = false; // the next 'close' goes through (renderer agreed or the
 let quitRequested = false; // app.quit() (Cmd+Q / installer) is waiting on the close guard
 let rendererEdited = false; // any unsaved document (reported by the renderer)
 let rendererGone = false; // the render process crashed / was killed
+let rendererReady = false; // the page finished loading and can receive 'desktop:open-file'
 let expectedKill = false; // we killed a hung renderer ourselves (reload), don't report it as a crash
-const closeReq = { pending: false, acked: false, timer: null, fallbackShown: false };
+const closeReq = { pending: false, acked: false, ackedAt: 0, timer: null, fallbackShown: false };
+let forceTimer = null;
 /** One native prompt at a time (close fallback / crash / unresponsive). @type {AbortController | null} */
 let promptAbort = null;
 let crashTimes = [];
@@ -46,8 +53,22 @@ nativeTheme.themeSource = 'dark';
 // sets `sandbox: true` itself.
 if (!app.commandLine.hasSwitch('no-sandbox')) app.enableSandbox();
 if (process.platform === 'win32') app.setAppUserModelId('com.noxiryn.perseverance');
+// Pose Studio / model import need WebGL. Without a usable GPU (blocklisted driver, VM, remote desktop)
+// Chromium no longer falls back to software WebGL unless this is set. "Unsafe" refers to exposing the
+// SwiftShader JIT to untrusted web content; this window only ever runs the app's own bundle (no remote
+// pages: navigation and popups are blocked, CSP script-src 'self'). Hardware GPUs are still preferred.
+app.commandLine.appendSwitch('enable-unsafe-swiftshader');
 
 /* ---------------- crash logging ---------------- */
+
+/** userData/logs/main.log, available before 'ready' so early failures are recorded too. */
+function earlyLogFile() {
+  try {
+    return path.join(app.getPath('userData'), 'logs', 'main.log');
+  } catch {
+    return null;
+  }
+}
 
 process.on('uncaughtException', (e) => log.error('uncaughtException', e));
 process.on('unhandledRejection', (e) => log.error('unhandledRejection', e));
@@ -129,13 +150,10 @@ async function readOpened(p) {
   return { path: p, name: path.basename(p), data: lib.toArrayBuffer(buf) };
 }
 
-async function sendOpen(p) {
+/** Read a file the OS handed us and send it to the renderer (which queues it until the UI listens). */
+async function deliverOpen(p) {
   const w = liveWindow();
-  if (!w || w.webContents.isLoading() || rendererGone) {
-    if (!pendingOpen.includes(p)) pendingOpen.push(p);
-    if (!w && app.isReady()) createWindow();
-    return;
-  }
+  if (!w) return;
   try {
     const st = await fs.stat(p);
     if (!st.isFile()) throw new Error('not a file');
@@ -147,8 +165,19 @@ async function sendOpen(p) {
   }
 }
 
-async function flushPendingOpen() {
-  while (pendingOpen.length) await sendOpen(pendingOpen.shift());
+/**
+ * Files requested before the page could receive them (Explorer double-click / CLI args / Finder) wait
+ * here until 'did-finish-load'. Readiness is our own flag, not `webContents.isLoading()`: that can still
+ * be true inside 'did-finish-load', which used to re-queue the file in a tight loop and starve the main
+ * process (a cold start with a file argument never finished loading).
+ */
+const openQueue = lib.createOpenQueue({
+  ready: () => !!liveWindow() && rendererReady && !rendererGone,
+  deliver: deliverOpen,
+});
+
+function sendOpen(p) {
+  if (!openQueue.open(p) && !liveWindow() && app.isReady()) createWindow();
 }
 
 /* ---------------- window state ---------------- */
@@ -175,7 +204,14 @@ function scheduleSaveWindowState() {
 
 function resetClose() {
   clearTimeout(closeReq.timer);
-  Object.assign(closeReq, { pending: false, acked: false, timer: null, fallbackShown: false });
+  Object.assign(closeReq, { pending: false, acked: false, ackedAt: 0, timer: null, fallbackShown: false });
+}
+
+/** Bring the window back so a prompt about unsaved work can be seen (minimized / hidden on macOS). */
+function revealWindow(w) {
+  if (w.isMinimized()) w.restore();
+  if (!w.isVisible()) w.show();
+  w.focus();
 }
 
 /** Close the window (and quit when that was requested) without asking the renderer again. */
@@ -186,9 +222,24 @@ function closeNow() {
   const w = liveWindow();
   if (quitRequested || !w) app.quit();
   else w.close();
+  // A wedged renderer can stall the window teardown: make sure the user's decision really happens.
+  clearTimeout(forceTimer);
+  forceTimer = setTimeout(() => {
+    forceTimer = null;
+    const still = liveWindow();
+    if (still && still === w) {
+      log.warn('window did not close in time; destroying it');
+      still.destroy();
+    }
+    if (quitRequested) {
+      log.warn('quit did not finish in time; exiting');
+      app.exit(0);
+    }
+  }, FORCE_CLOSE_MS);
 }
 
 function cancelClose() {
+  if (closeReq.fallbackShown) dismissPrompt(); // the renderer answered: drop our "Quit Anyway" prompt
   resetClose();
   quitRequested = false;
 }
@@ -201,9 +252,16 @@ function requestClose() {
     closeNow();
     return;
   }
+  // The renderer's unsaved-changes prompt must be visible (e.g. closed from the taskbar while minimized).
+  if (rendererEdited || closeReq.pending) revealWindow(w);
   if (closeReq.pending) {
-    w.focus();
-    if (closeReq.fallbackShown || closeReq.acked) return;
+    if (closeReq.fallbackShown) return;
+    if (closeReq.acked) {
+      // Closing again while the renderer's prompt is (supposedly) open: after a moment, offer a way
+      // out in case that prompt is lost or stuck. A quick double click just keeps the prompt.
+      if (Date.now() - closeReq.ackedAt >= REPEAT_CLOSE_MS) void closeFallback('stuck');
+      return;
+    }
     if (!closeReq.timer) void closeFallback();
     return;
   }
@@ -213,27 +271,34 @@ function requestClose() {
   closeReq.timer = setTimeout(closeFallback, CLOSE_ACK_TIMEOUT_MS);
 }
 
-/** The renderer didn't acknowledge the close request: it is busy or broken. Don't trap the user. */
-async function closeFallback() {
-  closeReq.timer = null;
-  if (!closeReq.pending || closeReq.acked) return;
+/**
+ * Native way out of the close guard. 'no-ack': the renderer didn't acknowledge the close request (busy
+ * or broken). 'stuck': it did, but the user keeps trying to close while its prompt is open.
+ */
+async function closeFallback(reason = 'no-ack') {
+  if (reason === 'no-ack') closeReq.timer = null;
+  if (!closeReq.pending || closeReq.fallbackShown) return;
+  if (reason === 'no-ack' && closeReq.acked) return;
+  const stuck = reason === 'stuck';
   closeReq.fallbackShown = true;
-  log.warn('close request not acknowledged by the renderer');
+  log.warn(stuck ? 'close requested again while the unsaved-changes prompt is open' : 'close request not acknowledged by the renderer');
+  const lost = rendererEdited ? ' If you quit now, unsaved changes are lost (autosave may offer to recover them on the next launch).' : '';
   const r = await prompt({
     type: 'warning',
     title: 'Perseverance',
-    message: 'Perseverance is not responding',
-    detail: rendererEdited
-      ? 'The window did not answer the close request. If you quit now, unsaved changes are lost (autosave may offer to recover them on the next launch).'
-      : 'The window did not answer the close request.',
+    message: stuck ? 'Quit without answering the editor?' : 'Perseverance is not responding',
+    detail: stuck
+      ? `The editor is asking what to do with unsaved changes. Answer it in the window, or quit now.${lost}`
+      : `The window did not answer the close request.${lost}`,
     buttons: ['Wait', 'Quit Anyway'],
     defaultId: 0,
     cancelId: 0,
   });
   closeReq.fallbackShown = false;
-  if (r === -1 || !closeReq.pending || closeReq.acked) return; // the renderer answered meanwhile
+  // Dismissed (-1) or settled meanwhile: the renderer answered or acknowledged.
+  if (r === -1 || !closeReq.pending || (!stuck && closeReq.acked)) return;
   if (r === 1) closeNow();
-  else closeReq.timer = setTimeout(closeFallback, CLOSE_RETRY_TIMEOUT_MS);
+  else if (!closeReq.acked) closeReq.timer = setTimeout(closeFallback, CLOSE_RETRY_TIMEOUT_MS);
 }
 
 /** The renderer is alive but has no close handler (e.g. the UI failed to start). */
@@ -259,6 +324,7 @@ async function closeUnguarded() {
 
 async function onRenderGone(details) {
   rendererGone = true;
+  rendererReady = false;
   resetClose();
   log.error('render process gone', details);
   if (details.reason === 'clean-exit' || forceClose || expectedKill) return;
@@ -318,6 +384,7 @@ function createWindow() {
   const saved = windowStateFile ? lib.readJsonSync(windowStateFile, null) : null;
   const bounds = lib.initialBounds(saved, displays);
   rendererGone = false;
+  rendererReady = false;
   forceClose = false;
   resetClose();
 
@@ -382,6 +449,12 @@ function createWindow() {
     e.preventDefault();
     requestClose();
   });
+  // Windows log off / shut down: never block it (autosave keeps unsaved work for recovery).
+  w.on('session-end', () => {
+    log.info('session end');
+    forceClose = true;
+    saveWindowState();
+  });
   w.on('closed', () => {
     clearTimeout(stateTimer);
     if (win === w) win = null;
@@ -392,12 +465,14 @@ function createWindow() {
   const wc = w.webContents;
   wc.on('did-start-loading', () => {
     // A reload resets the renderer: forget half-finished close requests.
+    rendererReady = false;
     resetClose();
   });
   wc.on('did-finish-load', () => {
     rendererGone = false;
+    rendererReady = true;
     expectedKill = false;
-    void flushPendingOpen();
+    void openQueue.flush();
   });
   wc.on('render-process-gone', (_e, details) => void onRenderGone(details));
   w.on('unresponsive', () => void onUnresponsive());
@@ -561,6 +636,7 @@ listen('desktop:set-edited', (_e, v) => {
 listen('desktop:close-ack', (_e, handled) => {
   if (!closeReq.pending || closeReq.acked) return;
   closeReq.acked = true;
+  closeReq.ackedAt = Date.now();
   clearTimeout(closeReq.timer);
   closeReq.timer = null;
   if (closeReq.fallbackShown) dismissPrompt();
@@ -603,13 +679,13 @@ if (!gotLock) {
       w.show();
       w.focus();
     }
-    files.forEach((p) => void sendOpen(p));
+    files.forEach((p) => sendOpen(p));
   });
 
   // macOS: files opened via Finder / the dock (may fire before 'ready').
   app.on('open-file', (e, p) => {
     e.preventDefault();
-    if (typeof p === 'string' && lib.isSafeAbsPath(p)) void sendOpen(p);
+    if (typeof p === 'string' && lib.isSafeAbsPath(p)) sendOpen(p);
   });
 
   app.on('before-quit', () => {
@@ -622,7 +698,7 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     const userData = app.getPath('userData');
-    log = lib.createLogger(path.join(userData, 'logs', 'main.log'));
+    if (!log.file) log = lib.createLogger(path.join(userData, 'logs', 'main.log'));
     grants = new lib.FileGrants(path.join(userData, 'file-access.json'));
     windowStateFile = path.join(userData, 'window-state.json');
     log.info(`start v${app.getVersion()} ${process.platform} electron ${process.versions.electron}`);
@@ -671,7 +747,7 @@ if (!gotLock) {
     ses.setPermissionCheckHandler((wc, permission) => ALLOWED_PERMISSIONS.has(permission) && ownPage(wc));
     ses.setDevicePermissionHandler(() => false);
 
-    lib.fileArgs(process.argv, { skip: argSkip }).forEach((p) => pendingOpen.push(p));
+    lib.fileArgs(process.argv, { skip: argSkip }).forEach((p) => openQueue.open(p));
     createWindow();
 
     app.on('activate', () => {

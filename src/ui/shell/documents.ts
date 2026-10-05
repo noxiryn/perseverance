@@ -6,7 +6,7 @@ import { bitmaps } from '../../core/bitmaps';
 import { createDocument, insertLayerDraft, makeRasterLayer } from '../../core/document';
 import type { DocSession } from '../../core/types';
 import { commands, docPresets, runCommand, type DocPresetDef, type TemplateDef } from '../../registry';
-import { desktop, fileNameOf, type OpenedFile } from '../../platform';
+import { desktop, fileNameOf, isAccessDenied, type OpenedFile } from '../../platform';
 import { useEditor } from '../../state/editor';
 import { toast, useUI } from '../../state/ui';
 import { openFile } from '../../io/open';
@@ -176,9 +176,13 @@ export async function openRecent(entry: RecentEntry) {
     const data = await desktop.readFile(entry.path);
     await openFileWithIo({ path: entry.path, name: entry.name || fileNameOf(entry.path), data }, { asNewDocument: true });
   } catch (e) {
-    console.error(e);
     removeRecent(entry.path);
-    toast(`“${entry.name}” could not be found. It was removed from recent files.`, 'error', 4000);
+    // The desktop app only reopens files the user chose before (see electron/main.cjs file grants).
+    if (isAccessDenied(e)) toast(`“${entry.name}” can't be reopened directly any more — choose it with File ▸ Open.`, 'error', 4000);
+    else {
+      console.error(e);
+      toast(`“${entry.name}” could not be found. It was removed from recent files.`, 'error', 4000);
+    }
   }
 }
 

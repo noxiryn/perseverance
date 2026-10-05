@@ -2,8 +2,8 @@
 /**
  * Desktop hardening check: drives the REAL Electron app (production build in dist/) and verifies the
  * main-process contract — file access policy, Save As extension fix, crash-safe large writes,
- * second-instance file forwarding, cold-start file open, close guard (dirty / hung / crashed
- * renderer), window-state persistence, navigation/external-link/permission policy, the titlebar
+ * second-instance file forwarding (also while the page reloads), cold-start file open, close guard
+ * (dirty / hung / crashed renderer / stuck prompt / Windows session end), window-state persistence, navigation/external-link/permission policy, the titlebar
  * overlay following the UI zoom, and zero console errors / CSP violations / Electron security warnings.
  *
  *   npx vite build && xvfb-run -a -s "-screen 0 1600x960x24" node scripts/electron-desktop-check.mjs \
@@ -38,7 +38,7 @@ const CFG = path.join(T, 'cfg');
 fs.mkdirSync(FILES, { recursive: true });
 fs.mkdirSync(CFG, { recursive: true });
 
-const env = { ...process.env, XDG_CONFIG_HOME: CFG, PERSEVERANCE_CLOSE_TIMEOUT_MS: '1500' };
+const env = { ...process.env, XDG_CONFIG_HOME: CFG, PERSEVERANCE_CLOSE_TIMEOUT_MS: '1500', PERSEVERANCE_REPEAT_CLOSE_MS: '1500' };
 delete env.ELECTRON_DISABLE_SECURITY_WARNINGS; // we want to see them
 delete env.VITE_DEV_SERVER_URL;
 
@@ -155,6 +155,12 @@ const prefs = await main(app, ({ BrowserWindow }) => {
 });
 check('webPreferences locked down', prefs.contextIsolation === true && prefs.sandbox === true && !prefs.nodeIntegration && !prefs.webviewTag && prefs.webSecurity !== false, prefs);
 check('renderer has no Node', await page.evaluate(() => typeof window.require === 'undefined' && typeof window.process === 'undefined'));
+const webgl = await page.evaluate(() => {
+  const g = document.createElement('canvas').getContext('webgl2');
+  const ext = g && g.getExtension('WEBGL_debug_renderer_info');
+  return g ? (ext ? g.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'available') : null;
+});
+check('WebGL available for Pose Studio (software fallback without a usable GPU)', !!webgl, webgl);
 
 /* ---- Save As without extension ---- */
 await openTemplate(page);
@@ -257,6 +263,38 @@ check('second instance exits and forwards its file (relative path, spaces)', chi
 const w2 = await page.evaluate((p) => window.desktop.writeFile(p, new ArrayBuffer(0)).then(() => 'ok', (e) => e.message), second);
 fs.copyFileSync(poster, second);
 check('a project opened from the OS can be saved back in place', w2 === 'ok', w2);
+
+/* ---- a file forwarded while the page is (re)loading waits for it, then opens once ---- */
+const during = path.join(FILES, 'During Reload.pgfx');
+fs.copyFileSync(poster, during);
+await main(
+  app,
+  ({ app: eApp, BrowserWindow }, { file, cwd, exe, root }) => {
+    const wc = BrowserWindow.getAllWindows()[0].webContents;
+    globalThis.__t.loadingAtSend = null;
+    const send = wc.send.bind(wc);
+    wc.send = (ch, ...a) => {
+      if (ch === 'desktop:open-file') globalThis.__t.loadingAtSend = wc.isLoading();
+      return send(ch, ...a);
+    };
+    // Deliver the second instance's argv exactly while the page is reloading (deterministic, unlike a race
+    // with a spawned process): the main process must queue it and send it after 'did-finish-load'.
+    wc.once('did-start-loading', () => eApp.emit('second-instance', {}, [exe, root, file], cwd, { argv: [exe, root, file], cwd }));
+    wc.reload();
+  },
+  { file: path.relative(T, during), cwd: T, exe: electronPath, root },
+);
+await wait(500);
+await waitReady(page);
+const openedDuring = await poll(async () => {
+  const l = (await sessions(page)).filter((s) => s.path === during);
+  return l.length ? l : undefined;
+}, 10000);
+await wait(800);
+const openedDuringFinal = (await sessions(page)).filter((s) => s.path === during).length;
+await page.evaluate(() => window.__app.useUI.setState({ dialogs: [] })); // e.g. a crash-recovery offer after the reload
+t = await T_(app);
+check('file forwarded during a reload opens once the page is ready', !!openedDuring && openedDuringFinal === 1 && t.loadingAtSend !== null, { opened: openedDuringFinal, loadingAtSend: t.loadingAtSend });
 
 /* ---- external links, popups, navigation ---- */
 await page.evaluate(() => {
@@ -466,6 +504,20 @@ if (idx >= 0) {
   const w3 = await page.evaluate((p) => window.desktop.readFile(p).then((b) => window.desktop.writeFile(p, b)).then(() => 'ok', (e) => e.message), poster);
   check('a recent project can be saved in place after a relaunch', w3 === 'ok', w3);
 }
+/* ---- Open Recent on a file the app may not read: explained, not reported as missing ---- */
+const ungranted = path.join(FILES, 'ungranted.png');
+fs.writeFileSync(ungranted, 'not chosen by the user');
+const deniedRecent = await page.evaluate(async (p) => {
+  const list = JSON.parse(localStorage.getItem('perseverance.recent') ?? '[]');
+  localStorage.setItem('perseverance.recent', JSON.stringify([{ path: p, name: 'ungranted.png', time: Date.now() }, ...list]));
+  window.dispatchEvent(new StorageEvent('storage', { key: 'perseverance.recent' })); // regenerates File ▸ Open Recent
+  await window.__app.commands.get('file.openRecent.0').run();
+  await new Promise((r) => setTimeout(r, 300));
+  const text = document.body.innerText;
+  return { explained: text.includes("can't be reopened directly"), notFound: /could not be found/.test(text), stillListed: JSON.parse(localStorage.getItem('perseverance.recent')).some((e) => e.path === p) };
+}, ungranted);
+check('Open Recent without access says so (not "could not be found") and drops the entry', deniedRecent.explained && !deniedRecent.notFound && !deniedRecent.stillListed, deniedRecent);
+
 const grantsFile = path.join(userData, 'file-access.json');
 const grants = fs.existsSync(grantsFile) ? JSON.parse(fs.readFileSync(grantsFile, 'utf8')).files : [];
 check('grants persisted in userData (projects writable, nothing else)', grants.some((g) => g.path === poster && g.write) && !grants.some((g) => g.path === evil || g.path === legacy), grants.map((g) => `${path.basename(g.path)}:${g.write ? 'rw' : 'r'}`));
@@ -551,13 +603,48 @@ t = await T_(app);
 const href = await page.evaluate(() => location.href);
 check('the window never navigates away (http(s) goes to the browser)', /dist\/index\.html$/.test(href) && t.external.includes('https://example.net/nav') && (await page.evaluate(() => !!window.__app)), { href, external: t.external });
 
-/* ---- normal quit: dirty → Discard ---- */
+/* ---- close again while the in-app prompt is open: a native way out after a moment ---- */
 await makeDirty(page);
+let boxesN = (await T_(app)).boxes.length;
 await closeWindow(app);
+const inApp = await poll(() => page.evaluate(() => document.body.innerText.includes('Save changes before closing?')), 6000);
+await closeWindow(app); // quick second click: just keeps the prompt
+await wait(300);
+const quickBoxes = (await T_(app)).boxes.length - boxesN;
+await wait(1600);
+await answerBox(app, 0); // "Wait"
+await closeWindow(app);
+const stuckBox = await poll(async () => (await T_(app)).boxes.slice(boxesN).find((b) => /Quit without answering/.test(b.message)), 4000);
+await wait(300);
+check(
+  'closing again while the unsaved-changes prompt is open offers Quit Anyway (Wait keeps it)',
+  inApp && quickBoxes === 0 && !!stuckBox && stuckBox.buttons.join() === 'Wait,Quit Anyway' && (await windowCount(app)) === 1 && (await page.evaluate(() => document.body.innerText.includes('Save changes before closing?'))),
+  { inApp, quickBoxes, stuckBox },
+);
+
+/* ---- normal quit: dirty → Discard (answering the prompt that is still open) ---- */
 prompted = await answerPrompt(page, 'Save changes before closing?', 'Discard');
 const codeB = await Promise.race([exited, wait(10000).then(() => 'timeout')]);
 check('quit with unsaved changes → Discard exits', prompted && codeB !== 'timeout', { exitCode: codeB });
 if (codeB === 'timeout') await app.close().catch(() => {});
+
+/* ======================================================================== */
+/* Phase C: Windows log off / shut down never blocks on the close guard     */
+/* ======================================================================== */
+({ app, page, exited } = await launch());
+await waitReady(page);
+await page.evaluate(() => window.__app.useUI.setState({ dialogs: [] }));
+await openTemplate(page);
+await makeDirty(page);
+await wait(300);
+await main(app, ({ BrowserWindow }) => {
+  const w = BrowserWindow.getAllWindows()[0];
+  w.emit('session-end');
+  w.close();
+});
+const codeC = await Promise.race([exited, wait(8000).then(() => 'timeout')]);
+check('Windows session end closes without the unsaved-changes prompt', codeC !== 'timeout', { exitCode: codeC });
+if (codeC === 'timeout') await app.close().catch(() => {});
 
 const logFile = path.join(userData, 'logs', 'main.log');
 const mainLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';

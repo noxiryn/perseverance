@@ -298,3 +298,15 @@ Reference images (PNG) are on disk at `docs/reference/` (not committed): `ref1-b
   ImageData math with plain typed arrays (construct `{ data, width, height }` objects), not canvases.
 - Visual check: `npm run dev` + playwright-core with Chromium at
   `/opt/pw-browsers/chromium-1194/chrome-linux/chrome` (see `scripts/` for helpers if present).
+- Desktop (Electron) contract — `electron/main.cjs` + `electron/preload.cjs`, pure helpers in
+  `electron/lib.cjs` (unit-tested in `src/platform/desktopMain.test.ts`): sandboxed, context-isolated
+  renderer without Node; every IPC handler checks the sender frame and argument types; `readFile` /
+  `writeFile` only touch paths the user chose (dialogs, Explorer/Finder/argv; grants persisted in
+  `userData/file-access.json`, writes only for projects and Save targets, crash-safe temp+rename);
+  Save As appends the filter's extension; `openExternal` / `window.open` / navigation hand only
+  http(s) to the browser; permissions: local fonts, clipboard, fullscreen. Single instance (argv
+  forwarded, files queued until the page has loaded), close guard (the renderer must acknowledge
+  `onCloseRequested`, else "Quit Anyway"; closing again while its prompt is open also offers it),
+  crash/unresponsive prompts with Reload, window bounds in `userData/window-state.json`, log in
+  `userData/logs/main.log`. Check the real app with
+  `npx vite build && xvfb-run -a -s "-screen 0 1600x960x24" node scripts/electron-desktop-check.mjs [--full]`.

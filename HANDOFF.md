@@ -67,6 +67,18 @@ starting point; don't rewrite modules from scratch.
   publish one. `release/Perseverance-Setup-0.1.0.exe` on disk predates the module work (stale).
   README install/sharing/build sections describe Releases vs. Actions artifacts.
 
+## Desktop hardening (electron/, checked with scripts/electron-desktop-check.mjs — 42 checks)
+- Security: sandbox + contextIsolation, no Node in the renderer, IPC sender-frame + type checks,
+  file grants (read/write only user-chosen paths, persisted in userData), http(s)-only external links,
+  navigation/popups blocked, permissions limited to local fonts/clipboard/fullscreen, CSP clean in the
+  packaged app, electron-builder fuses (no RunAsNode / NODE_OPTIONS / inspect, app only from asar).
+- Behaviour: single instance + .pgfx association (argv and cwd forwarded; files wait for the page to
+  load — a cold start with a file argument used to spin the main process at 100% CPU and never load),
+  macOS open-file, close guard with ack timeout / "Quit Anyway" / repeated-close way out / forced
+  destroy after 5 s, Windows session end never blocked, window bounds restored, Save As adds `.pgfx`.
+- Crash resilience: render-process-gone / unresponsive prompts (Reload / Quit), main-process log in
+  `userData/logs/main.log` (uncaught exceptions, renderer console errors, crashes).
+
 ## Remaining steps after the modules
 1. **Integrate**: `npm run typecheck` (whole tree) + `npx vite build`; fix cross-module mismatches.
 2. **Pending core requests** (from module reports):

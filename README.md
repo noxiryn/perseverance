@@ -113,6 +113,13 @@ npm run dist:mac     # → release/*.dmg    (on macOS)
 npm run dist:linux   # → release/*.AppImage
 ```
 
+Check the real desktop app (Linux with Xvfb): file-access policy, Save As, second instance and file
+association forwarding, close guard with a hung or crashed window, window state, CSP and permissions:
+
+```bash
+npx vite build && xvfb-run -a -s "-screen 0 1600x960x24" node scripts/electron-desktop-check.mjs
+```
+
 Building the Windows installer on Linux needs Wine with 32-bit support:
 
 ```bash

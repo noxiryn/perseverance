@@ -268,6 +268,49 @@ class FileGrants {
   }
 }
 
+/* ---------------- files opened from the OS ---------------- */
+
+/**
+ * Files the OS hands the app (command line, Explorer double-click forwarded by a second instance,
+ * Finder) before the page can receive them. `ready()` says whether the renderer can take a file now;
+ * `deliver(p)` sends it (and reports its own errors). flush() makes ONE pass over the files waiting at
+ * that moment: one that still can't be delivered stays queued for the next flush and is never retried
+ * in a loop (a synchronous retry loop starved the main process while the page was loading).
+ */
+function createOpenQueue({ ready, deliver }) {
+  const pending = [];
+  const keep = (p) => {
+    if (!pending.includes(p)) pending.push(p);
+  };
+  const send = async (p) => {
+    try {
+      await deliver(p);
+    } catch {
+      /* deliver reports its own errors */
+    }
+  };
+  return {
+    get pending() {
+      return [...pending];
+    },
+    /** Deliver now when the renderer is ready, else keep it for flush(). True when delivery started. */
+    open(p) {
+      if (!ready()) {
+        keep(p);
+        return false;
+      }
+      void send(p);
+      return true;
+    },
+    async flush() {
+      for (const p of pending.splice(0)) {
+        if (ready()) await send(p);
+        else keep(p);
+      }
+    },
+  };
+}
+
 /* ---------------- window state ---------------- */
 
 const DEFAULT_SIZE = { width: 1600, height: 960 };
@@ -402,6 +445,7 @@ module.exports = {
   atomicWriteSync,
   readJsonSync,
   FileGrants,
+  createOpenQueue,
   parseWindowState,
   initialBounds,
   createLogger,

@@ -230,6 +230,47 @@ describe('atomicWrite', () => {
   });
 });
 
+describe('files opened from the OS', () => {
+  it('keeps files until the page is ready and flushes without spinning while it is still loading', async () => {
+    let ready = false;
+    const delivered: string[] = [];
+    const q = lib.createOpenQueue({ ready: () => ready, deliver: async (p: string) => void delivered.push(p) });
+    expect(q.open('C:\\Art\\Poster.pgfx')).toBe(false);
+    q.open('C:\\Art\\Poster.pgfx'); // duplicate (Explorer + argv) is kept once
+    q.open('/Users/me/icon.png');
+    // A flush while the page still can't take files (e.g. 'did-finish-load' with isLoading() true) must
+    // finish and keep them — the old loop re-queued and retried forever, starving the main process.
+    await q.flush();
+    expect(q.pending).toEqual(['C:\\Art\\Poster.pgfx', '/Users/me/icon.png']);
+    expect(delivered).toEqual([]);
+    ready = true;
+    await q.flush();
+    expect(delivered).toEqual(['C:\\Art\\Poster.pgfx', '/Users/me/icon.png']);
+    expect(q.pending).toEqual([]);
+    expect(q.open('/second.pgfx')).toBe(true);
+    await Promise.resolve();
+    expect(delivered.at(-1)).toBe('/second.pgfx');
+  });
+
+  it('a failing delivery does not stop the others', async () => {
+    let ready = false;
+    const delivered: string[] = [];
+    const q = lib.createOpenQueue({
+      ready: () => ready,
+      deliver: async (p: string) => {
+        if (p === '/bad.pgfx') throw new Error('gone');
+        delivered.push(p);
+      },
+    });
+    q.open('/bad.pgfx');
+    q.open('/good.pgfx');
+    ready = true;
+    await q.flush();
+    expect(delivered).toEqual(['/good.pgfx']);
+    expect(q.pending).toEqual([]);
+  });
+});
+
 describe('window state', () => {
   const primary = { x: 0, y: 0, width: 1920, height: 1040 };
   const second = { x: 1920, y: 0, width: 2560, height: 1400 };

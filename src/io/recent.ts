@@ -4,7 +4,7 @@
  */
 import { FileClock, Trash2 } from 'lucide-react';
 import { commands, type CommandDef } from '../registry';
-import { desktop, fileNameOf } from '../platform';
+import { desktop, fileNameOf, isAccessDenied } from '../platform';
 import { toast } from '../state/ui';
 import { pushRecent, type RecentFile } from './math';
 import { readJSON, writeJSON } from './util';
@@ -49,9 +49,11 @@ export async function openRecentFile(entry: RecentFile) {
   let data: ArrayBuffer;
   try {
     data = await desktop.readFile(entry.path);
-  } catch {
+  } catch (e) {
     removeRecentFile(entry.path);
-    toast(`“${entry.name}” could not be found and was removed from Open Recent.`, 'error', 4200);
+    // The desktop app only reopens files the user chose before (see electron/main.cjs file grants).
+    if (isAccessDenied(e)) toast(`“${entry.name}” can't be reopened directly any more — choose it with File ▸ Open.`, 'error', 4200);
+    else toast(`“${entry.name}” could not be found and was removed from Open Recent.`, 'error', 4200);
     return;
   }
   const { openFile } = await import('./open');
