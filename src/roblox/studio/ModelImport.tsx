@@ -405,5 +405,6 @@ export async function openModelImport(opts: { files?: OpenedFile[] | ModelFile[]
     if (!picked.length) return undefined;
     files = picked.map((f) => ({ name: f.name, data: f.data }));
   }
-  return openDialog<unknown, ModelImportProps>(ModelImportDialog, { files, layerId: opts.layerId ?? null });
+  // A large editor: a stray click on the backdrop must not close it (Esc / Cancel still do).
+  return openDialog<unknown, ModelImportProps>(ModelImportDialog, { files, layerId: opts.layerId ?? null }, { closeOnBackdrop: false });
 }

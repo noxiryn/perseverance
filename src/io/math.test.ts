@@ -21,6 +21,7 @@ import {
   safeFileName,
   scaleTransform,
   scaleTransformExact,
+  sizeEstimateFactor,
   turnAffine,
   axisAlignment,
   strokeCoverage,
@@ -403,5 +404,29 @@ describe('Image Size of rotated/skewed layers (exact decomposition)', () => {
     expect('skewX' in r).toBe(false);
     expect(r.scaleX).toBeCloseTo(2, 9);
     expect(r.scaleY).toBeCloseTo(3, 9);
+  });
+});
+
+describe('export file size estimate', () => {
+  it('is 1 when the preview is the export', () => {
+    expect(sizeEstimateFactor(1, 1)).toBe(1);
+    expect(sizeEstimateFactor(2, 2)).toBe(1);
+    expect(sizeEstimateFactor(0, 2)).toBe(1);
+  });
+  it('grows almost linearly with pixels below native resolution', () => {
+    // 4× fewer pixels in the preview → close to 4× the bytes.
+    const f = sizeEstimateFactor(0.5, 1);
+    expect(f).toBeGreaterThan(3.5);
+    expect(f).toBeLessThan(4);
+  });
+  it('grows sub-linearly for upscaled exports (calibrated on a 1920×1080 thumbnail)', () => {
+    // Measured: 1× ≈ 1.80 MB, 2× ≈ 5.16 MB, 4× ≈ 15.1 MB PNG.
+    expect(1.8 * sizeEstimateFactor(1, 2)).toBeGreaterThan(5.16 * 0.85);
+    expect(1.8 * sizeEstimateFactor(1, 2)).toBeLessThan(5.16 * 1.15);
+    expect(1.8 * sizeEstimateFactor(1, 4)).toBeGreaterThan(15.1 * 0.85);
+    expect(1.8 * sizeEstimateFactor(1, 4)).toBeLessThan(15.1 * 1.15);
+  });
+  it('combines both regimes when the preview is below native and the export above', () => {
+    expect(sizeEstimateFactor(0.5, 2)).toBeCloseTo(sizeEstimateFactor(0.5, 1) * sizeEstimateFactor(1, 2), 9);
   });
 });

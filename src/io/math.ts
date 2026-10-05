@@ -297,6 +297,23 @@ export function fitWithin(w: number, h: number, maxW: number, maxH: number): num
   return Math.min(1, maxW / w, maxH / h);
 }
 
+/**
+ * Factor that turns the encoded size of a reduced preview (rendered at `previewScale`, doc → output)
+ * into an estimate for the full export (at `fullScale`). Measured on typical thumbnails: below the
+ * document's native resolution, encoded size grows almost linearly with the pixel count
+ * (bytes ∝ px^0.95); beyond it (upscaled exports) the extra pixels are interpolated/anti-aliased
+ * and compress much better (bytes ∝ px^0.77) — a plain pixel ratio overestimated a 4× PNG by 75%.
+ */
+export function sizeEstimateFactor(previewScale: number, fullScale: number): number {
+  if (!(previewScale > 0) || !(fullScale > previewScale)) return 1;
+  let f = 1;
+  const subTo = Math.min(fullScale, 1);
+  if (subTo > previewScale) f *= (subTo / previewScale) ** (2 * 0.95);
+  const upFrom = Math.max(previewScale, 1);
+  if (fullScale > upFrom) f *= (fullScale / upFrom) ** (2 * 0.77);
+  return f;
+}
+
 /** Human-readable byte size. */
 export function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n < 0) return '—';

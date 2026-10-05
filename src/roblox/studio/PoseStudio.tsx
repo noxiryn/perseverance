@@ -615,5 +615,6 @@ export function PoseStudioDialog({ close, layerId }: PoseStudioProps & { close: 
 
 /** Open Pose Studio (optionally re-editing a rig render layer). Resolves true when a layer was added/updated. */
 export function openPoseStudio(opts: { layerId?: string | null } = {}) {
-  return openDialog<unknown, PoseStudioProps>(PoseStudioDialog, { layerId: opts.layerId ?? null });
+  // A large editor: a stray click on the backdrop must not close it (Esc / Cancel still do).
+  return openDialog<unknown, PoseStudioProps>(PoseStudioDialog, { layerId: opts.layerId ?? null }, { closeOnBackdrop: false });
 }

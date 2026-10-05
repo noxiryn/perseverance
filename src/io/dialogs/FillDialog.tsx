@@ -220,7 +220,11 @@ export function FillDialog({ close }: { close: (r?: FillSpec) => void }) {
           disabled={transparencyLock}
           onChange={(v) => set('preserveTransparency', v)}
           label="Preserve Transparency"
-          title={transparencyLock ? 'The layer locks transparent pixels, so only existing pixels are changed' : 'Only change pixels that are not transparent'}
+          title={
+            transparencyLock
+              ? 'The layer locks transparent pixels, so only existing pixels are changed'
+              : 'Only change pixels that are not transparent'
+          }
         />
       </div>
     </Dialog>

@@ -32,4 +32,4 @@ commands.registerMany(viewportCommands);
 export * from './snap';
 export { applyCrop } from './cropApply';
 export { openColorRange, closeColorRange } from './colorRange';
-export { startFreeTransform, startSelectionTransform, commitTransform, cancelTransform, activeTransform } from './transform/controller';
+export { startFreeTransform, startSelectionTransform, commitTransform, cancelTransform, activeTransform, settleTransform, commitBesideTransform } from './transform/controller';

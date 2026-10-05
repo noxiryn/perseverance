@@ -37,6 +37,15 @@ function arrowFor(cell: number, anchor: number) {
   return ARROWS[(dy + 1) * 3 + (dx + 1)];
 }
 
+/** What the new canvas area will show. */
+function extensionNote(doc: Document, hasBackground: boolean): string {
+  if (hasBackground) return 'The extension color fills new area on the Background layer; other layers keep their pixels.';
+  const bottom = doc.layers[doc.rootIds[0]];
+  if (bottom?.type === 'fill' && bottom.visible) return `The “${bottom.name}” fill layer covers the new area.`;
+  if (doc.background) return 'There is no Background layer: new area shows the document background color.';
+  return 'There is no Background layer, so new areas stay transparent.';
+}
+
 export function CanvasSizeDialog({ close, doc }: { close: (r?: CanvasSizeResult) => void; doc: Document }) {
   const primary = useEditor((s) => s.primaryColor);
   const secondary = useEditor((s) => s.secondaryColor);
@@ -167,9 +176,7 @@ export function CanvasSizeDialog({ close, doc }: { close: (r?: CanvasSizeResult)
           {w} × {h} px
         </b>
         .{' '}
-        {hasBackground
-          ? 'The extension color fills new area on the Background layer; other layers keep their pixels.'
-          : 'There is no Background layer, so new areas stay transparent.'}
+        {extensionNote(doc, hasBackground)}
       </div>
     </Dialog>
   );

@@ -50,6 +50,9 @@ export function Dialog({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const entryId = useContext(DialogIdContext);
+  // Latest onSubmit: after an Enter blur-commit the parent re-renders with fresh state before we submit.
+  const submitRef = useRef(onSubmit);
+  submitRef.current = onSubmit;
 
   useEffect(() => {
     if (!entryId) return;
@@ -72,8 +75,9 @@ export function Dialog({
       } else if (e.key === 'Enter' && onSubmit && (e.target as HTMLElement)?.tagName !== 'TEXTAREA') {
         e.stopPropagation();
         e.preventDefault();
-        // Let a focused NumberField/TextInput commit its typed text first (it commits on blur).
-        if (commitFocusedField()) window.setTimeout(onSubmit, 0);
+        // Let a focused NumberField/TextInput commit its typed text first (it commits on blur),
+        // then submit with the re-rendered (latest) handler.
+        if (commitFocusedField()) requestAnimationFrame(() => window.setTimeout(() => submitRef.current?.(), 0));
         else onSubmit();
       }
     };

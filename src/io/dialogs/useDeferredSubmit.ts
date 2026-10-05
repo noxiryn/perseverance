@@ -1,12 +1,13 @@
 import { useCallback, useRef } from 'react';
 
 /**
- * Enter-to-submit that respects fields still being edited.
+ * Enter-to-submit that always sees committed field values.
  *
- * The shared <Dialog> handles Enter in the capture phase, i.e. BEFORE a focused NumberField has
- * committed its typed text (NumberField commits on blur). This wrapper blurs the focused field
- * first (committing its value through React state), then runs the LATEST `submit` closure on the
- * next task, after React has re-rendered with the committed value.
+ * NumberField/TextInput commit their typed text on blur. The shared <Dialog> blurs a focused text
+ * field on Enter and calls onSubmit on the next tick — but it calls the onSubmit closure from the
+ * render BEFORE the commit, which still holds the old values. This returns a stable callback
+ * that runs the LATEST `submit` closure (and blurs a still-focused field first when it is called
+ * from a button), so the dialog submits exactly what the user typed.
  */
 export function useDeferredSubmit(submit: () => void): () => void {
   const latest = useRef(submit);

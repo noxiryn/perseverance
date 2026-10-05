@@ -375,7 +375,8 @@ export function readAlpha(c: HTMLCanvasElement, r: LocalRect): Uint8Array {
   const img = ctx2d(c).getImageData(r.x, r.y, r.w, r.h).data;
   const n = r.w * r.h;
   const a = new Uint8Array(n);
-  for (let i = 0, j = 3; i < n; i++, j += 4) a[i] = img[j];
+  const d32 = new Uint32Array(img.buffer, img.byteOffset, n);
+  for (let i = 0; i < n; i++) a[i] = d32[i] >>> 24;
   return a;
 }
 

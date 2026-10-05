@@ -23,8 +23,8 @@ ARCHITECTURE.md §3 for each module's full feature list).
 | adjustments | `src/filters/adjustments` | **done** |
 | fonts-color (86 bundled fonts, swatches/color/fonts panels) | `src/fonts`, `src/presets` | **done** |
 | renderer (compositor, text, shapes, layer styles) | `src/render` | in review |
-| viewport-select (canvas, selection/transform/crop tools, Select/View menus) | `src/viewport` | in review |
-| roblox (Pose Studio, remove bg, styler, safe zones, preview) | `src/roblox` | in review |
+| viewport-select (canvas, selection/transform/crop tools, Select/View menus) | `src/viewport` | **done** |
+| roblox (Pose Studio, remove bg, styler, safe zones, preview) | `src/roblox` | **done** |
 | io (projects, export, PSD, clipboard, autosave, File/Edit/Image menus) | `src/io` | in review |
 | type-shape (type tool, character panel, shapes + presets) | `src/tools/type`, `src/tools/shape` | **done** |
 | looks-templates (looks engine, templates, doc presets) | `src/looks`, `src/templates` | **done** |
@@ -53,6 +53,11 @@ starting point; don't rewrite modules from scratch.
      `renderLayer`) so layers-panels' Rasterize Layer Style is exact for non-Normal blend layers.
    - (done) shell start screen / palette open templates via openTemplate(id) from src/templates (character
      selected); palette looks use currentTargetId().
+   - Optional: editor store `beforeCommit` hook so Free Transform can commit itself before another command
+     (viewport currently repairs history via transform/historySplit.ts).
+   - Optional: FilterContext.contentRect so edge-sensitive filters (rim-light, toon) know the real layer box.
+   - (done) viewport.fit accounts for rulers; Alt+wheel no longer focuses the menu bar; Dialog submits with the
+     latest onSubmit after Enter blur-commit.
    - (done) NumberField `disabled` prop; (done) NumberField arrow keys keep the displayed text in sync.
    - renderer: export `warpPoint`/`isWarpActive`/`ITALIC_SKEW` from compositor.ts (type tool imports warpMath.ts directly).
    - viewport move tool: call `editTextLayer(layerId, {at})` from src/tools/type on double-click of a text layer

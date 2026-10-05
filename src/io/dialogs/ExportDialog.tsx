@@ -38,7 +38,7 @@ interface Rendered {
   width: number;
   height: number;
   reduced: boolean;
-  ratio: number;
+  estimateFactor: number;
 }
 
 export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc: Document }) {
@@ -64,7 +64,7 @@ export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc:
       try {
         const p = await renderExportPreview(doc, o);
         if (id !== job.current) return;
-        const base = { key, canvas: p.canvas, width: p.width, height: p.height, reduced: p.reduced, ratio: p.ratio };
+        const base = { key, canvas: p.canvas, width: p.width, height: p.height, reduced: p.reduced, estimateFactor: p.estimateFactor };
         setRendered({ ...base, blob: null });
         setError(null);
         const blob = await encodeExport(p.canvas, o);
@@ -143,7 +143,7 @@ export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc:
 
   const submitOnEnter = useDeferredSubmit(() => void doExport());
   const out = rendered?.key === key ? rendered : null;
-  const estimate = out?.blob ? out.blob.size * (out.reduced ? out.ratio : 1) : null;
+  const estimate = out?.blob ? out.blob.size * out.estimateFactor : null;
   const preset = SIZE_PRESETS.find((p) => p.id === o.presetId);
   // What Cover / Fit does when the aspect ratios differ.
   let fitNote: string | null = null;

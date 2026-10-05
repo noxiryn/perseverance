@@ -6,6 +6,10 @@
  * the distance (px) from its center to the estimated shape edge, with a sub-pixel correction
  * from the coverage of the nearest site and of the pixel itself — giving smooth edges after a
  * 1px ramp.
+ *
+ * Memory traffic is kept low (this runs on every stroke/bevel render): one Int32 map holding,
+ * per pixel, the row of the nearest site in its column; site tests are recomputed from the
+ * coverage; the squared vertical distances live in a single row buffer.
  */
 
 let fBuf = new Float64Array(0);
@@ -58,6 +62,32 @@ function dt1d(n: number) {
   }
 }
 
+/** Per pixel: row of the nearest site in the same column (−1 = none). */
+let gyBuf = new Int32Array(0);
+/** Per column: last site row seen by the current sweep. */
+let colBuf = new Int32Array(0);
+/** Squared vertical distance per column for the row being finished. */
+let rowG = new Float64Array(0);
+let nearBuf = new Int32Array(0);
+
+/**
+ * Per-pixel scratch maps (4 bytes/px) are pooled between calls up to this many pixels; larger
+ * maps (e.g. a 4× export of a full-canvas stroked layer) are released after the call instead of
+ * staying allocated for the rest of the session.
+ */
+export const POOLED_MAP_PIXELS = 4 * 1024 * 1024;
+
+function trimMaps() {
+  if (gyBuf.length > POOLED_MAP_PIXELS) gyBuf = new Int32Array(0);
+}
+
+/** Currently pooled scratch-map size in pixels (tests / diagnostics). */
+export function pooledMapPixels(): number {
+  return gyBuf.length;
+}
+
+const INF_I = 1 << 30;
+
 /**
  * Distance from each pixel to the edge of the shape described by `cov` (0..255 coverage).
  *  - mode 'outside': distance for pixels outside the shape (0 inside).
@@ -65,78 +95,38 @@ function dt1d(n: number) {
  * The result is in pixels, sub-pixel corrected, ≥ 0. Pixels farther than `maxDist` may be
  * clamped to `maxDist` (pass Infinity for exact).
  */
-let siteBuf = new Uint8Array(0);
-let gBuf = new Float32Array(0);
-let gyBuf = new Int32Array(0);
-let colBuf = new Int32Array(0);
-
-/**
- * Per-pixel scratch maps (9 bytes/px) are pooled between calls up to this many pixels; larger
- * maps (e.g. a 4× export of a full-canvas stroked layer) are released after the call instead of
- * staying allocated for the rest of the session.
- */
-export const POOLED_MAP_PIXELS = 4 * 1024 * 1024;
-
-function trimMaps() {
-  if (siteBuf.length > POOLED_MAP_PIXELS) {
-    siteBuf = new Uint8Array(0);
-    gBuf = new Float32Array(0);
-    gyBuf = new Int32Array(0);
-  }
-}
-
-/** Currently pooled scratch-map size in pixels (tests / diagnostics). */
-export function pooledMapPixels(): number {
-  return siteBuf.length;
-}
-
-function ensureMap(n: number, w: number) {
-  if (siteBuf.length < n) {
-    siteBuf = new Uint8Array(n);
-    gBuf = new Float32Array(n);
-    gyBuf = new Int32Array(n);
-  }
-  if (colBuf.length < w) colBuf = new Int32Array(w);
-}
-
 export function edgeDistance(cov: Uint8Array | Uint8ClampedArray, w: number, h: number, mode: 'outside' | 'inside', maxDist = Infinity): Float32Array {
   const n = w * h;
   const out = new Float32Array(n);
   if (!n) return out;
-  ensureMap(n, w);
+  if (gyBuf.length < n) gyBuf = new Int32Array(n);
+  if (colBuf.length < w) colBuf = new Int32Array(w);
+  if (rowG.length < w) rowG = new Float64Array(w);
+  if (nearBuf.length < w) nearBuf = new Int32Array(w);
   ensure(Math.max(w, h));
-  const site = siteBuf;
   const outside = mode === 'outside';
-  // Pass 1, forward sweep (row-major for cache locality), fused with site detection: per
-  // column, squared vertical distance to the last site above and that site's row.
-  const g = gBuf;
+  // A site is a pixel of the other class (inside pixels when measuring outside, and vice versa):
+  // coverage in [lo, hi).
+  const lo = outside ? 128 : 0;
+  const hi = outside ? 256 : 128;
   const gy = gyBuf;
   const col = colBuf;
+  const G = rowG;
+  const near = nearBuf;
+  // Pass 1, forward sweep (row-major): per column, the row of the last site above.
   col.fill(-1, 0, w);
   for (let y = 0; y < h; y++) {
     const row = y * w;
     for (let x = 0; x < w; x++) {
-      const i = row + x;
-      const s = outside ? cov[i] >= 128 : cov[i] < 128;
-      site[i] = s ? 1 : 0;
-      if (s) col[x] = y;
-      const last = col[x];
-      if (last >= 0) {
-        const dy = y - last;
-        g[i] = dy * dy;
-        gy[i] = last;
-      } else {
-        g[i] = INF;
-        gy[i] = -1;
-      }
+      const c = cov[row + x];
+      if (c >= lo && c < hi) col[x] = y;
+      gy[row + x] = col[x];
     }
   }
   // Backward sweep fused with pass 2: once row y has seen the sites below it, its column
-  // distances are final and its 1D envelope can run immediately (one less pass over memory).
+  // distances are final and its 1D envelope can run immediately.
   const md2 = Number.isFinite(maxDist) ? (maxDist + 2) * (maxDist + 2) : INF;
   const R = Number.isFinite(maxDist) ? Math.ceil(maxDist) + 3 : w;
-  if (nearBuf.length < w) nearBuf = new Int32Array(w);
-  near = nearBuf;
   col.fill(-1, 0, w);
   for (let y = h - 1; y >= 0; y--) {
     const row = y * w;
@@ -146,45 +136,68 @@ export function edgeDistance(cov: Uint8Array | Uint8ClampedArray, w: number, h: 
     let minG = INF;
     for (let x = 0; x < w; x++) {
       const i = row + x;
-      if (site[i]) col[x] = y;
-      else allSite = false;
-      const next = col[x];
-      if (next >= 0) {
-        const dy = next - y;
-        if (dy * dy < g[i]) {
-          g[i] = dy * dy;
-          gy[i] = next;
+      const c = cov[i];
+      if (c >= lo && c < hi) {
+        col[x] = y;
+        G[x] = 0;
+        minG = 0;
+        continue;
+      }
+      allSite = false;
+      const up = gy[i];
+      const dn = col[x];
+      let d2 = INF;
+      if (up >= 0) {
+        const dy = y - up;
+        d2 = dy * dy;
+      }
+      if (dn >= 0) {
+        const dy = dn - y;
+        // ties keep the site above (as the forward sweep found it)
+        if (dy * dy < d2) {
+          d2 = dy * dy;
+          gy[i] = dn;
         }
       }
-      if (g[i] < minG) minG = g[i];
+      G[x] = d2;
+      if (d2 < minG) minG = d2;
     }
     if (allSite) continue;
     if (minG >= md2) {
-      out.fill(maxDist, row, row + w);
+      for (let x = 0; x < w; x++) {
+        const c = cov[row + x];
+        if (!(c >= lo && c < hi)) out[row + x] = maxDist;
+      }
       continue;
     }
     if (R >= w) {
-      envelope(cov, w, mode, maxDist, md2, out, row, 0, w, 0, w);
+      envelope(cov, w, outside, maxDist, md2, out, row, 0, w, 0, w, lo, hi);
       continue;
     }
     // Bounded distance: a pixel can be closer than maxDist + 2 only through a column with
-    // g < md2 within R columns. Run the envelope only over windows of ±R around such pixels
+    // G < md2 within R columns. Run the envelope only over windows of ±R around such pixels
     // (the deep interior and far exterior of large shapes are skipped entirely).
     let lastRel = -INF_I;
     for (let x = 0; x < w; x++) {
-      if (g[row + x] < md2) lastRel = x;
+      if (G[x] < md2) lastRel = x;
       near[x] = x - lastRel;
     }
     lastRel = INF_I;
     for (let x = w - 1; x >= 0; x--) {
-      if (g[row + x] < md2) lastRel = x;
+      if (G[x] < md2) lastRel = x;
       if (lastRel - x < near[x]) near[x] = lastRel - x;
     }
     let x = 0;
     while (x < w) {
       // Next candidate (non-site pixel with a relevant column in reach).
-      while (x < w && (site[row + x] || near[x] > R)) {
-        if (!site[row + x]) out[row + x] = maxDist;
+      while (x < w) {
+        const c = cov[row + x];
+        if (c >= lo && c < hi) {
+          x++;
+          continue;
+        }
+        if (near[x] <= R) break;
+        out[row + x] = maxDist;
         x++;
       }
       if (x >= w) break;
@@ -192,13 +205,16 @@ export function edgeDistance(cov: Uint8Array | Uint8ClampedArray, w: number, h: 
       let c1 = x; // last candidate of this run of overlapping windows
       x++;
       while (x < w && x <= c1 + 2 * R + 1) {
-        if (!site[row + x] && near[x] <= R) c1 = x;
-        else if (!site[row + x]) out[row + x] = maxDist;
+        const c = cov[row + x];
+        if (!(c >= lo && c < hi)) {
+          if (near[x] <= R) c1 = x;
+          else out[row + x] = maxDist;
+        }
         x++;
       }
       const s0 = Math.max(0, c0 - R);
       const s1 = Math.min(w, c1 + R + 1);
-      envelope(cov, w, mode, maxDist, md2, out, row, s0, s1, c0, c1 + 1);
+      envelope(cov, w, outside, maxDist, md2, out, row, s0, s1, c0, c1 + 1, lo, hi);
       // Pixels in (c1, x) were non-candidates (already resolved); continue from x.
     }
   }
@@ -206,26 +222,35 @@ export function edgeDistance(cov: Uint8Array | Uint8ClampedArray, w: number, h: 
   return out;
 }
 
-const INF_I = 1 << 30;
-let nearBuf = new Int32Array(0);
-let near = nearBuf;
-
 /**
  * 1D envelope over columns [s0, s1) of a row and final (sub-pixel corrected) distances for the
  * non-site pixels in [o0, o1) (whose ±R windows lie inside [s0, s1)).
  */
-function envelope(cov: Uint8Array | Uint8ClampedArray, w: number, mode: 'outside' | 'inside', maxDist: number, md2: number, out: Float32Array, row: number, s0: number, s1: number, o0: number, o1: number) {
+function envelope(
+  cov: Uint8Array | Uint8ClampedArray,
+  w: number,
+  outside: boolean,
+  maxDist: number,
+  md2: number,
+  out: Float32Array,
+  row: number,
+  s0: number,
+  s1: number,
+  o0: number,
+  o1: number,
+  lo: number,
+  hi: number,
+) {
   const f = fBuf;
-  const g = gBuf;
+  const G = rowG;
   const gy = gyBuf;
-  const site = siteBuf;
   const len = s1 - s0;
-  for (let k = 0; k < len; k++) f[k] = g[row + s0 + k];
+  for (let k = 0; k < len; k++) f[k] = G[s0 + k];
   dt1d(len);
   for (let x = o0; x < o1; x++) {
     const i = row + x;
-    if (site[i]) continue;
     const a = cov[i];
+    if (a >= lo && a < hi) continue;
     const d2 = dBuf[x - s0];
     if (d2 >= md2) {
       out[i] = maxDist;
@@ -237,13 +262,13 @@ function envelope(cov: Uint8Array | Uint8ClampedArray, w: number, mode: 'outside
     if (sy >= 0) {
       // Sub-pixel correction: the edge lies (coverage - 0.5) beyond the nearest site's center.
       const sa = cov[sy * w + sx] / 255;
-      d -= mode === 'outside' ? sa - 0.5 : 0.5 - sa;
+      d -= outside ? sa - 0.5 : 0.5 - sa;
     } else {
       d -= 0.5;
     }
     // A partially covered pixel bounds the distance from above by its own coverage.
-    if (mode === 'outside' ? a > 0 : a < 255) {
-      const own = mode === 'outside' ? 0.5 - a / 255 : a / 255 - 0.5;
+    if (outside ? a > 0 : a < 255) {
+      const own = outside ? 0.5 - a / 255 : a / 255 - 0.5;
       if (own < d) d = own;
     }
     out[i] = d > 0 ? d : 0;

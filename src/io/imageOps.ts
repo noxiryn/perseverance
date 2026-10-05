@@ -145,7 +145,12 @@ export function resizeImage(newW: number, newH: number, opts: { method?: Resampl
         const h = Math.max(1, Math.round(l.height * fy));
         const cx = (l.transform.x + l.width / 2) * sx;
         const cy = (l.transform.y + l.height / 2) * sy;
-        newRaster.set(l.id, { id: bitmaps.add(resample(src, w, h, method)), w, h, transform: { ...l.transform, x: cx - w / 2, y: cy - h / 2 } });
+        newRaster.set(l.id, {
+          id: bitmaps.add(resample(src, w, h, method)),
+          w,
+          h,
+          transform: { ...l.transform, x: cx - w / 2, y: cy - h / 2 },
+        });
       } else {
         newRaster.set(l.id, { id: null, w: l.width, h: l.height, transform: scaleTransformExact(l.transform, l.width, l.height, sx, sy) });
       }

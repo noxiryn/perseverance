@@ -262,6 +262,8 @@ function onPointerDown() {
 function onWheel(e: WheelEvent) {
   // Block Chromium page zoom; the viewport handles Ctrl+wheel itself.
   if (e.ctrlKey) e.preventDefault();
+  // Alt+wheel zooms the canvas: releasing Alt afterwards must not focus the menu bar.
+  if (e.altKey) altAlone = false;
 }
 
 function onContextMenu(e: MouseEvent) {

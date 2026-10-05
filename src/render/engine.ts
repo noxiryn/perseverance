@@ -483,9 +483,12 @@ function readAlphaPadded(c: HTMLCanvasElement, r: LocalRect): Uint8Array {
   const i = intersectRect(r, { x: 0, y: 0, w: c.width, h: c.height });
   if (!i) return out;
   const d = ctx2d(c).getImageData(i.x, i.y, i.w, i.h).data;
+  // One 32-bit load per pixel (alpha = top byte of the little-endian RGBA word).
+  const d32 = new Uint32Array(d.buffer, d.byteOffset, d.length >> 2);
   for (let y = 0; y < i.h; y++) {
     let o = (i.y - r.y + y) * r.w + (i.x - r.x);
-    for (let x = 0, j = y * i.w * 4 + 3; x < i.w; x++, j += 4) out[o++] = d[j];
+    const end = (y + 1) * i.w;
+    for (let j = y * i.w; j < end; j++) out[o++] = d32[j] >>> 24;
   }
   return out;
 }

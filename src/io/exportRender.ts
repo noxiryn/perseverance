@@ -8,7 +8,7 @@ import { renderDocument } from '../render/compositor';
 import { saveFile } from '../platform';
 import { activeSession } from '../state/editor';
 import { toast } from '../state/ui';
-import { fitRect, formatBytes, safeFileName, type FitMode } from './math';
+import { fitRect, formatBytes, safeFileName, sizeEstimateFactor, type FitMode } from './math';
 import { ensureFontsFor, readJSON, writeJSON } from './util';
 
 export type ExportFormat = 'png' | 'jpeg' | 'webp';
@@ -173,8 +173,8 @@ export interface ExportPreview {
   height: number;
   /** True when `canvas` is a reduced render (the full image is rendered on export). */
   reduced: boolean;
-  /** Full pixels ÷ preview pixels — scales an encoded preview's byte count into an estimate. */
-  ratio: number;
+  /** Multiplies the encoded preview's byte count into a full-size estimate (1 when not reduced). */
+  estimateFactor: number;
 }
 
 /**
@@ -187,7 +187,9 @@ export async function renderExportPreview(doc: Document, o: ExportOptions): Prom
   const px = plan.width * plan.height;
   const k = px > LARGE_EXPORT_PIXELS ? Math.sqrt(PREVIEW_PIXELS / px) : 1;
   const canvas = drawPlan(doc, o, plan, k);
-  return { canvas, width: plan.width, height: plan.height, reduced: k < 1, ratio: px / (canvas.width * canvas.height) };
+  // Effective preview scale from the actual (rounded) canvas size.
+  const previewScale = plan.scale * Math.sqrt((canvas.width * canvas.height) / px);
+  return { canvas, width: plan.width, height: plan.height, reduced: k < 1, estimateFactor: k < 1 ? sizeEstimateFactor(previewScale, plan.scale) : 1 };
 }
 
 /** Wait until the browser has painted (so a toast / busy state shows before a long synchronous render). */

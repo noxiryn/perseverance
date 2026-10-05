@@ -5,6 +5,10 @@
  */
 import type { Point } from '../core/types';
 import { activeSession, useEditor } from '../state/editor';
+import { useUI } from '../state/ui';
+
+/** Width/height of the viewport rulers in CSS px (when View ▸ Rulers is on). */
+export const RULER_SIZE = 18;
 
 export interface ViewportImpl {
   /** Size of the viewport element in CSS px. */
@@ -96,13 +100,24 @@ export const viewport = {
     viewport.zoomTo(viewport.zoom() * factor, anchor);
   },
 
-  /** Fit the document in the viewport with some padding. */
-  fit(padding = 48) {
+  /**
+   * Fit the document in the viewport with some padding. `insets` reserve screen space on each side
+   * (e.g. rulers); when omitted, visible rulers (18px top/left) are accounted for automatically.
+   */
+  fit(padding = 48, insets?: { top?: number; left?: number; right?: number; bottom?: number }) {
     const s = activeSession();
     if (!s) return;
     const size = viewport.getSize();
-    const z = Math.min((size.width - padding * 2) / s.doc.width, (size.height - padding * 2) / s.doc.height);
-    useEditor.getState().setView({ zoom: Math.max(0.02, Math.min(z, 16)), panX: 0, panY: 0 });
+    const ins = insets ?? (useUI.getState().view.rulers ? { top: RULER_SIZE, left: RULER_SIZE } : {});
+    const t = ins.top ?? 0,
+      l = ins.left ?? 0,
+      r = ins.right ?? 0,
+      b = ins.bottom ?? 0;
+    const availW = size.width - l - r - padding * 2;
+    const availH = size.height - t - b - padding * 2;
+    const z = Math.min(availW / s.doc.width, availH / s.doc.height);
+    // Center within the area left by the insets (pan is relative to the viewport center).
+    useEditor.getState().setView({ zoom: Math.max(0.02, Math.min(z, 16)), panX: (l - r) / 2, panY: (t - b) / 2 });
   },
 
   actualPixels() {
