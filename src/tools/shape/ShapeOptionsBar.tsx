@@ -14,7 +14,7 @@ import {
   keyAppliesToKind,
   optionsFromShape,
   shapeDefaults,
-  writeShapeOption,
+  writeShapeOptions,
   type EditPhase,
   type ShapeToolId,
   type ShapeToolOptions,
@@ -63,6 +63,31 @@ export function useShapeView(toolId: ShapeToolId) {
   return { view, layer, primary, secondary };
 }
 
+/**
+ * Change several options at once: they are written to the tool options and, when a shape layer is
+ * active, applied to it in ONE edit (one history step on commit) computed from the same merged
+ * view, so dependent keys (stroke on + width) never undo each other.
+ */
+export function setShapeOptions(toolId: ShapeToolId, view: ShapeToolOptions, layer: ShapeLayer | null, patch: Partial<ShapeToolOptions>, phase: EditPhase, label?: string) {
+  const keys = Object.keys(patch) as (keyof ShapeToolOptions)[];
+  if (!keys.length) return;
+  writeShapeOptions(toolId, patch);
+  if (!layer) return;
+  const kind = layer.shape.kind;
+  const applicable = keys.filter((k) => keyAppliesToKind(k, kind) && (SHARED_KEYS.has(k) || kind === TOOL_KIND[toolId]));
+  if (!applicable.length) return;
+  const { primaryColor, secondaryColor } = useEditor.getState();
+  const next: ShapeToolOptions = { ...view, ...patch };
+  editShapeLayer(
+    layer.id,
+    (l) => {
+      for (const k of applicable) applyOptionToShape(l, k, next, primaryColor, secondaryColor, (id) => shapePresets.get(id));
+    },
+    phase,
+    label ?? LABELS[applicable[applicable.length - 1]] ?? 'Edit Shape',
+  );
+}
+
 export function setShapeOption<K extends keyof ShapeToolOptions>(
   toolId: ShapeToolId,
   view: ShapeToolOptions,
@@ -71,14 +96,31 @@ export function setShapeOption<K extends keyof ShapeToolOptions>(
   value: ShapeToolOptions[K],
   phase: EditPhase,
 ) {
-  writeShapeOption(toolId, key, value);
-  if (!layer) return;
-  const kind = layer.shape.kind;
-  if (!keyAppliesToKind(key, kind)) return;
-  if (!SHARED_KEYS.has(key) && kind !== TOOL_KIND[toolId]) return;
-  const { primaryColor, secondaryColor } = useEditor.getState();
-  const next = { ...view, [key]: value } as ShapeToolOptions;
-  editShapeLayer(layer.id, (l) => applyOptionToShape(l, key, next, primaryColor, secondaryColor, (id) => shapePresets.get(id)), phase, LABELS[key] ?? 'Edit Shape');
+  setShapeOptions(toolId, view, layer, { [key]: value } as Partial<ShapeToolOptions>, phase);
+}
+
+/**
+ * Stroke width from the options bar. A positive width turns the stroke on (in the same edit).
+ * While scrubbing, an existing stroke only changes width (0 included) so its colour, alignment,
+ * dash and joins survive dragging through 0; a width of 0 removes the stroke on commit.
+ */
+export function setShapeStrokeWidth(toolId: ShapeToolId, view: ShapeToolOptions, layer: ShapeLayer | null, v: number, phase: EditPhase) {
+  const width = Math.max(0, Number.isFinite(v) ? v : 0);
+  const patch: Partial<ShapeToolOptions> = { strokeWidth: width };
+  if (width > 0 && !view.strokeOn) patch.strokeOn = true;
+  if (phase === 'live' && layer?.shape.stroke) {
+    writeShapeOptions(toolId, patch);
+    editShapeLayer(
+      layer.id,
+      (l) => {
+        if (l.shape.stroke) l.shape.stroke.width = width;
+      },
+      'live',
+      'Stroke Width',
+    );
+    return;
+  }
+  setShapeOptions(toolId, view, layer, patch, phase, 'Stroke Width');
 }
 
 export function ShapeOptionsBar() {
@@ -94,15 +136,12 @@ export function ShapeOptionsBar() {
       <span className="shape-opts-label">Fill</span>
       <FillButton
         value={{ mode: view.fillMode, color: view.fillColor || primary, gradient }}
-        onMode={(m) => {
-          if (m === 'gradient' && !view.fillGradient) writeShapeOption(toolId, 'fillGradient', gradient);
-          set('fillMode', m);
-        }}
+        onMode={(m) => setShapeOptions(toolId, view, layer, m === 'gradient' && !view.fillGradient ? { fillMode: m, fillGradient: gradient } : { fillMode: m }, 'commit', 'Shape Fill')}
         onColor={(c, phase) => set('fillColor', c, phase)}
         onGradient={(g, phase) => set('fillGradient', g, phase)}
       />
       <span className="shape-opts-label">Stroke</span>
-      <StrokeButton value={{ on: view.strokeOn, color: view.strokeColor, width: view.strokeWidth, align: view.strokeAlign, dash: view.strokeDash }} onOn={(on) => set('strokeOn', on)} onColor={(c, phase) => set('strokeColor', c, phase)} />
+      <StrokeButton value={{ on: view.strokeOn, color: view.strokeColor, width: view.strokeWidth, align: view.strokeAlign, dash: view.strokeDash }} onOn={(on) => setShapeOptions(toolId, view, layer, on && !(view.strokeWidth > 0) ? { strokeOn: true, strokeWidth: 4 } : { strokeOn: on }, 'commit', 'Shape Stroke')}onColor={(c, phase) => set('strokeColor', c, phase)} />
       <NumberField
         value={view.strokeWidth}
         min={0}
@@ -111,14 +150,8 @@ export function ShapeOptionsBar() {
         unit="px"
         width={58}
         title="Stroke width"
-        onChange={(v) => {
-          if (!view.strokeOn && v > 0) writeShapeOption(toolId, 'strokeOn', true);
-          set('strokeWidth', v, 'live');
-        }}
-        onCommit={(v) => {
-          if (!view.strokeOn && v > 0) set('strokeOn', true);
-          set('strokeWidth', v, 'commit');
-        }}
+        onChange={(v) => setShapeStrokeWidth(toolId, view, layer, v, 'live')}
+        onCommit={(v) => setShapeStrokeWidth(toolId, view, layer, v, 'commit')}
       />
       <Select value={view.strokeAlign} options={ALIGN_OPTIONS} onChange={(v) => set('strokeAlign', v)} width={78} title="Stroke alignment" />
       <DashSelect value={view.strokeDash} onChange={(v) => set('strokeDash', v)} />

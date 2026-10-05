@@ -45,9 +45,108 @@ function weightAt(a: DabArea, x: number, y: number, w: number): number {
   return f;
 }
 
-/* Grow-only scratch buffers for boxBlurRegion (one blur per dab → no per-dab allocations). */
+/* ---------------- falloff lookup (big dabs) ---------------- */
+
+const LUT_N = 2048;
+const falloffLut = new Float32Array(LUT_N + 1);
+let falloffKey = '';
+
+/**
+ * Falloff indexed by normalized SQUARED distance (d²/r² · LUT_N) — no sqrt or function call
+ * per pixel. Hard tips depend on the radius (1px anti-aliased edge), soft ones only on hardness.
+ */
+function falloffTable(hardness: number, radius: number): Float32Array {
+  const key = hardness >= 0.999 ? `h${Math.round(radius * 4)}` : `s${hardness}`;
+  if (key !== falloffKey) {
+    for (let i = 0; i <= LUT_N; i++) falloffLut[i] = roundFalloff(Math.sqrt(i / LUT_N), hardness, 1, radius);
+    falloffLut[LUT_N] = 0;
+    falloffKey = key;
+  }
+  return falloffLut;
+}
+
+/* ---------------- box blur ---------------- */
+
+/* Grow-only scratch buffers (one blur per dab → no per-dab allocations); see trimPixelScratch. */
 let blurA = new Float32Array(0);
 let blurB = new Float32Array(0);
+let colSums = new Float32Array(0);
+
+function scratchFor(n: number, cols: number) {
+  if (blurA.length < n) {
+    blurA = new Float32Array(n);
+    blurB = new Float32Array(n);
+  }
+  if (colSums.length < cols * 4) colSums = new Float32Array(cols * 4);
+}
+
+/** Release oversized scratch buffers (call when a stroke ends). */
+export function trimPixelScratch(maxBytes = 8 << 20) {
+  if (blurA.byteLength > maxBytes) {
+    blurA = new Float32Array(0);
+    blurB = new Float32Array(0);
+  }
+  if (colSums.byteLength > maxBytes) colSums = new Float32Array(0);
+}
+
+/**
+ * Separable box blur (radius k, clamp-to-edge) of the premultiplied w×h image in `pm`.
+ * Both passes walk memory row by row with the 4 channels interleaved (the vertical pass keeps
+ * running column sums), so big regions stay cache friendly. Result is written back into `pm`.
+ */
+function blurPremultiplied(pm: Float32Array, w: number, h: number, k: number) {
+  const tmp = blurB;
+  const inv = 1 / (2 * k + 1);
+  const stride = w * 4;
+  // Horizontal pass: pm → tmp.
+  for (let y = 0; y < h; y++) {
+    const row = y * stride;
+    let s0 = 0,
+      s1 = 0,
+      s2 = 0,
+      s3 = 0;
+    for (let i = -k; i <= k; i++) {
+      const j = row + (i < 0 ? 0 : i >= w ? w - 1 : i) * 4;
+      s0 += pm[j];
+      s1 += pm[j + 1];
+      s2 += pm[j + 2];
+      s3 += pm[j + 3];
+    }
+    for (let x = 0; x < w; x++) {
+      const o = row + x * 4;
+      tmp[o] = s0 * inv;
+      tmp[o + 1] = s1 * inv;
+      tmp[o + 2] = s2 * inv;
+      tmp[o + 3] = s3 * inv;
+      const ax = x + k + 1;
+      const sx = x - k;
+      const add = row + (ax >= w ? w - 1 : ax) * 4;
+      const sub = row + (sx < 0 ? 0 : sx) * 4;
+      s0 += pm[add] - pm[sub];
+      s1 += pm[add + 1] - pm[sub + 1];
+      s2 += pm[add + 2] - pm[sub + 2];
+      s3 += pm[add + 3] - pm[sub + 3];
+    }
+  }
+  // Vertical pass: tmp → pm, with running column sums.
+  const cs = colSums;
+  cs.fill(0, 0, stride);
+  for (let i = -k; i <= k; i++) {
+    const r = (i < 0 ? 0 : i >= h ? h - 1 : i) * stride;
+    for (let j = 0; j < stride; j++) cs[j] += tmp[r + j];
+  }
+  for (let y = 0; y < h; y++) {
+    const o = y * stride;
+    const ay = y + k + 1;
+    const sy = y - k;
+    const addRow = (ay >= h ? h - 1 : ay) * stride;
+    const subRow = (sy < 0 ? 0 : sy) * stride;
+    for (let j = 0; j < stride; j++) {
+      pm[o + j] = cs[j] * inv;
+      cs[j] += tmp[addRow + j] - tmp[subRow + j];
+    }
+  }
+}
 
 /**
  * Box blur of a region in premultiplied float space (radius k, clamp-to-edge inside the region).
@@ -57,11 +156,7 @@ let blurB = new Float32Array(0);
 export function boxBlurRegion(buf: PixelBuf, rx: number, ry: number, rw: number, rh: number, k: number): Float32Array {
   const src = buf.data;
   const W = buf.width;
-  const n = rw * rh * 4;
-  if (blurA.length < n) {
-    blurA = new Float32Array(n);
-    blurB = new Float32Array(n);
-  }
+  scratchFor(rw * rh * 4, rw);
   const pm = blurA;
   for (let y = 0; y < rh; y++) {
     let si = ((ry + y) * W + rx) * 4;
@@ -74,42 +169,69 @@ export function boxBlurRegion(buf: PixelBuf, rx: number, ry: number, rw: number,
       pm[di + 3] = src[si + 3];
     }
   }
-  const tmp = blurB;
-  const size = 2 * k + 1;
-  // Horizontal pass.
+  blurPremultiplied(pm, rw, rh, k);
+  return pm;
+}
+
+/**
+ * Like boxBlurRegion, on an f×-downsampled copy (f×f block averages, premultiplied). Returns the
+ * shared scratch with ceil(rw/f) × ceil(rh/f) RGBA floats.
+ */
+export function pooledBlurRegion(buf: PixelBuf, rx: number, ry: number, rw: number, rh: number, f: number, k: number): { data: Float32Array; width: number; height: number } {
+  const src = buf.data;
+  const W = buf.width;
+  const dw = Math.ceil(rw / f);
+  const dh = Math.ceil(rh / f);
+  scratchFor(dw * dh * 4, dw);
+  const pm = blurA;
+  pm.fill(0, 0, dw * dh * 4);
+  // Accumulate premultiplied pixels into their blocks, row by row (sequential reads).
   for (let y = 0; y < rh; y++) {
-    const row = y * rw * 4;
-    for (let c = 0; c < 4; c++) {
-      let sum = 0;
-      for (let i = -k; i <= k; i++) sum += pm[row + Math.min(rw - 1, Math.max(0, i)) * 4 + c];
-      for (let x = 0; x < rw; x++) {
-        tmp[row + x * 4 + c] = sum / size;
-        const add = Math.min(rw - 1, x + k + 1);
-        const sub = Math.max(0, x - k);
-        sum += pm[row + add * 4 + c] - pm[row + sub * 4 + c];
+    let si = ((ry + y) * W + rx) * 4;
+    let di = ((y / f) | 0) * dw * 4;
+    for (let bx = 0; bx < dw; bx++, di += 4) {
+      const n = Math.min(f, rw - bx * f);
+      let s0 = 0,
+        s1 = 0,
+        s2 = 0,
+        s3 = 0;
+      for (let j = 0; j < n; j++, si += 4) {
+        const al = src[si + 3];
+        const a = al / 255;
+        s0 += src[si] * a;
+        s1 += src[si + 1] * a;
+        s2 += src[si + 2] * a;
+        s3 += al;
       }
+      pm[di] += s0;
+      pm[di + 1] += s1;
+      pm[di + 2] += s2;
+      pm[di + 3] += s3;
     }
   }
-  // Vertical pass.
-  const out = pm; // reuse
-  for (let x = 0; x < rw; x++) {
-    for (let c = 0; c < 4; c++) {
-      let sum = 0;
-      for (let i = -k; i <= k; i++) sum += tmp[Math.min(rh - 1, Math.max(0, i)) * rw * 4 + x * 4 + c];
-      for (let y = 0; y < rh; y++) {
-        out[y * rw * 4 + x * 4 + c] = sum / size;
-        const add = Math.min(rh - 1, y + k + 1);
-        const sub = Math.max(0, y - k);
-        sum += tmp[add * rw * 4 + x * 4 + c] - tmp[sub * rw * 4 + x * 4 + c];
-      }
+  for (let by = 0; by < dh; by++) {
+    const bh = Math.min(f, rh - by * f);
+    for (let bx = 0; bx < dw; bx++) {
+      const n = 1 / (bh * Math.min(f, rw - bx * f));
+      const di = (by * dw + bx) * 4;
+      pm[di] *= n;
+      pm[di + 1] *= n;
+      pm[di + 2] *= n;
+      pm[di + 3] *= n;
     }
   }
-  return out;
+  blurPremultiplied(pm, dw, dh, k);
+  return { data: pm, width: dw, height: dh };
 }
 
 /** Blur kernel radius for a brush radius. */
 export function blurKernel(radius: number): number {
   return Math.max(1, Math.min(8, Math.round(radius * 0.12)));
+}
+
+/** Downsampling factor for the blur brush (big dabs blur a reduced copy; the kernel is tiny relative to them). */
+export function blurDownsample(radius: number): number {
+  return radius <= 64 ? 1 : radius <= 160 ? 2 : radius <= 400 ? 4 : 8;
 }
 
 /** Blur (amount > 0) or sharpen (amount < 0 → unsharp) under the dab. Returns the touched rect. */
@@ -121,24 +243,95 @@ export function blurSharpenDab(buf: PixelBuf, a: DabArea, amount: number, sharpe
   const ry = Math.max(0, rect.y - k);
   const rw = Math.min(buf.width, rect.x + rect.width + k) - rx;
   const rh = Math.min(buf.height, rect.y + rect.height + k) - ry;
-  const blurred = boxBlurRegion(buf, rx, ry, rw, rh, k);
+  const f = sharpen ? 1 : blurDownsample(a.radius);
+  let blurred: Float32Array;
+  let bw = rw,
+    bh = rh;
+  if (f > 1) {
+    const p = pooledBlurRegion(buf, rx, ry, rw, rh, f, Math.max(1, Math.round(k / f)));
+    blurred = p.data;
+    bw = p.width;
+    bh = p.height;
+  } else blurred = boxBlurRegion(buf, rx, ry, rw, rh, k);
+
   const d = buf.data;
   const W = buf.width;
+  const lut = falloffTable(a.hardness, a.radius);
+  const r2 = a.radius * a.radius;
+  const scale = LUT_N / r2;
+  const sel = a.sel;
+  const x1 = rect.x + rect.width;
+  // Reduced blur (f > 1): bilinear sampling split into a per-column table (u0, fu) and one
+  // vertically interpolated row per output row, so each pixel only does a 2-tap lerp.
+  let uIdx: Int32Array | null = null;
+  let uFrac: Float32Array | null = null;
+  let rowBuf: Float32Array | null = null;
+  if (f > 1) {
+    ({ uIdx, uFrac, rowBuf } = mixTables(rect.width, bw));
+    const invF = 1 / f;
+    for (let x = rect.x; x < x1; x++) {
+      const u = (x + 0.5 - rx) * invF - 0.5;
+      const uc = u < 0 ? 0 : u > bw - 1 ? bw - 1 : u;
+      const u0 = uc | 0;
+      uIdx[x - rect.x] = u0 * 4;
+      uFrac[x - rect.x] = uc - u0;
+    }
+  }
   for (let y = rect.y; y < rect.y + rect.height; y++) {
-    for (let x = rect.x; x < rect.x + rect.width; x++) {
-      const wt = weightAt(a, x, y, W) * amount;
+    const dy = y + 0.5 - a.cy;
+    const dy2 = dy * dy;
+    if (dy2 >= r2) continue;
+    // Only the chord of the circle on this row.
+    const hw = Math.sqrt(r2 - dy2);
+    const xs = Math.max(rect.x, Math.floor(a.cx - hw - 0.5));
+    const xe = Math.min(x1, Math.ceil(a.cx + hw + 0.5));
+    if (rowBuf) {
+      const v = (y + 0.5 - ry) / f - 0.5;
+      const vc = v < 0 ? 0 : v > bh - 1 ? bh - 1 : v;
+      const v0 = vc | 0;
+      const fv = vc - v0;
+      const r0 = v0 * bw * 4;
+      const r1 = Math.min(bh - 1, v0 + 1) * bw * 4;
+      for (let j = 0; j < bw * 4; j++) rowBuf[j] = blurred[r0 + j] + (blurred[r1 + j] - blurred[r0 + j]) * fv;
+      // One extra texel so u0 + 1 never reads past the row.
+      const last = (bw - 1) * 4;
+      rowBuf[bw * 4] = rowBuf[last];
+      rowBuf[bw * 4 + 1] = rowBuf[last + 1];
+      rowBuf[bw * 4 + 2] = rowBuf[last + 2];
+      rowBuf[bw * 4 + 3] = rowBuf[last + 3];
+    }
+    for (let x = xs; x < xe; x++) {
+      const dx = x + 0.5 - a.cx;
+      const d2 = dx * dx + dy2;
+      if (d2 >= r2) continue;
+      let wt = lut[(d2 * scale) | 0];
+      if (sel) wt *= sel[y * W + x] / 255;
+      wt *= amount;
       if (wt <= 0) continue;
       const i = (y * W + x) * 4;
-      const bi = ((y - ry) * rw + (x - rx)) * 4;
       const al = d[i + 3];
+      let b0: number, b1: number, b2: number, b3: number;
+      if (rowBuf) {
+        const p = uIdx![x - rect.x];
+        const fu = uFrac![x - rect.x];
+        b0 = rowBuf[p] + (rowBuf[p + 4] - rowBuf[p]) * fu;
+        b1 = rowBuf[p + 1] + (rowBuf[p + 5] - rowBuf[p + 1]) * fu;
+        b2 = rowBuf[p + 2] + (rowBuf[p + 6] - rowBuf[p + 2]) * fu;
+        b3 = rowBuf[p + 3] + (rowBuf[p + 7] - rowBuf[p + 3]) * fu;
+      } else {
+        const bi = ((y - ry) * rw + (x - rx)) * 4;
+        b0 = blurred[bi];
+        b1 = blurred[bi + 1];
+        b2 = blurred[bi + 2];
+        b3 = blurred[bi + 3];
+      }
       if (sharpen) {
-        if (al === 0) continue;
-        const ba = blurred[bi + 3];
-        if (ba <= 0) continue;
-        for (let c = 0; c < 3; c++) {
-          const bc = blurred[bi + c] / (ba / 255);
-          d[i + c] = d[i + c] + (d[i + c] - bc) * wt * 1.6;
-        }
+        if (al === 0 || b3 <= 0) continue;
+        const ib = 255 / b3;
+        const s = wt * 1.6;
+        d[i] = d[i] + (d[i] - b0 * ib) * s;
+        d[i + 1] = d[i + 1] + (d[i + 1] - b1 * ib) * s;
+        d[i + 2] = d[i + 2] + (d[i + 2] - b2 * ib) * s;
         continue;
       }
       // Blur in premultiplied space.
@@ -146,22 +339,35 @@ export function blurSharpenDab(buf: PixelBuf, a: DabArea, amount: number, sharpe
       const pr = d[i] * af,
         pg = d[i + 1] * af,
         pb = d[i + 2] * af;
-      const t = Math.min(1, wt);
-      const nr = pr + (blurred[bi] - pr) * t;
-      const ng = pg + (blurred[bi + 1] - pg) * t;
-      const nb = pb + (blurred[bi + 2] - pb) * t;
-      const na = al + (blurred[bi + 3] - al) * t;
-      const outA = a.lockAlpha ? al : na;
+      const t = wt > 1 ? 1 : wt;
+      const nr = pr + (b0 - pr) * t;
+      const ng = pg + (b1 - pg) * t;
+      const nb = pb + (b2 - pb) * t;
+      const na = al + (b3 - al) * t;
       if (na > 0.5) {
         const inv = 255 / na;
         d[i] = nr * inv;
         d[i + 1] = ng * inv;
         d[i + 2] = nb * inv;
       }
-      d[i + 3] = outA;
+      d[i + 3] = a.lockAlpha ? al : na;
     }
   }
   return rect;
+}
+
+let mixU = new Int32Array(0);
+let mixF = new Float32Array(0);
+let mixRow = new Float32Array(0);
+
+/** Grow-only tables for the reduced-blur mixing pass. */
+function mixTables(cols: number, bw: number) {
+  if (mixU.length < cols) {
+    mixU = new Int32Array(cols);
+    mixF = new Float32Array(cols);
+  }
+  if (mixRow.length < (bw + 1) * 4) mixRow = new Float32Array((bw + 1) * 4);
+  return { uIdx: mixU, uFrac: mixF, rowBuf: mixRow };
 }
 
 /** Smudge state: the color "picked up" by the finger, relative to the dab. */

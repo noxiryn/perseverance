@@ -45,7 +45,11 @@ export interface LineGeometry extends Box {
   p1: { x: number; y: number };
 }
 
-/** Line from a drag: Shift snaps to 45° steps, Alt draws from the center. Boxes are at least 1px thick. */
+/**
+ * Line from a drag: Shift snaps to 45° steps, Alt draws from the center. The box spans the exact
+ * endpoints: a horizontal (vertical) line has height (width) 0 so it is drawn perfectly on-axis
+ * (the renderer draws along the box diagonal and pads by half the line weight).
+ */
 export function lineGeometry(i: DragInput): LineGeometry {
   let dx = i.x1 - i.x0;
   let dy = i.y1 - i.y0;
@@ -60,18 +64,10 @@ export function lineGeometry(i: DragInput): LineGeometry {
   }
   const p0 = i.alt ? { x: i.x0 - dx, y: i.y0 - dy } : { x: i.x0, y: i.y0 };
   const p1 = { x: i.x0 + dx, y: i.y0 + dy };
-  let x = Math.min(p0.x, p1.x);
-  let y = Math.min(p0.y, p1.y);
-  let w = Math.abs(p1.x - p0.x);
-  let h = Math.abs(p1.y - p0.y);
-  if (w < 1) {
-    x -= (1 - w) / 2;
-    w = 1;
-  }
-  if (h < 1) {
-    y -= (1 - h) / 2;
-    h = 1;
-  }
+  const x = Math.min(p0.x, p1.x);
+  const y = Math.min(p0.y, p1.y);
+  const w = Math.abs(p1.x - p0.x);
+  const h = Math.abs(p1.y - p0.y);
   const flipX = (p1.x - p0.x) * (p1.y - p0.y) < 0;
   return { x, y, w, h, flipX, p0, p1 };
 }

@@ -197,6 +197,21 @@ export function optionsPatchFromTextPatch(p: Partial<TextProps>): Partial<TypeTo
   return out;
 }
 
+/**
+ * Tool option keys that describe one layer's look (fill, outline, warp, style preset). Changing
+ * them on a selected layer never changes what the next new text looks like.
+ */
+const PER_LAYER_KEYS = new Set<keyof TypeToolOptions>(['warp', 'strokeOn', 'strokeColor', 'strokeWidth', 'fillType', 'gradient', 'stylePreset']);
+
+/** The part of a tool patch that carries over to new text after styling a layer (typography only). */
+export function typographicPatch(patch: Partial<TypeToolOptions>): Partial<TypeToolOptions> {
+  const out: Partial<TypeToolOptions> = {};
+  for (const k of Object.keys(patch) as (keyof TypeToolOptions)[]) {
+    if (!PER_LAYER_KEYS.has(k)) (out as Record<string, unknown>)[k] = patch[k];
+  }
+  return out;
+}
+
 /* ---------------- store access ---------------- */
 
 export function readTypeOptions(): TypeToolOptions {

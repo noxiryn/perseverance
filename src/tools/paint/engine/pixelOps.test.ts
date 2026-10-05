@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   blurSharpenDab,
+  blurDownsample,
   boxBlurRegion,
   createSmudgeState,
+  pooledBlurRegion,
   dabRect,
   primeSmudge,
   rangeWeight,
@@ -51,7 +53,46 @@ describe('boxBlurRegion', () => {
   });
 });
 
+describe('pooledBlurRegion', () => {
+  it('keeps a flat image flat at reduced resolution (partial edge blocks included)', () => {
+    const b = buf(23, 17, () => [100, 150, 200, 255]);
+    const out = pooledBlurRegion(b, 0, 0, 23, 17, 4, 1);
+    expect(out.width).toBe(6);
+    expect(out.height).toBe(5);
+    for (let i = 0; i < out.width * out.height * 4; i += 4) {
+      expect(out.data[i]).toBeCloseTo(100, 3);
+      expect(out.data[i + 1]).toBeCloseTo(150, 3);
+      expect(out.data[i + 3]).toBeCloseTo(255, 3);
+    }
+  });
+
+  it('averages blocks in premultiplied space', () => {
+    // Left half opaque red, right half transparent: block straddling both → half alpha, red only.
+    const b = buf(4, 2, (x) => (x < 2 ? [255, 0, 0, 255] : [0, 255, 0, 0]));
+    const out = pooledBlurRegion(b, 0, 0, 4, 2, 4, 0);
+    expect(out.data[3]).toBeCloseTo(127.5, 3);
+    expect(out.data[0] / (out.data[3] / 255)).toBeCloseTo(255, 3);
+    expect(out.data[1]).toBeCloseTo(0, 6);
+  });
+});
+
 describe('blur / sharpen', () => {
+  it('big blur dabs use a downsampled blur and still soften edges smoothly', () => {
+    expect(blurDownsample(40)).toBe(1);
+    expect(blurDownsample(120)).toBe(2);
+    expect(blurDownsample(300)).toBe(4);
+    const b = buf(400, 60, (x) => (x < 200 ? [0, 0, 0, 255] : [255, 255, 255, 255]));
+    blurSharpenDab(b, area(200, 30, 120, { hardness: 0.5 }), 1, false);
+    const row = (x: number) => b.data[(30 * 400 + x) * 4];
+    expect(row(199)).toBeGreaterThan(0);
+    expect(row(200)).toBeLessThan(255);
+    // Monotonic ramp across the edge (no blocky steps going the wrong way).
+    for (let x = 190; x < 210; x++) expect(row(x + 1)).toBeGreaterThanOrEqual(row(x));
+    // Far from the edge the flat areas are untouched.
+    expect(row(110)).toBe(0);
+    expect(row(290)).toBe(255);
+  });
+
   it('blur reduces contrast across an edge', () => {
     const b = buf(20, 20, (x) => (x < 10 ? [0, 0, 0, 255] : [255, 255, 255, 255]));
     blurSharpenDab(b, area(10, 10, 8), 1, false);

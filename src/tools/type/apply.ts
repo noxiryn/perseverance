@@ -10,7 +10,7 @@ import { activeSession, useEditor } from '../../state/editor';
 import { toast } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
 import { frameContains, mutateKeepingAnchor, textFrame } from './frame';
-import { writeTypeOptions, type TypeToolOptions } from './options';
+import { typographicPatch, writeTypeOptions, type TypeToolOptions } from './options';
 import { editingLayerId, isEditing, previewSessionLayer, refocusAfterStyleChange, useTypeEditing } from './session';
 
 export type Phase = 'live' | 'commit';
@@ -62,21 +62,6 @@ function applyTo(l: TextLayer, change: TextChange) {
     });
   }
   change.layer?.(l);
-}
-
-/**
- * Tool option keys that describe one layer's look (fill, outline, warp, style preset). Changing
- * them on a selected layer never changes what the next new text looks like.
- */
-const PER_LAYER_KEYS = new Set<keyof TypeToolOptions>(['warp', 'strokeOn', 'strokeColor', 'strokeWidth', 'fillType', 'gradient', 'stylePreset']);
-
-/** The part of a tool patch that carries over to new text after editing a layer (typography only). */
-export function typographicPatch(patch: Partial<TypeToolOptions>): Partial<TypeToolOptions> {
-  const out: Partial<TypeToolOptions> = {};
-  for (const k of Object.keys(patch) as (keyof TypeToolOptions)[]) {
-    if (!PER_LAYER_KEYS.has(k)) (out as Record<string, unknown>)[k] = patch[k];
-  }
-  return out;
 }
 
 /**

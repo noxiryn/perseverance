@@ -19,6 +19,7 @@ import {
   primeSmudge,
   smudgeDab,
   toneDab,
+  trimPixelScratch,
   type DabArea,
   type SmudgeState,
   type ToneOp,
@@ -141,6 +142,7 @@ function createRetouchTool(spec: RetouchSpec): ToolDef {
       paint(a, a.stroke.end(e ? a.axis.apply(inputPoint(e), e.shiftKey, a.stroke.position) : undefined));
       a.session.commit(spec.label);
     }
+    trimPixelScratch();
     viewport.requestOverlay();
   };
 
@@ -148,6 +150,7 @@ function createRetouchTool(spec: RetouchSpec): ToolDef {
   const abort = (a: Active, message: string) => {
     if (active !== a) return;
     active = null;
+    trimPixelScratch();
     toast(message, 'warning');
     viewport.requestOverlay();
   };

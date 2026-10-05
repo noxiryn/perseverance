@@ -44,8 +44,8 @@ export function assetLayerSize(def: AssetDef, docWidth: number, docHeight: numbe
   if (opts.width && opts.height) return { width: Math.round(opts.width), height: Math.round(opts.height) };
   if (def.category === USER_CATEGORY) return fitSize(def.sizing.width, def.sizing.height, docWidth * USER_FIT, docHeight * USER_FIT);
   const { width, height } = def.sizing;
-  // element assets keep their native size unless the document is much smaller
-  const fit = Math.min(1, (docWidth * 0.9) / width, (docHeight * 0.9) / height);
+  // stickers keep their native size unless that would cover more than ~55% of the document
+  const fit = Math.min(1, (docWidth * 0.55) / width, (docHeight * 0.55) / height);
   return { width: Math.max(1, Math.round(width * fit)), height: Math.max(1, Math.round(height * fit)) };
 }
 

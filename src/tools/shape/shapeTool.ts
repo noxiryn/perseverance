@@ -86,8 +86,15 @@ function geometryFor(d: DragState, e: ToolPointerEvent): { box: Box; flipX: bool
 }
 
 function applyGeometry(l: ShapeLayer, box: Box, flipX: boolean) {
-  l.shape.width = Math.max(1, box.w);
-  l.shape.height = Math.max(1, box.h);
+  if (l.shape.kind === 'line') {
+    // Exact extents: an axis-aligned line keeps a 0 side so it is drawn perfectly on-axis.
+    l.shape.width = Math.max(0, box.w);
+    l.shape.height = Math.max(0, box.h);
+    if (l.shape.width === 0 && l.shape.height === 0) l.shape.width = 1;
+  } else {
+    l.shape.width = Math.max(1, box.w);
+    l.shape.height = Math.max(1, box.h);
+  }
   l.transform.x = box.x;
   l.transform.y = box.y;
   l.transform.scaleX = flipX ? -1 : 1;
@@ -140,7 +147,7 @@ function finishDrag(e: ToolPointerEvent | null) {
     const size = Math.max(16, Math.round(Math.min(s.doc.width, s.doc.height) * 0.2));
     const kind = TOOL_KIND[d.toolId];
     let box: Box;
-    if (kind === 'line') box = { x: d.x0 - size / 2, y: d.y0 - 0.5, w: size, h: 1 };
+    if (kind === 'line') box = { x: d.x0 - size / 2, y: d.y0, w: size, h: 0 };
     else box = clickBox(d.x0, d.y0, size, aspectFor(d.toolId));
     const layer = makeShapeLayer({ name: layerName(d.toolId), shape: newShapeProps(d.toolId, box.w, box.h) });
     applyGeometry(layer, box, false);

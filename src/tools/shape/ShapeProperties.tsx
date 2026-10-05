@@ -3,7 +3,7 @@ import { useEditor } from '../../state/editor';
 import { shapePresets } from '../../registry';
 import { Field, NumberField, Select } from '../../ui/controls';
 import type { Gradient, ShapeKind, ShapeLayer, StrokeStyle } from '../../core/types';
-import { KIND_LABEL, dashFor, dashPresetOf, defaultGradient, editShapeLayer, paintColor, readShapeOptions, type DashPreset, type EditPhase, type FillMode } from './options';
+import { KIND_LABEL, dashFor, dashPresetOf, defaultGradient, editShapeLayer, paintColor, readShapeOptions, swapShapePath, type DashPreset, type EditPhase, type FillMode } from './options';
 import { ALIGN_OPTIONS, DashSelect, FillButton, StrokeButton } from './PaintControls';
 import { PresetPicker } from './PresetPicker';
 import { DEFAULT_SHAPE_PRESET } from './presets';
@@ -14,13 +14,21 @@ const KINDS: { value: ShapeKind; label: string }[] = (['rect', 'ellipse', 'polyg
 
 /** Resize the shape box keeping its top-left corner fixed in document space (rotation-aware). */
 function resizeKeepingCorner(l: ShapeLayer, w: number, h: number) {
-  const pos = keepAnchor(l.transform, l.shape.width, l.shape.height, { x: 0, y: 0 }, w, h, { x: 0, y: 0 });
+  // Pivot sizes as the renderer sees them (getLayerSize clamps to ≥ 1, e.g. for 0-height lines).
+  const pos = keepAnchor(l.transform, Math.max(1, l.shape.width), Math.max(1, l.shape.height), { x: 0, y: 0 }, Math.max(1, w), Math.max(1, h), { x: 0, y: 0 });
   l.shape.width = w;
   l.shape.height = h;
   if (Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
     l.transform.x = pos.x;
     l.transform.y = pos.y;
   }
+}
+
+/** A side length for the Size fields: lines allow 0 (axis-aligned) unless the other side is 0 too. */
+function sideValue(l: ShapeLayer, v: number, other: number): number {
+  const n = Number.isFinite(v) ? v : 1;
+  if (l.shape.kind === 'line') return other > 0 ? Math.max(0, n) : Math.max(1, n);
+  return Math.max(1, n);
 }
 
 const JOINS: { value: CanvasLineJoin; label: string }[] = [
@@ -44,6 +52,9 @@ export function ShapeProperties({ layerId }: { layerId: string }) {
     onCommit: (v: number) => edit((l) => apply(l, v), 'commit', label),
   });
 
+  // Lines may be exactly horizontal/vertical (one side 0); other shapes need at least 1px.
+  const minSide = s.kind === 'line' ? 0 : 1;
+
   const fillMode: FillMode = !s.fill ? 'none' : s.fill.type === 'gradient' ? 'gradient' : 'solid';
   const fillColor = s.fill?.type === 'solid' ? s.fill.color : paintColor(s.fill, primary);
   const fillGradient: Gradient = s.fill?.type === 'gradient' ? s.fill.gradient : defaultGradient(fillColor, secondary);
@@ -63,6 +74,28 @@ export function ShapeProperties({ layerId }: { layerId: string }) {
       label,
     );
 
+  /**
+   * While scrubbing, keep the stroke object and only change its width (0 included: the renderer
+   * skips it) so colour, alignment, dash and joins survive dragging through 0. A width of 0 removes
+   * the stroke on commit; a positive width on a shape without stroke adds one.
+   */
+  const setStrokeWidth = (v: number, phase: EditPhase) => {
+    const width = Math.max(0, Number.isFinite(v) ? v : 0);
+    edit(
+      (l) => {
+        const cur = l.shape.stroke;
+        if (cur) {
+          if (phase === 'commit' && width === 0) l.shape.stroke = null;
+          else cur.width = width;
+        } else if (width > 0) {
+          l.shape.stroke = { paint: { type: 'solid', color: strokeColor }, width, align: 'outside', ...dashFor('solid') };
+        }
+      },
+      phase,
+      'Stroke Width',
+    );
+  };
+
   const changeKind = (k: ShapeKind) => {
     if (k === s.kind) return;
     edit(
@@ -70,11 +103,7 @@ export function ShapeProperties({ layerId }: { layerId: string }) {
         l.shape.kind = k;
         if (k === 'path' && !l.shape.path) {
           const p = shapePresets.get(readShapeOptions('shape-custom').presetId) ?? shapePresets.get(DEFAULT_SHAPE_PRESET);
-          if (p) {
-            l.shape.path = p.path;
-            l.shape.viewBox = [...p.viewBox] as [number, number, number, number];
-            l.shape.presetId = p.id;
-          }
+          if (p) swapShapePath(l, p.path, p.viewBox, p.id);
         }
         if (k === 'star' && l.shape.sides < 2) l.shape.sides = 5;
         if (k === 'polygon' && l.shape.sides < 3) l.shape.sides = 3;
@@ -97,23 +126,15 @@ export function ShapeProperties({ layerId }: { layerId: string }) {
             onChange={(id) => {
               const p = shapePresets.get(id);
               if (!p) return;
-              edit(
-                (l) => {
-                  l.shape.path = p.path;
-                  l.shape.viewBox = [...p.viewBox] as [number, number, number, number];
-                  l.shape.presetId = p.id;
-                },
-                'commit',
-                'Custom Shape',
-              );
+              edit((l) => swapShapePath(l, p.path, p.viewBox, p.id), 'commit', 'Custom Shape');
             }}
           />
         </Field>
       )}
       <Field label="Size">
         <div className="shape-props-row">
-          <NumberField value={s.width} min={1} max={30000} step={1} unit="W" width="100%" {...num('Shape Size', (l, v) => resizeKeepingCorner(l, Math.max(1, v), l.shape.height))} />
-          <NumberField value={s.height} min={1} max={30000} step={1} unit="H" width="100%" {...num('Shape Size', (l, v) => resizeKeepingCorner(l, l.shape.width, Math.max(1, v)))} />
+          <NumberField value={s.width} min={minSide} max={30000} step={1} unit="W" width="100%" {...num('Shape Size', (l, v) => resizeKeepingCorner(l, sideValue(l, v, l.shape.height), l.shape.height))} />
+          <NumberField value={s.height} min={minSide} max={30000} step={1} unit="H" width="100%" {...num('Shape Size', (l, v) => resizeKeepingCorner(l, l.shape.width, sideValue(l, v, l.shape.width)))} />
         </div>
       </Field>
       {(s.kind === 'rect' || s.kind === 'polygon' || s.kind === 'star') && (
@@ -162,10 +183,16 @@ export function ShapeProperties({ layerId }: { layerId: string }) {
             onOn={(on) => setStroke(on ? {} : null, 'commit')}
             onColor={(c, phase) => setStroke({ paint: { type: 'solid', color: c } }, phase)}
           />
-          <NumberField value={stroke?.width ?? 0} min={0} max={500} step={1} unit="px" width={64} {...{
-            onChange: (v: number) => setStroke(v > 0 ? { width: v } : null, 'live', 'Stroke Width'),
-            onCommit: (v: number) => setStroke(v > 0 ? { width: v } : null, 'commit', 'Stroke Width'),
-          }} />
+          <NumberField
+            value={stroke?.width ?? 0}
+            min={0}
+            max={500}
+            step={1}
+            unit="px"
+            width={64}
+            onChange={(v) => setStrokeWidth(v, 'live')}
+            onCommit={(v) => setStrokeWidth(v, 'commit')}
+          />
         </div>
       </Field>
       {stroke && (

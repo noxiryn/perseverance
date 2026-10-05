@@ -27,6 +27,7 @@ import { anchorLocal, baselineNear, frameContains, frameOutline, mutateKeepingAn
 import { TYPE_TOOL_ID, autoLayerName, optionsFromText, readTypeOptions, textPropsFromOptions, writeTypeOptions, type TypeToolOptions } from './options';
 import { getTextStyle, presetEffects } from './styles';
 import { caseMap, paragraphRangeAt, sanitizeTypedText, toDisplay, toSource, wordRangeAt, type CaseMap } from './textIndex';
+import { ClickCounter } from './clicks';
 
 /* ------------------------------------------------------------------ */
 /* Public reactive state (for the options bar / panels)                */
@@ -723,26 +724,15 @@ const HANDLE_PX = 9;
 
 /* ---------------- multi-click counting ---------------- */
 
-/**
- * Chromium reports `detail = 0` on pointerdown, so clicks are counted here: a press within
- * MULTI_CLICK_MS and MULTI_CLICK_PX (screen) of the previous one increments the count
- * (1 = caret, 2 = word, 3 = line/paragraph, 4 = all), anything else restarts at 1.
- */
-const MULTI_CLICK_MS = 500;
-const MULTI_CLICK_PX = 4;
-let lastPress: { t: number; x: number; y: number; count: number } | null = null;
+/** pointerdown.detail is always 0 in Chromium: clicks are counted here (see clicks.ts). */
+const clicks = new ClickCounter(500, 4);
 
-/** Register a press at a viewport (screen) point and return its click count. Exported for tests. */
-export function countPress(x: number, y: number, now = performance.now()): number {
-  const p = lastPress;
-  const count = p && now - p.t <= MULTI_CLICK_MS && Math.abs(x - p.x) <= MULTI_CLICK_PX && Math.abs(y - p.y) <= MULTI_CLICK_PX ? (p.count >= 4 ? 1 : p.count + 1) : 1;
-  lastPress = { t: now, x, y, count };
-  return count;
+function countPress(x: number, y: number): number {
+  return clicks.press(x, y, performance.now());
 }
 
-/** Forget the click sequence (next press counts as a single click). */
-export function resetPressCount() {
-  lastPress = null;
+function resetPressCount() {
+  clicks.reset();
 }
 
 type SessionHit = 'inside' | 'left' | 'right' | 'outside';

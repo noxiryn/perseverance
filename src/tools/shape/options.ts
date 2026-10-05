@@ -5,6 +5,7 @@
  */
 import type { Gradient, Paint, ShapeKind, ShapeLayer, ShapeProps, StrokeStyle } from '../../core/types';
 import { activeSession, useEditor } from '../../state/editor';
+import { keepAnchor } from '../type/affine';
 
 export const SHAPE_TOOL_IDS = ['shape-rect', 'shape-ellipse', 'shape-polygon', 'shape-star', 'shape-line', 'shape-custom'] as const;
 export type ShapeToolId = (typeof SHAPE_TOOL_IDS)[number];
@@ -153,14 +154,21 @@ export function dashPresetOf(stroke: StrokeStyle | null | undefined): DashPreset
   return d[0] === 0 ? 'dotted' : 'dashed';
 }
 
+/**
+ * Stroke for the options. With an `existing` stroke, its non-solid paint is kept, and so are its
+ * dash/cap/join when the dash preset is unchanged (e.g. round joins set in Properties survive a
+ * width change from the options bar).
+ */
 export function strokeFromOptions(o: ShapeToolOptions, existing?: StrokeStyle | null): StrokeStyle | null {
   if (!o.strokeOn || !(o.strokeWidth > 0)) return null;
   const keepPaint = existing && existing.paint.type !== 'solid' ? existing.paint : null;
+  const keepStyle = existing && dashPresetOf(existing) === o.strokeDash;
+  const style = keepStyle ? { dash: existing.dash ? [...existing.dash] : undefined, cap: existing.cap ?? 'butt', join: existing.join ?? 'miter' } : dashFor(o.strokeDash);
   return {
     paint: keepPaint ?? { type: 'solid', color: o.strokeColor },
     width: o.strokeWidth,
     align: o.strokeAlign,
-    ...dashFor(o.strokeDash),
+    ...style,
   };
 }
 
@@ -201,14 +209,22 @@ export function readShapeOptions(toolId: ShapeToolId): ShapeToolOptions {
 
 /** Write a tool option (shared keys go to every shape tool so they stay in sync). */
 export function writeShapeOption<K extends keyof ShapeToolOptions>(toolId: ShapeToolId, key: K, value: ShapeToolOptions[K]) {
-  const st = useEditor.getState();
-  if (SHARED_KEYS.has(key)) {
-    useEditor.setState((s) => {
-      const next = { ...s.toolOptions };
-      for (const id of SHAPE_TOOL_IDS) next[id] = { ...next[id], [key]: value };
-      return { toolOptions: next };
-    });
-  } else st.setToolOption(toolId, key, value);
+  writeShapeOptions(toolId, { [key]: value } as Partial<ShapeToolOptions>);
+}
+
+/** Write several tool options in one store update (shared keys go to every shape tool). */
+export function writeShapeOptions(toolId: ShapeToolId, patch: Partial<ShapeToolOptions>) {
+  const keys = Object.keys(patch) as (keyof ShapeToolOptions)[];
+  if (!keys.length) return;
+  const shared: Record<string, unknown> = {};
+  const own: Record<string, unknown> = {};
+  for (const k of keys) (SHARED_KEYS.has(k) ? shared : own)[k] = patch[k];
+  useEditor.setState((s) => {
+    const next = { ...s.toolOptions };
+    if (Object.keys(shared).length) for (const id of SHAPE_TOOL_IDS) next[id] = { ...next[id], ...shared };
+    if (Object.keys(own).length) next[toolId] = { ...next[toolId], ...own };
+    return { toolOptions: next };
+  });
 }
 
 /** The active layer if it is a shape layer. */
@@ -265,12 +281,43 @@ export function applyOptionToShape(l: ShapeLayer, key: keyof ShapeToolOptions, o
       break;
     case 'presetId': {
       const p = presetLookup?.(o.presetId);
-      if (p) {
-        s.path = p.path;
-        s.viewBox = [...p.viewBox] as [number, number, number, number];
-        s.presetId = o.presetId;
-      }
+      if (p) swapShapePath(l, p.path, p.viewBox, o.presetId);
       break;
     }
+  }
+}
+
+/**
+ * Box size for a new path aspect: the area is kept (so switching back and forth between presets
+ * returns to the same size) and the proportions follow the viewBox. Unchanged when the aspect
+ * already matches.
+ */
+export function boxForAspect(w: number, h: number, vbW: number, vbH: number): { w: number; h: number } {
+  const a = vbW / vbH;
+  if (!Number.isFinite(a) || a <= 0 || !(w > 0) || !(h > 0)) return { w, h };
+  if (Math.abs(w / h - a) / a < 0.005) return { w, h };
+  const area = w * h;
+  return { w: Math.sqrt(area * a), h: Math.sqrt(area / a) };
+}
+
+/**
+ * Replace a path shape's outline (custom shape preset) and give the box the new outline's
+ * proportions around the same center (rotation/flip aware), so the new shape is not stretched.
+ */
+export function swapShapePath(l: ShapeLayer, path: string, viewBox: [number, number, number, number], presetId?: string) {
+  const s = l.shape;
+  s.path = path;
+  s.viewBox = [...viewBox] as [number, number, number, number];
+  if (presetId !== undefined) s.presetId = presetId;
+  const w0 = Math.max(1, s.width);
+  const h0 = Math.max(1, s.height);
+  const { w, h } = boxForAspect(w0, h0, viewBox[2], viewBox[3]);
+  if (w === w0 && h === h0) return;
+  const pos = keepAnchor(l.transform, w0, h0, { x: w0 / 2, y: h0 / 2 }, w, h, { x: w / 2, y: h / 2 });
+  s.width = w;
+  s.height = h;
+  if (Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
+    l.transform.x = pos.x;
+    l.transform.y = pos.y;
   }
 }

@@ -3,6 +3,8 @@ import { makeShapeLayer } from '../../core/document';
 import { clickBox, dragBox, lineGeometry } from './geometry';
 import {
   applyOptionToShape,
+  boxForAspect,
+  swapShapePath,
   dashFor,
   dashPresetOf,
   fillFromOptions,
@@ -28,8 +30,15 @@ describe('shape drag geometry', () => {
 
   it('snaps lines to 45° with Shift and flips for rising lines', () => {
     const g = lineGeometry({ x0: 0, y0: 0, x1: 100, y1: 10, shift: true, alt: false });
-    expect(g.h).toBe(1);
+    // Exactly horizontal: 0 height, box on the line itself (drawn perfectly on-axis).
+    expect(g.h).toBe(0);
+    expect(g.y).toBe(0);
+    expect(g.w).toBeCloseTo(Math.hypot(100, 10));
     expect(g.p1.y).toBeCloseTo(0);
+    const v = lineGeometry({ x0: 50, y0: 10, x1: 52, y1: 210, shift: true, alt: false });
+    expect(v.w).toBe(0);
+    expect(v.x).toBe(50);
+    expect(v.flipX).toBe(false);
     const up = lineGeometry({ x0: 0, y0: 100, x1: 100, y1: 0, shift: false, alt: false });
     expect(up.flipX).toBe(true);
     const down = lineGeometry({ x0: 0, y0: 0, x1: 100, y1: 100, shift: false, alt: false });
@@ -77,6 +86,42 @@ describe('shape options ↔ props', () => {
     const star = makeShapeLayer({ shape: { kind: 'star', sides: 5 } });
     applyOptionToShape(star, 'sides', { ...o, sides: 1 }, '#000', '#fff');
     expect(star.shape.sides).toBe(2);
+  });
+
+  it('turns the stroke on and sets its width in one merged change', () => {
+    const layer = makeShapeLayer({ shape: { kind: 'rect', stroke: null } });
+    const view = { ...shapeDefaults('shape-rect'), strokeOn: false };
+    const next = { ...view, strokeOn: true, strokeWidth: 12 };
+    for (const k of ['strokeWidth', 'strokeOn'] as const) applyOptionToShape(layer, k, next, '#000', '#fff');
+    expect(layer.shape.stroke).toMatchObject({ width: 12, align: 'outside' });
+  });
+
+  it('keeps joins/caps of an existing stroke when only the width changes', () => {
+    const existing = { paint: { type: 'solid' as const, color: '#123456' }, width: 3, align: 'center' as const, join: 'round' as CanvasLineJoin, cap: 'round' as CanvasLineCap };
+    const o = { ...shapeDefaults('shape-rect'), strokeOn: true, strokeWidth: 9, strokeAlign: 'center' as const, strokeColor: '#123456', strokeDash: 'solid' as const };
+    expect(strokeFromOptions(o, existing)).toMatchObject({ width: 9, join: 'round', cap: 'round' });
+    // A different dash preset applies that preset's caps/joins.
+    expect(strokeFromOptions({ ...o, strokeDash: 'dashed' }, existing)).toMatchObject({ dash: [3, 2], cap: 'butt', join: 'miter' });
+  });
+
+  it('gives a swapped custom shape the new proportions around the same center', () => {
+    expect(boxForAspect(200, 300, 100, 100)).toEqual({ w: Math.sqrt(60000), h: Math.sqrt(60000) });
+    expect(boxForAspect(200, 100, 200, 100)).toEqual({ w: 200, h: 100 });
+    // Area is kept: switching back returns the original box.
+    const a = boxForAspect(200, 300, 100, 100);
+    const b = boxForAspect(a.w, a.h, 200, 300);
+    expect(b.w).toBeCloseTo(200);
+    expect(b.h).toBeCloseTo(300);
+
+    const l = makeShapeLayer({ shape: { kind: 'path', width: 200, height: 300, path: 'M0 0H10V10Z', viewBox: [0, 0, 10, 10] } });
+    l.transform = { ...l.transform, x: 100, y: 50, rotation: 30 };
+    swapShapePath(l, 'M0 0H20V10Z', [0, 0, 20, 10], 'wide');
+    expect(l.shape.presetId).toBe('wide');
+    expect(l.shape.width / l.shape.height).toBeCloseTo(2);
+    expect(l.shape.width * l.shape.height).toBeCloseTo(60000);
+    // Center unchanged (rotation pivots on the center).
+    expect(l.transform.x + l.shape.width / 2).toBeCloseTo(100 + 100);
+    expect(l.transform.y + l.shape.height / 2).toBeCloseTo(50 + 150);
   });
 
   it('reads tool options back from a shape', () => {
