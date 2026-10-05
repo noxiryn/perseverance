@@ -25,7 +25,7 @@ import type {
   Transform,
 } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
-import { cloneCanvas, createCanvas, ctx2d, ctxRead } from '../core/canvas';
+import { cloneCanvas, createCanvas, ctx2d, ctxRead, opaqueBounds } from '../core/canvas';
 import { uid } from '../core/ids';
 import { identityTransform, transformMatrix } from '../core/geometry';
 import {
@@ -409,20 +409,51 @@ export function duplicateLayers(opts: { ids?: ID[] } = {}): ID[] {
   return roots;
 }
 
-function layerViaCopy(s: DocSession, layer: RasterLayer): ID | null {
+/** True when Layer ▸ New ▸ Layer via Copy can run (a pixel selection and an active pixel layer). */
+export function canLayerViaCopy(): boolean {
+  const s = activeSession();
+  const l = s?.activeLayerId ? s.doc.layers[s.activeLayerId] : null;
+  return !!(s?.doc.selection && l?.type === 'raster');
+}
+
+/**
+ * Layer ▸ New ▸ Layer via Copy: the selected pixels of the active pixel layer as a new layer right
+ * above it, cropped to the copied pixels (blend mode, opacity, styles and smart filters carried
+ * over). Nothing is committed when the selected area of the layer is empty.
+ */
+export function layerViaCopy(): ID | null {
+  const ctx = needLayer('copy pixels from');
+  if (!ctx) return null;
+  const { s, layer } = ctx;
   const doc = s.doc;
-  const content = renderLayerToDoc(doc, { ...layer, filters: [], effects: [], mask: null }, { effects: false, mask: false });
   const mask = doc.selection ? bitmaps.tryGet(doc.selection.bitmapId) : null;
-  if (!content || !mask) {
-    toast('Nothing to copy — the selection is outside the layer pixels', 'info');
+  if (!mask) {
+    toast('Make a selection first — Layer via Copy copies the selected pixels to a new layer', 'info');
     return null;
   }
+  if (layer.type !== 'raster') {
+    toast(
+      layer.type === 'group'
+        ? 'Select a pixel layer inside the group to copy pixels from'
+        : `“${layer.name}” is not a pixel layer — rasterize it first (Layer ▸ Rasterize Layer)`,
+      'info',
+    );
+    return null;
+  }
+  const content = renderLayerToDoc(doc, { ...layer, filters: [], effects: [], mask: null }, { effects: false, mask: false });
   const out = createCanvas(doc.width, doc.height);
-  const ctx = ctx2d(out);
-  ctx.drawImage(content, 0, 0);
-  ctx.globalCompositeOperation = 'destination-in';
-  ctx.drawImage(mask, 0, 0);
-  const l = makeRasterLayer({ name: nextLayerName(doc), bitmapId: bitmaps.add(out), width: doc.width, height: doc.height });
+  const octx = ctx2d(out);
+  if (content) octx.drawImage(content, 0, 0);
+  octx.globalCompositeOperation = 'destination-in';
+  octx.drawImage(mask, 0, 0, doc.width, doc.height);
+  const b = content ? opaqueBounds(out) : null;
+  if (!b) {
+    toast(`The selected area of “${layer.name}” is empty — nothing to copy`, 'info');
+    return null;
+  }
+  const crop = createCanvas(b.width, b.height);
+  ctx2d(crop).drawImage(out, -b.x, -b.y);
+  const l = makeRasterLayer({ name: nextLayerName(doc), bitmapId: bitmaps.add(crop), width: b.width, height: b.height, transform: { x: b.x, y: b.y } });
   l.blendMode = layer.blendMode;
   l.opacity = layer.opacity;
   l.fillOpacity = layer.fillOpacity;
@@ -483,25 +514,33 @@ export function toggleVisibility(id: ID) {
   });
 }
 
-let soloState: { docId: ID; layerId: ID; restore: Record<ID, boolean> } | null = null;
+/** What an Alt-click solo changed: the visibility it set and the visibility to restore. */
+let soloState: { docId: ID; layerId: ID; set: Record<ID, boolean>; restore: Record<ID, boolean> } | null = null;
 
-/** Alt-click on an eye: show only this layer; Alt-click again restores the previous visibility. */
+/**
+ * Alt-click on an eye: show only this layer; Alt-click again restores the previous visibility.
+ * Layers whose eye was toggled by hand in the meantime keep their current state.
+ */
 export function soloLayer(id: ID) {
   const s = activeSession();
   if (!s || !s.doc.layers[id]) return;
   if (soloState && soloState.docId === s.doc.id && soloState.layerId === id) {
-    const restore = soloState.restore;
+    const { set, restore } = soloState;
     soloState = null;
-    ed().commit('Show/Hide Layers', (d) => {
-      for (const [k, v] of Object.entries(restore)) if (d.layers[k]) d.layers[k].visible = v;
-    });
-    return;
+    const back = Object.entries(restore).filter(([k]) => s.doc.layers[k] && s.doc.layers[k].visible === set[k]);
+    if (back.length) {
+      ed().commit('Show/Hide Layers', (d) => {
+        for (const [k, v] of back) d.layers[k].visible = v;
+      });
+      return;
+    }
+    // Nothing left to restore (e.g. the solo was undone): solo again below.
   }
   const change = soloVisibility(s.doc, id);
   if (!Object.keys(change).length) return;
   const restore: Record<ID, boolean> = {};
   for (const k of Object.keys(change)) restore[k] = s.doc.layers[k].visible;
-  soloState = { docId: s.doc.id, layerId: id, restore };
+  soloState = { docId: s.doc.id, layerId: id, set: change, restore };
   ed().commit('Show/Hide Layers', (d) => {
     for (const [k, v] of Object.entries(change)) d.layers[k].visible = v;
   });
