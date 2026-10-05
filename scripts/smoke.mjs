@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
  * End-to-end smoke test: drives the editor in headless Chromium against a running dev server
- * (or `vite preview`), exercising templates, every command, every tool and every panel while
- * collecting console errors and exceptions. Screenshots go to --out (default screenshots-tmp/).
+ * (or `vite preview`), checking a few compositing pixels (PSD-baked clipped adjustments) and
+ * exercising templates, every command, every tool and every panel while collecting console errors
+ * and exceptions. Screenshots go to --out (default screenshots-tmp/).
  *
  *   npx vite --port 5300 &   node scripts/smoke.mjs --url http://localhost:5300 [--out dir] [--quick]
  *
- * Exit code 1 if any page error / console error was captured.
+ * Exit code 1 if any render check failed or any page error / console error was captured.
  */
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
@@ -50,6 +51,98 @@ const wait = (ms) => page.waitForTimeout(ms);
 await page.goto(url, { waitUntil: 'networkidle' });
 await wait(1500);
 await shot('01-start');
+
+/* ---------- render checks (compositing pixels) ---------- */
+const renderFailures = await run('render-checks', async () => {
+  const { bitmaps, documentUtils: D, renderDocument, loadPsd } = window.__app;
+  const { buildPsd } = await loadPsd();
+  const failures = [];
+  const W = 160;
+  const H = 120;
+  const raster = (doc, draw, props = {}) => {
+    const c = document.createElement('canvas');
+    c.width = W;
+    c.height = H;
+    draw(c.getContext('2d'));
+    const l = D.makeRasterLayer({ name: props.name ?? 'Layer', bitmapId: bitmaps.add(c), width: W, height: H });
+    Object.assign(l, props);
+    D.insertLayerDraft(doc, l, { parentId: null });
+    return l;
+  };
+  // Soft-edged base: a radial gradient fading to transparent inside an anti-aliased ellipse.
+  const soft = (g) => {
+    const gr = g.createRadialGradient(80, 60, 10, 80, 60, 55);
+    gr.addColorStop(0, 'rgba(220,120,40,1)');
+    gr.addColorStop(0.6, 'rgba(60,140,200,0.8)');
+    gr.addColorStop(1, 'rgba(60,140,200,0)');
+    g.fillStyle = gr;
+    g.beginPath();
+    g.ellipse(80, 60, 70, 50, 0.3, 0, Math.PI * 2);
+    g.fill();
+  };
+  const pixels = (c) => c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height).data;
+  /** Largest per-channel difference in premultiplied levels (what the pixels look like composited). */
+  const diff = (a, b) => {
+    let m = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      m = Math.max(m, Math.abs(a[i + 3] - b[i + 3]));
+      for (let k = 0; k < 3; k++) m = Math.max(m, Math.abs(Math.round((a[i + k] * a[i + 3]) / 255) - Math.round((b[i + k] * b[i + 3]) / 255)));
+    }
+    return m;
+  };
+  // A clipped adjustment without a Photoshop equivalent is baked into a pixel layer; that layer
+  // clipped onto the same base must render like the adjustment (it is written at full alpha
+  // wherever the clip stack has coverage), also at the base's soft edges.
+  const roundTrip = (name, build, { approx = false } = {}) => {
+    const doc = D.createDocument({ name, width: W, height: H, background: null });
+    const adj = build(doc);
+    const want = pixels(renderDocument(doc, { background: false }));
+    const res = buildPsd(doc, { bakeStyles: false });
+    const baked = res.psd.children.find((c) => c.name === adj.name);
+    if (!res.bakedAdjustments.includes(adj.name) || !baked?.canvas || !baked.clipping) {
+      failures.push(`${name}: no clipped baked layer`);
+      return;
+    }
+    if (res.approxAdjustments.includes(adj.name) !== approx) failures.push(`${name}: ${approx ? 'not ' : ''}reported as approximate`);
+    if (approx) return;
+    const re = D.createDocument({ name: `${name} (re-import)`, width: W, height: H, background: null });
+    for (const id of doc.rootIds) if (id !== adj.id) D.insertLayerDraft(re, doc.layers[id], { parentId: null });
+    const l = D.makeRasterLayer({ name: adj.name, bitmapId: bitmaps.add(baked.canvas), width: baked.canvas.width, height: baked.canvas.height, transform: { x: baked.left, y: baked.top } });
+    l.clipped = true;
+    l.opacity = baked.opacity;
+    D.insertLayerDraft(re, l, { parentId: null, index: doc.rootIds.indexOf(adj.id) });
+    const d = diff(want, pixels(renderDocument(re, { background: false })));
+    if (d > 1) failures.push(`${name}: re-imported baked layer differs by ${d} levels`);
+  };
+  const adjustment = (doc, filterId, params) => {
+    const a = D.makeAdjustmentLayer({ filterId, params });
+    a.clipped = true;
+    D.insertLayerDraft(doc, a, { parentId: null });
+    return a;
+  };
+  roundTrip('baked clipped vignette', (doc) => {
+    raster(doc, soft);
+    return adjustment(doc, 'vignette', { amount: 1, size: 0.3, feather: 0.6 });
+  });
+  roundTrip('baked clipped duotone over a clipped layer', (doc) => {
+    raster(doc, soft);
+    raster(doc, (g) => ((g.fillStyle = 'rgba(255,0,80,0.7)'), g.fillRect(60, 0, 50, H)), { clipped: true });
+    return adjustment(doc, 'duotone', { contrast: 30 });
+  });
+  // The base's behind effects are drawn under the clip stack: the adjustment never sees them.
+  roundTrip('baked clipped duotone, base with drop shadow', (doc) => {
+    raster(doc, soft, { effects: [{ id: 'fx-shadow', effectId: 'drop-shadow', enabled: true, params: { distance: 6, size: 4, opacity: 1, color: '#00ff00' } }] });
+    return adjustment(doc, 'duotone', { contrast: 30 });
+  });
+  // Below 100% fill a pixel layer can't reproduce it (Photoshop neither): reported.
+  roundTrip('baked clipped duotone, base at 50% fill', (doc) => {
+    raster(doc, soft, { fillOpacity: 0.5 });
+    return adjustment(doc, 'duotone', { contrast: 30 });
+  }, { approx: true });
+  return failures;
+});
+for (const f of renderFailures ?? []) errors.push(`[render-checks] ${f}`);
+console.log(`render checks: ${!renderFailures ? 'not run' : renderFailures.length ? `${renderFailures.length} FAILED` : 'ok'}`);
 
 /* ---------- registry inventory ---------- */
 const inventory = await run('inventory', () => {

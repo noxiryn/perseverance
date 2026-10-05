@@ -67,18 +67,23 @@ starting point; don't rewrite modules from scratch.
   baked into pixel layers (mask/opacity/blend kept); `doc.background` exports as a bottom
   "Background Color" fill layer and is restored on import.
   - Baked adjustments (`src/io/psdBake.ts`): clipped ones are written at full alpha wherever the clip
-    stack has coverage, which Photoshop's clipping reproduces exactly; unclipped ones over
-    semi-transparent pixels (isolated groups, transparent documents) can't be exact with one pixel
-    layer — they are listed as "baked approximately (soft edges)" in the export toast.
+    stack has coverage (the filtered, unpremultiplied backdrop colour), which clipping — Photoshop's
+    and ours: it recolours the stack by the layer's alpha and keeps the base's coverage — reproduces
+    exactly, also at soft base edges. Their backdrop leaves out the base's behind effects (drop
+    shadow, outer glow, outside stroke): those draw under the clip stack, the adjustment never sees
+    them. Not exact with one pixel layer, listed as "baked approximately (semi-transparent pixels)" in
+    the export toast: clipped ones over a base below 100% fill (the base comes out denser where only
+    it shows), unclipped ones over semi-transparent pixels (isolated groups, transparent documents).
+    Check: `scripts/smoke.mjs` render checks (soft-edged base + clipped vignette / duotone → the baked
+    layer clipped onto the base renders the same within 1 level).
   - Gradient fill/overlay center offsets are written in Photoshop's convention (percent of the box,
     ±50 % = edge; ours is ±1 = edge). ag-psd stores scale/offset as whole percents: a fill that needs
     rounding stays an editable fill only if the rounded gradient renders within 2 levels, otherwise
     it is written as pixels ("gradient fills exported as pixels"); such overlays are baked.
-  - Known gap (renderer, not io): our clip stacks composite clipped layers with destination-in +
-    source-over, so over a semi-transparent base pixel they add coverage (50 % base + clipped red →
-    alpha 192; Photoshop keeps the base's 128). Any clipped layer over soft base edges therefore
-    looks slightly different in Photoshop, and a re-import of a clipped baked adjustment is not
-    exact at those edges.
+  - Clip stacks now keep the base's coverage like Photoshop (src/render/clip.ts: 50 % base + clipped
+    red → [255,0,0,128], was alpha 192), so clipped layers over soft base edges match Photoshop.
+    Baked adjustment layers below 100% opacity re-import within ~2 levels (also opaque, unclipped):
+    the renderer's opacity mix (`lerpInto`) rounds three times, a pixel layer's globalAlpha once.
 - **Free Transform on tab switch** (`src/viewport/transform/controller.ts commitTransformInOwnDoc`):
   applied in its own document (with a toast) instead of being dropped.
 - **CI / installers**: Build installers is green since f6ce5d3 (Windows case-clash rename b4d8728 +

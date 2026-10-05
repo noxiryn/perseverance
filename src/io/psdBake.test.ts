@@ -24,10 +24,31 @@ function psOver(b: Px, p: Px, m: number): Px {
   return [c(0), c(1), c(2), a];
 }
 
+/**
+ * Our clip stack (src/render/clip.ts) over an opaque base pixel at fill `fill`: the base alone shows
+ * at alpha `fill`; a clipped layer P is drawn over it (source-over, strength m), an adjustment `adj`
+ * mixes in by m and keeps alpha.
+ */
+function clipStack(base: [number, number, number], fill: number, p: Px | null, adj: ((c: number[]) => number[]) | null, m: number): Px {
+  let c: number[] = [...base];
+  let a = fill;
+  if (p) {
+    const k = p[3] * m;
+    const na = k + a * (1 - k);
+    c = c.map((v, i) => (p[i] * k + v * a * (1 - k)) / na);
+    a = na;
+  }
+  if (adj) {
+    const f = adj(c);
+    c = c.map((v, i) => v * (1 - m) + f[i] * m);
+  }
+  return [c[0], c[1], c[2], a];
+}
+
 /** Run finishBakedPixels on one pixel: backdrop alpha `ba` (0..255), filtered colour `f`. */
-function bakeOne(ba: number, f: [number, number, number], clipped: boolean): Px {
+function bakeOne(ba: number, f: [number, number, number], clipFill: number | null): Px {
   const data = new Uint8ClampedArray([f[0], f[1], f[2], ba]);
-  finishBakedPixels(data, alphaChannel(data), clipped, 1);
+  finishBakedPixels(data, alphaChannel(data), clipFill, 1);
   return [data[0], data[1], data[2], data[3] / 255];
 }
 
@@ -38,20 +59,47 @@ describe('baked PSD adjustments', () => {
     for (const ba of [255, 200, 128, 40, 1]) {
       const backdrop: Px = [200, 40, 90, ba / 255];
       const filtered: [number, number, number] = [30, 160, 220];
-      const baked = bakeOne(ba, filtered, true);
+      const baked = bakeOne(ba, filtered, 1);
       expect(baked[3]).toBe(1);
       for (const m of [1, 0.7, 0.25]) close(psClipped(backdrop, baked, m), ours(backdrop, [...filtered, ba / 255], m));
     }
     // No coverage below → nothing to show.
-    expect(bakeOne(0, [10, 20, 30], true)[3]).toBe(0);
+    expect(bakeOne(0, [10, 20, 30], 1)[3]).toBe(0);
+  });
+
+  it('clipped to a base below 100% fill: denser by up to 255·m·(1 − fill) levels, and flagged', () => {
+    const base: [number, number, number] = [200, 40, 90];
+    const inv = (c: number[]) => c.map((v) => 255 - v);
+    for (const fill of [0.5, 0.2]) {
+      for (const m of [1, 0.5]) {
+        const want = clipStack(base, fill, null, inv, m);
+        const baked = bakeOne(Math.round(fill * 255), inv(base) as [number, number, number], fill);
+        expect(baked[3]).toBe(1);
+        const re = clipStack(base, fill, baked, null, m);
+        expect(re[3] - want[3]).toBeCloseTo(m * (1 - fill), 6);
+      }
+    }
+    const n = 4096;
+    const make = (covered: number) => {
+      const d = new Uint8ClampedArray(n * 4);
+      for (let i = 0; i < covered; i++) d[i * 4 + 3] = 128;
+      return d;
+    };
+    const run = (d: Uint8ClampedArray, fill: number, opacity = 1) => finishBakedPixels(d, alphaChannel(d), fill, opacity);
+    expect(run(make(n), 1)).toBe(false); // 100% fill: exact
+    expect(run(make(n), 0.99)).toBe(false); // under the error threshold
+    expect(run(make(n), 0.5)).toBe(true);
+    expect(run(make(n), 0.5, 0.02)).toBe(false); // a faint layer can't be far off
+    expect(run(make(SOFT_EDGE_MIN_PIXELS - 1), 0)).toBe(false); // a few stray pixels
+    expect(run(make(0), 0)).toBe(false); // nothing below to adjust: an empty layer is exact
   });
 
   it('unclipped: exact over opaque pixels, denser over semi-transparent ones', () => {
     const filtered: [number, number, number] = [30, 160, 220];
     const opaque: Px = [200, 40, 90, 1];
-    close(psOver(opaque, bakeOne(255, filtered, false), 0.6), ours(opaque, [...filtered, 1], 0.6));
+    close(psOver(opaque, bakeOne(255, filtered, null), 0.6), ours(opaque, [...filtered, 1], 0.6));
     const soft: Px = [200, 40, 90, 0.5];
-    const baked = bakeOne(128, filtered, false);
+    const baked = bakeOne(128, filtered, null);
     expect(baked[3]).toBeCloseTo(128 / 255, 6); // the bake keeps the backdrop's alpha…
     expect(psOver(soft, baked, 1)[3]).toBeGreaterThan(0.7); // …so Photoshop's result is denser (ours: 0.5)
   });
@@ -63,13 +111,13 @@ describe('baked PSD adjustments', () => {
       for (let i = 0; i < soft; i++) d[i * 4 + 3] = alpha;
       return d;
     };
-    const run = (d: Uint8ClampedArray, clipped = false, opacity = 1) => finishBakedPixels(d, alphaChannel(d), clipped, opacity);
+    const run = (d: Uint8ClampedArray, clipFill: number | null = null, opacity = 1) => finishBakedPixels(d, alphaChannel(d), clipFill, opacity);
     expect(run(make(0))).toBe(false); // opaque backdrop
     expect(run(make(SOFT_EDGE_MIN_PIXELS - 1))).toBe(false); // a few stray pixels
     expect(run(make(SOFT_EDGE_MIN_PIXELS))).toBe(true);
     expect(run(make(200, 2))).toBe(false); // nearly transparent: under the error threshold
-    expect(run(make(200), false, 0.05)).toBe(false); // a faint layer can't be far off
-    expect(run(make(200), true)).toBe(false); // clipped bakes are exact
+    expect(run(make(200), null, 0.05)).toBe(false); // a faint layer can't be far off
+    expect(run(make(200), 1)).toBe(false); // clipped bakes over a base at 100% fill are exact
     const zero = make(200, 0);
     expect(run(zero)).toBe(false); // fully transparent pixels are exact too
   });
