@@ -10,7 +10,10 @@
  *   instantiation error) `wasm()` returns null and every caller runs its existing JavaScript
  *   code, which produces bit-identical results.
  * - Memory: one linear memory used as a stack (`wasmMark` / `wasmAlloc` / `wasmRelease`), grown on
- *   demand (a 4K image needs a few MB to ~285 MB depending on the kernel) and reused. Growing detaches
+ *   demand and reused. A 4K (3840×2160) image needs from a few MB up to ~350 MB depending on the
+ *   filter: bloom with radius ≤ 4 is the largest (~349 MB: full-size float grids at all three scales),
+ *   the small-σ gaussian (σ < 1: watercolor, poster edges, …) ~285 MB, most others ≤ 64 MB. The stack
+ *   never passes MAX_BYTES (1 GiB); an operation that would is run in JavaScript. Growing detaches
  *   every typed-array view of the old buffer, so callers keep byte addresses and take fresh views
  *   with `wasmHeap()` after their last allocation. Once no operation has needed more than 192 MB
  *   for 2 s, the instance is recreated so the memory is returned (a burst of big operations — a

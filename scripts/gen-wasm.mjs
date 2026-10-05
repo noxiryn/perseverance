@@ -1424,6 +1424,15 @@ export function buildModule() {
 
 export const EXPORTS = funcs.map((f) => ({ name: f.name, params: f.params.map(([n, t]) => `${n}: ${t}`) }));
 
+/**
+ * Line endings are not content: a Windows checkout (core.autocrlf=true, the Git for Windows default)
+ * may write the generated file with CRLF, so `--check` and the vitest test compare after this.
+ * (.gitattributes also pins the file to LF.)
+ */
+export function normalizeEol(text) {
+  return text.replace(/\r\n/g, '\n');
+}
+
 export function generatedSource(bytes = buildModule()) {
   const b64 = Buffer.from(bytes).toString('base64');
   const lines = b64.match(/.{1,100}/g) ?? [];
@@ -1448,7 +1457,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     } catch {
       /* missing */
     }
-    if (cur !== src) {
+    if (normalizeEol(cur) !== src) {
       console.error('src/core/wasm/blurWasm.generated.ts is out of date: run node scripts/gen-wasm.mjs');
       process.exit(1);
     }

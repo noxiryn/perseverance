@@ -5,13 +5,13 @@
  * The engine tests run the real compositor on the test-only software canvas (./softCanvas.ts).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Document, Layer, LayerEffect } from '../core/types';
+import type { Document, Layer, LayerEffect, RasterLayer } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
 import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeGroupLayer, makeRasterLayer } from '../core/document';
 import { filters } from '../registry';
 import { coreExceedsShape, normalizeClipBase } from './clip';
 import { installSoftCanvas, pixelAt } from './softCanvas';
-import { invalidateRenderCache, renderCacheInfo, renderDocument, renderDocumentLive, renderLayerToDoc } from './compositor';
+import { invalidateRenderCache, renderCacheInfo, renderClipBackdrop, renderDocument, renderDocumentLive, renderLayerToDoc } from './compositor';
 import { setCropExactBackend } from './backendProbe';
 import { registerEffects } from './effects';
 
@@ -346,5 +346,56 @@ describe('clip stacks (compositor)', () => {
         for (let yy = 0; yy < H; yy++) for (let xx = 0; xx < W; xx++) expect(pixelAt(shared, xx, yy), `shared (${xx},${yy})`).toEqual(pixelAt(full, xx, yy));
       }
     }
+  });
+
+  it('renderClipBackdrop: the stack a clipped layer sees — normalized base + clipped below, no behind effects', () => {
+    const d = doc();
+    // Soft base (alpha 128) with an outside stroke (a behind-stage effect) over the edge pixels.
+    const base = raster(d, canvasOf(W, H, (x, y) => (x >= 2 && x < 6 && y >= 2 && y < 6 ? [200, 40, 90, x === 2 ? 128 : 255] : [0, 0, 0, 0])), {
+      effects: [{ id: 's', effectId: 'stroke', enabled: true, params: { size: 1, position: 'outside', blendMode: 'normal', opacity: 1, fillType: 'color', color: '#ffffff' } }],
+    });
+    const shade = raster(d, [0, 0, 255, 255], { clipped: true, opacity: 0.5 });
+    raster(d, [0, 255, 0, 255], { clipped: true, visible: false });
+    const adj = adjustment(d, 'test-invert', { clipped: true });
+    const bd = renderClipBackdrop(d, adj.id);
+    if (!bd || bd === 'empty') throw new Error('expected a clip stack');
+    const at = (c: HTMLCanvasElement, x: number, y: number) => pixelAt(c, x - bd.x, y - bd.y);
+    // Inside the base: its colour made opaque (even on the soft column, which the stroke lies
+    // under), the 50% blue shade composited on it; the hidden green layer is skipped.
+    for (const x of [2, 4]) {
+      const [r, g, b, a] = at(bd.stack, x, 3);
+      expect(a).toBe(255);
+      expect(Math.abs(r - 100)).toBeLessThanOrEqual(1);
+      expect(Math.abs(g - 20)).toBeLessThanOrEqual(1);
+      expect(Math.abs(b - 173)).toBeLessThanOrEqual(1);
+    }
+    // Coverage: the base's shape (soft column 128), nothing where only the stroke is.
+    expect(at(bd.cover, 2, 3)[3]).toBe(128);
+    expect(at(bd.cover, 4, 3)[3]).toBe(255);
+    expect(at(bd.cover, 1, 3)[3]).toBe(0);
+    expect(bd.share).toBeNull();
+    // The layer right above the base sees the base alone.
+    const first = renderClipBackdrop(d, shade.id);
+    if (!first || first === 'empty') throw new Error('expected a clip stack');
+    expect(pixelAt(first.stack, 4 - first.x, 3 - first.y)).toEqual([200, 40, 90, 255]);
+    // Not in a clip stack: the base itself, an unclipped layer, a layer clipped above an adjustment.
+    expect(renderClipBackdrop(d, base.id)).toBeNull();
+    const e = doc();
+    adjustment(e, 'test-invert');
+    const overAdj = raster(e, [9, 9, 9, 255], { clipped: true });
+    expect(renderClipBackdrop(e, overAdj.id)).toBeNull();
+    // A base with nothing to render (moved off the canvas): the whole stack is empty.
+    const f = doc();
+    const off = raster(f, [255, 0, 0, 255]) as RasterLayer;
+    off.transform = { ...off.transform, x: 100 };
+    const z = adjustment(f, 'test-invert', { clipped: true });
+    expect(renderClipBackdrop(f, z.id)).toBe('empty');
+    // A transparent base still has a (transparent) stack: nothing to filter, nothing baked.
+    const t = doc();
+    raster(t, [0, 0, 0, 0]);
+    const tz = adjustment(t, 'test-invert', { clipped: true });
+    const tb = renderClipBackdrop(t, tz.id);
+    if (!tb || tb === 'empty') throw new Error('expected a clip stack');
+    expect(pixelAt(tb.stack, 3, 3)[3]).toBe(0);
   });
 });

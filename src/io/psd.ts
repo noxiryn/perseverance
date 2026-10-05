@@ -5,7 +5,8 @@
  *    Adjustment layers with a Photoshop equivalent are written as native adjustment layers (see
  *    psdAdjustments.ts); the others (duotone, split toning, color lookup, vignette…) are baked into
  *    a pixel layer showing their effect on what is below them, with the same mask, opacity and
- *    blending (exact over opaque pixels and inside clipping masks; see psdBake.ts). The document
+ *    blending (exact over opaque pixels, and inside clipping masks also over soft base edges and
+ *    whatever the base's behind-stage effects; see psdBake.ts). The document
  *    background colour becomes a bottom "Background Color" fill layer.
  *  - Import: pixel layers → raster layers (left/top → transform), groups, masks, opacity, blending,
  *    visibility, clipping, supported adjustment layers; our "Background Color" layer becomes the
@@ -16,16 +17,16 @@ import type { AdjustmentLayer, Document, FillLayer, ID, Layer, LayerMask, ParamV
 import { bitmaps } from '../core/bitmaps';
 import { createCanvas, ctx2d, opaqueBounds } from '../core/canvas';
 import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeFillLayer, makeGroupLayer, makeRasterLayer, parentOf, siblingsOf } from '../core/document';
-import { renderDocument, renderLayerToDoc } from '../render/compositor';
-import { effects as effectRegistry, filters } from '../registry';
+import { renderClipBackdrop, renderDocument, renderLayerParts, renderLayerToDoc } from '../render/compositor';
+import { effects as effectRegistry, filters, type FilterDef } from '../registry';
 import { makeFilterContext, resolveParams, runFilter } from '../filters/engine';
 import { saveFile, type OpenedFile } from '../platform';
 import { activeSession, useEditor } from '../state/editor';
 import { openDialog, toast } from '../state/ui';
-import { formatBytes, fromPsdBlend, safeFileName, toPsdBlend } from './math';
+import { blendFromCompositeOp, formatBytes, fromPsdBlend, safeFileName, toPsdBlend } from './math';
 import { effectLabel, effectsFromPsd, effectsToPsd, fillFromPsd, fillToPsd, representableGradient, toPsdColor } from './psdEffects';
 import { fromPsdAdjustment, toPsdAdjustment } from './psdAdjustments';
-import { alphaChannel, clippedBakeApprox, finishBakedPixels } from './psdBake';
+import { alphaChannel, finishBakedPixels, finishClippedBake } from './psdBake';
 import { backgroundLayerOf, baseName, ensureFontsFor } from './util';
 
 /** Name of the bottom fill layer that carries the document background colour in exported PSDs. */
@@ -80,13 +81,21 @@ export interface PsdBuildReport {
   /**
    * Baked adjustments that are only approximate: not clipped, over semi-transparent pixels (soft
    * edges inside an isolated group or a transparent document come out denser in Photoshop), or
-   * clipped to a base drawn at a lower Fill (see clippedBakeApprox).
+   * clipped to a base drawn at a lower Fill or whose above-stage effects reach beyond its content
+   * (see finishClippedBake).
    */
   approxAdjustments: string[];
   /** Gradient fill layers written as plain pixels (Photoshop's fill data can't hold their geometry closely enough). */
   rasterizedFills: string[];
   /** Layers whose styles had to be baked into pixels (no Photoshop equivalent). */
   baked: string[];
+  /**
+   * Clipping-mask bases whose baked styles went into pixel layers of their own below them (baked
+   * into the base's pixels they would become the clip's shape: clipped layers painting over them).
+   */
+  splitClipBases: string[];
+  /** Clipping-mask bases whose styles stayed editable Photoshop effects instead (see splitClipBaseStyles). */
+  editableClipBases: string[];
   /** Groups whose styles could not be exported (folders cannot hold baked pixels). */
   lostGroupStyles: string[];
 }
@@ -99,54 +108,70 @@ function copyCanvas(src: HTMLCanvasElement): HTMLCanvasElement {
 }
 
 /** Render `rootIds` of `doc` on their own (doc space, transparent), optionally only below `below`. */
-function renderIsolated(doc: Document, rootIds: ID[], overrides: Record<ID, Layer>, below?: ID): HTMLCanvasElement {
-  const temp: Document = { ...doc, id: `${doc.id}~psd-bake`, background: null, layers: { ...doc.layers, ...overrides }, rootIds, selection: null };
+function renderIsolated(doc: Document, rootIds: ID[], below?: ID): HTMLCanvasElement {
+  const temp: Document = { ...doc, id: `${doc.id}~psd-bake`, background: null, rootIds, selection: null };
   return copyCanvas(renderDocument(temp, { background: false, below }));
 }
 
 /**
- * What an adjustment layer applies to (doc space): everything below it — or, inside an isolated
- * (non pass-through) group, the group's content below it; for a clipped adjustment, its clip base
- * plus the layers clipped to it below the adjustment (`clipped` = the backdrop is a clip stack;
- * `shape` = the base's shape when it is drawn at a lower Fill, see clippedBakeApprox).
+ * What an unclipped adjustment layer applies to (doc space): everything below it — or, inside an
+ * isolated (non pass-through) group, the group's content below it.
  */
-function adjustmentBackdrop(doc: Document, l: AdjustmentLayer): { canvas: HTMLCanvasElement; clipped: boolean; shape?: HTMLCanvasElement | null } {
-  if (l.clipped) {
-    const sibs = siblingsOf(doc, l.id);
-    const i = sibs.indexOf(l.id);
-    let baseIdx = i - 1;
-    while (baseIdx >= 0 && doc.layers[sibs[baseIdx]]?.clipped) baseIdx--;
-    const base = baseIdx >= 0 ? doc.layers[sibs[baseIdx]] : undefined;
-    if (base && base.type !== 'adjustment') {
-      // The clip stack composites the base's content at full opacity; its own opacity/blend apply
-      // to the whole stack afterwards.
-      const solo = { ...base, opacity: 1, clipped: false, blendMode: base.type === 'group' && base.blendMode === 'pass-through' ? 'pass-through' : 'normal' } as Layer;
-      const fill = Number.isFinite(base.fillOpacity) ? base.fillOpacity : 1;
-      const shape = fill < 0.999 ? renderLayerToDoc(doc, { ...solo, fillOpacity: 1 } as Layer, { effects: false }) : undefined;
-      return { canvas: renderIsolated(doc, sibs.slice(baseIdx, i), { [base.id]: solo }), clipped: true, shape };
-    }
-  }
+function adjustmentBackdrop(doc: Document, l: AdjustmentLayer): HTMLCanvasElement {
   for (let p = parentOf(doc, l.id); p; p = parentOf(doc, p)) {
     const g = doc.layers[p];
-    if (g?.type === 'group' && g.blendMode !== 'pass-through') return { canvas: renderIsolated(doc, g.childIds, {}, l.id), clipped: false };
+    if (g?.type === 'group' && g.blendMode !== 'pass-through') return renderIsolated(doc, g.childIds, l.id);
   }
-  return { canvas: copyCanvas(renderDocument(doc, { below: l.id, background: true })), clipped: false };
+  return copyCanvas(renderDocument(doc, { below: l.id, background: true }));
+}
+
+/** Pixels of a canvas as ImageData (read through a CPU scratch copy). */
+function imageOf(c: HTMLCanvasElement): ImageData {
+  const s = createCanvas(c.width, c.height);
+  const ctx = ctx2d(s, { willReadFrequently: true });
+  ctx.drawImage(c, 0, 0);
+  return ctx.getImageData(0, 0, c.width, c.height);
+}
+
+/**
+ * A clipped adjustment, baked from its clip stack as the compositor builds it (renderClipBackdrop:
+ * the base's colour made opaque, without its behind-stage effects, plus the clipped layers below)
+ * and filtered over the same rect and pixel positions as in a render. Null when the adjustment is
+ * not in a clip stack (the compositor applies it unclipped).
+ */
+function bakeClipped(doc: Document, l: AdjustmentLayer, def: FilterDef, opacity: number): { canvas: HTMLCanvasElement; approx: boolean } | null {
+  const bd = renderClipBackdrop(doc, l.id);
+  if (!bd) return null;
+  const out = createCanvas(doc.width, doc.height);
+  if (bd === 'empty') return { canvas: out, approx: false };
+  const img = imageOf(bd.stack);
+  const stack = img.data.slice();
+  const ctx = { docWidth: doc.width, docHeight: doc.height, offsetX: bd.x, offsetY: bd.y, scale: 1 };
+  const res = runFilter(def, img, l.adjustment.params, makeFilterContext(ctx));
+  const approx = finishClippedBake(res.data, stack, alphaChannel(imageOf(bd.cover).data), bd.share ? alphaChannel(imageOf(bd.share).data) : null, opacity);
+  const t = createCanvas(res.width, res.height);
+  ctx2d(t).putImageData(res, 0, 0);
+  ctx2d(out).drawImage(t, bd.x, bd.y);
+  return { canvas: out, approx };
 }
 
 /**
  * An adjustment Photoshop doesn't have, rendered into pixels (doc-sized), or null (unknown filter).
- * `opacity` is the layer's total strength (for the soft-edge check, see psdBake.ts).
+ * `opacity` is the layer's total strength (for the approximation checks, see psdBake.ts).
  */
 function bakeAdjustment(doc: Document, l: AdjustmentLayer, opacity: number): { canvas: HTMLCanvasElement; approx: boolean } | null {
   const def = filters.get(l.adjustment.filterId);
   if (!def) return null;
-  const { canvas: c, clipped, shape } = adjustmentBackdrop(doc, l);
+  if (l.clipped) {
+    const clipped = bakeClipped(doc, l, def, opacity);
+    if (clipped) return clipped;
+  }
+  const c = adjustmentBackdrop(doc, l);
   const ctx = ctx2d(c, { willReadFrequently: true });
   const img = ctx.getImageData(0, 0, c.width, c.height);
   const alpha = alphaChannel(img.data);
   const out = runFilter(def, img, l.adjustment.params, makeFilterContext({ docWidth: doc.width, docHeight: doc.height }));
-  let approx = finishBakedPixels(out.data, alpha, clipped, opacity);
-  if (!approx && shape && shape.width === c.width && shape.height === c.height) approx = clippedBakeApprox(alpha, alphaChannel(readPixels(shape)), opacity);
+  const approx = finishBakedPixels(out.data, alpha, opacity);
   ctx.putImageData(out, 0, 0);
   return { canvas: c, approx };
 }
@@ -175,10 +200,7 @@ function fillVectorData(doc: Document, l: FillLayer, full: HTMLCanvasElement | n
 }
 
 function readPixels(c: HTMLCanvasElement): Uint8ClampedArray {
-  const s = createCanvas(c.width, c.height);
-  const ctx = ctx2d(s, { willReadFrequently: true });
-  ctx.drawImage(c, 0, 0);
-  return ctx.getImageData(0, 0, c.width, c.height).data;
+  return imageOf(c).data;
 }
 
 /** True when the bottom layer is an opaque, doc-covering "Background" that hides doc.background. */
@@ -220,12 +242,55 @@ function backgroundToPsd(doc: Document): PsdLayer | null {
   };
 }
 
+/** A PSD pixel layer: `common` with `full` (doc-sized) cropped to its opaque bounds. */
+function withPixels(common: PsdLayer, full: HTMLCanvasElement | null): PsdLayer {
+  const b = full ? opaqueBounds(full) : null;
+  if (!full || !b) return { ...common, top: 0, left: 0, bottom: 0, right: 0 };
+  const c = createCanvas(b.width, b.height);
+  ctx2d(c).drawImage(full, b.x, b.y, b.width, b.height, 0, 0, b.width, b.height);
+  return { ...common, top: b.y, left: b.x, bottom: b.y + b.height, right: b.x + b.width, canvas: c };
+}
+
+/**
+ * Baked styles of a clipping-mask base as pixel layers of their own (like Photoshop's Layer ▸
+ * Layer Style ▸ Create Layers), so the base keeps its own shape as the clip: one layer per
+ * behind-stage piece (drop shadow, outer glow, outside stroke…; knocked out under the content as
+ * rendered, with its blend mode, at the base's opacity) to go below the base, and `core` = the
+ * base's pixels when it has above-stage effects (null: its plain content, with Fill and mask left
+ * to Photoshop). Null when that can't reproduce the render: a piece drawn with an operation that
+ * has no blend mode, or above-stage effects together with a reduced Fill (Photoshop would fade the
+ * baked effects too), an enabled mask, or coverage beyond the content (it would grow the clip).
+ */
+function splitClipBaseStyles(doc: Document, l: Layer): { below: PsdLayer[]; core: HTMLCanvasElement | null } | null {
+  const parts = renderLayerParts(doc, l, { mask: true });
+  if (!parts) return { below: [], core: null };
+  if (parts.above && (l.fillOpacity < 0.999 || (l.mask && l.mask.enabled) || parts.coreBeyondShape)) return null;
+  const blends = parts.behind.map((p) => blendFromCompositeOp(p.op));
+  if (blends.some((b) => !b)) return null;
+  const n = parts.behind.length;
+  const below = parts.behind.map((p, i) =>
+    withPixels({ name: n > 1 ? `${l.name}'s Styles ${i + 1}` : `${l.name}'s Styles`, opacity: l.opacity, blendMode: toPsdBlend(blends[i]!) as PsdLayer['blendMode'], hidden: !l.visible }, p.canvas),
+  );
+  return { below, core: parts.above ? parts.core : null };
+}
+
+/**
+ * Whether `l` is the base of a clipping mask: a non-adjustment layer with a clipped layer right
+ * above it (the compositor groups clip stacks the same way).
+ */
+function isClipBase(doc: Document, l: Layer): boolean {
+  if (l.type === 'adjustment') return false;
+  const sibs = siblingsOf(doc, l.id);
+  const i = sibs.indexOf(l.id);
+  return i >= 0 && !!doc.layers[sibs[i + 1]]?.clipped;
+}
+
 /** Build the ag-psd structure for a document. */
 export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd } & PsdBuildReport {
-  const report: PsdBuildReport = { skipped: [], bakedAdjustments: [], approxAdjustments: [], rasterizedFills: [], baked: [], lostGroupStyles: [] };
-  const convert = (id: ID): PsdLayer | null => {
+  const report: PsdBuildReport = { skipped: [], bakedAdjustments: [], approxAdjustments: [], rasterizedFills: [], baked: [], splitClipBases: [], editableClipBases: [], lostGroupStyles: [] };
+  const convert = (id: ID): PsdLayer[] => {
     const l = doc.layers[id];
-    if (!l) return null;
+    if (!l) return [];
     const common: PsdLayer = {
       name: l.name,
       opacity: l.opacity,
@@ -244,8 +309,8 @@ export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd } & 
       if (fx.unsupported.length)
         report.lostGroupStyles.push(`${l.name} (${fx.unsupported.map((e) => effectLabel(e.effectId)).join(', ')})`);
       if (l.fillOpacity < 1) common.fillOpacity = l.fillOpacity;
-      const children = l.childIds.map(convert).filter((c): c is PsdLayer => !!c);
-      return { ...common, opened: !l.collapsed, children };
+      const children = l.childIds.flatMap(convert);
+      return [{ ...common, opened: !l.collapsed, children }];
     }
     if (l.type === 'adjustment') {
       const inst = l.adjustment;
@@ -253,50 +318,59 @@ export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd } & 
       common.opacity = clamp01(l.opacity * (Number.isFinite(l.fillOpacity) ? l.fillOpacity : 1) * (inst.opacity ?? 1));
       if (!inst.enabled) common.hidden = true;
       const a = toPsdAdjustment(inst.filterId, paramsOf(inst.filterId, inst.params));
-      if (a) return { ...common, adjustment: a };
+      if (a) return [{ ...common, adjustment: a }];
       const baked = bakeAdjustment(doc, l, common.opacity ?? 1);
       if (!baked) {
         report.skipped.push(l.name);
-        return null;
+        return [];
       }
       report.bakedAdjustments.push(l.name);
       if (baked.approx) report.approxAdjustments.push(l.name);
-      const bb = opaqueBounds(baked.canvas);
-      if (!bb) return { ...common, top: 0, left: 0, bottom: 0, right: 0 };
-      const c = createCanvas(bb.width, bb.height);
-      ctx2d(c).drawImage(baked.canvas, bb.x, bb.y, bb.width, bb.height, 0, 0, bb.width, bb.height);
-      return { ...common, top: bb.y, left: bb.x, bottom: bb.y + bb.height, right: bb.x + bb.width, canvas: c };
+      return [withPixels(common, baked.canvas)];
     }
     const enabledFx = l.effects.filter((e) => e.enabled);
-    let bake = opts.bakeStyles && enabledFx.length > 0;
+    const fx = l.effects.length ? effectsToPsd(l.effects) : null;
+    const unsupported = fx?.unsupported ?? [];
+    let bake = enabledFx.length > 0 && (opts.bakeStyles || unsupported.length > 0);
+    const labels = unsupported.map((e) => effectLabel(e.effectId)).join(', ');
+    let below: PsdLayer[] = [];
+    let core: HTMLCanvasElement | null = null;
+    if (bake && isClipBase(doc, l)) {
+      // Baked into the base's own pixels, styles would become the clip's shape in Photoshop (the
+      // clipped layers would paint over its shadow, stroke, glow…): bake them into layers of their
+      // own below it — or, when that can't reproduce the render, keep them editable (unless a
+      // style has no Photoshop equivalent: then they are baked into it after all, and reported).
+      const split = splitClipBaseStyles(doc, l);
+      if (split) {
+        bake = false;
+        below = split.below;
+        core = split.core;
+        report.splitClipBases.push(l.name);
+        if (!opts.bakeStyles) report.baked.push(`${l.name} (${labels})`);
+      } else if (!unsupported.length) {
+        bake = false;
+        if (fx?.info) common.effects = fx.info;
+        report.editableClipBases.push(l.name);
+      } else report.baked.push(`${l.name} (${labels}; clipped layers now clip to them too)`);
+    } else if (bake && !opts.bakeStyles) report.baked.push(`${l.name} (${labels})`);
+    else if (!bake && !opts.bakeStyles && fx?.info) common.effects = fx.info;
     let source: Layer = l;
-    if (!opts.bakeStyles && l.effects.length) {
-      const fx = effectsToPsd(l.effects);
-      if (fx.unsupported.length) {
-        bake = true;
-        report.baked.push(`${l.name} (${fx.unsupported.map((e) => effectLabel(e.effectId)).join(', ')})`);
-      } else if (fx.info) common.effects = fx.info;
-    }
-    if (!bake && l.fillOpacity < 1) {
+    if (!bake && !core && l.fillOpacity < 1) {
       // The renderer applies Fill to the content: export it at full fill and let Photoshop apply it.
       common.fillOpacity = l.fillOpacity;
       source = { ...l, fillOpacity: 1 } as Layer;
     }
-    const full = renderLayerToDoc(doc, source, { effects: bake, mask: false });
-    if (source.type === 'fill' && !bake) {
+    const full = core ?? renderLayerToDoc(doc, source, { effects: bake, mask: false });
+    if (source.type === 'fill' && !bake && !core) {
       // Solid/gradient fills stay editable Photoshop fill layers (pixels are written too). Not when
       // styles are baked: Photoshop re-renders fill layers from this data and would drop them.
       const vf = fillVectorData(doc, source, full);
       if (vf) common.vectorFill = vf;
       else if (source.fill.type === 'gradient') report.rasterizedFills.push(l.name);
     }
-    const b = full ? opaqueBounds(full) : null;
-    if (!full || !b) return { ...common, top: 0, left: 0, bottom: 0, right: 0 };
-    const c = createCanvas(b.width, b.height);
-    ctx2d(c).drawImage(full, b.x, b.y, b.width, b.height, 0, 0, b.width, b.height);
-    return { ...common, top: b.y, left: b.x, bottom: b.y + b.height, right: b.x + b.width, canvas: c };
+    return [...below, withPixels(common, full)];
   };
-  const children = doc.rootIds.map(convert).filter((c): c is PsdLayer => !!c);
+  const children = doc.rootIds.flatMap(convert);
   const bg = backgroundToPsd(doc);
   if (bg) children.unshift(bg);
   const comp = renderDocument(doc, { background: true });
@@ -317,7 +391,7 @@ export async function exportPsd(opts: PsdExportOptions): Promise<void> {
     await ensureFontsFor(s.doc);
     // Let the toast paint before the (synchronous) layer rendering and encoding.
     await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
-    const { psd, skipped, bakedAdjustments, approxAdjustments, rasterizedFills, baked, lostGroupStyles } = buildPsd(s.doc, opts);
+    const { psd, skipped, bakedAdjustments, approxAdjustments, rasterizedFills, baked, splitClipBases, editableClipBases, lostGroupStyles } = buildPsd(s.doc, opts);
     const data = writePsd(psd, { generateThumbnail: true, noBackground: true });
     const res = await saveFile({
       title: 'Export PSD',
@@ -332,10 +406,12 @@ export async function exportPsd(opts: PsdExportOptions): Promise<void> {
       notes.push(
         `${bakedAdjustments.length} adjustment layer${bakedAdjustments.length > 1 ? 's' : ''} without a Photoshop equivalent baked into pixels (${list(bakedAdjustments)})`,
       );
-    if (approxAdjustments.length) notes.push(`baked approximately (soft edges or a clip base at reduced Fill): ${list(approxAdjustments)}`);
+    if (approxAdjustments.length) notes.push(`baked approximately (soft edges, or a clip base at reduced Fill or with effects beyond its content): ${list(approxAdjustments)}`);
     if (rasterizedFills.length) notes.push(`gradient fills exported as pixels: ${list(rasterizedFills)}`);
     if (skipped.length) notes.push(`${skipped.length} unknown adjustment layer${skipped.length > 1 ? 's' : ''} left out (${list(skipped)})`);
     if (baked.length) notes.push(`styles baked into pixels on ${list(baked)}`);
+    if (splitClipBases.length) notes.push(`styles of clipping-mask bases written as separate layers below them: ${list(splitClipBases)}`);
+    if (editableClipBases.length) notes.push(`styles kept editable on clipping-mask bases (baked, they would change the clip): ${list(editableClipBases)}`);
     if (lostGroupStyles.length) notes.push(`group styles not exported: ${list(lostGroupStyles)}`);
     const size = formatBytes(data.byteLength);
     if (notes.length) toast(`Exported PSD (${size}) · ${notes.join(' · ')}`, 'warning', 7000);

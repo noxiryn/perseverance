@@ -30,7 +30,7 @@ export function PsdExportDialog({ close }: { close: (r?: PsdExportOptions) => vo
       <Checkbox checked={bake} onChange={setBake} label="Bake layer styles into pixels" />
       <div className="io-note" style={{ marginTop: 6, paddingLeft: 19 }}>
         {bake
-          ? 'Drop shadows, strokes, glows and overlays are rendered into each layer so the PSD looks exactly like your document.'
+          ? 'Drop shadows, strokes, glows and overlays are rendered into each layer so the PSD looks exactly like your document. Clipping-mask bases keep editable styles: baked, they would change the clip.'
           : 'Layer styles are written as editable Photoshop effects (drop/inner shadow, outer/inner glow, bevel, satin, stroke, color and gradient overlay). Layers using a style Photoshop does not have (long shadow, pattern overlay) are baked.'}
       </div>
       <div className="io-sep" />
@@ -42,8 +42,9 @@ export function PsdExportDialog({ close }: { close: (r?: PsdExportOptions) => vo
         Lookup, Vignette…) are baked into pixel layers. The background colour becomes a bottom “Background Color” layer.
       </div>
       <div className="io-note" style={{ marginTop: 6 }}>
-        Baked adjustments match exactly over opaque pixels and inside clipping masks. Over semi-transparent pixels — soft edges in a group
-        or a transparent document — they look slightly denser in Photoshop; the export lists those layers.
+        Baked adjustments match exactly over opaque pixels and inside clipping masks (soft edges included). Over semi-transparent pixels
+        outside a clipping mask — soft edges in a group or a transparent document — or clipped to a base at reduced Fill, they look
+        slightly denser in Photoshop; the export lists those layers.
       </div>
     </Dialog>
   );

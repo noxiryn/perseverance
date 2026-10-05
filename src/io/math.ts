@@ -438,6 +438,16 @@ const OUR_BLENDS = new Set<string>([
   'luminosity',
 ]);
 
+/**
+ * The blend mode a canvas composite operation draws with (the inverse of compositeOp), or null
+ * when it has none (e.g. 'destination-out').
+ */
+export function blendFromCompositeOp(op: string): BlendMode | null {
+  if (op === 'source-over') return 'normal';
+  if (op === 'lighter') return 'linear-dodge';
+  return op !== 'normal' && op !== 'linear-dodge' && OUR_BLENDS.has(op) ? (op as BlendMode) : null;
+}
+
 /** ag-psd blend mode → ours (unsupported modes map to the closest available one). */
 export function fromPsdBlend(mode: string | undefined, isGroup = false): GroupBlendMode {
   if (!mode) return isGroup ? 'pass-through' : 'normal';

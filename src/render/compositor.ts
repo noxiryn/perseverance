@@ -17,6 +17,7 @@ import { transformedBounds } from '../core/geometry';
 import { applyFilterStack, makeFilterContext } from '../filters/engine';
 import { VOLATILE_ASSETS, bumpGeneration, px, renderCache, slots } from './cache';
 import {
+  clipStackBackdrop,
   compositeDocument,
   compositeDocumentLive,
   dropLiveComposites,
@@ -26,6 +27,7 @@ import {
   geometrySig,
   lastLayerText,
   layerGeometry,
+  layerParts,
   layerSig,
   makeRC,
   onSettle,
@@ -33,6 +35,7 @@ import {
   renderStats,
   settleApproximations,
   settlePending,
+  type LayerParts,
   type RC,
 } from './engine';
 import { maskValue } from './mask';
@@ -164,6 +167,53 @@ export function renderLayerToDoc(
   const R = renderLayer(rc, layer, { effects: opts.effects !== false, mask: opts.mask !== false, filters: true });
   if (!R) return null;
   return flattenRender(rc, R);
+}
+
+export type { LayerParts } from './engine';
+
+/**
+ * A layer's render split the way the compositor draws it (styles as layers of their own, like
+ * Photoshop's Layer ▸ Layer Style ▸ Create Layers): its behind-stage effect pieces (drop shadow,
+ * outer glow, outside stroke…), each with the canvas operation it is drawn with, then its core
+ * (content at fill opacity + above-stage effects). Doc-sized (× scale) fresh canvases; the layer's
+ * own opacity / blend mode are not applied. Null if nothing to draw.
+ */
+export function renderLayerParts(doc: Document, layer: Layer, opts: { scale?: number; mask?: boolean } = {}): LayerParts | null {
+  const rc = makeRC(doc, opts.scale ?? 1);
+  return layerParts(rc, layer, { effects: true, mask: opts.mask !== false, filters: true });
+}
+
+/** What a clipped layer sees of its clip stack, see renderClipBackdrop. Canvases are fresh. */
+export interface ClipBackdrop {
+  /** Position and size of the canvases in doc px × scale (may reach beyond the document). */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /**
+   * The clip stack below the layer BEFORE the base's coverage is applied: the base's colour made
+   * opaque (its content and above-stage effects, without behind-stage effects such as drop
+   * shadows, outer glows or an outside stroke) with the clipped layers below composited on it.
+   * This is exactly what a clipped adjustment at that position filters.
+   */
+  stack: HTMLCanvasElement;
+  /** The stack's coverage (alpha channel): what the clip stack finally shows of `stack`. */
+  cover: HTMLCanvasElement;
+  /** Share of the coverage clipped pixel layers may paint (alpha), or null when it is all of it. */
+  share: HTMLCanvasElement | null;
+}
+
+/**
+ * The clip stack (base + clipped layers) below a clipped layer, as the compositor builds it.
+ * Null when the layer is not in a clip stack (not clipped, or clipped right above an adjustment
+ * layer: the compositor applies such a layer unclipped); 'empty' when the stack's base draws
+ * nothing (the whole stack shows nothing). A hidden base is rendered as if shown; hidden clipped
+ * layers are skipped.
+ */
+export function renderClipBackdrop(doc: Document, layerId: ID, opts: { scale?: number } = {}): ClipBackdrop | 'empty' | null {
+  const r = clipStackBackdrop(makeRC(doc, opts.scale ?? 1), layerId);
+  if (!r || r === 'empty') return r;
+  return { x: r.rect.x, y: r.rect.y, width: r.rect.w, height: r.rect.h, stack: r.stack, cover: r.cover, share: r.share };
 }
 
 function drawLocalAt(ctx: CanvasRenderingContext2D, lc: LocalContent) {

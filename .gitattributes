@@ -1,0 +1,4 @@
+# Generated WebAssembly kernels (scripts/gen-wasm.mjs): keep LF on every platform so the
+# up-to-date check (`node scripts/gen-wasm.mjs --check`, src/core/wasm/blurWasm.test.ts) sees the
+# exact generator output. (Both also ignore CRLF, for checkouts made before this file existed.)
+src/core/wasm/blurWasm.generated.ts text eol=lf

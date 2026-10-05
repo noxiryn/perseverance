@@ -1955,6 +1955,39 @@ function compositeClipStack(rc: RC, acc: Acc, base: Layer, R: LayerRender, clipp
   }
   const cb = clipBaseFor(rc, base, R);
   const G = acquire(wr.w, wr.h);
+  buildClipStack(rc, cb, reg, G, wr, clipped);
+  const g = ctx2d(G);
+  const gx = reg.x - wr.x;
+  const gy = reg.y - wr.y;
+  // The base's coverage.
+  g.globalCompositeOperation = 'destination-in';
+  g.drawImage(cb.cover ?? R.shape, gx, gy);
+  g.globalCompositeOperation = 'source-over';
+  const ctx = acc.ctx;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const dx = reg.x - acc.x;
+  const dy = reg.y - acc.y;
+  for (const b of R.behind) {
+    ctx.globalAlpha = a;
+    ctx.globalCompositeOperation = b.op;
+    ctx.drawImage(b.canvas, dx, dy);
+  }
+  ctx.globalAlpha = a;
+  ctx.globalCompositeOperation = compositeOp(base.blendMode);
+  ctx.drawImage(G, wr.x - acc.x, wr.y - acc.y);
+  ctx.restore();
+  release(G);
+  markDrawn(acc, reg);
+}
+
+/**
+ * Composite a clip stack into the cleared canvas G, which covers `wr` (output px) of the base
+ * render's region `reg`: the normalized base, then each clipped layer (adjustments applied to what
+ * is below them in the stack). The base's coverage is NOT applied (G's alpha is the normalized
+ * base's, plus whatever clipped layers drew outside it).
+ */
+function buildClipStack(rc: RC, cb: ClipBase, reg: PxRect, G: HTMLCanvasElement, wr: PxRect, clipped: Layer[]) {
   const g = ctx2d(G);
   // Region-local (0,0) inside G.
   const gx = reg.x - wr.x;
@@ -2004,26 +2037,108 @@ function compositeClipStack(rc: RC, acc: Acc, base: Layer, R: LayerRender, clipp
     g.globalCompositeOperation = 'source-over';
     release(T);
   }
-  // The base's coverage.
-  g.globalCompositeOperation = 'destination-in';
-  g.drawImage(cb.cover ?? R.shape, gx, gy);
-  g.globalCompositeOperation = 'source-over';
-  const ctx = acc.ctx;
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  const dx = reg.x - acc.x;
-  const dy = reg.y - acc.y;
-  for (const b of R.behind) {
-    ctx.globalAlpha = a;
-    ctx.globalCompositeOperation = b.op;
-    ctx.drawImage(b.canvas, dx, dy);
+}
+
+/** What a clipped layer sees of its clip stack (see clipStackBackdrop). Canvases are fresh. */
+export interface ClipStackBackdrop {
+  /** Output-px rect of the canvases (the base render's region; may reach beyond the document). */
+  rect: PxRect;
+  /**
+   * The stack below the layer before the base's coverage is applied: the base's normalized colour
+   * (its core made opaque, without its behind-stage effects) with the clipped layers below
+   * composited on it — exactly what a clipped adjustment at that position filters.
+   */
+  stack: HTMLCanvasElement;
+  /** The stack's coverage (alpha): the base's shape, or its core where that reaches beyond it. */
+  cover: HTMLCanvasElement;
+  /** Share of the coverage clipped layers may paint (alpha), or null when it is all of it. */
+  share: HTMLCanvasElement | null;
+}
+
+/**
+ * The clip stack below the clipped layer `id` as the compositor builds it (PSD export bakes
+ * clipped adjustments from it). Stacks are found like compositeList groups them: a non-adjustment
+ * layer followed by the clipped layers above it. Hidden clipped layers below `id` are skipped; a
+ * hidden base is rendered anyway (the stack is what the layer would see with the base shown).
+ * Null when `id` is not part of a clip stack (not clipped, or clipped right above an adjustment,
+ * which the compositor applies unclipped); 'empty' when the base draws nothing (neither does the
+ * stack).
+ */
+export function clipStackBackdrop(rc: RC, id: ID): ClipStackBackdrop | 'empty' | null {
+  const doc = rc.doc;
+  const parent = Object.values(doc.layers).find((g): g is GroupLayer => g.type === 'group' && g.childIds.includes(id));
+  const ids = parent ? parent.childIds : doc.rootIds;
+  const k = ids.indexOf(id);
+  if (k < 0 || !doc.layers[id]?.clipped) return null;
+  let base: Layer | null = null;
+  let start = -1;
+  for (let i = 0; i < k; ) {
+    const l = doc.layers[ids[i]];
+    if (!l || l.type === 'adjustment') {
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (j < ids.length && doc.layers[ids[j]]?.clipped) j++;
+    if (k < j) {
+      base = l;
+      start = i;
+      break;
+    }
+    i = j;
   }
-  ctx.globalAlpha = a;
-  ctx.globalCompositeOperation = compositeOp(base.blendMode);
-  ctx.drawImage(G, wr.x - acc.x, wr.y - acc.y);
-  ctx.restore();
-  release(G);
-  markDrawn(acc, reg);
+  if (!base) return null;
+  const R = renderLayer(rc, base);
+  if (!R || !R.shape) return 'empty';
+  const clipped: Layer[] = [];
+  for (let i = start + 1; i < k; i++) {
+    const c = doc.layers[ids[i]];
+    if (c && isShown(rc, c)) clipped.push(c);
+  }
+  const reg = R.region;
+  const cb = clipBaseFor(rc, base, R);
+  const stack = fresh(reg.w, reg.h);
+  buildClipStack(rc, cb, reg, stack, reg, clipped);
+  const copy = (src: HTMLCanvasElement) => {
+    const c = fresh(reg.w, reg.h);
+    ctx2d(c).drawImage(src, 0, 0);
+    return c;
+  };
+  return { rect: { ...reg }, stack, cover: copy(cb.cover ?? R.shape), share: cb.share ? copy(cb.share) : null };
+}
+
+/** A layer render split into its parts (see layerParts). Canvases are fresh, output-sized. */
+export interface LayerParts {
+  /** Behind-stage effect pieces in composite order, each drawn with its own operation. */
+  behind: { canvas: HTMLCanvasElement; op: GlobalCompositeOperation }[];
+  /** Content at fill opacity + above-stage effects (null: nothing, e.g. 0 % fill). */
+  core: HTMLCanvasElement | null;
+  /** Whether the layer has active above-stage effects. */
+  above: boolean;
+  /** Whether the core's alpha exceeds the content's anywhere (an above-stage effect adds coverage). */
+  coreBeyondShape: boolean;
+}
+
+/**
+ * A layer's render as the compositor draws it — behind pieces (already knocked out under the
+ * content when the layer is drawn at a lower opacity or fill), then the core — each placed on an
+ * output-sized canvas (PSD export: styles as layers of their own).
+ */
+export function layerParts(rc: RC, l: Layer, flags: RenderFlags): LayerParts | null {
+  const R = renderLayer(rc, l, flags);
+  if (!R) return null;
+  const place = (c: HTMLCanvasElement) => {
+    const out = fresh(rc.W, rc.H);
+    ctx2d(out).drawImage(c, R.region.x, R.region.y);
+    return out;
+  };
+  const above = flags.effects && activeEffects(l).some((e) => effectStage(e.def, e.params) !== 'behind');
+  let beyond = false;
+  if (R.core && R.shape && R.core !== R.shape) {
+    const r: PxRect = { x: 0, y: 0, w: Math.min(R.core.width, R.shape.width), h: Math.min(R.core.height, R.shape.height) };
+    beyond = coreExceedsShape(readImage(R.core, r).data, readImage(R.shape, r).data);
+  }
+  return { behind: R.behind.map((b) => ({ canvas: place(b.canvas), op: b.op })), core: R.core ? place(R.core) : null, above, coreBeyondShape: beyond };
 }
 
 /** Apply an adjustment layer to what has been composited so far in `acc`. */

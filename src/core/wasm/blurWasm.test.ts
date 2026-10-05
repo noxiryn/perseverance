@@ -110,7 +110,11 @@ describe('WebAssembly blur kernels', () => {
     const genPath = join(here, '..', '..', '..', 'scripts', 'gen-wasm.mjs');
     const gen = await import(/* @vite-ignore */ genPath);
     const expected: string = gen.generatedSource();
-    expect(readFileSync(join(here, 'blurWasm.generated.ts'), 'utf8')).toBe(expected);
+    // Compare modulo line endings: a Windows checkout (core.autocrlf=true, the Git for Windows
+    // default on the CI runner) writes the file with CRLF; only the content must match.
+    const current = readFileSync(join(here, 'blurWasm.generated.ts'), 'utf8');
+    expect(gen.normalizeEol(current)).toBe(expected);
+    expect(gen.normalizeEol('a\r\nb\r\n')).toBe('a\nb\n');
   });
 
   it('box passes: 1–6 channels, plain / extended boxes, radius 0, 1, > width, 4K rows', () => {

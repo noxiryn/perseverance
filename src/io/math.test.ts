@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { Transform } from '../core/types';
+import { compositeOp } from '../filters/engine';
 import {
   anchorFractions,
+  blendFromCompositeOp,
   canvasSizeOffset,
   clampRect,
   distanceTo,
@@ -203,6 +205,15 @@ describe('psd blend modes', () => {
     expect(fromPsdBlend('linear burn')).toBe('multiply');
     expect(fromPsdBlend('weird')).toBe('normal');
     expect(fromPsdBlend(undefined, true)).toBe('pass-through');
+  });
+
+  it('reads the blend mode back from a canvas composite operation (styles split into layers)', () => {
+    expect(blendFromCompositeOp(compositeOp('normal'))).toBe('normal');
+    expect(blendFromCompositeOp(compositeOp('linear-dodge'))).toBe('linear-dodge');
+    for (const m of ['multiply', 'screen', 'color-dodge', 'soft-light', 'luminosity'] as const) expect(blendFromCompositeOp(compositeOp(m))).toBe(m);
+    expect(blendFromCompositeOp('destination-out')).toBeNull();
+    expect(blendFromCompositeOp('source-atop')).toBeNull();
+    expect(blendFromCompositeOp('normal')).toBeNull(); // not a canvas operation
   });
 });
 
