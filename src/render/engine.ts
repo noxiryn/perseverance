@@ -33,6 +33,7 @@ import { applyFilterStack, compositeOp, makeFilterContext, resolveParams, runFil
 import { cacheGeneration, objId, slots, type Resource } from './cache';
 import { edgeDistance } from './distance';
 import { applyMask, lerpInto, maskAlpha } from './mask';
+import { coreExceedsShape, normalizeClipBase, opaqueWhereCovered } from './clip';
 import { cropExactBackend } from './backendProbe';
 import { alignGrid, alignRect, changesSince, effectInfluence, effectUsesFields, fieldBucket, filtersLocal, isPixelExact, mapDirtyRect, type ChangeEntry } from './region';
 import { fillWithPaint } from './paint';
@@ -1266,6 +1267,8 @@ function updateRenderRegion(rc: RC, l: Layer, flags: RenderFlags, p: LayerRender
   const cctx = ctx2d(C);
   const seq0 = approxSeq;
   const uses0 = approxUses;
+  // The content (and the core) change in place over Dc: a clip-base cache made from them is stale there.
+  markClipStale(rc, l, p, Dc);
 
   // 2) content
   cctx.save();
@@ -1356,7 +1359,10 @@ function updateRenderRegion(rc: RC, l: Layer, flags: RenderFlags, p: LayerRender
   const ox = Di.x - region.x;
   const oy = Di.y - region.y;
   for (let i = 0; i < res.behind.length; i++) blitInto(p.behind[i].canvas, res.behind[i].canvas, lo, ox, oy);
-  if (!shared) blitInto(p.core!, res.core, lo, ox, oy);
+  if (!shared) {
+    markClipStale(rc, l, p, Do);
+    blitInto(p.core!, res.core, lo, ox, oy);
+  }
   if (isApprox) markApprox(rc, l.id, Do, sharedFields);
   return isApprox ? 'approx' : 'ok';
 }
@@ -1807,7 +1813,130 @@ function compositeRender(acc: Acc, l: Layer, R: LayerRender) {
   markDrawn(acc, R.region);
 }
 
-/** Base layer + clipped layers: clipped content is limited to the base's alpha. */
+/* ---------------- clip stacks ---------------- */
+
+/**
+ * Normalized clip base of a base layer's render (see ./clip.ts): region-local canvases (the size
+ * of the render's canvases), cached per base layer and render scale for the render's core / shape
+ * canvases — renders that share them (a moved layer, an opacity edit) share it too. Computed on
+ * the CPU once per render; renders updated in place (live painting) only recompute the changed
+ * area (`stale`, see markClipStale), zero-copy raster renders follow their bitmap's dirty rects.
+ */
+interface ClipBase {
+  shape: HTMLCanvasElement;
+  core: HTMLCanvasElement | null;
+  w: number;
+  h: number;
+  /** Base colour made opaque: core / coverage (null: the base draws nothing itself, e.g. 0% fill). */
+  norm: HTMLCanvasElement | null;
+  /** Coverage, when the core reaches beyond the shape somewhere (null: the shape's alpha). */
+  cover: HTMLCanvasElement | null;
+  /** Share of the coverage clipped layers may paint, with `cover` (null: all of it). */
+  share: HTMLCanvasElement | null;
+  /** Region-local area changed in place since it was computed. */
+  stale: PxRect | null;
+  /** Zero-copy raster render (the live bitmap is the render): the bitmap version computed from. */
+  bitmap?: { id: ID; v: number };
+}
+
+function clipKey(rc: RC, id: ID): string {
+  return `CB|${id}|${scaleKey(rc.s)}`;
+}
+
+function clipSig(R: LayerRender): string {
+  return `${objId(R.shape)}|${objId(R.core)}|${R.shape?.width}x${R.shape?.height}`;
+}
+
+/**
+ * A render's core / shape canvases are about to change in place over `abs` (output px): clip bases
+ * made from them must recompute that area.
+ */
+function markClipStale(rc: RC, l: Layer, p: LayerRender, abs: PxRect) {
+  if (!p.shape) return;
+  for (const cb of slots.values<ClipBase>(clipKey(rc, l.id))) {
+    if (cb.shape !== p.shape) continue;
+    const r = intersectRect({ x: abs.x - p.region.x, y: abs.y - p.region.y, w: abs.w, h: abs.h }, { x: 0, y: 0, w: cb.w, h: cb.h });
+    if (r) cb.stale = unionRect(cb.stale, r);
+  }
+}
+
+/** Pixels of `src` over `r` (straight alpha), read through a CPU scratch canvas (see applyAdjustment). */
+function readImage(src: HTMLCanvasElement, r: PxRect): ImageData {
+  const T = acquire(r.w, r.h, { read: true });
+  const k = ctx2d(T, { willReadFrequently: true });
+  k.drawImage(src, -r.x, -r.y);
+  const img = k.getImageData(0, 0, r.w, r.h);
+  release(T);
+  return img;
+}
+
+/**
+ * Compute a clip base over the region-local rect `r`. False when the core reaches beyond the shape
+ * there while the cache has no coverage canvases yet (and `whole` is false): recompute it whole.
+ */
+function computeClipBase(cb: ClipBase, r: PxRect, whole: boolean): boolean {
+  const core = cb.core;
+  if (!core) return true;
+  const K = readImage(core, r);
+  const S = core === cb.shape ? null : readImage(cb.shape, r);
+  if (S && !cb.cover && coreExceedsShape(K.data, S.data)) {
+    if (!whole) return false;
+    cb.cover = fresh(cb.w, cb.h);
+    cb.share = fresh(cb.w, cb.h);
+  }
+  const put = (c: HTMLCanvasElement, img: ImageData) => ctx2d(c).putImageData(img, r.x, r.y);
+  if (cb.cover && cb.share) {
+    const k = ctx2d(cb.cover);
+    const cov = k.createImageData(r.w, r.h);
+    const sh = k.createImageData(r.w, r.h);
+    normalizeClipBase(K.data, S && S.data, cov.data, sh.data);
+    put(cb.cover, cov);
+    put(cb.share, sh);
+  } else normalizeClipBase(K.data, S && S.data);
+  if (!cb.norm) cb.norm = fresh(cb.w, cb.h);
+  put(cb.norm, K);
+  return true;
+}
+
+/** The (cached, up-to-date) clip base of a base layer render. */
+function clipBaseFor(rc: RC, base: Layer, R: LayerRender): ClipBase {
+  const shape = R.shape!;
+  const key = clipKey(rc, base.id);
+  const sig = clipSig(R);
+  const whole: PxRect = { x: 0, y: 0, w: shape.width, h: shape.height };
+  const hit = slots.get<ClipBase>(key, sig);
+  if (hit) {
+    if (hit.bitmap) {
+      const v = bitmaps.version(hit.bitmap.id);
+      if (v !== hit.bitmap.v) {
+        const d = bitmaps.dirtySince(hit.bitmap.id, hit.bitmap.v);
+        const dr = d ? intersectRect(coverRect(d.x, d.y, d.width, d.height), whole) : whole;
+        if (dr) hit.stale = unionRect(hit.stale, dr);
+        hit.bitmap.v = v;
+      }
+    }
+    if (!hit.stale) return hit;
+    const st = hit.stale;
+    hit.stale = null;
+    if (computeClipBase(hit, st, false)) return hit;
+    // The core now reaches beyond the shape: recompute everything with coverage canvases.
+    computeClipBase(hit, whole, true);
+    slots.set(key, sig, hit, 0, { layerId: base.id, max: 2, res: [hit.norm, hit.cover, hit.share] });
+    return hit;
+  }
+  const cb: ClipBase = { shape, core: R.core, w: shape.width, h: shape.height, norm: null, cover: null, share: null, stale: null };
+  if (base.type === 'raster' && borrowed.has(shape) && bitmaps.tryGet(base.bitmapId) === shape) cb.bitmap = { id: base.bitmapId, v: bitmaps.version(base.bitmapId) };
+  computeClipBase(cb, whole, true);
+  slots.set(key, sig, cb, 0, { layerId: base.id, max: 2, res: [cb.norm, cb.cover, cb.share] });
+  return cb;
+}
+
+/**
+ * Base layer + clipped layers (Photoshop clipping, see ./clip.ts): the stack's coverage is the
+ * base's — clipped layers never add any — and each clipped layer blends "atop" what is below it.
+ * The stack is composited over the base made opaque (its normalized colour), clipped layers with
+ * plain source-over blending, then the base's coverage is applied with destination-in.
+ */
 function compositeClipStack(rc: RC, acc: Acc, base: Layer, R: LayerRender, clipped: Layer[]) {
   const a = Math.max(0, Math.min(1, base.opacity));
   if (a <= 0 || !R.shape) return;
@@ -1823,12 +1952,13 @@ function compositeClipStack(rc: RC, acc: Acc, base: Layer, R: LayerRender, clipp
       return;
     }
   }
+  const cb = clipBaseFor(rc, base, R);
   const G = acquire(wr.w, wr.h);
   const g = ctx2d(G);
   // Region-local (0,0) inside G.
   const gx = reg.x - wr.x;
   const gy = reg.y - wr.y;
-  if (R.core) g.drawImage(R.core, gx, gy);
+  if (cb.norm) g.drawImage(cb.norm, gx, gy);
   const gAcc: Acc = { canvas: G, ctx: g, x: wr.x, y: wr.y, w: wr.w, h: wr.h, bounds: wr, root: false, clip: null, cropOf: sameRect(wr, reg) ? undefined : reg };
   for (const c of clipped) {
     if (c.type === 'adjustment') {
@@ -1839,25 +1969,44 @@ function compositeClipStack(rc: RC, acc: Acc, base: Layer, R: LayerRender, clipp
     if (!CR) continue;
     const ca = Math.max(0, Math.min(1, c.opacity));
     if (ca <= 0) continue;
-    const T = acquire(wr.w, wr.h);
-    const t = ctx2d(T);
+    const op = c.type === 'group' && c.blendMode === 'pass-through' ? 'source-over' : compositeOp(c.blendMode);
     const dx = CR.region.x - wr.x;
     const dy = CR.region.y - wr.y;
+    if (!CR.behind.length && !cb.share) {
+      // Only the core: blended straight onto the stack.
+      if (CR.core) {
+        g.globalAlpha = ca;
+        g.globalCompositeOperation = op;
+        g.drawImage(CR.core, dx, dy);
+        g.globalAlpha = 1;
+        g.globalCompositeOperation = 'source-over';
+      }
+      continue;
+    }
+    // Behind pieces + core as one layer (blended with the layer's mode), limited to its share.
+    const T = acquire(wr.w, wr.h);
+    const t = ctx2d(T);
     for (const b of CR.behind) {
       t.globalCompositeOperation = b.op;
       t.drawImage(b.canvas, dx, dy);
     }
     t.globalCompositeOperation = 'source-over';
     if (CR.core) t.drawImage(CR.core, dx, dy);
-    t.globalCompositeOperation = 'destination-in';
-    t.drawImage(R.shape, gx, gy);
+    if (cb.share) {
+      t.globalCompositeOperation = 'destination-in';
+      t.drawImage(cb.share, gx, gy);
+    }
     g.globalAlpha = ca;
-    g.globalCompositeOperation = c.type === 'group' && c.blendMode === 'pass-through' ? 'source-over' : compositeOp(c.blendMode);
+    g.globalCompositeOperation = op;
     g.drawImage(T, 0, 0);
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'source-over';
     release(T);
   }
+  // The base's coverage.
+  g.globalCompositeOperation = 'destination-in';
+  g.drawImage(cb.cover ?? R.shape, gx, gy);
+  g.globalCompositeOperation = 'source-over';
   const ctx = acc.ctx;
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1916,21 +2065,31 @@ function applyAdjustment(rc: RC, acc: Acc, adj: AdjustmentLayer) {
     if (mk?.temp) release(mk.canvas);
     return;
   }
-  const out = runFilter(def, img, inst.params, makeFilterContext({ docWidth: rc.doc.width, docHeight: rc.doc.height, offsetX: abs.x / rc.s, offsetY: abs.y / rc.s, scale: rc.s }));
-  let F = acquire(r.w, r.h);
-  ctx2d(F).putImageData(out, 0, 0);
-  if (adj.blendMode && adj.blendMode !== 'normal') {
-    const B = acquire(r.w, r.h);
-    const b = ctx2d(B);
-    b.drawImage(acc.canvas, -r.x, -r.y);
-    b.globalCompositeOperation = compositeOp(adj.blendMode);
-    b.drawImage(F, 0, 0);
-    b.globalCompositeOperation = 'destination-in';
-    b.drawImage(acc.canvas, -r.x, -r.y);
-    b.globalCompositeOperation = 'source-over';
-    release(F);
-    F = B;
+  // Blend mode: the result is B(backdrop, filtered) "atop" the backdrop — its colour blended over
+  // the backdrop's straight colour, its alpha the backdrop's (an adjustment never changes
+  // coverage, also over semi-transparent pixels). Opaque copies of both are blended, then the
+  // backdrop's alpha is applied. The backdrop copy is taken first: filters may work in place.
+  const blend = adj.blendMode && adj.blendMode !== 'normal' ? compositeOp(adj.blendMode) : null;
+  let backdrop: ImageData | null = null;
+  if (blend) {
+    backdrop = ctx.createImageData(r.w, r.h);
+    opaqueWhereCovered(img.data, img.data, backdrop.data);
   }
+  const out = runFilter(def, img, inst.params, makeFilterContext({ docWidth: rc.doc.width, docHeight: rc.doc.height, offsetX: abs.x / rc.s, offsetY: abs.y / rc.s, scale: rc.s }));
+  const F = acquire(r.w, r.h);
+  const f = ctx2d(F);
+  if (blend && backdrop) {
+    opaqueWhereCovered(out.data, backdrop.data, out.data);
+    const O = acquire(r.w, r.h);
+    ctx2d(O).putImageData(out, 0, 0);
+    f.putImageData(backdrop, 0, 0);
+    f.globalCompositeOperation = blend;
+    f.drawImage(O, 0, 0);
+    f.globalCompositeOperation = 'destination-in';
+    f.drawImage(acc.canvas, -r.x, -r.y);
+    f.globalCompositeOperation = 'source-over';
+    release(O);
+  } else f.putImageData(out, 0, 0);
   lerpInto(ctx, F, opacity, mk?.canvas ?? null, r.x, r.y);
   release(F);
   if (mk?.temp) release(mk.canvas);

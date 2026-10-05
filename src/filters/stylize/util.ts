@@ -10,6 +10,8 @@
  */
 import type { FilterContext } from '../../registry';
 import { parseColor } from '../../core/color';
+import { wasmBoxPasses, type BoxIO } from '../../core/wasm/boxStream';
+import { wasm, wasmAlloc, wasmHeap, wasmMark, wasmRelease } from '../../core/wasm/runtime';
 
 export interface Img {
   data: Uint8ClampedArray;
@@ -560,7 +562,7 @@ export function boxBlurInterleaved(buf: Float32Array, w: number, h: number, ch: 
 /** Run a list of (extended) box passes over interleaved data in place (clamp-to-edge). */
 export function boxBlurPasses(buf: Float32Array, w: number, h: number, ch: number, list: BoxPass[]): Float32Array {
   if (w < 1 || h < 1) return buf;
-  runBoxPasses(buf, w, h, ch, list, null, null);
+  runBoxPasses(buf, w, h, ch, list, null, null, { kind: 'f32', buf });
   return buf;
 }
 
@@ -579,8 +581,12 @@ type RowIO = (y: number, row: Float32Array) => void;
  * Rows are read from `buf` (or `read(y, row)`) and the result written to `buf` (or
  * `write(y, row)`); input row y is always consumed before output row y is produced, so
  * in place is fine.
+ *
+ * `io` describes the same source / sink for the WebAssembly version (core/wasm/boxStream.ts:
+ * same row order, kernels with the same float operations → identical results), used whenever
+ * WebAssembly is available; otherwise (or if its memory can't be had) this JavaScript runs.
  */
-function runBoxPasses(buf: Float32Array | null, w: number, h: number, ch: number, list: BoxPass[], read: RowIO | null, write: RowIO | null) {
+function runBoxPasses(buf: Float32Array | null, w: number, h: number, ch: number, list: BoxPass[], read: RowIO | null, write: RowIO | null, io: BoxIO | null = null) {
   const stride = w * ch;
   const R: number[] = [],
     A: number[] = [];
@@ -602,7 +608,10 @@ function runBoxPasses(buf: Float32Array | null, w: number, h: number, ch: number
     else if (write && buf) for (let y = 0; y < h; y++) write(y, buf.subarray(y * stride, y * stride + stride));
     return;
   }
-  const st = new BoxStream(buf, w, h, ch, Int32Array.from(R), Float64Array.from(A), read, write);
+  const Ri = Int32Array.from(R),
+    Af = Float64Array.from(A);
+  if (io && wasmBoxPasses(io, w, h, ch, Ri, Af)) return;
+  const st = new BoxStream(buf, w, h, ch, Ri, Af, read, write);
   const last = R.length - 1;
   for (let y = 0; y < h; y++) {
     if (write) {
@@ -1045,6 +1054,7 @@ export function blurImage<T extends Img>(img: T, sigma: number): T {
             d[k + 2] = row[q + 2];
           }
         },
+        { kind: 'rgb', data: d },
       );
       return img;
     }
@@ -1056,6 +1066,7 @@ export function blurImage<T extends Img>(img: T, sigma: number): T {
       passes,
       (y, row) => premultiplyRow(d, y * rs, row, rs),
       (y, row) => unpremultiplyRow(row, d, y * rs, rs),
+      { kind: 'premul', data: d },
     );
     return img;
   }
@@ -1078,6 +1089,7 @@ export function blurImage<T extends Img>(img: T, sigma: number): T {
  * float plane stores it) is un-premultiplied straight into the bytes. Identical results.
  */
 function blurImageMultires(d: Uint8ClampedArray, w: number, h: number, sigma: number) {
+  if (blurImageMultiresWasm(d, w, h, sigma)) return;
   const f = multiresFactor(sigma);
   const w2 = Math.ceil(w / f),
     h2 = Math.ceil(h / f);
@@ -1119,6 +1131,81 @@ function blurImageMultires(d: Uint8ClampedArray, w: number, h: number, sigma: nu
     const j0 = fy | 0;
     upsampleRowUnpremul(small, j0 * w2 * 4, (j0 < h2 - 1 ? j0 + 1 : j0) * w2 * 4, fy - j0, xi0, xi1, xt, d, y * w * 4, w);
   }
+}
+
+/**
+ * blurImageMultires with the per-pixel loops in WebAssembly (core/wasm: ds_premul_row, ds_norm,
+ * us_unpremul_row mirror downsampleRowPremul, the cell normalisation and upsampleRowUnpremul
+ * operation for operation) and the grid in WebAssembly memory. False (nothing touched) when
+ * WebAssembly or its memory isn't available.
+ */
+function blurImageMultiresWasm(d: Uint8ClampedArray, w: number, h: number, sigma: number): boolean {
+  const X = wasm();
+  if (!X || d.length < w * h * 4) return false;
+  const f = multiresFactor(sigma);
+  const w2 = Math.ceil(w / f),
+    h2 = Math.ceil(h / f);
+  const cellRow = w2 * 16,
+    gridBytes = cellRow * h2,
+    rs = w * 4;
+  const mark = wasmMark();
+  try {
+    // one block (grid, byte row, upsample tables), so a refused allocation never grew the memory
+    const base = wasmAlloc(gridBytes + rs * 4 + 64);
+    if (!base) return false;
+    const small = base,
+      row = small + gridBytes,
+      xi0p = row + rs,
+      xi1p = xi0p + rs,
+      xtp = xi1p + rs;
+    let H = wasmHeap();
+    H.u8.fill(0, small, small + gridBytes);
+    for (let y2 = 0; y2 < h2; y2++) {
+      const y0 = y2 * f,
+        y1 = Math.min(h, y0 + f);
+      const o = small + y2 * cellRow;
+      for (let y = y0; y < y1; y++) {
+        H.u8.set(d.subarray(y * rs, y * rs + rs), row);
+        X.ds_premul_row(row, w, f, w2, o);
+      }
+      X.ds_norm(o, w, f, w2, y1 - y0);
+    }
+    multiresBlurGridWasm(small, w2, h2, 4, sigma, f); // may grow the memory: fresh views below
+    H = wasmHeap();
+    const invF = 1 / f;
+    const xi0 = H.i32.subarray(xi0p >>> 2, (xi0p >>> 2) + w),
+      xi1 = H.i32.subarray(xi1p >>> 2, (xi1p >>> 2) + w),
+      xt = H.f32.subarray(xtp >>> 2, (xtp >>> 2) + w);
+    for (let x = 0; x < w; x++) {
+      let fx = (x + 0.5) * invF - 0.5;
+      if (fx < 0) fx = 0;
+      else if (fx > w2 - 1) fx = w2 - 1;
+      const i0 = fx | 0;
+      xi0[x] = i0 * 16; // byte offsets of the cells (4 floats each)
+      xi1[x] = (i0 < w2 - 1 ? i0 + 1 : i0) * 16;
+      xt[x] = fx - i0;
+    }
+    for (let y = 0; y < h; y++) {
+      let fy = (y + 0.5) * invF - 0.5;
+      if (fy < 0) fy = 0;
+      else if (fy > h2 - 1) fy = h2 - 1;
+      const j0 = fy | 0;
+      X.us_unpremul_row(small + j0 * cellRow, small + (j0 < h2 - 1 ? j0 + 1 : j0) * cellRow, fy - j0, xi0p, xi1p, xtp, row, w);
+      d.set(H.u8.subarray(row, row + rs), y * rs);
+    }
+    return true;
+  } finally {
+    wasmRelease(mark);
+  }
+}
+
+/** multiresBlurGrid on a grid in WebAssembly memory (byte address `ptr`). */
+function multiresBlurGridWasm(ptr: number, w2: number, h2: number, ch: number, sigma: number, f: number) {
+  const n = w2 * h2 * ch;
+  // A view of the grid: gaussSmall* allocate no WebAssembly memory, and boxBlurPasses' WebAssembly
+  // path addresses a view of its own memory directly (its JavaScript fallback allocates nothing there).
+  const view = wasmHeap().f32.subarray(ptr >>> 2, (ptr >>> 2) + n);
+  multiresBlurGrid(view, w2, h2, ch, sigma, f);
 }
 
 /** One image row's premultiplied pixels (bytes at d[j..]) added into its cells (float32 sums). */
