@@ -17,6 +17,7 @@ import {
   isEmpty,
   mixWith,
   num,
+  pixelWords,
   rgb,
   samplePlane,
   saturateInPlace,
@@ -285,6 +286,33 @@ function applyHalftone<T extends Img>(img: T, p: ParamValues, ctx: FilterContext
 
 /** Mono screen result → pixels: ink coverage v over the paper (or ink with alpha·v). */
 function inkOnPaper(data: Uint8ClampedArray, n: number, out: Float32Array, i0: number, i1: number, i2: number, p0: number, p1: number, p2: number, transparent: boolean) {
+  const u = transparent ? null : pixelWords({ data, width: n, height: 1 });
+  if (u) {
+    // Coverage is exactly 0 (paper) or 1 (ink) over most of a screen: p + (i − p)·0 = p and
+    // p + (i − p)·1 = i, so those pixels take the paper / ink bytes as one word store.
+    const q = new Uint8ClampedArray(6);
+    q[0] = p0;
+    q[1] = p1;
+    q[2] = p2;
+    q[3] = i0;
+    q[4] = i1;
+    q[5] = i2;
+    const P = q[0] | (q[1] << 8) | (q[2] << 16),
+      I = q[3] | (q[4] << 8) | (q[5] << 16);
+    for (let i = 0, j = 0; i < n; i++, j += 4) {
+      const px = u[i];
+      if (px >>> 24 === 0) continue;
+      const v = out[i];
+      if (v === 0) u[i] = (px & -16777216) | P;
+      else if (v === 1) u[i] = (px & -16777216) | I;
+      else {
+        data[j] = p0 + (i0 - p0) * v;
+        data[j + 1] = p1 + (i1 - p1) * v;
+        data[j + 2] = p2 + (i2 - p2) * v;
+      }
+    }
+    return;
+  }
   for (let i = 0, j = 0; i < n; i++, j += 4) {
     const a = data[j + 3];
     if (a === 0) continue;

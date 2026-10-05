@@ -5,6 +5,7 @@
 const nodePath = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const { fileURLToPath } = require('node:url');
 
 const PROJECT_EXT = 'pgfx';
 /** Files the app opens from the command line / Explorer / Finder. */
@@ -54,6 +55,26 @@ function pathKey(p, platform = process.platform) {
   if (platform === 'win32') k = k.replace(/\//g, '\\');
   if (k.length > 1) k = k.replace(platform === 'win32' ? /\\+$/ : /\/+$/, '');
   return platform === 'win32' || platform === 'darwin' ? k.toLowerCase() : k;
+}
+
+/**
+ * True when `url` is a file:// URL naming `root` itself or something inside it. The app page loads
+ * from file:// with Electron's extra file privileges, which would let it fetch() or <img> ANY local
+ * file (file:///C:/Users/…, file://server/share UNC paths); the main process cancels every file://
+ * request outside the app's own dist folder with this check. Malformed URLs (encoded separators, a
+ * host on POSIX) are refused.
+ */
+function fileUrlInside(url, root, platform = process.platform) {
+  if (typeof url !== 'string' || !/^file:/i.test(url) || typeof root !== 'string' || !root) return false;
+  let p;
+  try {
+    p = fileURLToPath(url, { windows: platform === 'win32' });
+  } catch {
+    return false;
+  }
+  const k = pathKey(p, platform);
+  const r = pathKey(root, platform);
+  return k === r || k.startsWith(r + pathApi(platform).sep);
 }
 
 /**
@@ -451,6 +472,7 @@ module.exports = {
   overlayHeight,
   isSafeAbsPath,
   pathKey,
+  fileUrlInside,
   fileArgs,
   sanitizeFilters,
   ensureExtension,

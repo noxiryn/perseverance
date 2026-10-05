@@ -88,25 +88,42 @@ starting point; don't rewrite modules from scratch.
   then `git tag v0.1.0 && git push origin v0.1.0`, then confirm the Release lists the Setup .exe,
   portable .exe, .dmg and .AppImage. The release job now publishes when only macOS/Linux failed
   (Windows installer required, warnings for the missing ones). `release/Perseverance-Setup-0.1.0.exe`
-  on disk predates the module work (stale). README: sharing leads with sending the Setup .exe itself.
+  on disk is a local build of the current electron/ code (`WINEDEBUG=-all npx electron-builder --win
+  nsis --x64 --publish never`, with embedded asar integrity), not a release artifact. README: sharing
+  leads with sending the Setup .exe itself.
 
-## Desktop hardening (electron/, checked with scripts/electron-desktop-check.mjs — 46 checks)
-- Security: sandbox + contextIsolation, no Node in the renderer, IPC sender-frame + type checks,
-  file grants (read/write only user-chosen paths, persisted in userData), http(s)-only external links,
-  navigation/popups blocked, permissions limited to local fonts/clipboard/fullscreen, CSP clean in the
-  packaged app, electron-builder fuses (no RunAsNode / NODE_OPTIONS / inspect, app only from asar).
+## Desktop hardening (electron/, checked with scripts/electron-desktop-check.mjs — 52 checks)
+- Security: sandbox + contextIsolation, no Node in the renderer, IPC sender-frame + type checks.
+  Desktop bridge file grants: `readFile`/`writeFile` only accept user-chosen paths (persisted in
+  userData); any other path is refused before it is opened (no FIFOs/devices, no UNC paths). The page
+  itself can only load file:// URLs inside its own `dist/` folder: Electron's file:// privileges (the
+  GrantFileProtocolExtraPrivileges fuse) would otherwise let it fetch()/XHR/<img> any local file, so a
+  session webRequest filter cancels every other file:// request (logged as "blocked file request").
+  http(s)-only external links, navigation/popups blocked, permissions limited to local
+  fonts/clipboard/fullscreen, CSP clean in the packaged app with network access only to
+  `*.roblox.com` / `*.rbxcdn.com`, electron-builder fuses (no RunAsNode / NODE_OPTIONS / inspect, app
+  only from asar, embedded asar integrity validation on Windows/macOS). Possible later step: serve the
+  app from a privileged `app://` scheme and turn the file:// privileges fuse off (changes the page
+  origin, so localStorage prefs / recent files would need a migration).
 - Behaviour: single instance + .pgfx association (argv and cwd forwarded; files wait for the page to
   load — a cold start with a file argument used to spin the main process at 100% CPU and never load),
   macOS open-file, close guard with ack timeout / "Quit Anyway" / repeated-close way out / forced
   destroy after 5 s, Windows session end never blocked, window bounds restored, Save As adds `.pgfx`.
-  A project handed over again while it is open (Explorer double-click) switches to its tab instead of
-  opening a second copy. Saves keep the replaced file's permissions and refuse read-only files (POSIX
-  rename would replace them silently); Save then falls back to Save As.
+  A project that is already open switches to its tab instead of opening a second copy, whichever way
+  it is opened (Explorer double-click, File ▸ Open, Open Recent: io `focusOpenProject`). Saves keep the
+  replaced file's permissions and refuse read-only files (POSIX rename would replace them silently).
+  Save in place falls back to Save As (with a short reason) for a read-only/locked file, a folder or
+  drive that is gone (USB stick removed), or a full disk.
 - Before → after (same check script against the f6ce5d3 electron/ files): 7/17 checks passed before the
   run wedged (a file forwarded while the page loaded spun the main process; no close timeout, no access
-  policy, no Save As extension fix, no window state, no crash prompts) → 46/46.
-- Crash resilience: render-process-gone / unresponsive prompts (Reload / Quit), main-process log in
-  `userData/logs/main.log` (uncaught exceptions, renderer console errors, crashes).
+  policy, no Save As extension fix, no window state, no crash prompts) → 46/46. Review round 2: the
+  previous code fails the new checks (page fetch of file:///etc/hostname and of unchosen files allowed;
+  FIFOs named .pgfx blocked the main process' file I/O; unresponsive → Reload left a blank window) → 52/52.
+- Crash resilience: crash prompt (Reload / Quit); unresponsive prompt (Wait / Reload / Quit) where
+  Reload kills the hung renderer and reloads once its process is gone, with a safety net (crash prompt
+  when the editor is not back within 15 s). A crash or reload drops a pending Cmd+Q, so a later window
+  close on macOS doesn't quit the app. Main-process log in `userData/logs/main.log` (uncaught
+  exceptions, renderer console errors, crashes, blocked requests).
 
 ## Remaining steps after the modules
 1. **Integrate**: `npm run typecheck` (whole tree) + `npx vite build`; fix cross-module mismatches.
@@ -126,15 +143,25 @@ starting point; don't rewrite modules from scratch.
      `renderLayer`) so layers-panels' Rasterize Layer Style is exact for non-Normal blend layers.
    - (done) shell start screen / palette open templates via openTemplate(id) from src/templates (character
      selected); palette looks use currentTargetId().
-   - (done, filter-perf) hue/saturation ~100 → ~35-45 ms and vignette ~45-270 → ~25-35 ms per 1080p pass (per-(max,min)
-     tables, cached falloff rows + fixed-point blend); film grain ~5×, bloom ~2.5-3×, add noise / chromatic aberration /
-     gaussian blur / halftone 1.2-1.8×, dithered gradient map 2-3×; a per-color cache speeds the costlier adjustments
-     on rendered art. Outputs identical (vignette ±1); checked against the previous code in
-     src/filters/{adjustments,stylize}/perf.test.ts (old implementations in perf.reference.ts). Renderer already
-     exports invalidateTextLayout.
-   - PERF (open): cel shade (~0.6-0.9 s), cutout (~1.0-1.5 s), vibrance / selective color / color balance (~40-90 ms) and
-     the box-blur core stay above the 1080p targets with bit-exact JS; next step would be a Web Worker / WASM (CSP
-     needs 'wasm-unsafe-eval') or tolerance-based algorithms.
+   - (partly done, filter-perf) 1080p filter speedups. Every optimized filter is bit-identical to its previous
+     implementation (src/filters/{adjustments,stylize}/perf.test.ts vs the old code in perf.reference.ts, incl. every
+     8-bit color for hue/sat, vibrance, color balance, selective color, and every ordering for the median networks).
+     Headless Chromium, crimson template / noisy synthetic image, median ms old → new: hue/sat 78 → 32 / 112 → 40,
+     vibrance 36 → 30 / 61 → 50, selective color 50 → 29 / 53 → 54, color balance 42 → 25 / 52 → 52, dithered
+     gradient map 58 → 16, curves/levels/exposure 12 → 10 (B&W, photo filter, channel mixer, split toning unchanged at
+     17-29), vignette 30 → 26 (roundness < 0: 139 → 32; per-row evaluation, no cache, any region costs only its
+     pixels), film grain 394 → 84, add noise 58 → 34, chromatic aberration 285 → 144 / 287 → 163, gaussian blur r4
+     248 → 135 / 246 → 175, r20 130 → 87, bloom 589 → 213 / 647 → 254, halftone 231 → 117 / 212 → 185, cel shade
+     450 → 409, cutout 826 → 548. Hue/sat, vibrance, color balance and selective color keep a per-parameter-set color
+     memo between calls (adjustments/math.ts colorMemo: 4 × 2 MB LRU; re-rendering an unchanged layer, e.g. painting
+     below it, is mostly lookups: ~20-29 ms); noisy images drop to the plain loop after a probe.
+   - PERF (open): still above the spec targets with exact JS: hue/sat, vibrance, selective color, channel mixer
+     (25-50 ms vs < 25), vignette (~26 vs < 20), bloom (~210), cel shade (~400), cutout (~550), and noisy-image
+     gaussian blur / halftone / chromatic aberration (165-185); watercolor / ink wash / screen print / risograph
+     0.8-1.2 s (only shared primitives got faster). The box-blur core runs at ~8 cycles per element (scalar limit).
+     Next step: WASM SIMD (a prototype box blur was 3-4× faster and bit-identical) — needs 'wasm-unsafe-eval' in
+     index.html's CSP, which src/platform/desktopMain.test.ts currently rejects (any 'unsafe-eval' substring) — or a
+     Worker behind an async filter API.
    - Optional: editor store `beforeCommit` hook so Free Transform can commit itself before another command
      (viewport currently repairs history via transform/historySplit.ts).
    - Optional: FilterContext.contentRect so edge-sensitive filters (rim-light, toon) know the real layer box.
@@ -143,8 +170,6 @@ starting point; don't rewrite modules from scratch.
    - (done) FilterDef.hidden honored by palette / Properties smart-filter menu / adjustments / gallery; Dialog Enter
      on buttons/links/selects/search fields no longer submits.
    - Optional: FilterContext layer bounds (or edge-repeat padding) so smart blurs match destructive results at edges.
-   - PERF: slow filters at 1080p (watercolor, ink-wash, screen-print, risograph ~1.5-2 s; only the shared blur / edge
-     primitives were optimized, no measurable change) — consider a Web Worker.
    - (done) CommandDef.paletteHidden (edit.redoAlt hidden from the palette); ARCHITECTURE §5.3 Edit/Transform layout.
    - Optional: renderLayerToDoc option to skip fillOpacity (PSD export renders a copy with fill 1 today).
    - (done) NumberField `disabled` prop; (done) NumberField arrow keys keep the displayed text in sync.
@@ -155,12 +180,32 @@ starting point; don't rewrite modules from scratch.
      `bitmaps.touch(id, rect)` (`dirtySince(id, v)`); the renderer updates the painted layer's cached render in place
      over that region (transform/mask/smart filters/effects reach), re-blends only that document region (layers below
      from a tiled cache, adjustments above over the region) into the live composite (`renderDocumentLive`, `since`/`seq`),
-     and the viewport redraws only that screen area. Work that is inexact on GPU canvases (blurs/resampling of crops,
-     several effects sharing distance fields) is re-rendered exactly ~350 ms after painting stops (`onRenderSettle`).
-     200px brush, SwiftShader: 1-layer 1080p ≈50 → ≈5 ms/frame, demo ≈150 → ≈8-11 ms/frame.
-     Check: `node scripts/dirty-rect-check.mjs --url http://localhost:<port>/ [--gpu]` (incremental vs from-scratch).
-   - Optional follow-ups: exports could call `settleRenderCaches()` first (only matters within ~350 ms of a stroke on
-     a GPU canvas); panels' thumbnails could also re-render on `onRenderSettle`.
+     and the viewport redraws only that screen area. Render signatures include the output AND document size
+     (`geometrySig`), so Canvas Size / Crop / Trim never reuse renders made for the old size.
+     Exactness: only the LIVE composite may hold approximate pixels. A one-time idle probe (`canvasCropExact()`,
+     src/render/backendProbe.ts) checks whether crops/clipped draws match whole draws: on the software canvas they do
+     and nothing is ever approximate or settled; on GPU canvases blur/resample/gradient work on crops (and several
+     effects sharing distance fields, on every backend) is approximate — ~350 ms after painting stops (at idle) the
+     approximate layer renders are dropped and the live composite re-composites just that area exactly
+     (`onRenderSettle`). renderDocument / renderLayerToDoc / thumbnails / exports are exact at all times (they skip
+     approximate renders and only do region work that is exact on the backend), so no settle call is needed anywhere.
+     Correctness check: `node scripts/dirty-rect-check.mjs --url http://localhost:<port>/ [--gpu]`.
+     Benchmark: `node scripts/dirty-rect-check.mjs --url http://localhost:<port>/ --bench [--gpu]` (real brush, 200 px,
+     fit zoom; main-thread ms per pointermove = handler + frames; "before" = this tree with the paint-perf files
+     reverted to f08283b; noisy shared 4-core box, ranges over 2 runs, GPU "before" 1 run):
+       software canvas            before (mean/p90)   now (mean/p90)   settle frame after the stroke
+         demo Red Glow            54–57 / 74–79       5.7–6.0 / 7.5–8.6   none (previous round: none)
+         demo Roblox Character    85–88 / 104–109     22–25 / 28–34       none (previous round: 170 ms)
+         1-layer 1080p            20–22.5 / 23–28     3.5–4.0 / 4.5–5     none
+       GPU canvas (SwiftShader)
+         demo Red Glow            199 / 280           71–88 / 94–122      none
+         demo Roblox Character    378 / 520           117–128 / 151–188   ≈220 ms (previous round: ≈330 ms)
+         1-layer 1080p            4.5 / 8.4           1.6–1.9 / 2.1–2.4   none
+     On SwiftShader the main-thread time is almost all synchronous GPU readbacks (getImageData waits for the
+     emulated GPU to finish the frame): one per frame for a CPU adjustment above the painted layer (the demo's
+     Vignette) and one for distance-field effects (stroke/bevel; it was two). Removing the adjustment readback needs
+     either GPU (WebGL) adjustments or a CPU-backed paint pipeline (painted bitmap, below cache and the layers above
+     kept on CPU canvases) — not done. Hardware GPUs should make these syncs far cheaper (not measured here).
    - macOS: Edit-menu roles intercept Cmd+C/V — canvas copy/paste on mac should also listen to DOM copy/paste events.
 3. **End-to-end smoke test**: `npx vite --port 5300 &` then `node scripts/smoke.mjs --url http://localhost:5300`
    (exercises templates, every command, tool and panel; screenshots in `screenshots-tmp/`).

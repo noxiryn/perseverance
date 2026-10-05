@@ -13,11 +13,24 @@ import { baseName, currentEntryId, markSavedAt, renameDocSilently } from './util
 
 export const PROJECT_FILTERS = [{ name: 'Perseverance Project', extensions: ['pgfx'] }];
 
-/** A desktop write refused by the OS: the file (or its drive) is read-only, or another app holds it. */
-function isReadOnlyError(e: unknown): boolean {
+/**
+ * Why a desktop write to the document's own path failed, when choosing another place helps: the file
+ * (or its drive) is read-only or held by another app, its folder or drive is gone (USB stick removed,
+ * folder deleted or renamed), or the disk is full. Null for anything else.
+ */
+export function saveInPlaceProblem(e: unknown): 'read-only' | 'missing' | 'full' | null {
   const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : '';
-  return /\b(EACCES|EPERM|EROFS|EBUSY)\b/.test(msg);
+  if (/\b(EACCES|EPERM|EROFS|EBUSY)\b/.test(msg)) return 'read-only';
+  if (/\b(ENOENT|ENOTDIR|ENODEV|ENXIO)\b/.test(msg)) return 'missing';
+  if (/\b(ENOSPC|EDQUOT)\b/.test(msg)) return 'full';
+  return null;
 }
+
+const PROBLEM_TEXT = {
+  'read-only': "can't be changed (read-only or in use)",
+  missing: "can't be saved where it was — its folder or drive is no longer available",
+  full: "can't be saved — the disk is full",
+} as const;
 
 let saving = false;
 
@@ -53,9 +66,10 @@ export async function saveDocument(docId?: ID, opts: { saveAs?: boolean } = {}):
         await writeFile(s.filePath, data);
       } catch (e) {
         // The desktop app only writes to paths the user chose (dialogs / opened projects); a path it
-        // doesn't know (e.g. from an older recent-files list) goes through Save As instead. So does a
-        // read-only or locked file (the main process refuses to replace it).
-        if (isReadOnlyError(e)) toast(`“${fileNameOf(s.filePath)}” can't be changed (read-only or in use) — choose where to save it.`, 'info', 4200);
+        // doesn't know goes through Save As instead. So does a read-only or locked file (the main
+        // process refuses to replace it), a folder/drive that is gone, and a full disk.
+        const problem = saveInPlaceProblem(e);
+        if (problem) toast(`“${fileNameOf(s.filePath)}” ${PROBLEM_TEXT[problem]} — choose where to save it.`, problem === 'read-only' ? 'info' : 'warning', 5000);
         else if (!isAccessDenied(e)) throw e;
         written = false;
       }

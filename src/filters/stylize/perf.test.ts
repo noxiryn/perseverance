@@ -255,6 +255,50 @@ describe('shared primitives stay bit-identical', () => {
         }
   });
 
+  it('blurImage with big sigmas (premultiply + downsample / upsample + unpremultiply fused) on odd sizes', () => {
+    const R = rng(23);
+    for (const [w, h] of [
+      [97, 61],
+      [16, 16],
+      [200, 17],
+      [17, 200],
+      [130, 90],
+    ] as [number, number][])
+      for (const sg of [6, 7.5, 17, 25, 40])
+        for (const opaque of [false, true]) {
+          const im = makeImage(w, h, Math.floor(R() * 1e6), opaque);
+          const a = { data: new Uint8ClampedArray(im.data), width: w, height: h };
+          const b = { data: new Uint8ClampedArray(im.data), width: w, height: h };
+          blurImage(a, sg);
+          REF.blurImage(b, sg);
+          const r = diff(a.data, b.data);
+          if (r.max !== 0) throw new Error(`blurImage ${w}x${h} σ${sg} opaque=${opaque}: max ${r.max} (${r.count} ch)`);
+        }
+  });
+
+  it('separable median with 3/5/7 taps (median networks) matches the histogram median for every ordering', () => {
+    // a column of n = 2r + 1 values 0..n−1 for every combination covers every (weak) ordering of
+    // a window, plus the clamped ends; both orientations (rows and columns pass)
+    for (const r of [1, 2, 3]) {
+      const n = 2 * r + 1,
+        total = n ** n;
+      const cols = new Uint8Array(total * n);
+      for (let k = 0; k < total; k++) for (let y = 0, v = k; y < n; y++, v = Math.floor(v / n)) cols[y * total + k] = v % n;
+      const rows = new Uint8Array(total * n);
+      for (let k = 0; k < total; k++) for (let y = 0; y < n; y++) rows[k * n + y] = cols[y * total + k];
+      for (const [p, w, h] of [
+        [cols, total, n],
+        [rows, n, total],
+      ] as [Uint8Array, number, number][]) {
+        const a = medianChannel(p, w, h, r, true),
+          b = REF.medianChannel(p, w, h, r, true);
+        let bad = 0;
+        for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) bad++;
+        expect(bad, `r=${r} ${w}x${h}`).toBe(0);
+      }
+    }
+  });
+
   it('blurredOne equals blurring a plane of ones', () => {
     for (const [w, h] of [...sizes, [200, 150] as [number, number]])
       for (const sg of sigmas) {

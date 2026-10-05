@@ -32,8 +32,9 @@
  * demo's adjustment layers), on its "Roblox Character" (layer effects, inside a group) and on a
  * one-layer 1920×1080 document. Reports the main-thread work per pointermove (the pointer handler
  * plus the animation-frame callbacks it causes: paint, composite, screen redraw) — mean, median,
- * p90, max — and, after the stroke, the longest main-thread task within 1.5 s (the settle of
- * approximate GPU work, if any). Works against older trees too (for before/after numbers).
+ * p90, max —, the cost of the frame that re-renders approximate GPU work exactly after the stroke
+ * (the settle; none on the software canvas) and the longest main-thread task within 1.5 s after
+ * the stroke (any work). Works against older trees too (for before/after numbers).
  */
 import { chromium } from 'playwright-core';
 
@@ -790,15 +791,22 @@ async function benchPart(opts) {
       if (lb && lb.width < doc.width * 0.9) b = { x: lb.x + lb.width * 0.2, y: lb.y + lb.height * 0.15, width: lb.width * 0.6, height: lb.height * 0.7 };
     }
     let work = 0;
+    const cbs = [];
     window.requestAnimationFrame = (cb) =>
       origRaf((t) => {
         const s0 = performance.now();
         try {
           cb(t);
         } finally {
-          work += performance.now() - s0;
+          const d = performance.now() - s0;
+          work += d;
+          cbs.push({ t: s0, d });
         }
       });
+    // The settle (approximate GPU work re-rendered exactly) and the frame that redraws it.
+    let tSettle = -1;
+    let settleCall = 0;
+    const unSettle = C && C.onRenderSettle ? C.onRenderSettle(() => (tSettle = performance.now())) : null;
     const i0 = info();
     const per = [];
     let x = b.x,
@@ -826,19 +834,22 @@ async function benchPart(opts) {
       fire('pointerup', x, y, 0);
       for (let i = 0; i < 3; i++) await nextFrame();
       await sleep(1500);
+      if (tSettle >= 0) settleCall = cbs.filter((c) => c.t >= tSettle && c.t < tSettle + 500).reduce((m, c) => Math.max(m, c.d), 0);
       const after = longTasks.filter((e) => e.t >= tUp);
       const i1 = info();
       results.push({
         name: cs.name,
         frames: per.length,
         work: stats(per.slice(5)),
-        settleTask: after.length ? +Math.max(...after.map((e) => e.d)).toFixed(0) : 0,
+        afterTask: after.length ? +Math.max(...after.map((e) => e.d)).toFixed(0) : 0,
+        settleFrame: tSettle >= 0 ? +settleCall.toFixed(0) : null,
         settles: (i1.settles ?? 0) - (i0.settles ?? 0),
         regionUpdates: (i1.regionUpdates ?? 0) - (i0.regionUpdates ?? 0),
         cropExact: i1.cropExact,
       });
     } finally {
       window.requestAnimationFrame = origRaf;
+      unSettle?.();
     }
     st().undo();
     await sleep(300);
@@ -872,11 +883,13 @@ try {
   console.log(`dirty-rect check — ${gpu ? 'GPU (accelerated canvas)' : 'software canvas'}`);
   if (args.bench === 'true') {
     const res = await page.evaluate(benchPart, { benchFrames: Number(args['bench-frames'] ?? 90) });
-    console.log('\nbrush 200 px, fit zoom: main-thread ms per pointermove (handler + frame)   mean   p50    p90    max    settle task  settles  region updates');
+    console.log('\nbrush 200 px, fit zoom: main-thread ms per pointermove (handler + frame)   mean   p50    p90    max    settle frame  longest task*  region updates');
     for (const r of res)
       console.log(
-        `  ${r.name.padEnd(68)}${String(r.work.mean).padEnd(7)}${String(r.work.p50).padEnd(7)}${String(r.work.p90).padEnd(7)}${String(r.work.max).padEnd(7)}${(r.settleTask ? `${r.settleTask} ms` : '-').padEnd(13)}${String(r.settles ?? '-').padEnd(9)}${r.regionUpdates ?? '-'}`,
+        `  ${r.name.padEnd(68)}${String(r.work.mean).padEnd(7)}${String(r.work.p50).padEnd(7)}${String(r.work.p90).padEnd(7)}${String(r.work.max).padEnd(7)}${(r.settleFrame !== null && r.settleFrame !== undefined ? `${r.settleFrame} ms` : '-').padEnd(14)}${(r.afterTask ? `${r.afterTask} ms` : '-').padEnd(15)}${r.regionUpdates ?? '-'}`,
       );
+    console.log('  settle frame: the frame re-rendering approximate GPU work exactly after the stroke (- = nothing to settle)');
+    console.log('  * longest main-thread task within 1.5 s after the stroke (any work: history, thumbnails, settle…)');
     if (res[0]?.cropExact !== undefined) console.log(`  (canvas backend crop-exact: ${res[0].cropExact})`);
     await browser.close();
     const realB = errors.filter((e) => !/Failed to load resource/.test(e));

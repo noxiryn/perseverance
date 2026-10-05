@@ -9,6 +9,8 @@ const { PROJECT_EXT, THEME } = lib;
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
 const isMac = process.platform === 'darwin';
 const INDEX_HTML = path.join(__dirname, '..', 'dist', 'index.html');
+/** The only folder the page may load file:// resources from (its own bundle, inside app.asar). */
+const DIST_DIR = path.dirname(INDEX_HTML);
 /** The renderer must acknowledge a close request within this time, or the user is offered a force quit. */
 const CLOSE_ACK_TIMEOUT_MS = Number(process.env.PERSEVERANCE_CLOSE_TIMEOUT_MS) || 4000;
 const CLOSE_RETRY_TIMEOUT_MS = 10000;
@@ -19,6 +21,8 @@ const CLOSE_RETRY_TIMEOUT_MS = 10000;
 const REPEAT_CLOSE_MS = Number(process.env.PERSEVERANCE_REPEAT_CLOSE_MS) || 3000;
 /** After the user chose to close/quit, a window that still hasn't gone away is destroyed. */
 const FORCE_CLOSE_MS = 5000;
+/** After we kill a hung renderer to reload it, the editor must be back within this time (else: crash prompt). */
+const RELOAD_TIMEOUT_MS = Number(process.env.PERSEVERANCE_RELOAD_TIMEOUT_MS) || 15000;
 /**
  * Only these permissions are ever granted, and only to the app's own page: system fonts in the font
  * picker, clipboard image paste/copy, and View ▸ Full Screen (HTML fullscreen API).
@@ -39,7 +43,8 @@ let quitRequested = false; // app.quit() (Cmd+Q / installer) is waiting on the c
 let rendererEdited = false; // any unsaved document (reported by the renderer)
 let rendererGone = false; // the render process crashed / was killed
 let rendererReady = false; // the page finished loading and can receive 'desktop:open-file'
-let expectedKill = false; // we killed a hung renderer ourselves (reload), don't report it as a crash
+let expectedKill = false; // we killed a hung renderer ourselves to reload it, don't report it as a crash
+let reloadTimer = null; // safety net for expectedKill: the reload must finish loading in time
 const closeReq = { pending: false, acked: false, ackedAt: 0, timer: null, fallbackShown: false };
 let forceTimer = null;
 /** One native prompt at a time (close fallback / crash / unresponsive). @type {AbortController | null} */
@@ -327,11 +332,24 @@ async function onRenderGone(details) {
   rendererReady = false;
   resetClose();
   log.error('render process gone', details);
-  if (details.reason === 'clean-exit' || forceClose || expectedKill) return;
+  if (forceClose) return;
+  // A crash or reload abandons a pending Cmd+Q: the next plain window close must not quit the app.
+  quitRequested = false;
+  if (expectedKill) {
+    // We killed a hung renderer to reload it (onUnresponsive). Reload only now that the old process is
+    // gone: a reload started before that is lost together with the dying process (blank window).
+    const w = liveWindow();
+    if (w) setImmediate(() => liveWindow() === w && w.webContents.reload());
+    return;
+  }
+  if (details.reason === 'clean-exit') return;
+  await crashPrompt(details);
+}
+
+async function crashPrompt(details) {
   const now = Date.now();
   crashTimes = crashTimes.filter((t) => now - t < 60000).concat(now);
-  const w = liveWindow();
-  if (!w) return;
+  if (!liveWindow()) return;
   const r = await prompt({
     type: 'error',
     title: 'Perseverance',
@@ -348,9 +366,32 @@ async function onRenderGone(details) {
   else if (r === 0 && liveWindow()) win.webContents.reload();
 }
 
+function clearReloadWatch() {
+  clearTimeout(reloadTimer);
+  reloadTimer = null;
+  expectedKill = false;
+}
+
+/** Kill a hung renderer and reload the page once its process is gone (see onRenderGone). */
+function reloadHungRenderer(w) {
+  resetClose();
+  quitRequested = false;
+  expectedKill = true;
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(() => {
+    reloadTimer = null;
+    if (!expectedKill || liveWindow() !== w) return;
+    // The kill or the reload didn't take: never leave a blank window without a way forward.
+    expectedKill = false;
+    log.warn('the editor did not come back after reloading a hung renderer');
+    void crashPrompt({ reason: 'the editor did not restart' });
+  }, RELOAD_TIMEOUT_MS);
+  w.webContents.forcefullyCrashRenderer();
+}
+
 async function onUnresponsive() {
   log.warn('renderer unresponsive');
-  if (closeReq.fallbackShown) return; // the close fallback already offers "Quit Anyway"
+  if (closeReq.fallbackShown || expectedKill) return; // already offering "Quit Anyway" / already reloading
   const r = await prompt({
     type: 'warning',
     title: 'Perseverance',
@@ -362,12 +403,8 @@ async function onUnresponsive() {
   });
   const w = liveWindow();
   if (!w) return;
-  if (r === 1) {
-    resetClose();
-    expectedKill = true;
-    w.webContents.forcefullyCrashRenderer();
-    w.webContents.reload();
-  } else if (r === 2) closeNow();
+  if (r === 1) reloadHungRenderer(w);
+  else if (r === 2) closeNow();
 }
 
 /* ---------------- window ---------------- */
@@ -457,6 +494,7 @@ function createWindow() {
   });
   w.on('closed', () => {
     clearTimeout(stateTimer);
+    clearReloadWatch();
     if (win === w) win = null;
     resetClose();
     dismissPrompt();
@@ -464,14 +502,15 @@ function createWindow() {
 
   const wc = w.webContents;
   wc.on('did-start-loading', () => {
-    // A reload resets the renderer: forget half-finished close requests.
+    // A reload resets the renderer: forget half-finished close requests (and a quit waiting on one).
     rendererReady = false;
     resetClose();
+    quitRequested = false;
   });
   wc.on('did-finish-load', () => {
     rendererGone = false;
     rendererReady = true;
-    expectedKill = false;
+    clearReloadWatch();
     void openQueue.flush();
   });
   wc.on('render-process-gone', (_e, details) => void onRenderGone(details));
@@ -606,11 +645,9 @@ handle('desktop:write-file', async (_e, p, data) => {
 
 handle('desktop:read-file', async (_e, p) => {
   assertPath(p);
-  if (!grants.canRead(p)) {
-    // Recent-file entries from before access grants existed: Perseverance projects may still be read.
-    const isProject = path.extname(p).slice(1).toLowerCase() === PROJECT_EXT && (await lib.fileHasPgfxMagic(p));
-    if (!isProject) throw denied(`reading ${path.basename(p)} was not chosen via a dialog`);
-  }
+  // Checked before the file is touched at all: no FIFOs/devices that block the I/O pool, no network
+  // paths (a UNC path would make Windows connect out and offer the user's NTLM hash).
+  if (!grants.canRead(p)) throw denied(`reading ${path.basename(p)} was not chosen via a dialog`);
   const buf = await fs.readFile(p);
   return lib.toArrayBuffer(buf);
 });
@@ -748,6 +785,17 @@ if (!gotLock) {
     ses.setPermissionRequestHandler((wc, permission, cb) => cb(ALLOWED_PERMISSIONS.has(permission) && ownPage(wc)));
     ses.setPermissionCheckHandler((wc, permission) => ALLOWED_PERMISSIONS.has(permission) && ownPage(wc));
     ses.setDevicePermissionHandler(() => false);
+
+    // The page loads from file:// and Electron grants file:// pages extra privileges (fetch/XHR of other
+    // file:// URLs), which CSP 'self' does not stop: without this filter a compromised page could read
+    // any local file. Only the app's own bundle may be loaded; every other file:// request (including
+    // UNC hosts) is cancelled. All schemes are filtered because file:// patterns ignore the URL's host.
+    let blockedFileLogs = 0;
+    ses.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, cb) => {
+      if (!/^file:/i.test(details.url) || lib.fileUrlInside(details.url, DIST_DIR)) return cb({});
+      if (blockedFileLogs++ < 50) log.warn('blocked file request', details.url.slice(0, 300));
+      cb({ cancel: true });
+    });
 
     lib.fileArgs(process.argv, { skip: argSkip }).forEach((p) => openQueue.open(p));
     createWindow();

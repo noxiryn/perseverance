@@ -443,16 +443,21 @@ function normalizeCells(g: Float32Array, w2: number, h2: number, f: number, w: n
 }
 
 /**
- * Bilinear upsampling of three blurred grids (r, g, b) one output row at a time: per column the
- * left cell and the float32 x-fraction, per row the pair of grid rows ([a, a1 − a, b, b1 − b] per
- * cell, refreshed when the pair changes) and the y-fraction.
+ * Bilinear upsampling of three blurred grids (r, g, b) one output row at a time. Per column: the
+ * left cell and the float32 x-fraction. Whenever the pair of grid rows changes (every f output
+ * rows), the horizontal halves of every column's taps are computed once: T = a + (a1 − a)·tx on
+ * the top row and D = (b + (b1 − b)·tx) − T — then each output pixel is one T + D·ty per channel
+ * (the same doubles as the full per-pixel tap).
  */
 class UpRows {
   readonly xi: Int32Array;
   readonly xt: Float32Array;
-  readonly cr: Float64Array;
-  readonly cg: Float64Array;
-  readonly cb: Float64Array;
+  readonly tr: Float64Array;
+  readonly dr: Float64Array;
+  readonly tg: Float64Array;
+  readonly dg: Float64Array;
+  readonly tb: Float64Array;
+  readonly db: Float64Array;
   ty = 0;
   /** Factor 1: the grids are the full-size planes, read directly at `off + x` (no interpolation). */
   readonly direct: boolean;
@@ -466,7 +471,7 @@ class UpRows {
     private readonly w2: number,
     private readonly h2: number,
     private readonly f: number,
-    w: number,
+    private readonly w: number,
   ) {
     this.direct = f === 1;
     this.xi = new Int32Array(w);
@@ -477,13 +482,16 @@ class UpRows {
       if (fx < 0) fx = 0;
       else if (fx > w2 - 1) fx = w2 - 1;
       const i0 = fx | 0;
-      this.xi[x] = i0 * 4;
+      this.xi[x] = i0;
       this.xt[x] = fx - i0;
     }
-    const nc = this.direct ? 0 : w2 * 4;
-    this.cr = new Float64Array(nc);
-    this.cg = new Float64Array(nc);
-    this.cb = new Float64Array(nc);
+    const nc = this.direct ? 0 : w;
+    this.tr = new Float64Array(nc);
+    this.dr = new Float64Array(nc);
+    this.tg = new Float64Array(nc);
+    this.dg = new Float64Array(nc);
+    this.tb = new Float64Array(nc);
+    this.db = new Float64Array(nc);
   }
   /** Prepare output row y; false when both grid rows are all zero (no light). */
   row(y: number): boolean {
@@ -506,26 +514,34 @@ class UpRows {
       const w2 = this.w2;
       const r0 = j0 * w2,
         r1 = (j0 < h2 - 1 ? j0 + 1 : j0) * w2;
-      this.nz = corners(this.gr, this.cr, r0, r1, w2) | corners(this.gg, this.cg, r0, r1, w2) | corners(this.gb, this.cb, r0, r1, w2) ? true : false;
+      this.nz = anyNonZero(this.gr, r0, r1, w2) || anyNonZero(this.gg, r0, r1, w2) || anyNonZero(this.gb, r0, r1, w2);
+      // (also when all zero: another scale may still light this row and read these)
+      lerpRowPair(this.gr, r0, r1, w2, this.xi, this.xt, this.tr, this.dr, this.w);
+      lerpRowPair(this.gg, r0, r1, w2, this.xi, this.xt, this.tg, this.dg, this.w);
+      lerpRowPair(this.gb, r0, r1, w2, this.xi, this.xt, this.tb, this.db, this.w);
     }
     return this.nz;
   }
 }
 
-/** [a, a1 − a, b, b1 − b] per cell of grid rows r0 / r1; returns 1 when any corner is non-zero. */
-function corners(g: Float32Array, C: Float64Array, r0: number, r1: number, w2: number): number {
-  let nz = 0;
-  for (let i = 0; i < w2; i++) {
+/** Whether any cell of grid rows r0 / r1 is non-zero. */
+function anyNonZero(g: Float32Array, r0: number, r1: number, w2: number): boolean {
+  for (let i = 0; i < w2; i++) if (g[r0 + i] !== 0 || g[r1 + i] !== 0) return true;
+  return false;
+}
+
+/** Horizontal halves of the bilinear taps of every output column between grid rows r0 and r1. */
+function lerpRowPair(g: Float32Array, r0: number, r1: number, w2: number, xi: Int32Array, xt: Float32Array, T: Float64Array, D: Float64Array, w: number) {
+  for (let x = 0; x < w; x++) {
+    const i = xi[x];
     const i1 = i < w2 - 1 ? i + 1 : i;
+    const tx = xt[x];
     const a0 = g[r0 + i],
       b0 = g[r1 + i];
-    C[i * 4] = a0;
-    C[i * 4 + 1] = g[r0 + i1] - a0;
-    C[i * 4 + 2] = b0;
-    C[i * 4 + 3] = g[r1 + i1] - b0;
-    if (a0 !== 0 || b0 !== 0) nz = 1;
+    const top = a0 + (g[r0 + i1] - a0) * tx;
+    T[x] = top;
+    D[x] = b0 + (g[r1 + i1] - b0) * tx - top;
   }
-  return nz;
 }
 
 /** One output row of bloom: sum the three upsampled scales, saturation, screen. */
@@ -544,23 +560,26 @@ function bloomRow(
   k: number,
   spill: boolean,
 ) {
-  const X0 = u0.xi,
-    T0 = u0.xt,
-    R0 = u0.cr,
-    G0 = u0.cg,
-    B0 = u0.cb,
+  const TR0 = u0.tr,
+    DR0 = u0.dr,
+    TG0 = u0.tg,
+    DG0 = u0.dg,
+    TB0 = u0.tb,
+    DB0 = u0.db,
     ty0 = u0.ty;
-  const X1 = u1.xi,
-    T1 = u1.xt,
-    R1 = u1.cr,
-    G1 = u1.cg,
-    B1 = u1.cb,
+  const TR1 = u1.tr,
+    DR1 = u1.dr,
+    TG1 = u1.tg,
+    DG1 = u1.dg,
+    TB1 = u1.tb,
+    DB1 = u1.db,
     ty1 = u1.ty;
-  const X2 = u2.xi,
-    T2 = u2.xt,
-    R2 = u2.cr,
-    G2 = u2.cg,
-    B2 = u2.cb,
+  const TR2 = u2.tr,
+    DR2 = u2.dr,
+    TG2 = u2.tg,
+    DG2 = u2.dg,
+    TB2 = u2.tb,
+    DB2 = u2.db,
     ty2 = u2.ty;
   const D0 = u0.direct,
     D1 = u1.direct,
@@ -579,58 +598,33 @@ function bloomRow(
     P2b = u2.gb;
   for (let x = 0, j = j0; x < w; x++, j += 4) {
     // each upsampled value is rounded to float32 (as stored by blurPlane) and summed in float32
-    let q: number, tx: number, top: number, bot: number;
     let gr: number, gg: number, gb: number;
     if (D0) {
       gr = Math.fround(P0r[o0 + x] * w0);
       gg = Math.fround(P0g[o0 + x] * w0);
       gb = Math.fround(P0b[o0 + x] * w0);
     } else {
-      q = X0[x];
-      tx = T0[x];
-      top = R0[q] + R0[q + 1] * tx;
-      bot = R0[q + 2] + R0[q + 3] * tx;
-      gr = Math.fround(Math.fround(top + (bot - top) * ty0) * w0);
-      top = G0[q] + G0[q + 1] * tx;
-      bot = G0[q + 2] + G0[q + 3] * tx;
-      gg = Math.fround(Math.fround(top + (bot - top) * ty0) * w0);
-      top = B0[q] + B0[q + 1] * tx;
-      bot = B0[q + 2] + B0[q + 3] * tx;
-      gb = Math.fround(Math.fround(top + (bot - top) * ty0) * w0);
+      gr = Math.fround(Math.fround(TR0[x] + DR0[x] * ty0) * w0);
+      gg = Math.fround(Math.fround(TG0[x] + DG0[x] * ty0) * w0);
+      gb = Math.fround(Math.fround(TB0[x] + DB0[x] * ty0) * w0);
     }
     if (D1) {
       gr = Math.fround(gr + P1r[o1 + x] * w1);
       gg = Math.fround(gg + P1g[o1 + x] * w1);
       gb = Math.fround(gb + P1b[o1 + x] * w1);
     } else {
-      q = X1[x];
-      tx = T1[x];
-      top = R1[q] + R1[q + 1] * tx;
-      bot = R1[q + 2] + R1[q + 3] * tx;
-      gr = Math.fround(gr + Math.fround(top + (bot - top) * ty1) * w1);
-      top = G1[q] + G1[q + 1] * tx;
-      bot = G1[q + 2] + G1[q + 3] * tx;
-      gg = Math.fround(gg + Math.fround(top + (bot - top) * ty1) * w1);
-      top = B1[q] + B1[q + 1] * tx;
-      bot = B1[q + 2] + B1[q + 3] * tx;
-      gb = Math.fround(gb + Math.fround(top + (bot - top) * ty1) * w1);
+      gr = Math.fround(gr + Math.fround(TR1[x] + DR1[x] * ty1) * w1);
+      gg = Math.fround(gg + Math.fround(TG1[x] + DG1[x] * ty1) * w1);
+      gb = Math.fround(gb + Math.fround(TB1[x] + DB1[x] * ty1) * w1);
     }
     if (D2) {
       gr = Math.fround(gr + P2r[o2 + x] * w2);
       gg = Math.fround(gg + P2g[o2 + x] * w2);
       gb = Math.fround(gb + P2b[o2 + x] * w2);
     } else {
-      q = X2[x];
-      tx = T2[x];
-      top = R2[q] + R2[q + 1] * tx;
-      bot = R2[q + 2] + R2[q + 3] * tx;
-      gr = Math.fround(gr + Math.fround(top + (bot - top) * ty2) * w2);
-      top = G2[q] + G2[q + 1] * tx;
-      bot = G2[q + 2] + G2[q + 3] * tx;
-      gg = Math.fround(gg + Math.fround(top + (bot - top) * ty2) * w2);
-      top = B2[q] + B2[q + 1] * tx;
-      bot = B2[q + 2] + B2[q + 3] * tx;
-      gb = Math.fround(gb + Math.fround(top + (bot - top) * ty2) * w2);
+      gr = Math.fround(gr + Math.fround(TR2[x] + DR2[x] * ty2) * w2);
+      gg = Math.fround(gg + Math.fround(TG2[x] + DG2[x] * ty2) * w2);
+      gb = Math.fround(gb + Math.fround(TB2[x] + DB2[x] * ty2) * w2);
     }
     if (desat) {
       const l = gr * 0.2126 + gg * 0.7152 + gb * 0.0722;

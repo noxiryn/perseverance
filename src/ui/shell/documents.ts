@@ -9,7 +9,7 @@ import { commands, docPresets, runCommand, type DocPresetDef, type TemplateDef }
 import { desktop, fileNameOf, isAccessDenied, type OpenedFile } from '../../platform';
 import { useEditor } from '../../state/editor';
 import { toast, useUI } from '../../state/ui';
-import { openFile } from '../../io/open';
+import { focusOpenProject, openFile } from '../../io/open';
 import { askChoice } from './dialogs/ChoiceDialog';
 import { defaultBackgroundColor } from './prefs';
 
@@ -172,6 +172,7 @@ export async function openRecent(entry: RecentEntry) {
     toast('Recent files can only be reopened in the desktop app — use File ▸ Open', 'info');
     return;
   }
+  if (focusOpenProject(entry.path)) return; // already open: switch to it instead of a second copy
   try {
     const data = await desktop.readFile(entry.path);
     await openFileWithIo({ path: entry.path, name: entry.name || fileNameOf(entry.path), data }, { asNewDocument: true });

@@ -46,6 +46,8 @@ export async function openRecentFile(entry: RecentFile) {
     toast('Recent files can be reopened in the desktop app — use File ▸ Open in the browser.', 'info');
     return;
   }
+  const { openFile, focusOpenProject } = await import('./open');
+  if (focusOpenProject(entry.path)) return; // already open: no second copy, no need to read it again
   let data: ArrayBuffer;
   try {
     data = await desktop.readFile(entry.path);
@@ -56,7 +58,6 @@ export async function openRecentFile(entry: RecentFile) {
     else toast(`“${entry.name}” could not be found and was removed from Open Recent.`, 'error', 4200);
     return;
   }
-  const { openFile } = await import('./open');
   await openFile({ path: entry.path, name: entry.name || fileNameOf(entry.path), data }, { asNewDocument: true });
 }
 

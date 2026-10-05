@@ -2,9 +2,13 @@
 /**
  * Desktop hardening check: drives the REAL Electron app (production build in dist/) and verifies the
  * main-process contract — file access policy, Save As extension fix, crash-safe large writes,
- * second-instance file forwarding (also while the page reloads), cold-start file open, close guard
- * (dirty / hung / crashed renderer / stuck prompt / Windows session end), window-state persistence, navigation/external-link/permission policy, the titlebar
- * overlay following the UI zoom, and zero console errors / CSP violations / Electron security warnings.
+ * second-instance file forwarding (also while the page reloads), cold-start file open, an already-open
+ * project never opening twice (OS / File ▸ Open / Open Recent), Save falling back to Save As (read-only
+ * file, missing folder), the page being unable to read local files outside its bundle (file:// fetch /
+ * XHR / <img>), close guard (dirty / hung / crashed renderer / stuck prompt / Windows session end),
+ * unresponsive → Reload (and its safety net), window-state persistence, navigation/external-link/
+ * permission policy, the titlebar overlay following the UI zoom, and zero console errors / CSP
+ * violations / Electron security warnings.
  *
  *   npx vite build && xvfb-run -a -s "-screen 0 1600x960x24" node scripts/electron-desktop-check.mjs \
  *     [--out shot.png] [--tmp dir] [--full]
@@ -17,7 +21,7 @@ import { _electron as electron } from 'playwright-core';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
@@ -38,7 +42,13 @@ const CFG = path.join(T, 'cfg');
 fs.mkdirSync(FILES, { recursive: true });
 fs.mkdirSync(CFG, { recursive: true });
 
-const env = { ...process.env, XDG_CONFIG_HOME: CFG, PERSEVERANCE_CLOSE_TIMEOUT_MS: '1500', PERSEVERANCE_REPEAT_CLOSE_MS: '1500' };
+const env = {
+  ...process.env,
+  XDG_CONFIG_HOME: CFG,
+  PERSEVERANCE_CLOSE_TIMEOUT_MS: '1500',
+  PERSEVERANCE_REPEAT_CLOSE_MS: '1500',
+  PERSEVERANCE_RELOAD_TIMEOUT_MS: '3000',
+};
 delete env.ELECTRON_DISABLE_SECURITY_WARNINGS; // we want to see them
 delete env.VITE_DEV_SERVER_URL;
 
@@ -82,7 +92,7 @@ async function launch(extraArgs = []) {
   const exited = new Promise((r) => app.process().once('exit', (code) => r(code)));
   const page = await app.firstWindow();
   await app.evaluate(({ BrowserWindow, dialog, shell, ipcMain }) => {
-    const t = (globalThis.__t = { console: [], boxes: [], boxAnswers: [], saveQueue: [], saves: [], external: [], revealed: [], ipc: [] });
+    const t = (globalThis.__t = { console: [], boxes: [], boxAnswers: [], saveQueue: [], saves: [], openQueue: [], external: [], revealed: [], ipc: [] });
     for (const ch of ['desktop:close-ack', 'desktop:confirm-close']) ipcMain.on(ch, (_e, v) => t.ipc.push(`${ch}=${v}@${Date.now()}`));
     const w = BrowserWindow.getAllWindows()[0];
     w.webContents.on('console-message', (e) => t.console.push({ level: e.level, message: e.message, source: e.sourceId }));
@@ -95,6 +105,10 @@ async function launch(extraArgs = []) {
       const o = a.length > 1 ? a[1] : a[0];
       t.boxes.push({ message: o.message, buttons: o.buttons, at: Date.now() });
       return { response: t.boxAnswers.length ? t.boxAnswers.shift() : (o.cancelId ?? 0), checkboxChecked: false };
+    };
+    dialog.showOpenDialog = async () => {
+      const p = t.openQueue.shift();
+      return p ? { canceled: false, filePaths: [p] } : { canceled: true, filePaths: [] };
     };
     shell.openExternal = async (url) => void t.external.push(url);
     shell.showItemInFolder = (p) => void t.revealed.push(p);
@@ -245,15 +259,92 @@ const denials = await page.evaluate(
       writeNumberPath: await attempt(() => d.writeFile(42, 'x')),
       readFakeProject: await attempt(() => d.readFile(`${files}/fake.pgfx`)),
       writeLegacy: await attempt(() => d.writeFile(legacy, 'x')),
-      readLegacyProject: await attempt(() => d.readFile(legacy)),
+      readUnchosenProject: await attempt(() => d.readFile(legacy)),
       revealSystemFile: (d.showItemInFolder('/etc/hostname'), 'sent'),
     };
   },
   { evil, poster, legacy, files: FILES, userData },
 );
-const mustDeny = ['writeUnchosen', 'readSystemFile', 'readTraversal', 'writeGrantsFile', 'readRelative', 'writeBadData', 'writeNumberPath', 'readFakeProject', 'writeLegacy'];
-check('paths the user never chose are refused', mustDeny.every((k) => denials[k].startsWith('denied')) && !fs.existsSync(evil), denials);
-check('projects from an older recent list stay readable (read-only)', denials.readLegacyProject.startsWith('ALLOWED') && sameBytes(legacy, poster));
+const mustDeny = ['writeUnchosen', 'readSystemFile', 'readTraversal', 'writeGrantsFile', 'readRelative', 'writeBadData', 'writeNumberPath', 'readFakeProject', 'writeLegacy', 'readUnchosenProject'];
+check('paths the user never chose are refused (also real projects)', mustDeny.every((k) => denials[k].startsWith('denied')) && !fs.existsSync(evil) && sameBytes(legacy, poster), denials);
+
+/* ---- an unchosen path is refused before the main process touches it (FIFOs can't block its I/O) ---- */
+const fifos = [0, 1, 2, 3, 4].map((i) => path.join(FILES, `fifo${i}.pgfx`));
+for (const f of fifos) execFileSync('mkfifo', [f]);
+const fifoRun = await page.evaluate(
+  async ({ fifos, poster }) => {
+    const d = window.desktop;
+    const t0 = performance.now();
+    const reads = Promise.all(fifos.map((f) => d.readFile(f).then(() => 'ALLOWED', (e) => (String(e.message).includes('ENOTGRANTED') ? 'denied' : e.message))));
+    const r = await Promise.race([reads, new Promise((res) => setTimeout(() => res(fifos.map(() => 'blocked (still opening the FIFO)')), 3000))]);
+    const deniedMs = Math.round(performance.now() - t0);
+    const t1 = performance.now();
+    const ok = await Promise.race([d.readFile(poster).then((b) => b.byteLength > 0), new Promise((res) => setTimeout(() => res('timeout'), 4000))]);
+    return { r, deniedMs, chosenReadOk: ok, chosenReadMs: Math.round(performance.now() - t1) };
+  },
+  { fifos, poster },
+);
+// Release main-process threads still blocked opening a FIFO (only when the policy failed), so the rest
+// of the run is not stuck behind them.
+for (const f of fifos) {
+  try {
+    fs.closeSync(fs.openSync(f, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK));
+  } catch {
+    /* ENXIO: nobody is reading it (expected) */
+  }
+  fs.rmSync(f, { force: true });
+}
+check('unchosen FIFOs named .pgfx are refused at once and reads of chosen files keep working', fifoRun.r.every((x) => x === 'denied') && fifoRun.deniedMs < 1000 && fifoRun.chosenReadOk === true, fifoRun);
+
+/* ---- the page itself can't read local files outside its bundle (Electron's file:// privileges) ---- */
+const secret = path.join(FILES, 'secret.txt');
+fs.writeFileSync(secret, 'top secret');
+const outsidePng = path.join(FILES, 'outside.png');
+fs.copyFileSync(path.join(root, 'build', 'icon.png'), outsidePng);
+const fileReads = await page.evaluate(
+  async ({ secret, png }) => {
+    const url = (p) => new URL(`file://${p}`).href;
+    const tryFetch = async (u) => {
+      try {
+        const r = await fetch(u);
+        return `ALLOWED ${r.status} ${(await r.text()).length} chars`;
+      } catch (e) {
+        return `blocked ${e.name}`;
+      }
+    };
+    const tryXhr = (u) =>
+      new Promise((res) => {
+        const x = new XMLHttpRequest();
+        x.open('GET', u);
+        x.onload = () => res(`ALLOWED ${x.status} ${String(x.responseText).length} chars`);
+        x.onerror = () => res('blocked');
+        x.send();
+      });
+    const tryImg = (u) =>
+      new Promise((res) => {
+        const i = new Image();
+        i.onload = () => res(`ALLOWED ${i.naturalWidth}px`);
+        i.onerror = () => res('blocked');
+        i.src = u;
+      });
+    return {
+      fetchSystemFile: await tryFetch('file:///etc/hostname'),
+      fetchUserFile: await tryFetch(url(secret)),
+      xhrUserFile: await tryXhr(url(secret)),
+      imgUserFile: await tryImg(url(png)),
+      fetchTraversal: await tryFetch(new URL('../../../../../../../../etc/hostname', location.href).href),
+      fetchEncodedTraversal: await tryFetch(location.href.replace(/index\.html$/, '%2e%2e/%2e%2e/package.json')),
+      fetchOwnBundle: await tryFetch(new URL('./favicon.png', location.href).href),
+    };
+  },
+  { secret, png: outsidePng },
+);
+const PROBE_RE = /secret\.txt|outside\.png|etc\/hostname|%2e%2e\/package\.json/;
+check(
+  'the page cannot read local files outside its bundle (fetch / XHR / <img> of file:// URLs)',
+  Object.entries(fileReads).every(([k, v]) => (k === 'fetchOwnBundle' ? v.startsWith('ALLOWED 200') : v.startsWith('blocked'))),
+  fileReads,
+);
 await wait(200);
 t = await T_(app);
 check('showItemInFolder limited to chosen files / data folder', !t.revealed.includes('/etc/hostname'), t.revealed);
@@ -339,6 +430,27 @@ check(
   'Save on a read-only project leaves it untouched and offers Save As',
   !!lockedOpen && patched === true && unlocked && sameBytes(locked, poster) && lockedToast && t.saves.length === savesLocked + 1 && t.saves.at(-1) === locked,
   { lockedOpen: !!lockedOpen, patched, unlocked, lockedToast, saves: t.saves.slice(savesLocked) },
+);
+
+/* ---- Save in place when the project's folder is gone (USB stick removed) offers Save As ---- */
+const goneDir = path.join(FILES, 'gone');
+fs.mkdirSync(goneDir);
+await queueSave(app, path.join(goneDir, 'Gone'));
+await page.evaluate(() => window.__app.commands.get('file.saveAs').run());
+const goneSaved = await poll(async () => fs.existsSync(path.join(goneDir, 'Gone.pgfx')), 8000);
+fs.rmSync(goneDir, { recursive: true, force: true });
+await makeDirty(page);
+const savesGone = (await T_(app)).saves.length;
+await queueSave(app, path.join(FILES, 'Rescued'));
+await page.evaluate(() => window.__app.commands.get('file.save').run());
+const rescued = await poll(async () => fs.existsSync(path.join(FILES, 'Rescued.pgfx')), 8000);
+const goneToast = await page.evaluate(() => document.body.innerText.includes('no longer available'));
+ss = await sessions(page);
+t = await T_(app);
+check(
+  'Save when the project folder is gone explains it and offers Save As',
+  !!goneSaved && rescued && goneToast && t.saves.length === savesGone + 1 && ss.some((s) => s.path === path.join(FILES, 'Rescued.pgfx') && !s.dirty),
+  { goneSaved: !!goneSaved, rescued, goneToast, saves: t.saves.slice(savesGone) },
 );
 
 /* ---- a file forwarded while the page is (re)loading waits for it, then opens once ---- */
@@ -516,16 +628,55 @@ t = await T_(app);
 const unresp = t.boxes.at(-1);
 check('unresponsive window offers Wait / Reload / Quit', unresp && unresp.message === 'Perseverance is not responding' && unresp.buttons.join() === 'Wait,Reload,Quit', unresp);
 
+const editorBack = () =>
+  poll(() => main(app, ({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.executeJavaScript('!!(window.__app && document.querySelector(".shell-root"))')), 20000, 300);
+const hangRenderer = () => main(app, ({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.executeJavaScript('setTimeout(() => { for (;;); }, 30); 1'));
+
+/* ---- unresponsive → Reload: the hung process is killed and the editor really comes back ---- */
+await hangRenderer();
+await wait(300);
+let boxesR = (await T_(app)).boxes.length;
+await answerBox(app, 1); // "Reload"
+const tReload = Date.now();
+await main(app, ({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].emit('unresponsive'));
+const backAfterReload = await editorBack();
+measurements.unresponsiveReloadMs = Date.now() - tReload;
+t = await T_(app);
+check(
+  'unresponsive → Reload brings the editor back (no blank window, no crash prompt)',
+  !!backAfterReload && t.boxes.length === boxesR + 1 && !t.boxes.slice(boxesR).some((b) => /stopped unexpectedly/.test(b.message)),
+  { back: !!backAfterReload, ms: measurements.unresponsiveReloadMs, boxes: t.boxes.slice(boxesR).map((b) => b.message) },
+);
+
+/* ---- …and when the reload never happens, the crash prompt still offers a way forward ---- */
+await main(app, ({ BrowserWindow }) => {
+  const wc = BrowserWindow.getAllWindows()[0].webContents;
+  const orig = wc.reload;
+  wc.reload = () => {
+    wc.reload = orig; // swallow only the first reload (the one after the kill)
+  };
+});
+await hangRenderer();
+await wait(300);
+boxesR = (await T_(app)).boxes.length;
+await answerBox(app, 1); // "Reload" in the not-responding prompt (swallowed)
+await answerBox(app, 0); // "Reload" in the safety-net crash prompt
+await main(app, ({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].emit('unresponsive'));
+const backAfterNet = await editorBack();
+t = await T_(app);
+check(
+  'a reload that never finishes still ends in the crash prompt (Reload recovers)',
+  !!backAfterNet && t.boxes.slice(boxesR).some((b) => /stopped unexpectedly/.test(b.message)),
+  { back: !!backAfterNet, boxes: t.boxes.slice(boxesR).map((b) => b.message) },
+);
+
 /* ---- renderer crash → Reload ---- */
+boxesR = (await T_(app)).boxes.length;
 await answerBox(app, 0);
 await main(app, ({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer());
-const reloaded = await poll(
-  () => main(app, ({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.executeJavaScript('!!(window.__app && document.querySelector(".shell-root"))')),
-  20000,
-  300,
-);
+const reloaded = await editorBack();
 t = await T_(app);
-check('renderer crash offers Reload and the editor comes back', !!reloaded && t.boxes.some((b) => b.message === 'The editor window stopped unexpectedly'), { reloaded });
+check('renderer crash offers Reload and the editor comes back', !!reloaded && t.boxes.slice(boxesR).some((b) => b.message === 'The editor window stopped unexpectedly'), { reloaded });
 
 /* ---- remember window bounds, then a hung renderer + close → "Quit Anyway" really quits ---- */
 await main(app, ({ BrowserWindow }) => {
@@ -580,6 +731,32 @@ if (idx >= 0) {
   check('Open Recent works after a relaunch (persisted grants)', !!reopened, reopened);
   const w3 = await page.evaluate((p) => window.desktop.readFile(p).then((b) => window.desktop.writeFile(p, b)).then(() => 'ok', (e) => e.message), poster);
   check('a recent project can be saved in place after a relaunch', w3 === 'ok', w3);
+
+  /* ---- File ▸ Open and Open Recent of the already-open project switch to it (never a second copy) ---- */
+  const activateOther = () =>
+    page.evaluate((p) => {
+      const st = window.__app.useEditor.getState();
+      const other = Object.values(st.sessions).find((s) => s.filePath !== p);
+      if (other) st.setActiveDoc(other.doc.id);
+      return !!other;
+    }, poster);
+  const activeIsPoster = () =>
+    page.evaluate((p) => {
+      const st = window.__app.useEditor.getState();
+      return st.sessions[st.activeDocId]?.filePath === p;
+    }, poster);
+  if (!(await activateOther())) await openTemplate(page);
+  await main(app, (_e, p) => globalThis.__t.openQueue.push(p), poster);
+  await page.evaluate(() => window.__app.commands.get('file.open').run());
+  await wait(500);
+  const viaOpen = await activeIsPoster();
+  await activateOther();
+  const recentIdx = await page.evaluate((p) => JSON.parse(localStorage.getItem('perseverance.recent') ?? '[]').findIndex((e) => e.path === p), poster);
+  await page.evaluate((i) => window.__app.commands.get(`file.openRecent.${i}`).run(), recentIdx);
+  await wait(500);
+  const viaRecent = await activeIsPoster();
+  const posterCopies = (await sessions(page)).filter((s) => s.path === poster).length;
+  check('File ▸ Open / Open Recent of an open project switch to its tab (no second copy)', viaOpen && viaRecent && posterCopies === 1, { viaOpen, viaRecent, posterCopies });
 }
 /* ---- Open Recent on a file the app may not read: explained, not reported as missing ---- */
 const ungranted = path.join(FILES, 'ungranted.png');
@@ -660,7 +837,8 @@ check('coverage run inside Electron', cov.panels > 5, cov);
 const csp = await page.evaluate(() => window.__csp);
 t = await T_(app);
 const consoleAll = [...consoleA, ...t.console];
-const errors = consoleAll.filter((m) => m.level === 'error');
+// The file:// probes above fail on purpose (net::ERR_BLOCKED_BY_CLIENT): not app errors.
+const errors = consoleAll.filter((m) => m.level === 'error' && !PROBE_RE.test(`${m.message} ${m.source}`));
 const secWarnings = consoleAll.filter((m) => /Electron Security Warning/i.test(m.message));
 const cspConsole = consoleAll.filter((m) => /Content Security Policy|Refused to/i.test(m.message));
 check('no CSP violations', csp.length === 0 && cspConsole.length === 0, [...csp, ...cspConsole.map((m) => m.message)].slice(0, 8));
@@ -726,5 +904,6 @@ if (codeC === 'timeout') await app.close().catch(() => {});
 const logFile = path.join(userData, 'logs', 'main.log');
 const mainLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
 check('main-process log written (crash + warnings recorded)', /render process gone/.test(mainLog) && /close request not acknowledged/.test(mainLog), logFile);
+check('blocked file:// requests are logged', /blocked file request file:\/\/\/etc\/hostname/.test(mainLog), logFile);
 
 finish();

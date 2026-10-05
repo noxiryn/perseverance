@@ -208,12 +208,17 @@ function convolveRow(src: Float32Array, dst: Float32Array, row: number, w: numbe
     }
     dst[row + x] = s;
   }
-  for (let x = xa; x < xb; x++) {
-    let s = 0;
-    const p = row + x - r;
-    for (let i = 0; i < K; i++) s += src[p + i] * k[i];
-    dst[row + x] = s;
-  }
+  // interior: unrolled for the common kernel sizes (same sums in the same order: s = 0 + t0 + t1 …)
+  if (K === 3) hTaps3(src, dst, row, xa, xb, k);
+  else if (K === 5) hTaps5(src, dst, row, xa, xb, k);
+  else if (K === 7) hTaps7(src, dst, row, xa, xb, k);
+  else
+    for (let x = xa; x < xb; x++) {
+      let s = 0;
+      const p = row + x - r;
+      for (let i = 0; i < K; i++) s += src[p + i] * k[i];
+      dst[row + x] = s;
+    }
   for (let x = xb; x < w; x++) {
     let s = 0;
     for (let i = 0; i < K; i++) {
@@ -222,6 +227,34 @@ function convolveRow(src: Float32Array, dst: Float32Array, row: number, w: numbe
     }
     dst[row + x] = s;
   }
+}
+
+function hTaps3(src: Float32Array, dst: Float32Array, row: number, xa: number, xb: number, k: Float32Array) {
+  const k0 = k[0],
+    k1 = k[1],
+    k2 = k[2];
+  for (let x = xa, p = row + xa - 1; x < xb; x++, p++) dst[row + x] = 0 + src[p] * k0 + src[p + 1] * k1 + src[p + 2] * k2;
+}
+
+function hTaps5(src: Float32Array, dst: Float32Array, row: number, xa: number, xb: number, k: Float32Array) {
+  const k0 = k[0],
+    k1 = k[1],
+    k2 = k[2],
+    k3 = k[3],
+    k4 = k[4];
+  for (let x = xa, p = row + xa - 2; x < xb; x++, p++) dst[row + x] = 0 + src[p] * k0 + src[p + 1] * k1 + src[p + 2] * k2 + src[p + 3] * k3 + src[p + 4] * k4;
+}
+
+function hTaps7(src: Float32Array, dst: Float32Array, row: number, xa: number, xb: number, k: Float32Array) {
+  const k0 = k[0],
+    k1 = k[1],
+    k2 = k[2],
+    k3 = k[3],
+    k4 = k[4],
+    k5 = k[5],
+    k6 = k[6];
+  for (let x = xa, p = row + xa - 3; x < xb; x++, p++)
+    dst[row + x] = 0 + src[p] * k0 + src[p + 1] * k1 + src[p + 2] * k2 + src[p + 3] * k3 + src[p + 4] * k4 + src[p + 5] * k5 + src[p + 6] * k6;
 }
 
 /** Exact separable gaussian on a float plane in place (small sigmas). Clamp-to-edge. */
@@ -991,22 +1024,28 @@ export function blurImage<T extends Img>(img: T, sigma: number): T {
     if (isOpaque(d)) {
       // Opaque: premultiplying is the identity and the alpha plane stays exactly 255 (a box of a
       // constant reproduces it after float32 rounding), so only the three color channels are
-      // blurred, each as its own plane — same values as the 4-channel path, 25% less work.
-      for (let c = 0; c < 3; c++) {
-        runBoxPasses(
-          null,
-          w,
-          h,
-          1,
-          passes,
-          (y, row) => {
-            for (let x = 0, k = y * rs + c; x < w; x++, k += 4) row[x] = d[k];
-          },
-          (y, row) => {
-            for (let x = 0, k = y * rs + c; x < w; x++, k += 4) d[k] = row[x];
-          },
-        );
-      }
+      // blurred (interleaved RGB rows) — same values as the 4-channel path, 25% less work.
+      runBoxPasses(
+        null,
+        w,
+        h,
+        3,
+        passes,
+        (y, row) => {
+          for (let x = 0, k = y * rs, q = 0; x < w; x++, k += 4, q += 3) {
+            row[q] = d[k];
+            row[q + 1] = d[k + 1];
+            row[q + 2] = d[k + 2];
+          }
+        },
+        (y, row) => {
+          for (let x = 0, k = y * rs, q = 0; x < w; x++, k += 4, q += 3) {
+            d[k] = row[q];
+            d[k + 1] = row[q + 1];
+            d[k + 2] = row[q + 2];
+          }
+        },
+      );
       return img;
     }
     runBoxPasses(
@@ -1020,12 +1059,141 @@ export function blurImage<T extends Img>(img: T, sigma: number): T {
     );
     return img;
   }
+  if (sigma >= MULTIRES_SIGMA && w >= 16 && h >= 16) {
+    blurImageMultires(img.data, w, h, sigma);
+    return img;
+  }
   const f = premultipliedFloats(img.data);
   if (sigma < 1) gaussSmallRGBA(f, w, h, sigma);
-  else if (sigma >= MULTIRES_SIGMA && w >= 16 && h >= 16) blurMultires(f, w, h, 4, sigma);
   else boxBlurPasses(f, w, h, 4, boxPassesForSigma(sigma));
   unpremultiplyFloats(f, img.data);
   return img;
+}
+
+/**
+ * blurImage for big sigmas = premultipliedFloats → blurMultires(…, 4, σ) → unpremultiplyFloats,
+ * without the full-size float copy: the premultiplied values are summed into the downsampled
+ * cells straight from the bytes (per channel in the same order: rows of a cell top to bottom,
+ * pixels left to right, float32 sums), and each upsampled value (rounded to float32 like the
+ * float plane stores it) is un-premultiplied straight into the bytes. Identical results.
+ */
+function blurImageMultires(d: Uint8ClampedArray, w: number, h: number, sigma: number) {
+  const f = multiresFactor(sigma);
+  const w2 = Math.ceil(w / f),
+    h2 = Math.ceil(h / f);
+  const small = new Float32Array(w2 * h2 * 4);
+  for (let y2 = 0; y2 < h2; y2++) {
+    const y0 = y2 * f,
+      y1 = Math.min(h, y0 + f);
+    const o = y2 * w2 * 4;
+    for (let y = y0; y < y1; y++) downsampleRowPremul(d, y * w * 4, w, f, w2, small, o);
+    const kh = y1 - y0;
+    for (let x2 = 0, x0 = 0; x2 < w2; x2++, x0 += f) {
+      const k = 1 / (((x0 + f < w ? x0 + f : w) - x0) * kh);
+      const oc = o + x2 * 4;
+      small[oc] *= k;
+      small[oc + 1] *= k;
+      small[oc + 2] *= k;
+      small[oc + 3] *= k;
+    }
+  }
+  multiresBlurGrid(small, w2, h2, 4, sigma, f);
+  // bilinear upsample (cell centers at (i + 0.5)·f) → un-premultiplied bytes
+  const invF = 1 / f;
+  const xi0 = new Int32Array(w),
+    xi1 = new Int32Array(w),
+    xt = new Float32Array(w);
+  for (let x = 0; x < w; x++) {
+    let fx = (x + 0.5) * invF - 0.5;
+    if (fx < 0) fx = 0;
+    else if (fx > w2 - 1) fx = w2 - 1;
+    const i0 = fx | 0;
+    xi0[x] = i0 * 4;
+    xi1[x] = (i0 < w2 - 1 ? i0 + 1 : i0) * 4;
+    xt[x] = fx - i0;
+  }
+  for (let y = 0; y < h; y++) {
+    let fy = (y + 0.5) * invF - 0.5;
+    if (fy < 0) fy = 0;
+    else if (fy > h2 - 1) fy = h2 - 1;
+    const j0 = fy | 0;
+    upsampleRowUnpremul(small, j0 * w2 * 4, (j0 < h2 - 1 ? j0 + 1 : j0) * w2 * 4, fy - j0, xi0, xi1, xt, d, y * w * 4, w);
+  }
+}
+
+/** One image row's premultiplied pixels (bytes at d[j..]) added into its cells (float32 sums). */
+function downsampleRowPremul(d: Uint8ClampedArray, j: number, w: number, f: number, w2: number, small: Float32Array, o: number) {
+  for (let x2 = 0, x0 = 0; x2 < w2; x2++, x0 += f) {
+    const x1 = x0 + f < w ? x0 + f : w;
+    const oc = o + x2 * 4;
+    let s0 = small[oc],
+      s1 = small[oc + 1],
+      s2 = small[oc + 2],
+      s3 = small[oc + 3];
+    for (let x = x0; x < x1; x++, j += 4) {
+      const a = d[j + 3];
+      if (a === 255) {
+        s0 = Math.fround(s0 + d[j]);
+        s1 = Math.fround(s1 + d[j + 1]);
+        s2 = Math.fround(s2 + d[j + 2]);
+        s3 = Math.fround(s3 + 255);
+      } else if (a !== 0) {
+        // premultipliedFloats: the float32 of byte · a/255
+        const m = a / 255;
+        s0 = Math.fround(s0 + Math.fround(d[j] * m));
+        s1 = Math.fround(s1 + Math.fround(d[j + 1] * m));
+        s2 = Math.fround(s2 + Math.fround(d[j + 2] * m));
+        s3 = Math.fround(s3 + a);
+      }
+      // a = 0 adds 0 to every channel (s + 0 = s)
+    }
+    small[oc] = s0;
+    small[oc + 1] = s1;
+    small[oc + 2] = s2;
+    small[oc + 3] = s3;
+  }
+}
+
+/**
+ * One output row of the bilinear upsample of the 4-channel grid (grid rows r0 / r1, y-fraction
+ * ty) un-premultiplied into the bytes at d[j..] (unpremultiplyFloats on the float32 values).
+ */
+function upsampleRowUnpremul(small: Float32Array, r0: number, r1: number, ty: number, xi0: Int32Array, xi1: Int32Array, xt: Float32Array, d: Uint8ClampedArray, j: number, w: number) {
+  for (let x = 0; x < w; x++, j += 4) {
+    const a0 = r0 + xi0[x],
+      a1 = r0 + xi1[x],
+      b0 = r1 + xi0[x],
+      b1 = r1 + xi1[x];
+    const tx = xt[x];
+    let top = small[a0 + 3] + (small[a1 + 3] - small[a0 + 3]) * tx;
+    let bot = small[b0 + 3] + (small[b1 + 3] - small[b0 + 3]) * tx;
+    const a = Math.fround(top + (bot - top) * ty);
+    if (a < 0.5) {
+      d[j] = d[j + 1] = d[j + 2] = d[j + 3] = 0;
+      continue;
+    }
+    top = small[a0] + (small[a1] - small[a0]) * tx;
+    bot = small[b0] + (small[b1] - small[b0]) * tx;
+    const v0 = Math.fround(top + (bot - top) * ty);
+    top = small[a0 + 1] + (small[a1 + 1] - small[a0 + 1]) * tx;
+    bot = small[b0 + 1] + (small[b1 + 1] - small[b0 + 1]) * tx;
+    const v1 = Math.fround(top + (bot - top) * ty);
+    top = small[a0 + 2] + (small[a1 + 2] - small[a0 + 2]) * tx;
+    bot = small[b0 + 2] + (small[b1 + 2] - small[b0 + 2]) * tx;
+    const v2 = Math.fround(top + (bot - top) * ty);
+    if (a >= 254.5) {
+      d[j] = v0;
+      d[j + 1] = v1;
+      d[j + 2] = v2;
+      d[j + 3] = 255;
+    } else {
+      const m = 255 / a;
+      d[j] = v0 * m;
+      d[j + 1] = v1 * m;
+      d[j + 2] = v2 * m;
+      d[j + 3] = a;
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */

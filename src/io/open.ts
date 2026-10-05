@@ -6,7 +6,7 @@
  *    new layer in the active document.
  */
 import type { OpenedFile } from '../platform';
-import { extOf } from '../platform';
+import { extOf, samePath } from '../platform';
 import { bitmaps } from '../core/bitmaps';
 import { blobToCanvas, createCanvas, ctx2d } from '../core/canvas';
 import { createDocument, insertLayerDraft, makeRasterLayer } from '../core/document';
@@ -47,10 +47,27 @@ function sniff(file: OpenedFile): Kind {
   return 'unknown';
 }
 
+/**
+ * A project that is already open (same path; Windows paths compare case- and slash-insensitively) is
+ * brought to the front, like Photoshop, instead of opening a second copy whose Save would silently
+ * overwrite the other copy's changes. Returns true when it switched. Used by File ▸ Open, Open Recent
+ * (before reading the file) and files handed over by the OS.
+ */
+export function focusOpenProject(path: string | null | undefined): boolean {
+  if (!path) return false;
+  const st = useEditor.getState();
+  const open = Object.values(st.sessions).find((s) => samePath(s.filePath, path));
+  if (!open) return false;
+  st.setActiveDoc(open.doc.id);
+  toast(`“${open.doc.name}” is already open.`, 'info');
+  return true;
+}
+
 export async function openFile(file: OpenedFile, opts: { asNewDocument?: boolean } = {}): Promise<void> {
   const kind = sniff(file);
   try {
     if (kind === 'pgfx') {
+      if (focusOpenProject(file.path)) return;
       const doc = await loadProject(file);
       addRecentFile(file.path, file.name);
       toast(`Opened “${doc.name}”`, 'success');

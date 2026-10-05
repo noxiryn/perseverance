@@ -74,7 +74,7 @@ calls except the optional Roblox avatar fetch.
 | `src/editor/selection.ts` | Selection masks: `rectMask/ellipseMask/polygonMask/alphaMask`, `combine(doc, mask, mode, shape)`, `setSelection`, `selectAll`, `deselect`, `invertSelection`, `featherSelection`, `expandSelection`, `getSelectionMask(doc)`, `clipToSelection`, `colorSelectMask` (magic wand), `selectionFromLayerCanvas`, `maskBounds` |
 | `src/filters/engine.ts` | `compositeOp(blendMode)`, `defaultParams`, `resolveParams`, `makeFilterContext`, `runFilter`, `applyFilterInstanceToCanvas`, `applyFilterStack`, `adjustmentFilters()` |
 | `src/fonts/loader.ts` | `ensureFont(family, weight, style)`, `isFontReady`, `ensureDocumentFonts` |
-| `src/platform/index.ts` | `isDesktop`, `desktop`, `openFiles`, `saveFile`, `writeFile`, `openExternal`, `setWindowTitle`, `fileNameOf`, `extOf`, `isMac`, `isAccessDenied(e)` (desktop: `readFile`/`writeFile` only accept paths the user chose via dialogs / opened from the OS — see `electron/main.cjs`; other paths reject with `ENOTGRANTED`) |
+| `src/platform/index.ts` | `isDesktop`, `desktop`, `openFiles`, `saveFile`, `writeFile`, `openExternal`, `setWindowTitle`, `fileNameOf`, `extOf`, `isMac`, `samePath(a, b)` (desktop paths: Windows compares case- and slash-insensitively, macOS case-insensitively), `isAccessDenied(e)` (desktop: `readFile`/`writeFile` only accept paths the user chose via dialogs / opened from the OS — see `electron/main.cjs`; other paths reject with `ENOTGRANTED`) |
 | `src/ui/controls` | `Button`, `IconButton`, `Checkbox`, `Select`, `NumberField` (scrubbable), `Slider`, `Field`, `Tabs`, `Section`, `SearchInput`, `ChipRow` (one scrolling row of filter chips), `TextInput`, `ColorSwatch`, `ColorPicker` (`variant="panel"`: fluid, sized field), `ColorField`, `GradientPreview`, `GradientEditor`, `GradientField`, `gradientToCss`, `CurvesEditor`, `curveLUT`, `IDENTITY_CURVES`, `ParamEditor`, `AngleDial`, `FontSelect`, `Popover`, `showContextMenu`, `showMenuAt`, `MenuItem`, `MenuHost`, `Dialog`, `DialogHost` |
 | `src/ui/shortcuts.ts` | `matchShortcut(e, 'Ctrl+Shift+N')`, `formatShortcut`, `parseShortcut`, `isTypingTarget(e.target)`, `eventKey(e)` |
 
@@ -309,12 +309,18 @@ Reference images (PNG) are on disk at `docs/reference/` (not committed): `ref1-b
   `electron/lib.cjs` (unit-tested in `src/platform/desktopMain.test.ts`): sandboxed, context-isolated
   renderer without Node; every IPC handler checks the sender frame and argument types; `readFile` /
   `writeFile` only touch paths the user chose (dialogs, Explorer/Finder/argv; grants persisted in
-  `userData/file-access.json`, writes only for projects and Save targets, crash-safe temp+rename);
+  `userData/file-access.json`, writes only for projects and Save targets, crash-safe temp+rename;
+  other paths are refused before they are opened); the page itself may only load file:// URLs inside
+  its own `dist/` folder (session webRequest filter — Electron's file:// privileges would otherwise let
+  it fetch any local file), and the CSP allows network access only to `*.roblox.com` / `*.rbxcdn.com`.
   Save As appends the filter's extension; writes keep the replaced file's mode and refuse read-only files;
-  a project handed over again while open switches to its tab; `openExternal` / `window.open` / navigation hand only
+  Save in place falls back to Save As for read-only/locked files, a missing folder/drive or a full disk;
+  a project that is already open (OS hand-over, File ▸ Open, Open Recent — io `focusOpenProject`)
+  switches to its tab; `openExternal` / `window.open` / navigation hand only
   http(s) to the browser; permissions: local fonts, clipboard, fullscreen. Single instance (argv
   forwarded, files queued until the page has loaded), close guard (the renderer must acknowledge
   `onCloseRequested`, else "Quit Anyway"; closing again while its prompt is open also offers it),
-  crash/unresponsive prompts with Reload, window bounds in `userData/window-state.json`, log in
+  crash/unresponsive prompts with Reload (a hung renderer is killed first and reloaded once its process
+  is gone; crash prompt if it isn't back within 15 s), window bounds in `userData/window-state.json`, log in
   `userData/logs/main.log`. Check the real app with
   `npx vite build && xvfb-run -a -s "-screen 0 1600x960x24" node scripts/electron-desktop-check.mjs [--full]`.

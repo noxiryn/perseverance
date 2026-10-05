@@ -61,6 +61,48 @@ describe('path policy', () => {
   });
 });
 
+describe('file:// requests from the page', () => {
+  it('allows only the app bundle folder (POSIX)', () => {
+    const dist = '/opt/Perseverance/resources/app.asar/dist';
+    const ok = (u: string) => lib.fileUrlInside(u, dist, 'linux');
+    expect(ok('file:///opt/Perseverance/resources/app.asar/dist/index.html')).toBe(true);
+    expect(ok('file:///opt/Perseverance/resources/app.asar/dist/assets/index-abc.js?v=1#x')).toBe(true);
+    expect(ok('file:///opt/Perseverance/resources/app.asar/dist')).toBe(true);
+    expect(ok('file:///etc/hostname')).toBe(false);
+    expect(ok('file:///opt/Perseverance/resources/app.asar/dist/../../secret.txt')).toBe(false);
+    expect(ok('file:///opt/Perseverance/resources/app.asar/dist/%2e%2e/x')).toBe(false);
+    expect(ok('file:///opt/Perseverance/resources/app.asar/dist%2f..%2fx')).toBe(false); // encoded slash
+    expect(ok('file:///opt/Perseverance/resources/app.asar/distX/a.js')).toBe(false); // sibling prefix
+    expect(ok('file://evil.example/opt/Perseverance/resources/app.asar/dist/index.html')).toBe(false);
+    expect(ok('https://example.com/opt/Perseverance/resources/app.asar/dist/index.html')).toBe(false);
+    expect(ok('not a url')).toBe(false);
+  });
+
+  it('allows only the app bundle folder (Windows: any case/slash, no UNC hosts)', () => {
+    const dist = 'C:\\Program Files\\Perseverance\\resources\\app.asar\\dist';
+    const ok = (u: string) => lib.fileUrlInside(u, dist, 'win32');
+    expect(ok('file:///C:/Program%20Files/Perseverance/resources/app.asar/dist/index.html')).toBe(true);
+    expect(ok('file:///c:/program%20files/PERSEVERANCE/resources/app.asar/dist/assets/a.woff2')).toBe(true);
+    expect(ok('file:///C:/Users/me/Documents/secret.txt')).toBe(false);
+    expect(ok('file://attacker/share/x.pgfx')).toBe(false);
+    expect(ok('file:///C:/Program%20Files/Perseverance/resources/app.asar/dist%5c..%5cx')).toBe(false);
+  });
+});
+
+describe('Save in place failures that fall back to Save As (src/io/save)', () => {
+  it('classifies read-only, missing-folder and full-disk errors', async () => {
+    const { saveInPlaceProblem } = await import('../io/save');
+    const ipc = (code: string) => new Error(`Error invoking remote method 'desktop:write-file': Error: ${code}: x, open '/a/.b.tmp'`);
+    expect(saveInPlaceProblem(ipc('EACCES'))).toBe('read-only');
+    expect(saveInPlaceProblem(ipc('EBUSY'))).toBe('read-only');
+    expect(saveInPlaceProblem(ipc('ENOENT'))).toBe('missing');
+    expect(saveInPlaceProblem(ipc('ENOTDIR'))).toBe('missing');
+    expect(saveInPlaceProblem(ipc('ENOSPC'))).toBe('full');
+    expect(saveInPlaceProblem(ipc('ENOTGRANTED'))).toBe(null);
+    expect(saveInPlaceProblem(new Error('encoder failed'))).toBe(null);
+  });
+});
+
 describe('file access grants', () => {
   it('reads only granted paths, writes only write-granted ones, persists across launches', () => {
     const dir = tmp();
@@ -378,6 +420,11 @@ describe('native chrome matches the CSS', () => {
     const csp = html.match(/Content-Security-Policy"\s+content="([^"]+)"/)?.[1] ?? '';
     for (const d of ["script-src 'self'", "object-src 'none'", "frame-src 'none'", "base-uri 'none'", "form-action 'none'"]) expect(csp).toContain(d);
     expect(csp).not.toContain('unsafe-eval');
+    // Network access only to the Roblox APIs/CDN the avatar fetch uses (no "any https host" exfiltration
+    // channel, no dev-server leftovers in the production policy).
+    expect(csp).not.toMatch(/\shttps:[\s;]/);
+    expect(csp).not.toContain('ws://');
+    expect(csp).toMatch(/connect-src [^;]*https:\/\/\*\.roblox\.com/);
     expect(existsSync(join(here, '..', '..', 'electron', 'main.cjs'))).toBe(true);
   });
 });

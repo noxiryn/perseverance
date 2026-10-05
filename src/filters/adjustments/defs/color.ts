@@ -5,7 +5,7 @@
 import { Camera, Gem, Palette, Pipette, Scale, Shuffle, SunMoon } from 'lucide-react';
 import type { ParamDef, ParamValues } from '../../../core/types';
 import type { FilterDef } from '../../../registry';
-import { ALPHA_MASK, MEMO_PROBE, MEMO_SHIFT, applyLuts, colorMemo, hslToRgbInto, luma, pixelWords, readWords, rgbOf, type Pixels } from '../math';
+import { ALPHA_MASK, MEMO_PROBE, MEMO_SHIFT, applyLuts, colorMemo, hslToRgbInto, luma, pixelWords, rgbOf, type Pixels } from '../math';
 import { bool, boolP, colorP, num, numP, pctP, selectP, str } from '../params';
 
 const scratch = new Float64Array(3);
@@ -23,84 +23,86 @@ export function vibrancePixels(img: Pixels, vibrance: number, saturation: number
   const sat = Math.max(-1, Math.min(1, saturation / 100));
   if (vib === 0 && sat === 0) return img;
   const d = img.data;
-  const live = pixelWords(img);
-  const u = live ?? readWords(img);
-  // results are read back from the live words into the color memo (none on the byte fallback)
-  const memo = live ? colorMemo(`vib:${vib}:${sat}`) : null;
-  const ce = memo ? memo.entries : NO_MEMO;
-  let memoOn = memo !== null,
-    hits = 0,
+  const u = pixelWords(img);
+  if (!u) {
+    vibranceRange(d, 0, d.length >> 2, vib, sat);
+    return img;
+  }
+  // Whole pixels as words: runs of one color reuse the previous result, other colors seen before
+  // (this call or an earlier one with the same params) come from the color memo. A noisy image
+  // (fewer hits than misses) finishes in the plain loop.
+  const ce = colorMemo(`vib:${vib}:${sat}`).entries;
+  let hits = 0,
     misses = 0;
-  const { S, W, SK } = vibranceTables();
-  const sat1 = 1 + sat;
   let prev = ~u[0];
-  for (let q = 0, n = u.length; q < n; q++) {
+  let q = 0;
+  const n = u.length;
+  for (; q < n; q++) {
     const p = u[q];
-    const j = q << 2;
     if (p === prev) {
-      // same pixel as the previous one → same result
-      d[j] = d[j - 4];
-      d[j + 1] = d[j - 3];
-      d[j + 2] = d[j - 2];
+      u[q] = u[q - 1];
       continue;
     }
     prev = p;
     if (p >>> 24 === 0) continue;
     const rgb = p & 0xffffff;
-    let slot = 0;
-    if (memoOn) {
-      slot = (Math.imul(rgb, -1640531535) >>> MEMO_SHIFT) << 1;
-      if (ce[slot] === rgb) {
-        u[q] = (p & ALPHA_MASK) | ce[slot + 1];
-        hits++;
-        continue;
-      }
-      if ((++misses & (MEMO_PROBE - 1)) === 0 && hits < misses) memoOn = false;
+    const slot = (Math.imul(rgb, -1640531535) >>> MEMO_SHIFT) << 1;
+    if (ce[slot] === rgb) {
+      u[q] = (p & ALPHA_MASK) | ce[slot + 1];
+      hits++;
+      continue;
     }
-    px: {
-      const r = p & 255,
-        g = (p >> 8) & 255,
-        b = (p >> 16) & 255;
-      const mx = r > g ? (r > b ? r : b) : g > b ? g : b;
-      const mn = r < g ? (r < b ? r : b) : g < b ? g : b;
-      if (mx === mn) break px; // neutral: nothing to (de)saturate
-      const t = (mx << 8) | mn;
-      const L = 0.299 * r + 0.587 * g + 0.114 * b; // luma()
-      let f: number;
-      if (vib > 0) {
-        let w = W[t]; // (1 − s)^1.5 · 1.3
-        // Skin protection: warm hues (r ≥ g ≥ b, hue ≈ 10°–45°) get a gentler boost.
-        if (r >= g && g >= b) w *= SK[((r - b) << 8) | (g - b)];
-        f = 1 + vib * w;
-        // Cap the boost so the most extreme channel just reaches 0 or 255 (no clipping). The
-        // caps (two divisions) only matter when the boost gets near them: a conservative test
-        // skips them for every color the cap can't change (min(f, max(1, cap)) = f).
-        if ((mx > L && f * (mx - L) > (255 - L) * CAP_SAFE) || (mn < L && f * (L - mn) > L * CAP_SAFE)) {
-          let cap = Infinity;
-          if (mx > L) cap = (255 - L) / (mx - L);
-          if (mn < L) cap = Math.min(cap, L / (L - mn));
-          f = Math.min(f, Math.max(1, cap));
-        }
-      } else if (vib < 0) {
-        f = 1 + vib * (1 - S[t] * 0.5);
-      } else f = 1;
-      f *= sat1;
-      if (f < 0) f = 0;
-      d[j] = L + (r - L) * f;
-      d[j + 1] = L + (g - L) * f;
-      d[j + 2] = L + (b - L) * f;
-    }
-    if (memoOn) {
-      ce[slot] = rgb;
-      ce[slot + 1] = u[q] & 0xffffff;
-    }
+    if ((++misses & (MEMO_PROBE - 1)) === 0 && hits < misses) break;
+    vibranceRange(d, q, q + 1, vib, sat);
+    ce[slot] = rgb;
+    ce[slot + 1] = u[q] & 0xffffff;
   }
+  if (q < n) vibranceRange(d, q, n, vib, sat);
   return img;
+}
+
+/** Vibrance / saturation of the pixels q0..q1 − 1 (transparent ones skipped). */
+function vibranceRange(d: Uint8ClampedArray, q0: number, q1: number, vib: number, sat: number) {
+  const { S, W, SK } = vibranceTables();
+  const sat1 = 1 + sat;
+  for (let j = q0 << 2, e = q1 << 2; j < e; j += 4) {
+    if (d[j + 3] === 0) continue;
+    const r = d[j],
+      g = d[j + 1],
+      b = d[j + 2];
+    const mx = r > g ? (r > b ? r : b) : g > b ? g : b;
+    const mn = r < g ? (r < b ? r : b) : g < b ? g : b;
+    if (mx === mn) continue; // neutral: nothing to (de)saturate
+    const t = (mx << 8) | mn;
+    const L = 0.299 * r + 0.587 * g + 0.114 * b; // luma()
+    let f: number;
+    if (vib > 0) {
+      let w = W[t]; // (1 − s)^1.5 · 1.3
+      // Skin protection: warm hues (r ≥ g ≥ b, hue ≈ 10°–45°) get a gentler boost.
+      if (r >= g && g >= b) w *= SK[((r - b) << 8) | (g - b)];
+      f = 1 + vib * w;
+      // Cap the boost so the most extreme channel just reaches 0 or 255 (no clipping). The
+      // caps (two divisions) only matter when the boost gets near them: a conservative test
+      // skips them for every color the cap can't change (min(f, max(1, cap)) = f).
+      if ((mx > L && f * (mx - L) > (255 - L) * CAP_SAFE) || (mn < L && f * (L - mn) > L * CAP_SAFE)) {
+        let cap = Infinity;
+        if (mx > L) cap = (255 - L) / (mx - L);
+        if (mn < L) cap = Math.min(cap, L / (L - mn));
+        f = Math.min(f, Math.max(1, cap));
+      }
+    } else if (vib < 0) {
+      f = 1 + vib * (1 - S[t] * 0.5);
+    } else f = 1;
+    f *= sat1;
+    if (f < 0) f = 0;
+    d[j] = L + (r - L) * f;
+    d[j + 1] = L + (g - L) * f;
+    d[j + 2] = L + (b - L) * f;
+  }
 }
 
 /** Below this fraction of a cap the vibrance boost certainly stays under it (float error ≪ 1e-9). */
 const CAP_SAFE = 1 - 1e-9;
-const NO_MEMO = new Int32Array(0);
 
 let vibTables: { S: Float64Array; W: Float64Array; SK: Float64Array } | null = null;
 /**
@@ -462,40 +464,55 @@ export function colorBalancePixels(img: Pixels, p: ParamValues): Pixels {
     for (let c = 0; c < 3; c++) off[k * 3 + c] = (sh[c] * ws + md[c] * wm + hi[c] * wh) * 255;
   }
   const d = img.data;
-  const live = pixelWords(img);
-  const u = live ?? readWords(img);
-  const memo = live ? colorMemo(`cb:${sh}:${md}:${hi}:${preserve}`) : null;
-  const ce = memo ? memo.entries : NO_MEMO;
-  let memoOn = memo !== null,
-    hits = 0,
+  const u = pixelWords(img);
+  if (!u) {
+    colorBalanceRange(d, 0, d.length >> 2, off, preserve);
+    return img;
+  }
+  // Whole pixels as words: runs of one color reuse the previous result, other colors seen before
+  // (this call or an earlier one with the same params) come from the color memo. A noisy image
+  // (fewer hits than misses) finishes in the plain loop.
+  const ce = colorMemo(`cb:${sh}:${md}:${hi}:${preserve}`).entries;
+  let hits = 0,
     misses = 0;
   let prev = ~u[0];
-  for (let q = 0, n = u.length; q < n; q++) {
+  let q = 0;
+  const n = u.length;
+  for (; q < n; q++) {
     const p = u[q];
-    const i = q << 2;
     if (p === prev) {
-      // same pixel as the previous one → same result
-      d[i] = d[i - 4];
-      d[i + 1] = d[i - 3];
-      d[i + 2] = d[i - 2];
+      u[q] = u[q - 1];
       continue;
     }
     prev = p;
     if (p >>> 24 === 0) continue;
     const rgb = p & 0xffffff;
-    let slot = 0;
-    if (memoOn) {
-      slot = (Math.imul(rgb, -1640531535) >>> MEMO_SHIFT) << 1;
-      if (ce[slot] === rgb) {
-        u[q] = (p & ALPHA_MASK) | ce[slot + 1];
-        hits++;
-        continue;
-      }
-      if ((++misses & (MEMO_PROBE - 1)) === 0 && hits < misses) memoOn = false;
+    const slot = (Math.imul(rgb, -1640531535) >>> MEMO_SHIFT) << 1;
+    if (ce[slot] === rgb) {
+      u[q] = (p & ALPHA_MASK) | ce[slot + 1];
+      hits++;
+      continue;
     }
-    const r0 = p & 255,
-      g0 = (p >> 8) & 255,
-      b0 = (p >> 16) & 255;
+    if ((++misses & (MEMO_PROBE - 1)) === 0 && hits < misses) break;
+    colorBalanceRange(d, q, q + 1, off, preserve);
+    ce[slot] = rgb;
+    ce[slot + 1] = u[q] & 0xffffff;
+  }
+  if (q < n) colorBalanceRange(d, q, n, off, preserve);
+  return img;
+}
+
+/**
+ * Color balance of the pixels q0..q1 − 1 (transparent ones skipped). Preserve Luminosity restores
+ * the original HSL lightness keeping hue & saturation (closed form of rgb→hsl→set L→rgb: the
+ * chroma is rescaled around the new lightness).
+ */
+function colorBalanceRange(d: Uint8ClampedArray, q0: number, q1: number, off: Float32Array, preserve: boolean) {
+  for (let i = q0 << 2, e = q1 << 2; i < e; i += 4) {
+    if (d[i + 3] === 0) continue;
+    const r0 = d[i],
+      g0 = d[i + 1],
+      b0 = d[i + 2];
     const mx = r0 > g0 ? (r0 > b0 ? r0 : b0) : g0 > b0 ? g0 : b0;
     const mn = r0 < g0 ? (r0 < b0 ? r0 : b0) : g0 < b0 ? g0 : b0;
     const k = (mx + mn) * 3;
@@ -506,11 +523,9 @@ export function colorBalancePixels(img: Pixels, p: ParamValues): Pixels {
     g = g < 0 ? 0 : g > 255 ? 255 : g;
     b = b < 0 ? 0 : b > 255 ? 255 : b;
     if (preserve) {
-      // Restore the original HSL lightness keeping hue & saturation (closed form of
-      // rgb→hsl→set L→rgb): rescale the chroma around the new lightness.
       const M1 = r > g ? (r > b ? r : b) : g > b ? g : b;
       const m1 = r < g ? (r < b ? r : b) : g < b ? g : b;
-      const L2 = mx + mn; // original lightness ×2 (0..510)
+      const L2 = mx + mn;
       const C1 = M1 - m1;
       if (C1 <= 0) {
         r = g = b = L2 / 2;
@@ -527,12 +542,7 @@ export function colorBalancePixels(img: Pixels, p: ParamValues): Pixels {
     d[i] = r;
     d[i + 1] = g;
     d[i + 2] = b;
-    if (memoOn) {
-      ce[slot] = rgb;
-      ce[slot + 1] = u[q] & 0xffffff;
-    }
   }
-  return img;
 }
 
 const balanceGroup = (prefix: string, group: string): ParamDef[] => [
@@ -866,6 +876,47 @@ export function selectiveColorPixels(img: Pixels, p: ParamValues): Pixels {
   // Precomputed per-range channel factors: delta_v = ((−1 − a)·k − a) · (relative ? 1 − v : 1).
   const fac = new Float32Array(9 * 3);
   for (let k = 0; k < 9; k++) for (let c = 0; c < 3; c++) fac[k * 3 + c] = (-1 - adj[k * 4 + c]) * adj[k * 4 + 3] - adj[k * 4 + c];
+  const d = img.data;
+  const u = pixelWords(img);
+  if (!u) {
+    selectiveRange(d, 0, d.length >> 2, fac, active, relative);
+    return img;
+  }
+  // Whole pixels as words: runs of one color reuse the previous result, other colors seen before
+  // (this call or an earlier one with the same params) come from the color memo. A noisy image
+  // (fewer hits than misses) finishes in the plain loop.
+  const ce = colorMemo(`sc:${adj.join(',')}:${relative}`).entries;
+  let hits = 0,
+    misses = 0;
+  let prev = ~u[0];
+  let q = 0;
+  const n = u.length;
+  for (; q < n; q++) {
+    const p = u[q];
+    if (p === prev) {
+      u[q] = u[q - 1];
+      continue;
+    }
+    prev = p;
+    if (p >>> 24 === 0) continue;
+    const rgb = p & 0xffffff;
+    const slot = (Math.imul(rgb, -1640531535) >>> MEMO_SHIFT) << 1;
+    if (ce[slot] === rgb) {
+      u[q] = (p & ALPHA_MASK) | ce[slot + 1];
+      hits++;
+      continue;
+    }
+    if ((++misses & (MEMO_PROBE - 1)) === 0 && hits < misses) break;
+    selectiveRange(d, q, q + 1, fac, active, relative);
+    ce[slot] = rgb;
+    ce[slot + 1] = u[q] & 0xffffff;
+  }
+  if (q < n) selectiveRange(d, q, n, fac, active, relative);
+  return img;
+}
+
+/** Selective color of the pixels q0..q1 − 1 (transparent ones skipped). */
+function selectiveRange(d: Uint8ClampedArray, q0: number, q1: number, fac: Float32Array, active: Uint8Array, relative: boolean) {
   const aR = active[0],
     aY = active[1],
     aG = active[2],
@@ -875,41 +926,11 @@ export function selectiveColorPixels(img: Pixels, p: ParamValues): Pixels {
     aW = active[6],
     aN = active[7],
     aK = active[8];
-  const d = img.data;
-  const live = pixelWords(img);
-  const u = live ?? readWords(img);
-  const memo = live ? colorMemo(`sc:${adj.join(',')}:${relative}`) : null;
-  const ce = memo ? memo.entries : NO_MEMO;
-  let memoOn = memo !== null,
-    hits = 0,
-    misses = 0;
-  let prev = ~u[0];
-  for (let q = 0, n = u.length; q < n; q++) {
-    const p = u[q];
-    const i = q << 2;
-    if (p === prev) {
-      // same pixel as the previous one → same result
-      d[i] = d[i - 4];
-      d[i + 1] = d[i - 3];
-      d[i + 2] = d[i - 2];
-      continue;
-    }
-    prev = p;
-    if (p >>> 24 === 0) continue;
-    const rgb = p & 0xffffff;
-    let slot = 0;
-    if (memoOn) {
-      slot = (Math.imul(rgb, -1640531535) >>> MEMO_SHIFT) << 1;
-      if (ce[slot] === rgb) {
-        u[q] = (p & ALPHA_MASK) | ce[slot + 1];
-        hits++;
-        continue;
-      }
-      if ((++misses & (MEMO_PROBE - 1)) === 0 && hits < misses) memoOn = false;
-    }
-    const r = p & 255,
-      g = (p >> 8) & 255,
-      b = (p >> 16) & 255;
+  for (let i = q0 << 2, e = q1 << 2; i < e; i += 4) {
+    if (d[i + 3] === 0) continue;
+    const r = d[i],
+      g = d[i + 1],
+      b = d[i + 2];
     const mx = r > g ? (r > b ? r : b) : g > b ? g : b;
     const mn = r < g ? (r < b ? r : b) : g < b ? g : b;
     const md = r + g + b - mx - mn;
@@ -965,12 +986,7 @@ export function selectiveColorPixels(img: Pixels, p: ParamValues): Pixels {
         d[i + 2] = b + f2 * 255;
       }
     }
-    if (memoOn) {
-      ce[slot] = rgb;
-      ce[slot + 1] = u[q] & 0xffffff;
-    }
   }
-  return img;
 }
 
 const selectiveParams = (): ParamDef[] => {
