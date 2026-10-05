@@ -208,6 +208,7 @@ export class ViewportEngine {
     this.drag = null;
     this.disposers.forEach((d) => d());
     this.disposers = [];
+    this.dropAltReleaseGuard();
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     if (this.antsTimer) clearTimeout(this.antsTimer);
@@ -857,10 +858,14 @@ export class ViewportEngine {
     this.altReleaseGuard = guard;
     window.addEventListener('keyup', guard, true);
     window.addEventListener('blur', guard as unknown as EventListener, true);
-    this.disposers.push(() => {
-      window.removeEventListener('keyup', guard, true);
-      window.removeEventListener('blur', guard as unknown as EventListener, true);
-    });
+  }
+
+  private dropAltReleaseGuard() {
+    const g = this.altReleaseGuard;
+    if (!g) return;
+    this.altReleaseGuard = null;
+    window.removeEventListener('keyup', g, true);
+    window.removeEventListener('blur', g as unknown as EventListener, true);
   }
 
   private onWheel = (e: WheelEvent) => {

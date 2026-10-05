@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { rimLightCore, robloxFilters, silhouetteCore, topShadeCore, toonRobloxCore, readToon } from './filters';
-import { alphaBounds, blurFloat, distanceToOutside, hexToRgb, luma, makeBuffer, rgbToHexString, sobel, type PixelBuffer } from './pixels';
+import { alphaBounds, blurFloat, contentFrame, distanceToOutside, hexToRgb, luma, makeBuffer, rgbToHexString, sobel, type PixelBuffer } from './pixels';
 
 /** Transparent canvas with an opaque filled rect. */
 function subject(w: number, h: number, rect: [number, number, number, number], color: [number, number, number] = [200, 150, 100]): PixelBuffer {
@@ -15,6 +15,22 @@ function subject(w: number, h: number, rect: [number, number, number, number], c
       img.data[q + 3] = 255;
     }
   return img;
+}
+
+/** Transparent canvas with an opaque disc (an alpha-shaped, cut-out subject). */
+function disc(w: number, h: number, cx: number, cy: number, r: number, color: [number, number, number] = [200, 150, 100]): PixelBuffer {
+  const img = makeBuffer(w, h, [0, 0, 0, 0]);
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      if ((x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 > r * r) continue;
+      img.data.set([...color, 255], (y * w + x) * 4);
+    }
+  return img;
+}
+
+/** Opaque image framed by transparent padding (how smart filters receive an opaque layer). */
+function padded(w: number, h: number, pad: number, color: [number, number, number]): PixelBuffer {
+  return subject(w + 2 * pad, h + 2 * pad, [pad, pad, w, h], color);
 }
 
 const px = (img: PixelBuffer, x: number, y: number) => {
@@ -89,7 +105,7 @@ describe('roblox filters', () => {
   });
 
   it('rim-light brightens the edge facing the light and leaves the far side', () => {
-    const img = subject(40, 40, [10, 10, 20, 20], [60, 60, 60]);
+    const img = disc(40, 40, 20, 20, 10, [60, 60, 60]);
     // light from the right (angle 0)
     rimLightCore(img, { color: '#ff0000', width: 4, angle: 0, intensity: 1, softness: 0.2 });
     const right = px(img, 29, 20);
@@ -147,9 +163,59 @@ describe('roblox filters', () => {
   });
 
   it('toon-roblox draws an inner outline on cut-out subjects', () => {
-    const img = subject(30, 30, [5, 5, 20, 20], [220, 220, 220]);
+    const img = disc(30, 30, 15, 15, 10, [220, 220, 220]);
     toonRobloxCore(img, { ...readToon({}), outlineWidth: 2, outlineColor: '#000000', edges: 0, smooth: 0, shadowStrength: 0 });
     expect(px(img, 5, 15)[0]).toBeLessThan(40); // edge pixel inked
     expect(px(img, 15, 15)[0]).toBeGreaterThan(100); // interior keeps its tone
+  });
+
+  it('rim-light ignores the transparent padding around an opaque layer', () => {
+    // Opaque 60×40 image inside a 20 px transparent frame (smart-filter padding).
+    const img = padded(60, 40, 20, [90, 90, 90]);
+    rimLightCore(img, { color: '#ff0000', width: 12, angle: 135, intensity: 0.8, softness: 0.5 });
+    // Content border facing the light (top-left) is untouched: no rim around the canvas.
+    expect(px(img, 20, 20)).toEqual([90, 90, 90, 255]);
+    expect(px(img, 50, 20)).toEqual([90, 90, 90, 255]);
+    expect(px(img, 20, 40)).toEqual([90, 90, 90, 255]);
+    expect(px(img, 5, 5)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('rim-light on opaque content still lights luminance edges inside it', () => {
+    // Bright square on a dark opaque backdrop, padded: the bright square's light-facing edge glows.
+    const img = padded(60, 60, 16, [20, 20, 20]);
+    for (let y = 36; y < 56; y++) for (let x = 36; x < 56; x++) img.data.set([230, 230, 230, 255], (y * img.width + x) * 4);
+    rimLightCore(img, { color: '#ff0000', width: 4, angle: 0, intensity: 1, softness: 0.2 });
+    expect(px(img, 55, 46)[1]).toBeLessThan(px(img, 55, 46)[0]); // reddened right edge of the square
+    expect(px(img, 16 + 59, 46)).toEqual([20, 20, 20, 255]); // canvas edge untouched
+  });
+
+  it('toon-roblox draws no frame around an opaque padded layer', () => {
+    const img = padded(60, 40, 20, [200, 200, 200]);
+    toonRobloxCore(img, { ...readToon({}), outlineWidth: 4, outlineColor: '#000000', edges: 0.25, smooth: 0.25, shadowStrength: 0 });
+    const edge = px(img, 20, 30);
+    const middle = px(img, 50, 40);
+    expect(edge[0]).toBeGreaterThan(100);
+    expect(edge).toEqual(middle);
+    expect(px(img, 79, 59)).toEqual(middle);
+  });
+
+  it('toon-roblox skips the outline where the subject is cut by the layer box', () => {
+    // A subject whose bottom is cut (waist-up render): disc top half + full-width bottom rows.
+    const img = disc(40, 40, 20, 20, 14, [220, 220, 220]);
+    for (let y = 20; y < 34; y++) for (let x = 6; x < 34; x++) img.data.set([220, 220, 220, 255], (y * 40 + x) * 4);
+    // Pad 10 px below the cut bottom row (smart-filter margin): rows 34+ stay transparent.
+    toonRobloxCore(img, { ...readToon({}), outlineWidth: 2, outlineColor: '#000000', edges: 0, smooth: 0, shadowStrength: 0 });
+    expect(px(img, 20, 6)[0]).toBeLessThan(40); // silhouette top: inked
+    expect(px(img, 20, 33)[0]).toBeGreaterThan(100); // cut bottom: no outline
+  });
+
+  it('describes the content frame of padded and cut-out buffers', () => {
+    const f = contentFrame(padded(10, 8, 3, [1, 2, 3]))!;
+    expect(f).toMatchObject({ x0: 3, y0: 3, x1: 12, y1: 10, transparent: false });
+    expect(f.cut).toEqual({ left: true, right: true, top: true, bottom: true });
+    const c = contentFrame(disc(30, 30, 15, 15, 10))!;
+    expect(c.transparent).toBe(true);
+    expect(c.cut).toEqual({ left: false, right: false, top: false, bottom: false });
+    expect(contentFrame(makeBuffer(4, 4, [0, 0, 0, 0]))).toBeNull();
   });
 });
