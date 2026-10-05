@@ -23,8 +23,9 @@ calls except the optional Roblox avatar fetch.
      or `cancelPreview()`.
    - Pixel edits: `const patch = bitmaps.edit(bitmapId, ctx => ..., rect?)` then
      `commit(label, recipe?, { patches: [patch] })`. For brush strokes, record the before-image of
-     the dirty rect at stroke start, paint live into the bitmap canvas (call `bitmaps.touch(id)` +
-     `viewport.requestRender()` while painting), and build the BitmapPatch on release.
+     the dirty rect at stroke start, paint live into the bitmap canvas (call `bitmaps.touch(id, rect)`
+     with the frame's dirty rect in bitmap px + `viewport.requestRender()` while painting — the
+     renderer then re-composites only that region), and build the BitmapPatch on release.
    - Helpers: `addLayer`, `updateLayer`, `removeLayers`, `moveLayer`, `groupLayers`, `ungroupLayer`,
      `setActiveLayer`, `setSelectedLayers`, `setEditTarget`, `undo`, `redo`, `jumpToHistory`.
    - Non-reactive accessors: `activeSession()`, `activeDoc()`, `activeLayer()`, `toolOptions(id, defaults)`.
@@ -59,7 +60,7 @@ calls except the optional Roblox avatar fetch.
 |---|---|
 | `src/core/types.ts` | Document model, layers, params, paints, text/shape props, history types |
 | `src/core/document.ts` | Layer factories (`makeRasterLayer`, `makeTextLayer`, `makeShapeLayer`, `makeFillLayer`, `makeAdjustmentLayer`, `makeGroupLayer`, `makeFilterInstance`, `createDocument`), tree utils (`parentOf`, `siblingsOf`, `childrenOf`, `flattenIds`, `displayList`, `isAncestor`, `isEffectivelyVisible`, `isTransformable`, `nextLayerName`), immer draft mutators (`insertLayerDraft`, `detachLayerDraft`, `removeLayerDraft`) |
-| `src/core/bitmaps.ts` | `bitmaps.add(canvas)`, `create(w,h,fill?)`, `get/tryGet`, `version`, `touch`, `duplicate`, `read(id, rect)`, `edit(id, draw, rect?) → BitmapPatch`, `applyPatch`, `pin` |
+| `src/core/bitmaps.ts` | `bitmaps.add(canvas)`, `create(w,h,fill?)`, `get/tryGet`, `version`, `touch(id, rect?)` (rect = changed region; omit = everything), `dirtySince(id, version) → Rect \| null` (null = unknown/full), `duplicate`, `read(id, rect)`, `edit(id, draw, rect?) → BitmapPatch`, `applyPatch`, `pin` |
 | `src/core/canvas.ts` | `createCanvas`, `ctx2d`, `ctxRead`, `cloneCanvas`, `canvasFromImageData`, `blobToCanvas`, `canvasToBlob`, `loadImage`, `opaqueBounds`, `checkerboard` |
 | `src/core/color.ts` | parse/format colors, HSL/HSV conversions, `luminance`, `mixColors`, `gradientLUT(stops)` |
 | `src/core/geometry.ts` | transforms, bounds, rect ops, `clamp`, `lerp`, `pointInPolygon` |
@@ -79,7 +80,7 @@ calls except the optional Roblox avatar fetch.
 
 | Contract | Owner | Signature |
 |---|---|---|
-| `src/render/compositor.ts` | renderer | `renderDocument(doc, opts)`, `renderLayerToDoc(doc, layer, opts)`, `renderLayerContent(doc, layer)`, `getLayerSize(layer)`, `measureText(text) → TextLayout`, `getLayerBounds(doc, id)`, `hitTestLayer(doc, x, y)`, `rasterizeLayer(doc, id)`, `renderThumbnail(doc, id|null, size)`, `fillWithPaint(ctx, paint, box, path?)`, `invalidateRenderCache(id?)` |
+| `src/render/compositor.ts` | renderer | `renderDocument(doc, opts)`, `renderDocumentLive(doc, opts) → { canvas, dirty, changed }` (viewport: canvas updated in place, only the changed region re-composited), `renderLayerToDoc(doc, layer, opts)`, `renderLayerContent(doc, layer)`, `getLayerSize(layer)`, `measureText(text) → TextLayout`, `getLayerBounds(doc, id)`, `hitTestLayer(doc, x, y)`, `rasterizeLayer(doc, id)`, `renderThumbnail(doc, id|null, size)`, `fillWithPaint(ctx, paint, box, path?)`, `invalidateRenderCache(id?)` |
 | `src/filters/ui/filterDialog.ts` | fx-filters | `openFilterDialog(filterId, { mode?: 'auto'\|'smart'\|'destructive' })` |
 | `src/assets/place.ts` | assets | `createAssetLayer(assetId, params, docW, docH, opts) → RasterLayer` (pure), `placeAsset(assetId, params?, opts?)`, `regenerateAssetLayer(layerId, params)` — baseline already works |
 | `src/looks/engine.ts` | looks-templates | `applyLook(lookId, targetLayerId \| null)` |

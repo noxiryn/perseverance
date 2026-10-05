@@ -51,6 +51,20 @@ export function rgb(color: unknown, fallback = '#000000'): [number, number, numb
   return [c.r, c.g, c.b];
 }
 
+/** True on little-endian hosts (every platform Electron ships on): RGBA bytes = r | g<<8 | b<<16 | a<<24. */
+export const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+
+/**
+ * The pixels as little-endian 32-bit words (one load/store per pixel instead of four), or null
+ * when that view isn't possible (big-endian host, unaligned buffer) — callers then fall back to
+ * byte access. Int32 (not Uint32) keeps values in integer registers; test alpha with `p >>> 24`.
+ */
+export function pixelWords(img: Img): Int32Array | null {
+  const d = img.data;
+  if (!LITTLE_ENDIAN || d.byteOffset & 3 || d.length & 3) return null;
+  return new Int32Array(d.buffer, d.byteOffset, d.length >> 2);
+}
+
 /** Effective scale (never 0). */
 export function sc(ctx: FilterContext): number {
   return ctx.scale > 0 ? ctx.scale : 1;

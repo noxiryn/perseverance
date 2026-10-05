@@ -6,11 +6,12 @@
  *  - overlay drawing (grid, pixel grid, ants, view overlays, guides, tool overlay, smart guides, rulers),
  *  - pointer/wheel input → pan/zoom, ruler guides, and ToolPointerEvent dispatch.
  */
-import type { Document, Point } from '../core/types';
+import type { Document, Point, Rect } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
+import { rectUnion } from '../core/geometry';
 import { installViewport, viewport } from '../editor/viewport';
 import { tools, viewOverlays, type ToolDef, type ToolPointerEvent } from '../registry';
-import { renderDocument } from '../render/compositor';
+import { renderDocumentLive } from '../render/compositor';
 import { activeSession, useEditor } from '../state/editor';
 import { useUI } from '../state/ui';
 import { isTypingTarget } from '../ui/shortcuts';
@@ -61,9 +62,16 @@ export class ViewportEngine {
   private docPending = true;
   private overlayPending = true;
   private compositeDirty = true;
+  /** Live composite (owned by the renderer, updated in place — see renderDocumentLive). */
   private composite: HTMLCanvasElement | null = null;
   private compositeDoc: Document | null = null;
-  private scaled: { src: HTMLCanvasElement; k: number; canvas: HTMLCanvasElement } | null = null;
+  /** Bumps whenever the composite's pixels change. */
+  private compositeGen = 0;
+  /** Part of the composite (composite px) changed since the document canvas was drawn. */
+  private compositeChange: Rect | null | 'full' = 'full';
+  private scaled: { src: HTMLCanvasElement; k: number; gen: number; dw: number; dh: number; canvas: HTMLCanvasElement } | null = null;
+  /** What the document canvas currently shows (a partial redraw needs all of it unchanged). */
+  private shown: string | null = null;
   private cursorOverride: string | null = null;
   private appliedCursor = '';
   private antsTimer = 0;
@@ -217,6 +225,7 @@ export class ViewportEngine {
     this.composite = null;
     this.compositeDoc = null;
     this.scaled = null;
+    this.shown = null;
   }
 
   /* ------------------------------------------------------------------ */
@@ -256,7 +265,7 @@ export class ViewportEngine {
     this.normalizeView();
     if (this.docPending) {
       this.docPending = false;
-      safe('document draw', () => this.drawDoc());
+      safe('document draw', () => this.drawDocument());
     }
     if (this.overlayPending) {
       this.overlayPending = false;
@@ -311,19 +320,83 @@ export class ViewportEngine {
   private getComposite(doc: Document): HTMLCanvasElement | null {
     if (this.composite && this.compositeDoc === doc && !this.compositeDirty) return this.composite;
     try {
-      this.composite = renderDocument(doc);
+      // The live composite is updated in place: a brush frame re-composites (and reports) only
+      // the stroke area, so only that part of the pre-scaled copy and of the screen is redrawn.
+      const r = renderDocumentLive(doc);
+      if (r.canvas !== this.composite) {
+        this.compositeGen++;
+        this.compositeChange = 'full';
+      } else if (r.changed) {
+        const prevGen = this.compositeGen++;
+        const d = r.dirty;
+        if (!d || this.compositeChange === 'full') this.compositeChange = 'full';
+        else if (d.width > 0 && d.height > 0) {
+          const c = this.compositeChange;
+          this.compositeChange = c ? rectUnion(c, d) : { ...d };
+          // Keep an up-to-date pre-scaled copy up to date (else it is rebuilt when next used).
+          const sc = this.scaled;
+          if (sc && sc.src === r.canvas && sc.gen === prevGen && this.patchScaled(sc, d)) sc.gen = this.compositeGen;
+        }
+      }
+      this.composite = r.canvas;
     } catch (err) {
       console.error('[viewport] renderDocument failed', err);
       if (this.compositeDoc?.id !== doc.id) this.composite = null;
+      this.compositeChange = 'full';
     }
     this.compositeDoc = doc;
     this.compositeDirty = false;
     return this.composite;
   }
 
+  /** Pre-scaled copy rect (scaled px) that a composite change `d` (composite px) affects. */
+  private scaledRectOf(d: Rect, f: number, w: number, h: number): { x0: number; y0: number; x1: number; y1: number } {
+    // The minifying filter spreads a composite pixel over its footprint plus ~1 px each side.
+    return {
+      x0: Math.max(0, Math.floor(d.x * f) - 2),
+      y0: Math.max(0, Math.floor(d.y * f) - 2),
+      x1: Math.min(w, Math.ceil((d.x + d.width) * f) + 2),
+      y1: Math.min(h, Math.ceil((d.y + d.height) * f) + 2),
+    };
+  }
+
+  /**
+   * Redraw the part of the pre-scaled copy a composite change affects (the same draw, clipped).
+   * False when that is not exact — the patch reaches the copy's partly covered last column/row
+   * (the GPU anti-aliases a quad edge differently when a clip cuts the quad).
+   */
+  private patchScaled(sc: NonNullable<ViewportEngine['scaled']>, d: Rect): boolean {
+    const comp = sc.src;
+    const c = sc.canvas;
+    const f = this.scaledFactor(sc);
+    const r = this.scaledRectOf(d, f, c.width, c.height);
+    if (r.x1 <= r.x0 || r.y1 <= r.y0) return true;
+    if ((sc.dw % 1 !== 0 && r.x1 > Math.floor(sc.dw)) || (sc.dh % 1 !== 0 && r.y1 > Math.floor(sc.dh))) return false;
+    const ctx = c.getContext('2d');
+    if (!ctx) return false;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.beginPath();
+    ctx.rect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
+    ctx.clip();
+    ctx.clearRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    // Exactly the draw getScaled makes, clipped: identical pixels inside the patch.
+    ctx.drawImage(comp, 0, 0, comp.width, comp.height, 0, 0, sc.dw, sc.dh);
+    ctx.restore();
+    return true;
+  }
+
+  /** Scaled px per composite px of a pre-scaled copy. */
+  private scaledFactor(sc: NonNullable<ViewportEngine['scaled']>): number {
+    return sc.dw / Math.max(1, sc.src.width);
+  }
+
   /**
    * High-quality copy of the composite at device scale `k` (< 1), cached per composite canvas +
-   * scale. Null when it would be too large (then the composite is drawn directly).
+   * scale (+ content generation; partial composite changes patch it in place). Null when it
+   * would be too large (then the composite is drawn directly).
    */
   private getScaled(comp: HTMLCanvasElement, k: number, docW: number, docH: number): HTMLCanvasElement | null {
     const dw = docW * k;
@@ -332,7 +405,7 @@ export class ViewportEngine {
     const h = Math.ceil(dh - 1e-6);
     if (w < 1 || h < 1 || w * h > 16_777_216) return null;
     const s = this.scaled;
-    if (s && s.src === comp && s.k === k) return s.canvas;
+    if (s && s.src === comp && s.k === k && s.gen === this.compositeGen) return s.canvas;
     let c = s?.canvas ?? null;
     if (!c || c.width !== w || c.height !== h) {
       c = document.createElement('canvas');
@@ -346,8 +419,89 @@ export class ViewportEngine {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(comp, 0, 0, comp.width, comp.height, 0, 0, dw, dh);
-    this.scaled = { src: comp, k, canvas: c };
+    this.scaled = { src: comp, k, gen: this.compositeGen, dw, dh, canvas: c };
     return c;
+  }
+
+  /**
+   * Draw the document canvas: only the screen area of what changed in the composite when
+   * nothing else moved (view, size, background, checkerboard), else everything.
+   */
+  private drawDocument() {
+    const s = activeSession();
+    const comp = s && s.view.zoom ? this.getComposite(s.doc) : null;
+    const key = s && comp ? this.shownKey(s.doc, comp) : null;
+    const change = this.compositeChange;
+    this.compositeChange = null;
+    if (key && key === this.shown && change !== 'full') {
+      if (!change) return; // nothing visible changed
+      const clip = this.screenRectOf(s!.doc, comp!, change);
+      if (clip) {
+        this.drawDoc(comp, clip);
+        return;
+      }
+    }
+    this.drawDoc(comp, null);
+    this.shown = key;
+  }
+
+  /** Everything besides the composite's pixels that the document canvas depends on. */
+  private shownKey(doc: Document, comp: HTMLCanvasElement): string {
+    const v = activeSession()?.view;
+    return [
+      doc.id,
+      doc.width,
+      doc.height,
+      hasTransparentBackground(doc) ? 't' : 'o',
+      this.docCanvas.width,
+      this.docCanvas.height,
+      this.dpr,
+      v?.zoom,
+      v?.panX,
+      v?.panY,
+      this.checkerCell(),
+      comp.width,
+      comp.height,
+      this.composite === comp ? 1 : 0,
+    ].join('|');
+  }
+
+  /**
+   * Device-px rect of the document canvas showing a composite change (null → redraw everything,
+   * e.g. when it reaches the document's fractional edge pixels next to the drop shadow).
+   */
+  private screenRectOf(doc: Document, comp: HTMLCanvasElement, d: Rect): { x: number; y: number; w: number; h: number } | null {
+    const W = this.docCanvas.width;
+    const H = this.docCanvas.height;
+    const dpr = this.dpr;
+    const k = viewport.zoom() * dpr;
+    const o = viewport.origin();
+    const x0 = Math.round(o.x * dpr);
+    const y0 = Math.round(o.y * dpr);
+    const cs = comp.width / Math.max(1, doc.width);
+    const f = k / cs;
+    let r: { x0: number; y0: number; x1: number; y1: number };
+    if (k < 1 && this.scaled && this.scaled.src === comp && this.scaled.gen === this.compositeGen) {
+      const sc = this.scaledRectOf(d, this.scaledFactor(this.scaled), this.scaled.canvas.width, this.scaled.canvas.height);
+      r = { x0: x0 + sc.x0, y0: y0 + sc.y0, x1: x0 + sc.x1, y1: y0 + sc.y1 };
+    } else {
+      const m = Math.ceil(k) + 2;
+      r = { x0: Math.floor(x0 + d.x * f) - m, y0: Math.floor(y0 + d.y * f) - m, x1: Math.ceil(x0 + (d.x + d.width) * f) + m, y1: Math.ceil(y0 + (d.y + d.height) * f) + m };
+    }
+    // Visible document area; its last column/row may be partly covered (fractional edge).
+    const vx0 = Math.max(0, x0);
+    const vy0 = Math.max(0, y0);
+    const ex = x0 + doc.width * k;
+    const ey = y0 + doc.height * k;
+    const vx1 = Math.min(W, ex);
+    const vy1 = Math.min(H, ey);
+    const cx0 = Math.max(vx0, r.x0);
+    const cy0 = Math.max(vy0, r.y0);
+    const cx1 = Math.min(Math.ceil(vx1), r.x1);
+    const cy1 = Math.min(Math.ceil(vy1), r.y1);
+    if (cx1 <= cx0 || cy1 <= cy0) return { x: 0, y: 0, w: 0, h: 0 };
+    if ((ex < W && cx1 > Math.floor(ex)) || (ey < H && cy1 > Math.floor(ey))) return null;
+    return { x: cx0, y: cy0, w: cx1 - cx0, h: cy1 - cy0 };
   }
 
   /** Checkerboard square size in CSS px (shell preference 'checkerSize', default 8). */
@@ -381,12 +535,33 @@ export class ViewportEngine {
     return p;
   }
 
-  private drawDoc() {
+  /** Draw the document canvas (all of it, or only `clip` (device px) inside the document). */
+  private drawDoc(comp: HTMLCanvasElement | null, clip: { x: number; y: number; w: number; h: number } | null) {
+    const ctx = this.docCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    if (!clip) {
+      this.paintDoc(comp, false);
+      return;
+    }
+    if (clip.w <= 0 || clip.h <= 0) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(clip.x, clip.y, clip.w, clip.h);
+    ctx.clip();
+    ctx.clearRect(clip.x, clip.y, clip.w, clip.h);
+    try {
+      this.paintDoc(comp, true);
+    } finally {
+      ctx.restore();
+    }
+  }
+
+  private paintDoc(comp: HTMLCanvasElement | null, partial: boolean) {
     const ctx = this.docCtx;
     const W = this.docCanvas.width;
     const H = this.docCanvas.height;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, W, H);
+    if (!partial) ctx.clearRect(0, 0, W, H);
     const s = activeSession();
     if (!s || !s.view.zoom) return;
     const doc = s.doc;
@@ -403,8 +578,9 @@ export class ViewportEngine {
     const vx1 = Math.min(W, x0 + dw);
     const vy1 = Math.min(H, y0 + dh);
 
-    // Subtle drop shadow (only when an edge of the document is visible).
-    if (x0 > -1 || y0 > -1 || x0 + dw < W + 1 || y0 + dh < H + 1) {
+    // Subtle drop shadow (only when an edge of the document is visible; partial redraws stay
+    // inside the document, which covers the shadow's fill).
+    if (!partial && (x0 > -1 || y0 > -1 || x0 + dw < W + 1 || y0 + dh < H + 1)) {
       const m = 80 * dpr;
       const sx0 = Math.max(-m, x0);
       const sy0 = Math.max(-m, y0);
@@ -431,7 +607,6 @@ export class ViewportEngine {
       ctx.fillRect(vx0, vy0, vx1 - vx0, vy1 - vy0);
     }
 
-    const comp = this.getComposite(doc);
     if (!comp) return;
     if (k < 1) {
       // Minified: blit a cached, high-quality pre-scaled copy 1:1 (the origin sits on a device

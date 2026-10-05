@@ -11,7 +11,7 @@
 import type { BitmapPatch, Rect } from '../../../core/types';
 import { bitmaps } from '../../../core/bitmaps';
 import { ctx2d, ctxRead } from '../../../core/canvas';
-import { pixelRect } from '../../../core/geometry';
+import { pixelRect, rectUnion } from '../../../core/geometry';
 import { viewport } from '../../../editor/viewport';
 import { useEditor } from '../../../state/editor';
 import { toast } from '../../../state/ui';
@@ -141,9 +141,14 @@ export class PixelSession implements GuardedSession {
   flush() {
     if (this.finished || this.frame.isEmpty) return;
     const ctx = ctx2d(this.target.canvas);
-    for (const r of this.frame.rects()) ctx.putImageData(this.work, 0, 0, r.x, r.y, r.width, r.height);
+    let changed: Rect | null = null;
+    for (const r of this.frame.rects()) {
+      ctx.putImageData(this.work, 0, 0, r.x, r.y, r.width, r.height);
+      changed = rectUnion(changed, r);
+    }
     this.frame.clear();
-    bitmaps.touch(this.target.bitmapId);
+    // Only the cells written this frame changed: the renderer re-composites just that region.
+    bitmaps.touch(this.target.bitmapId, changed);
     viewport.requestRender();
   }
 

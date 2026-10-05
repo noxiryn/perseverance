@@ -33,6 +33,7 @@ import { applyFilterStack, compositeOp, makeFilterContext, resolveParams, runFil
 import { cacheGeneration, objId, slots, type Resource } from './cache';
 import { edgeDistance } from './distance';
 import { applyMask, lerpInto, maskAlpha } from './mask';
+import { alignGrid, alignRect, effectInfluence, effectUsesFields, fieldBucket, filtersLocal, isPixelExact, mapDirtyRect } from './region';
 import { fillWithPaint } from './paint';
 import { renderShapeContent, shapeLocalBounds } from './shapes';
 import { layoutTextProps, renderTextContent, textCacheEpoch, textFontReady, textLocalBounds, type LocalContent } from './text';
@@ -135,7 +136,14 @@ export interface LayerRender {
   fx?: FxEntry[];
   /** @internal Translation reuse. */
   move?: MoveInfo;
+  /** @internal Structure signature (layerSig without bitmap versions), see structSig. */
+  ssig?: string;
+  /** @internal Bitmap versions this render was made from (content, mask, shown descendants). */
+  deps?: DepList;
 }
+
+/** Bitmap id → version pairs a render depends on. */
+export type DepList = [ID, number][];
 
 /** A cached effect output: its pieces in composite order (behind pieces, or above pieces). */
 interface FxEntry {
@@ -156,6 +164,8 @@ export interface RC {
   below: ID | null;
   stopped: boolean;
   sigMemo: Map<Layer, string>;
+  /** Memo of structSig (signatures without bitmap versions). */
+  structMemo?: Map<Layer, string>;
 }
 
 interface Acc {
@@ -183,6 +193,13 @@ export const renderStats = {
   translateHits: 0,
   contentReuse: 0,
   fxReuse: 0,
+  /** Layer renders updated in place over the region their bitmaps changed (live painting). */
+  regionUpdates: 0,
+  /** Document composites re-blended over a dirty rect only. */
+  docRegionRenders: 0,
+  /** Live (viewport) composites updated in place. */
+  liveRegionRenders: 0,
+  liveFullRenders: 0,
   fieldHits: 0,
   fieldComputes: 0,
   docRenders: 0,
@@ -204,7 +221,7 @@ export function outputSize(doc: Document, scale: number): { W: number; H: number
 
 export function makeRC(doc: Document, scale = 1, hidden?: Set<ID> | null, below?: ID | null): RC {
   const { W, H, s } = outputSize(doc, scale);
-  return { doc, s, W, H, hidden: hidden && hidden.size ? hidden : null, below: below ?? null, stopped: false, sigMemo: new Map() };
+  return { doc, s, W, H, hidden: hidden && hidden.size ? hidden : null, below: below ?? null, stopped: false, sigMemo: new Map(), structMemo: new Map() };
 }
 
 export function isShown(rc: RC, l: Layer): boolean {
@@ -268,6 +285,70 @@ export function listSig(rc: RC, ids: ID[], st: { stopped: boolean }): string {
     }
   }
   return out;
+}
+
+/**
+ * Signature of a layer as rendered EXCEPT the pixels of its bitmaps: layerSig without bitmap
+ * versions. Two renders with equal structure signatures differ only where bitmaps were touched
+ * in between (see bitmaps.dirtySince), so one can be updated into the other region by region.
+ */
+export function structSig(rc: RC, l: Layer): string {
+  const memo = rc.structMemo ?? (rc.structMemo = new Map());
+  const hit = memo.get(l);
+  if (hit !== undefined) return hit;
+  let s = String(objId(l));
+  if (l.type === 'raster') s += `.${l.bitmapId}`;
+  if (l.mask) s += `m${l.mask.bitmapId}`;
+  if (l.type === 'text') s += textStateSig(l.text);
+  if (l.type === 'group') {
+    let inner = '';
+    eachShownChild(rc, l.childIds, (c) => {
+      inner += structSig(rc, c) + ',';
+    }, (id) => {
+      inner += id === 'B' ? 'B' : 'h,';
+    });
+    s += `[${inner}]`;
+  }
+  memo.set(l, s);
+  return s;
+}
+
+/**
+ * Visit the layers of a list exactly as listSig/compositing see them: shown layers in order,
+ * stopping at the `below` layer. `marker` gets 'h' for hidden layers and 'B' at the stop.
+ */
+function eachShownChild(rc: RC, ids: ID[], fn: (l: Layer) => void, marker?: (m: 'h' | 'B') => void) {
+  for (const id of ids) {
+    if (id === rc.below) {
+      marker?.('B');
+      return;
+    }
+    const l = rc.doc.layers[id];
+    if (!l) continue;
+    if (!isShown(rc, l)) {
+      if (l.type === 'group' && rc.below && containsId(rc.doc, l, rc.below)) {
+        marker?.('B');
+        return;
+      }
+      marker?.('h');
+      continue;
+    }
+    fn(l);
+    if (l.type === 'group' && rc.below && containsId(rc.doc, l, rc.below)) return;
+  }
+}
+
+function collectDeps(rc: RC, l: Layer, out: Map<ID, number>) {
+  if (l.type === 'raster') out.set(l.bitmapId, bitmaps.version(l.bitmapId));
+  if (l.mask) out.set(l.mask.bitmapId, bitmaps.version(l.mask.bitmapId));
+  if (l.type === 'group') eachShownChild(rc, l.childIds, (c) => collectDeps(rc, c, out));
+}
+
+/** Current versions of the bitmaps a layer's render depends on. */
+export function depList(rc: RC, l: Layer): DepList {
+  const m = new Map<ID, number>();
+  collectDeps(rc, l, m);
+  return [...m];
 }
 
 /**
@@ -464,9 +545,7 @@ export function layerGeometry(l: Layer, s: number): { m: DOMMatrix; local: Rect;
  * stroke/bevel size up reuses them for a while instead of recomputing the distance transform
  * every frame, while small strokes stay cheap (the transform's cost grows with the depth).
  */
-export function fieldBucket(maxDist: number): number {
-  return Math.ceil(maxDist + Math.max(2, maxDist * 0.25));
-}
+export { fieldBucket };
 
 function subArray<T extends Float32Array | Uint8Array>(src: T, sr: PxRect, r: PxRect, make: (n: number) => T): T {
   const out = make(r.w * r.h);
@@ -671,6 +750,10 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
     return hit;
   }
   const prevs = slots.values<LayerRender | null>(key);
+  // Live painting: the previous render of the same layer, updated in place over the region its
+  // bitmaps changed (a brush frame re-renders a few hundred pixels, not the whole layer).
+  const upd = regionReuse(rc, l, flags, key, sig, prevs);
+  if (upd) return upd;
   // A moved layer (same content, whole-pixel delta) reuses its previous render, shifted:
   // dragging a layer with strokes/shadows never recomputes its effects.
   const geom = layerGeometry(l, rc.s);
@@ -694,6 +777,8 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
       if (!need || !containsRect(shiftRect(mv.base.region, dx, dy), need)) continue;
       const moved = shiftRender(mv.base, dx, dy, contentSig(rc, l, flags));
       moved.move = mv;
+      moved.ssig = structSig(rc, l);
+      moved.deps = depList(rc, l);
       renderStats.translateHits++;
       slots.set(key, sig, moved, 0, { layerId: l.id, max: 2, res: renderResources(moved) });
       return moved;
@@ -717,8 +802,341 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
     const expected = intersectRect(full, expandSides({ x: 0, y: 0, w: rc.W, h: rc.H }, clip));
     if (expected && sameRect(expected, r.region)) r.move = { sig: tfull, base: r, e: geom.m.e, f: geom.m.f, full, clip };
   }
+  if (r) {
+    r.ssig = structSig(rc, l);
+    r.deps = depList(rc, l);
+  }
   slots.set(key, sig, r, 0, { layerId: l.id, max: 2, res: renderResources(r) });
   return r;
+}
+
+/* ---------------- region updates (live painting) ---------------- */
+
+/** Where a layer render changed between two sets of bitmap versions (output px). */
+interface Change {
+  /** Area of the content canvas (content + smart filters + mask) that changed. */
+  content: PxRect | null;
+  /** Area where any piece of the render (effects included) changed. */
+  out: PxRect | null;
+}
+
+/** Region (bitmap px) of a bitmap changed since its version in `deps`: null = unchanged, 'full' = unknown. */
+function bitmapChange(id: ID, deps: Map<ID, number>): Rect | null | 'full' {
+  const v = deps.get(id);
+  if (v === undefined) return 'full';
+  if (v === bitmaps.version(id)) return null;
+  const r = bitmaps.dirtySince(id, v);
+  if (!r) return 'full';
+  return r.width > 0 && r.height > 0 ? r : null;
+}
+
+/** Gaussian sigma (output px) of a mask's feather. */
+function maskSigma(mask: LayerMask | null | undefined, s: number): number {
+  if (!mask || !mask.enabled) return 0;
+  return (Math.max(0, Number(mask.feather) || 0) * s) / 2;
+}
+
+/** Output px whose mask visibility changes when the mask bitmap changed in `r` (bitmap px). */
+function maskChangeRect(rc: RC, mask: LayerMask, r: Rect): PxRect | 'full' {
+  const bmp = bitmaps.tryGet(mask.bitmapId);
+  if (!bmp) return 'full';
+  // The mask is stretched over the document and edge-clamped beyond it (see maskAlpha).
+  const m = new DOMMatrix().scaleSelf((rc.doc.width * rc.s) / bmp.width, (rc.doc.height * rc.s) / bmp.height);
+  // A resampled mask's last row/column is an anti-aliased quad edge, drawn differently when the
+  // work canvas cuts it (see contentPixelExact): changes reaching the mask's edge re-render.
+  if (!isPixelExact(m) && (r.x <= 0 || r.y <= 0 || r.x + r.width >= bmp.width || r.y + r.height >= bmp.height)) return 'full';
+  const out = mapDirtyRect(m, r, { w: bmp.width, h: bmp.height });
+  const sigma = maskSigma(mask, rc.s);
+  return sigma > 0.05 ? expandRect(out, Math.ceil(sigma * 3) + 2) : out;
+}
+
+/** Largest effect influence of a layer (output px; 0 without effects), see effectInfluence. */
+function effectsInfluenceOf(l: Layer, s: number): number {
+  let r = 0;
+  for (const e of activeEffects(l)) r = Math.max(r, effectInfluence(e.def, e.params, s));
+  return r;
+}
+
+/** Shown children of a group as compositing sees them (stops at the `below` layer). */
+function shownChildren(rc: RC, ids: ID[]): Layer[] {
+  const out: Layer[] = [];
+  eachShownChild(rc, ids, (c) => out.push(c));
+  return out;
+}
+
+/**
+ * Where a layer's render changed since it was made from the bitmap versions `deps`, the layer
+ * structure being the same (only bitmap pixels changed). 'full' when unknown or when the change
+ * is not region-local (smart filters that move pixels, bitmaps touched without a rect…).
+ */
+function changeOf(rc: RC, l: Layer, deps: Map<ID, number>, flags: RenderFlags): Change | 'full' {
+  let content: PxRect | null = null;
+  if (l.type === 'raster') {
+    const d = bitmapChange(l.bitmapId, deps);
+    if (d === 'full') return 'full';
+    if (d) {
+      const geom = layerGeometry(l, rc.s);
+      if (!geom) return 'full';
+      content = mapDirtyRect(geom.m, d);
+    }
+  } else if (l.type === 'group') {
+    // Children composite with full flags into the group's content.
+    for (const c of shownChildren(rc, l.childIds)) {
+      const ch = changeOf(rc, c, deps, FULL_FLAGS);
+      if (ch === 'full') return 'full';
+      content = unionRect(content, ch.out);
+    }
+  }
+  if (l.mask && flags.mask && l.mask.enabled) {
+    const d = bitmapChange(l.mask.bitmapId, deps);
+    if (d === 'full') return 'full';
+    if (d) {
+      const mr = maskChangeRect(rc, l.mask, d);
+      if (mr === 'full') return 'full';
+      content = unionRect(content, mr);
+    }
+  }
+  if (!content) return { content: null, out: null };
+  if (l.type === 'adjustment') return { content, out: content };
+  if (flags.filters && hasFilters(l.filters) && !filtersLocal(l.filters)) return 'full';
+  const rho = flags.effects ? effectsInfluenceOf(l, rc.s) : 0;
+  return { content, out: rho > 0 ? expandRect(content, rho) : content };
+}
+
+/**
+ * Whether a layer's content draws onto whole output pixels with pixel-aligned edges (a clipped
+ * redraw then reproduces a full draw exactly): untransformed bitmaps at integer offsets, fills at
+ * scale 1. Text and shapes are drawn through local rasters and treated as transformed.
+ */
+function contentPixelExact(rc: RC, l: Layer, geom: ReturnType<typeof layerGeometry>): boolean {
+  if (l.type === 'raster') return !!geom && isPixelExact(geom.m);
+  if (l.type === 'fill') return rc.s === 1;
+  return false;
+}
+
+/**
+ * Whether an output rect (grown by the edge anti-aliasing band) lies inside a raster layer's
+ * transformed bitmap quad: no quad edge crosses it, so a clipped redraw matches a full draw.
+ */
+function insideQuad(l: Layer, geom: ReturnType<typeof layerGeometry>, r: PxRect): boolean {
+  if (l.type !== 'raster' || !geom) return false;
+  let inv: DOMMatrix;
+  try {
+    inv = geom.m.inverse();
+  } catch {
+    return false;
+  }
+  if (!Number.isFinite(inv.a + inv.b + inv.c + inv.d + inv.e + inv.f)) return false;
+  const x0 = r.x - 2,
+    y0 = r.y - 2,
+    x1 = r.x + r.w + 2,
+    y1 = r.y + r.h + 2;
+  for (const [x, y] of [
+    [x0, y0],
+    [x1, y0],
+    [x1, y1],
+    [x0, y1],
+  ]) {
+    const p = inv.transformPoint({ x, y });
+    if (!(p.x >= 0 && p.y >= 0 && p.x <= l.width && p.y <= l.height)) return false;
+  }
+  return true;
+}
+
+/** Copy `src` (placed at ox, oy) into `dst` over the rect `r` only (dst-local px). */
+function blitInto(dst: HTMLCanvasElement, src: HTMLCanvasElement, r: PxRect, ox: number, oy: number) {
+  const k = ctx2d(dst);
+  k.save();
+  k.setTransform(1, 0, 0, 1, 0, 0);
+  k.globalAlpha = 1;
+  k.filter = 'none';
+  k.beginPath();
+  k.rect(r.x, r.y, r.w, r.h);
+  k.clip();
+  // clear + source-over (an exact copy of premultiplied pixels) rather than 'copy': see restoreInto.
+  k.globalCompositeOperation = 'source-over';
+  k.clearRect(r.x, r.y, r.w, r.h);
+  k.drawImage(src, ox, oy);
+  k.restore();
+}
+
+/** Reset the drawing state a fresh canvas would have (partial redraws must match fresh renders). */
+function resetDrawState(k: CanvasRenderingContext2D) {
+  k.setTransform(1, 0, 0, 1, 0, 0);
+  k.globalAlpha = 1;
+  k.globalCompositeOperation = 'source-over';
+  k.filter = 'none';
+  k.imageSmoothingEnabled = true;
+  k.imageSmoothingQuality = 'low';
+}
+
+/**
+ * Re-render a cached layer render IN PLACE over `D` (output px, inside its region) — the area
+ * where its content changed: content redrawn (groups re-composite their children there), pixel-
+ * local smart filters and the mask re-applied, effects recomputed on a crop large enough for
+ * their reach and written back over the area they can change.
+ * 'fail' = not possible, nothing was modified; 'corrupt' = not possible after pixels were
+ * modified (the render must be dropped).
+ */
+function updateRenderRegion(rc: RC, l: Layer, flags: RenderFlags, p: LayerRender, D: PxRect): 'ok' | 'fail' | 'corrupt' {
+  const region = p.region;
+  const C = p.shape;
+  if (!C) return 'fail';
+  // Zero-copy render (plain raster at 1:1): the live bitmap IS the render.
+  if (borrowed.has(C)) return l.type === 'raster' && C === bitmaps.tryGet(l.bitmapId) && p.core === C && !p.behind.length ? 'ok' : 'fail';
+  if (C.width !== region.w || C.height !== region.h) return 'fail';
+  const hasF = flags.filters && hasFilters(l.filters);
+  if (hasF && !filtersLocal(l.filters)) return 'fail';
+  const fx = flags.effects ? activeEffects(l) : [];
+  const fill = Math.max(0, Math.min(1, Number.isFinite(l.fillOpacity) ? l.fillOpacity : 1));
+  const sized = (c: HTMLCanvasElement) => c.width === region.w && c.height === region.h;
+  if (!fx.length) {
+    // Same layout as buildLayerRender: core = content at full fill, a fill-opacity copy below.
+    const ok = fill >= 0.999 ? p.core === C : fill > 0 ? !!p.core && p.core !== C && sized(p.core) : p.core === null;
+    if (!ok || p.behind.length) return 'fail';
+  } else {
+    if (!p.core || !p.extent || !sized(p.core) || !p.behind.every((b) => sized(b.canvas) && !borrowed.has(b.canvas))) return 'fail';
+    // Several effects sharing distance fields: see effectUsesFields.
+    if (fx.filter((e) => effectUsesFields(e.def.id)).length > 1) return 'fail';
+  }
+  const rho = fx.length ? effectsInfluenceOf(l, rc.s) : 0;
+  // Partial work starts on the same pixel grid as the full render (dither, blur downsampling).
+  const grid = alignGrid(Math.max(flags.mask ? maskSigma(l.mask, rc.s) : 0, rho / 3));
+  const Dc = alignRect(D, region, grid);
+  if (!Dc) return 'ok';
+  const lr: PxRect = { x: Dc.x - region.x, y: Dc.y - region.y, w: Dc.w, h: Dc.h };
+  const cctx = ctx2d(C);
+
+  // 2) content
+  const geom = layerGeometry(l, rc.s);
+  cctx.save();
+  resetDrawState(cctx);
+  cctx.beginPath();
+  cctx.rect(lr.x, lr.y, lr.w, lr.h);
+  cctx.clip();
+  cctx.clearRect(lr.x, lr.y, lr.w, lr.h);
+  try {
+    if (l.type === 'group' || contentPixelExact(rc, l, geom) || insideQuad(l, geom, Dc)) drawContent(rc, l, C, region, geom, Dc);
+    else {
+      // A transformed quad cut by a clip (or by a smaller canvas) gets different edge anti-
+      // aliasing on the GPU than the same quad drawn whole: draw it whole, exactly like a fresh
+      // render, and keep the changed part.
+      const T = acquire(region.w, region.h);
+      drawContent(rc, l, T, region, geom, null);
+      cctx.drawImage(T, 0, 0);
+      release(T);
+    }
+  } catch (err) {
+    warnOnce(`layer ${l.id} (${l.type}) failed to update`, err);
+    cctx.restore();
+    return 'corrupt';
+  }
+  cctx.restore();
+
+  // 3) smart filters (pixel-local adjustment filters only), on a crop with the crop's offset
+  if (hasF) {
+    const T = fresh(Dc.w, Dc.h);
+    ctx2d(T).drawImage(C, -lr.x, -lr.y);
+    let out: HTMLCanvasElement = T;
+    try {
+      out = applyFilterStack(T, l.filters, makeFilterContext({ docWidth: rc.doc.width, docHeight: rc.doc.height, offsetX: Dc.x / rc.s, offsetY: Dc.y / rc.s, scale: rc.s }));
+    } catch (err) {
+      warnOnce(`smart filters of ${l.id} failed`, err);
+    }
+    if (out !== T) blitInto(C, out, lr, lr.x, lr.y);
+  }
+
+  // 4) mask
+  if (flags.mask && l.mask && l.mask.enabled) {
+    const ma = maskAlpha(l.mask, rc.s, Dc, rc.doc.width, rc.doc.height);
+    if (ma) {
+      cctx.save();
+      cctx.setTransform(1, 0, 0, 1, 0, 0);
+      cctx.beginPath();
+      cctx.rect(lr.x, lr.y, lr.w, lr.h);
+      cctx.clip();
+      cctx.globalCompositeOperation = 'destination-in';
+      cctx.drawImage(ma, lr.x, lr.y);
+      cctx.restore();
+    }
+  }
+
+  // 5) fill opacity / effects
+  if (!fx.length) {
+    if (p.core && p.core !== C) {
+      const k = ctx2d(p.core);
+      k.save();
+      resetDrawState(k);
+      k.beginPath();
+      k.rect(lr.x, lr.y, lr.w, lr.h);
+      k.clip();
+      k.clearRect(lr.x, lr.y, lr.w, lr.h);
+      k.globalAlpha = fill;
+      k.drawImage(C, 0, 0);
+      k.restore();
+    }
+    return 'ok';
+  }
+  // Effects: recompute on a crop that holds all the content the changed outputs depend on.
+  const Do = intersectRect(expandRect(Dc, rho), region);
+  const Di0 = Do && intersectRect(expandRect(Do, rho), region);
+  const Di = Di0 && alignRect(Di0, region, grid);
+  if (!Do || !Di) return 'corrupt';
+  const Ci = fresh(Di.w, Di.h);
+  ctx2d(Ci).drawImage(C, region.x - Di.x, region.y - Di.y);
+  let res: EffectsResult;
+  try {
+    res = runEffects(rc, fx, Ci, Di, p.extent!, p.bounds, fill, l.opacity, { fields: [], fx: [], tight: undefined });
+  } catch (err) {
+    warnOnce(`effects of ${l.id} failed to update`, err);
+    return 'corrupt';
+  }
+  const shared = p.core === C;
+  if (res.behind.length !== p.behind.length || res.behind.some((b, i) => b.op !== p.behind[i].op) || (res.core === Ci) !== shared) return 'corrupt';
+  const lo: PxRect = { x: Do.x - region.x, y: Do.y - region.y, w: Do.w, h: Do.h };
+  const ox = Di.x - region.x;
+  const oy = Di.y - region.y;
+  for (let i = 0; i < res.behind.length; i++) blitInto(p.behind[i].canvas, res.behind[i].canvas, lo, ox, oy);
+  if (!shared) blitInto(p.core!, res.core, lo, ox, oy);
+  return 'ok';
+}
+
+/**
+ * Region reuse (live painting): the previous render of the same layer structure updated in place
+ * over the area its bitmaps changed since it was made. Undefined when not applicable (the layer
+ * is then rendered the usual way).
+ */
+function regionReuse(rc: RC, l: Layer, flags: RenderFlags, key: string, sig: string, prevs: (LayerRender | null)[]): LayerRender | undefined {
+  if (!prevs.length || l.type === 'adjustment') return undefined;
+  const ss = structSig(rc, l);
+  const p = prevs.find((r): r is LayerRender => !!r && r.ssig === ss && !!r.deps);
+  if (!p) return undefined;
+  const ch = changeOf(rc, l, new Map(p.deps), flags);
+  if (ch === 'full') return undefined;
+  const D = ch.content ? intersectRect(ch.content, p.region) : null;
+  if (D) {
+    // A large change re-renders from scratch (as cheap, and keeps the usual reuse paths).
+    if (D.w * D.h > 0.5 * p.region.w * p.region.h) return undefined;
+    const res = updateRenderRegion(rc, l, flags, p, D);
+    if (res === 'fail') return undefined;
+    if (res === 'corrupt') {
+      // Its pixels were modified before the update turned out impossible: drop every version.
+      slots.delete(key);
+      prevs.length = 0;
+      return undefined;
+    }
+    renderStats.regionUpdates++;
+    // Derived data of the old content is stale now.
+    p.tight = undefined;
+    p.fields = undefined;
+    p.fx = undefined;
+  }
+  p.csig = contentSig(rc, l, flags);
+  p.deps = depList(rc, l);
+  p.move = undefined;
+  // max 1: the other cached version of this layer may share the canvases just modified.
+  slots.set(key, sig, p, 0, { layerId: l.id, max: 1, res: renderResources(p) });
+  return p;
 }
 
 /** Union of the regions children of a group can draw into (output px). */
@@ -787,141 +1205,33 @@ function moveCanvas(c: HTMLCanvasElement, from: PxRect, to: PxRect): HTMLCanvasE
   return out;
 }
 
-function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRender | null)[]): LayerRender | null {
-  const { doc, s, W, H } = rc;
-  const docR: PxRect = { x: 0, y: 0, w: W, h: H };
-  // 1) content box (output px, float) ------------------------------------------------------
-  let box: { x: number; y: number; w: number; h: number } | null = null;
-  let contentBox: { x: number; y: number; w: number; h: number } | null = null;
-  const geom = layerGeometry(l, s);
-  if (geom) {
-    box = boundsOfMatrixRect(geom.m, geom.local);
-    contentBox = boundsOfMatrixRect(geom.m, geom.box);
-  } else if (l.type === 'fill') {
-    box = contentBox = { x: 0, y: 0, w: W, h: H };
-  } else if (l.type === 'group') {
-    const e = groupExtent(rc, l);
-    if (e) box = contentBox = { x: e.x, y: e.y, w: e.w, h: e.h };
-  }
-  if (!box || !(box.w > 0) || !(box.h > 0)) return null;
-  if (l.type === 'raster' && !bitmaps.tryGet(l.bitmapId)) return null;
+interface EffectsResult {
+  core: HTMLCanvasElement;
+  behind: BehindPiece[];
+  fields: FieldEntry[] | undefined;
+  fx: FxEntry[] | undefined;
+  tight: PxRect | null | undefined;
+}
 
-  const fx = flags.effects ? activeEffects(l) : [];
-  const sides = flags.effects ? effectsSidesOf(l, s) : NO_SIDES;
-  const fpad = flags.filters ? filterPad(l.filters, s) : 0;
-  const csig = contentSig(rc, l, flags);
+type ActiveEffect = ReturnType<typeof activeEffects>[number];
 
-  // Plain raster at 1:1 and an integer offset: the bitmap itself is the render (zero copy).
-  if (l.type === 'raster' && !fx.length && !(flags.filters && hasFilters(l.filters)) && !(flags.mask && l.mask?.enabled) && !(l.fillOpacity < 0.999)) {
-    const m = geom!.m;
-    const ex = Math.round(m.e);
-    const ey = Math.round(m.f);
-    if (Math.abs(m.a - 1) < 1e-9 && Math.abs(m.d - 1) < 1e-9 && Math.abs(m.b) < 1e-9 && Math.abs(m.c) < 1e-9 && Math.abs(m.e - ex) < 1e-3 && Math.abs(m.f - ey) < 1e-3) {
-      const bmp = bitmaps.tryGet(l.bitmapId)!;
-      const region = { x: ex, y: ey, w: bmp.width, h: bmp.height };
-      if (!intersectRect(region, docR)) return null;
-      borrowed.add(bmp);
-      return { region, core: bmp, shape: bmp, behind: [], bounds: region, csig, extent: region };
-    }
-  }
-  // Region: the content's raster bounds grown per side by the effects' reach (+ smart-filter
-  // growth), limited to what can affect the document (content farther out than an effect can
-  // pull it in, or effect output beyond the document, is never visible).
-  const grow = addSides(sides, fpad);
-  const cover = coverRect(box.x, box.y, box.w, box.h);
-  const extent = expandRect(cover, fpad);
-  const region = intersectRect(expandSides(cover, grow), expandSides(docR, flipSides(grow)));
-  if (!region) return null;
-  if (region.w > MAX_SIDE || region.h > MAX_SIDE) {
-    const clipped = intersectRect(region, expandRect(docR, Math.min(maxSide(grow), 64)));
-    if (!clipped) return null;
-    region.x = clipped.x;
-    region.y = clipped.y;
-    region.w = Math.min(MAX_SIDE, clipped.w);
-    region.h = Math.min(MAX_SIDE, clipped.h);
-  }
-
-  // 2–4) content, smart filters, mask (or the previous render's content when only effects,
-  // opacity or blending changed) ------------------------------------------------------------
-  const reuse = reuseContent(prevs, csig, region, extent, fpad);
-  let C: HTMLCanvasElement;
-  if (reuse.C) {
-    C = reuse.C;
-    renderStats.contentReuse++;
-  } else {
-    C = fresh(region.w, region.h);
-    const cctx = ctx2d(C);
-    switch (l.type) {
-      case 'raster': {
-        const bmp = bitmaps.tryGet(l.bitmapId)!;
-        const m = geom!.m;
-        const ex = Math.round(m.e - region.x);
-        const ey = Math.round(m.f - region.y);
-        if (Math.abs(m.a - 1) < 1e-9 && Math.abs(m.d - 1) < 1e-9 && Math.abs(m.b) < 1e-9 && Math.abs(m.c) < 1e-9 && Math.abs(m.e - region.x - ex) < 1e-3 && Math.abs(m.f - region.y - ey) < 1e-3) {
-          cctx.drawImage(bmp, ex, ey);
-        } else {
-          cctx.setTransform(m.a, m.b, m.c, m.d, m.e - region.x, m.f - region.y);
-          cctx.imageSmoothingEnabled = true;
-          cctx.imageSmoothingQuality = 'high';
-          cctx.drawImage(bmp, 0, 0);
-          cctx.setTransform(1, 0, 0, 1, 0, 0);
-        }
-        break;
-      }
-      case 'text': {
-        const m = geom!.m;
-        const { k, fx: phx, fy: phy } = localRasterParams(m);
-        drawLocal(cctx, renderTextContent(l.text, k, phx, phy), m, region.x, region.y);
-        break;
-      }
-      case 'shape': {
-        const m = geom!.m;
-        const { k, fx: phx, fy: phy } = localRasterParams(m);
-        drawLocal(cctx, renderShapeContent(l.shape, k, phx, phy), m, region.x, region.y);
-        break;
-      }
-      case 'fill': {
-        cctx.setTransform(s, 0, 0, s, -region.x, -region.y);
-        fillWithPaint(cctx, l.fill as Paint, { x: 0, y: 0, width: doc.width, height: doc.height });
-        cctx.setTransform(1, 0, 0, 1, 0, 0);
-        break;
-      }
-      case 'group': {
-        const acc: Acc = { canvas: C, ctx: cctx, x: region.x, y: region.y, w: region.w, h: region.h, bounds: null, root: false, clip: null };
-        compositeList(rc, l.childIds, acc);
-        break;
-      }
-    }
-
-    // 3) smart filters
-    if (flags.filters && hasFilters(l.filters)) {
-      try {
-        const out = applyFilterStack(C, l.filters, makeFilterContext({ docWidth: doc.width, docHeight: doc.height, offsetX: region.x / s, offsetY: region.y / s, scale: s }));
-        if (out !== C) C = out;
-      } catch (err) {
-        warnOnce(`smart filters of ${l.id} failed`, err);
-      }
-    }
-
-    // 4) mask
-    if (flags.mask && l.mask && l.mask.enabled) applyMask(C, region, l.mask, s, doc.width, doc.height);
-  }
-
-  const layoutBox = coverRect(contentBox!.x, contentBox!.y, contentBox!.w, contentBox!.h);
-  const fill = Math.max(0, Math.min(1, Number.isFinite(l.fillOpacity) ? l.fillOpacity : 1));
-
-  // 5) effects -------------------------------------------------------------------------------
-  if (!fx.length) {
-    let core: HTMLCanvasElement = C;
-    if (fill < 0.999) {
-      core = fresh(region.w, region.h);
-      const k = ctx2d(core);
-      k.globalAlpha = fill;
-      k.drawImage(C, 0, 0);
-    }
-    return { region, core: fill > 0 ? core : null, shape: C, behind: [], bounds: layoutBox, csig, extent, fields: reuse.fields.length ? reuse.fields : undefined, tight: reuse.tight };
-  }
-
+/**
+ * Stage 5 of a layer render: run the layer effects over the content canvas C (masked + filtered,
+ * positioned at `region`). Returns the core (content at fill opacity + above effects) and the
+ * behind pieces. `extent` is the content's raster extent, `layoutBox` its layout box (output px).
+ */
+function runEffects(
+  rc: RC,
+  fx: ActiveEffect[],
+  C: HTMLCanvasElement,
+  region: PxRect,
+  extent: PxRect,
+  layoutBox: PxRect,
+  fill: number,
+  layerOpacity: number,
+  reuse: Pick<Reuse, 'fields' | 'fx' | 'tight'>,
+): EffectsResult {
+  const { doc, s } = rc;
   // Effects work on everything the content covers (text stroke/warp/descenders, shape stroke,
   // filter growth), not just the layout box; gradients still follow the layout box.
   const ext = intersectRect(extent, region);
@@ -931,7 +1241,7 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
   const sorted = fx
     .map((e) => ({ ...e, stage: effectStage(e.def, e.params) }))
     .sort((a, b) => a.def.order - b.def.order || a.idx - b.idx);
-  const opacity = Math.max(0, Math.min(1, l.opacity));
+  const opacity = Math.max(0, Math.min(1, layerOpacity));
   const knock = fill * opacity < 0.999;
   const behind: BehindPiece[] = [];
   // Only behind-stage effects at full fill: the core IS the content (no copy).
@@ -1032,17 +1342,163 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
     }
   }
   return {
-    region,
     core,
-    shape: C,
     behind,
-    bounds: layoutBox,
-    csig,
-    extent,
     fields: fieldsP.entries.length ? fieldsP.entries : undefined,
     fx: fxOut.length ? fxOut : undefined,
     tight: fieldsP.tight,
   };
+}
+
+/**
+ * Draw a layer's content (no smart filters / mask / effects) into C, which sits at `region`
+ * (output px). With `clip` (output px), only that part is drawn: the caller cleared it and set
+ * the canvas clip; groups then re-composite their children over the clip only.
+ */
+function drawContent(rc: RC, l: Layer, C: HTMLCanvasElement, region: PxRect, geom: ReturnType<typeof layerGeometry>, clip: PxRect | null) {
+  const cctx = ctx2d(C);
+  switch (l.type) {
+    case 'raster': {
+      const bmp = bitmaps.tryGet(l.bitmapId);
+      if (!bmp || !geom) break;
+      const m = geom.m;
+      const ex = Math.round(m.e - region.x);
+      const ey = Math.round(m.f - region.y);
+      if (Math.abs(m.a - 1) < 1e-9 && Math.abs(m.d - 1) < 1e-9 && Math.abs(m.b) < 1e-9 && Math.abs(m.c) < 1e-9 && Math.abs(m.e - region.x - ex) < 1e-3 && Math.abs(m.f - region.y - ey) < 1e-3) {
+        cctx.drawImage(bmp, ex, ey);
+      } else {
+        cctx.setTransform(m.a, m.b, m.c, m.d, m.e - region.x, m.f - region.y);
+        cctx.imageSmoothingEnabled = true;
+        cctx.imageSmoothingQuality = 'high';
+        cctx.drawImage(bmp, 0, 0);
+        cctx.setTransform(1, 0, 0, 1, 0, 0);
+      }
+      break;
+    }
+    case 'text': {
+      if (!geom) break;
+      const m = geom.m;
+      const { k, fx: phx, fy: phy } = localRasterParams(m);
+      drawLocal(cctx, renderTextContent(l.text, k, phx, phy), m, region.x, region.y);
+      break;
+    }
+    case 'shape': {
+      if (!geom) break;
+      const m = geom.m;
+      const { k, fx: phx, fy: phy } = localRasterParams(m);
+      drawLocal(cctx, renderShapeContent(l.shape, k, phx, phy), m, region.x, region.y);
+      break;
+    }
+    case 'fill': {
+      cctx.setTransform(rc.s, 0, 0, rc.s, -region.x, -region.y);
+      fillWithPaint(cctx, l.fill as Paint, { x: 0, y: 0, width: rc.doc.width, height: rc.doc.height });
+      cctx.setTransform(1, 0, 0, 1, 0, 0);
+      break;
+    }
+    case 'group': {
+      const acc: Acc = { canvas: C, ctx: cctx, x: region.x, y: region.y, w: region.w, h: region.h, bounds: null, root: false, clip };
+      compositeList(rc, l.childIds, acc);
+      break;
+    }
+  }
+}
+
+function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRender | null)[]): LayerRender | null {
+  const { doc, s, W, H } = rc;
+  const docR: PxRect = { x: 0, y: 0, w: W, h: H };
+  // 1) content box (output px, float) ------------------------------------------------------
+  let box: { x: number; y: number; w: number; h: number } | null = null;
+  let contentBox: { x: number; y: number; w: number; h: number } | null = null;
+  const geom = layerGeometry(l, s);
+  if (geom) {
+    box = boundsOfMatrixRect(geom.m, geom.local);
+    contentBox = boundsOfMatrixRect(geom.m, geom.box);
+  } else if (l.type === 'fill') {
+    box = contentBox = { x: 0, y: 0, w: W, h: H };
+  } else if (l.type === 'group') {
+    const e = groupExtent(rc, l);
+    if (e) box = contentBox = { x: e.x, y: e.y, w: e.w, h: e.h };
+  }
+  if (!box || !(box.w > 0) || !(box.h > 0)) return null;
+  if (l.type === 'raster' && !bitmaps.tryGet(l.bitmapId)) return null;
+
+  const fx = flags.effects ? activeEffects(l) : [];
+  const sides = flags.effects ? effectsSidesOf(l, s) : NO_SIDES;
+  const fpad = flags.filters ? filterPad(l.filters, s) : 0;
+  const csig = contentSig(rc, l, flags);
+
+  // Plain raster at 1:1 and an integer offset: the bitmap itself is the render (zero copy).
+  if (l.type === 'raster' && !fx.length && !(flags.filters && hasFilters(l.filters)) && !(flags.mask && l.mask?.enabled) && !(l.fillOpacity < 0.999)) {
+    const m = geom!.m;
+    const ex = Math.round(m.e);
+    const ey = Math.round(m.f);
+    if (Math.abs(m.a - 1) < 1e-9 && Math.abs(m.d - 1) < 1e-9 && Math.abs(m.b) < 1e-9 && Math.abs(m.c) < 1e-9 && Math.abs(m.e - ex) < 1e-3 && Math.abs(m.f - ey) < 1e-3) {
+      const bmp = bitmaps.tryGet(l.bitmapId)!;
+      const region = { x: ex, y: ey, w: bmp.width, h: bmp.height };
+      if (!intersectRect(region, docR)) return null;
+      borrowed.add(bmp);
+      return { region, core: bmp, shape: bmp, behind: [], bounds: region, csig, extent: region };
+    }
+  }
+  // Region: the content's raster bounds grown per side by the effects' reach (+ smart-filter
+  // growth), limited to what can affect the document (content farther out than an effect can
+  // pull it in, or effect output beyond the document, is never visible).
+  const grow = addSides(sides, fpad);
+  const cover = coverRect(box.x, box.y, box.w, box.h);
+  const extent = expandRect(cover, fpad);
+  const region = intersectRect(expandSides(cover, grow), expandSides(docR, flipSides(grow)));
+  if (!region) return null;
+  if (region.w > MAX_SIDE || region.h > MAX_SIDE) {
+    const clipped = intersectRect(region, expandRect(docR, Math.min(maxSide(grow), 64)));
+    if (!clipped) return null;
+    region.x = clipped.x;
+    region.y = clipped.y;
+    region.w = Math.min(MAX_SIDE, clipped.w);
+    region.h = Math.min(MAX_SIDE, clipped.h);
+  }
+
+  // 2–4) content, smart filters, mask (or the previous render's content when only effects,
+  // opacity or blending changed) ------------------------------------------------------------
+  const reuse = reuseContent(prevs, csig, region, extent, fpad);
+  let C: HTMLCanvasElement;
+  if (reuse.C) {
+    C = reuse.C;
+    renderStats.contentReuse++;
+  } else {
+    C = fresh(region.w, region.h);
+    drawContent(rc, l, C, region, geom, null);
+
+    // 3) smart filters
+    if (flags.filters && hasFilters(l.filters)) {
+      try {
+        const out = applyFilterStack(C, l.filters, makeFilterContext({ docWidth: doc.width, docHeight: doc.height, offsetX: region.x / s, offsetY: region.y / s, scale: s }));
+        if (out !== C) C = out;
+      } catch (err) {
+        warnOnce(`smart filters of ${l.id} failed`, err);
+      }
+    }
+
+    // 4) mask
+    if (flags.mask && l.mask && l.mask.enabled) applyMask(C, region, l.mask, s, doc.width, doc.height);
+  }
+
+  const layoutBox = coverRect(contentBox!.x, contentBox!.y, contentBox!.w, contentBox!.h);
+  const fill = Math.max(0, Math.min(1, Number.isFinite(l.fillOpacity) ? l.fillOpacity : 1));
+
+  // 5) effects -------------------------------------------------------------------------------
+  if (!fx.length) {
+    let core: HTMLCanvasElement = C;
+    if (fill < 0.999) {
+      core = fresh(region.w, region.h);
+      const k = ctx2d(core);
+      k.globalAlpha = fill;
+      k.drawImage(C, 0, 0);
+    }
+    return { region, core: fill > 0 ? core : null, shape: C, behind: [], bounds: layoutBox, csig, extent, fields: reuse.fields.length ? reuse.fields : undefined, tight: reuse.tight };
+  }
+
+  const fxr = runEffects(rc, fx, C, region, extent, layoutBox, fill, l.opacity, reuse);
+  return { region, core: fxr.core, shape: C, behind: fxr.behind, bounds: layoutBox, csig, extent, fields: fxr.fields, fx: fxr.fx, tight: fxr.tight };
 }
 
 /* ================================================================== */
@@ -1062,6 +1518,11 @@ function markDrawn(acc: Acc, r: PxRect) {
 function compositeRender(acc: Acc, l: Layer, R: LayerRender) {
   const a = Math.max(0, Math.min(1, l.opacity));
   if (a <= 0) return;
+  // Incremental composite: nothing of this layer inside the recomposited rect.
+  if (acc.clip && !intersectRect(R.region, acc.clip)) {
+    markDrawn(acc, R.region);
+    return;
+  }
   const ctx = acc.ctx;
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1086,10 +1547,24 @@ function compositeClipStack(rc: RC, acc: Acc, base: Layer, R: LayerRender, clipp
   const a = Math.max(0, Math.min(1, base.opacity));
   if (a <= 0 || !R.shape) return;
   const reg = R.region;
-  const G = acquire(reg.w, reg.h);
+  // Incremental composite: rebuild only the part of the stack inside the accumulator's clip,
+  // starting on the region's pixel grid (adjustments in the stack see the same pixel phase).
+  let wr: PxRect | null = reg;
+  if (acc.clip) {
+    const c = intersectRect(reg, acc.clip);
+    wr = c && alignRect(c, reg, 64);
+    if (!wr) {
+      markDrawn(acc, reg);
+      return;
+    }
+  }
+  const G = acquire(wr.w, wr.h);
   const g = ctx2d(G);
-  if (R.core) g.drawImage(R.core, 0, 0);
-  const gAcc: Acc = { canvas: G, ctx: g, x: reg.x, y: reg.y, w: reg.w, h: reg.h, bounds: reg, root: false, clip: null };
+  // Region-local (0,0) inside G.
+  const gx = reg.x - wr.x;
+  const gy = reg.y - wr.y;
+  if (R.core) g.drawImage(R.core, gx, gy);
+  const gAcc: Acc = { canvas: G, ctx: g, x: wr.x, y: wr.y, w: wr.w, h: wr.h, bounds: wr, root: false, clip: null };
   for (const c of clipped) {
     if (c.type === 'adjustment') {
       applyAdjustment(rc, gAcc, c);
@@ -1099,10 +1574,10 @@ function compositeClipStack(rc: RC, acc: Acc, base: Layer, R: LayerRender, clipp
     if (!CR) continue;
     const ca = Math.max(0, Math.min(1, c.opacity));
     if (ca <= 0) continue;
-    const T = acquire(reg.w, reg.h);
+    const T = acquire(wr.w, wr.h);
     const t = ctx2d(T);
-    const dx = CR.region.x - reg.x;
-    const dy = CR.region.y - reg.y;
+    const dx = CR.region.x - wr.x;
+    const dy = CR.region.y - wr.y;
     for (const b of CR.behind) {
       t.globalCompositeOperation = b.op;
       t.drawImage(b.canvas, dx, dy);
@@ -1110,7 +1585,7 @@ function compositeClipStack(rc: RC, acc: Acc, base: Layer, R: LayerRender, clipp
     t.globalCompositeOperation = 'source-over';
     if (CR.core) t.drawImage(CR.core, dx, dy);
     t.globalCompositeOperation = 'destination-in';
-    t.drawImage(R.shape, 0, 0);
+    t.drawImage(R.shape, gx, gy);
     g.globalAlpha = ca;
     g.globalCompositeOperation = c.type === 'group' && c.blendMode === 'pass-through' ? 'source-over' : compositeOp(c.blendMode);
     g.drawImage(T, 0, 0);
@@ -1130,7 +1605,7 @@ function compositeClipStack(rc: RC, acc: Acc, base: Layer, R: LayerRender, clipp
   }
   ctx.globalAlpha = a;
   ctx.globalCompositeOperation = compositeOp(base.blendMode);
-  ctx.drawImage(G, dx, dy);
+  ctx.drawImage(G, wr.x - acc.x, wr.y - acc.y);
   ctx.restore();
   release(G);
   markDrawn(acc, reg);
@@ -1149,8 +1624,15 @@ function applyAdjustment(rc: RC, acc: Acc, adj: AdjustmentLayer) {
   if (!def || !inst.enabled) return;
   const opacity = Math.max(0, Math.min(1, adj.opacity * (Number.isFinite(adj.fillOpacity) ? adj.fillOpacity : 1) * (inst.opacity ?? 1)));
   if (opacity <= 0 || !acc.bounds) return;
-  let abs = intersectRect(acc.bounds, accRect(acc));
-  if (abs && acc.clip) abs = intersectRect(abs, acc.clip);
+  const full = intersectRect(acc.bounds, accRect(acc));
+  let abs = full;
+  if (full && acc.clip) {
+    // Incremental composite: only the clip (the canvas clip limits the write-back), starting on
+    // the full rect's pixel grid so position-dependent filters (ordered dither) and the mask's
+    // feather blur line up with a full render.
+    const c = intersectRect(full, acc.clip);
+    abs = c && alignRect(c, full, alignGrid(maskSigma(adj.mask, rc.s)));
+  }
   if (!abs) return;
   const r: PxRect = { x: abs.x - acc.x, y: abs.y - acc.y, w: abs.w, h: abs.h };
   renderStats.adjustments++;
@@ -1193,19 +1675,32 @@ function compositePassThrough(rc: RC, acc: Acc, g: GroupLayer) {
     if (rc.below && containsId(rc.doc, g, rc.below)) rc.stopped = true;
     return;
   }
-  const before = acquire(acc.w, acc.h);
-  ctx2d(before).drawImage(acc.canvas, 0, 0);
+  // Accumulator-local rect to lerp: everything, or (incremental composite) the clip, aligned to
+  // the accumulator's grid so the mask's feather blur matches a full render.
+  const all: PxRect = { x: 0, y: 0, w: acc.w, h: acc.h };
+  let wr: PxRect | null = all;
+  if (acc.clip) {
+    const c = intersectRect({ x: acc.clip.x - acc.x, y: acc.clip.y - acc.y, w: acc.clip.w, h: acc.clip.h }, all);
+    wr = c && alignRect(c, all, alignGrid(maskSigma(masked ? g.mask : null, rc.s)));
+  }
+  if (!wr) {
+    // Nothing visible to update; still composite for the bookkeeping (bounds, `below` stop).
+    compositeList(rc, g.childIds, acc);
+    return;
+  }
+  const before = acquire(wr.w, wr.h);
+  ctx2d(before).drawImage(acc.canvas, -wr.x, -wr.y);
   const boundsBefore = acc.bounds;
   compositeList(rc, g.childIds, acc);
-  const after = acquire(acc.w, acc.h);
-  ctx2d(after).drawImage(acc.canvas, 0, 0);
+  const after = acquire(wr.w, wr.h);
+  ctx2d(after).drawImage(acc.canvas, -wr.x, -wr.y);
   const ctx = acc.ctx;
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, acc.w, acc.h);
-  ctx.drawImage(before, 0, 0);
+  ctx.clearRect(wr.x, wr.y, wr.w, wr.h);
+  ctx.drawImage(before, wr.x, wr.y);
   ctx.restore();
-  lerpInto(ctx, after, a, maskFor(rc, g.mask, acc, { x: 0, y: 0, w: acc.w, h: acc.h }), 0, 0);
+  lerpInto(ctx, after, a, maskFor(rc, g.mask, acc, wr), wr.x, wr.y);
   release(before, after);
   acc.bounds = unionRect(boundsBefore, acc.bounds);
 }
@@ -1265,7 +1760,12 @@ function prefixSigs(rc: RC, ids: ID[], base: string): string[] {
 function restoreInto(acc: Acc, snap: Snapshot) {
   acc.ctx.save();
   acc.ctx.setTransform(1, 0, 0, 1, 0, 0);
-  acc.ctx.globalCompositeOperation = 'copy';
+  // clearRect + source-over is an exact copy of premultiplied pixels. The 'copy' operation is
+  // avoided on purpose: on GPU canvases Chrome draws it through its unbounded-composite path,
+  // which (with a clip, mid-way through deferred drawing) did not reproduce the source exactly.
+  acc.ctx.globalCompositeOperation = 'source-over';
+  acc.ctx.globalAlpha = 1;
+  acc.ctx.clearRect(0, 0, acc.w, acc.h);
   acc.ctx.drawImage(snap.canvas, 0, 0);
   acc.ctx.restore();
   acc.bounds = snap.bounds;
@@ -1405,11 +1905,24 @@ interface DocItem {
   id: ID;
   sig: string;
   region: ItemRegion;
+  /** Structure signature of the item's layer (see structSig), when shown. */
+  ssig?: string;
+  /** Bitmap versions the item was composited from, when shown. */
+  deps?: DepList;
 }
 
 interface DocEntry {
   canvas: HTMLCanvasElement;
   items: DocItem[];
+}
+
+/** A flattened composite item as computed for the current document state. */
+interface RawItem {
+  id: ID;
+  sig: string;
+  layer: Layer | null;
+  /** Index in doc.rootIds of the top-level layer this item belongs to. */
+  root: number;
 }
 
 function inlinePassThrough(g: GroupLayer): boolean {
@@ -1430,23 +1943,25 @@ function hasAdjustmentInline(rc: RC, g: GroupLayer): boolean {
  * Flattened composite items: pass-through groups (opacity 100%, no mask) composite exactly like
  * their children inlined, so they are expanded and changes are tracked per leaf.
  */
-function docItems(rc: RC, ids: ID[], st: { stopped: boolean }, out: { id: ID; sig: string; layer: Layer | null }[]) {
-  for (const id of ids) {
+function docItems(rc: RC, ids: ID[], st: { stopped: boolean }, out: RawItem[], root = -1) {
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    const r = root >= 0 ? root : i;
     if (st.stopped) return;
     if (id === rc.below) {
       st.stopped = true;
-      out.push({ id: 'below', sig: 'B', layer: null });
+      out.push({ id: 'below', sig: 'B', layer: null, root: r });
       return;
     }
     const l = rc.doc.layers[id];
     if (!l) continue;
     if (l.type === 'group' && isShown(rc, l) && inlinePassThrough(l)) {
-      out.push({ id, sig: `G${objId(l)}`, layer: null });
-      docItems(rc, l.childIds, st, out);
-      out.push({ id, sig: 'g', layer: null });
+      out.push({ id, sig: `G${objId(l)}`, layer: null, root: r });
+      docItems(rc, l.childIds, st, out, r);
+      out.push({ id, sig: 'g', layer: null, root: r });
       continue;
     }
-    out.push({ id, sig: listSig(rc, [id], st), layer: isShown(rc, l) ? l : null });
+    out.push({ id, sig: listSig(rc, [id], st), layer: isShown(rc, l) ? l : null, root: r });
   }
 }
 
@@ -1460,73 +1975,255 @@ function itemRegion(rc: RC, l: Layer | null): ItemRegion {
   return renderLayer(rc, l)?.region ?? null;
 }
 
-/** Composite the document (cached; the returned canvas must be treated as read-only). */
-export function compositeDocument(doc: Document, o: DocRenderOptions): HTMLCanvasElement {
+function makeItem(rc: RC, r: RawItem): DocItem {
+  return {
+    id: r.id,
+    sig: r.sig,
+    region: itemRegion(rc, r.layer),
+    ssig: r.layer ? structSig(rc, r.layer) : undefined,
+    deps: r.layer ? depList(rc, r.layer) : undefined,
+  };
+}
+
+/** Everything a document composite request resolves to (cache key, items, signature). */
+interface DocState {
+  rc: RC;
+  doc: Document;
+  key: string;
+  /** Signature of the empty accumulator (background, size, generation). */
+  base: string;
+  bg: string;
+  raw: RawItem[];
+  sig: string;
+  docR: PxRect;
+}
+
+function docState(doc: Document, o: DocRenderOptions): DocState {
   const rc = makeRC(doc, o.scale, o.hidden, o.below);
   const bg = o.background && doc.background ? doc.background : '';
   const hiddenKey = rc.hidden ? [...rc.hidden].sort().join(',') : '';
   const key = `D|${doc.id}|${rc.s.toFixed(5)}|${bg ? 'b' : ''}|${hiddenKey}|${rc.below ?? ''}`;
   const base = `bg:${bg}|${rc.W}x${rc.H}|g${cacheGeneration()}|`;
-  const raw: { id: ID; sig: string; layer: Layer | null }[] = [];
+  const raw: RawItem[] = [];
   docItems(rc, doc.rootIds, { stopped: false }, raw);
   const sig = base + raw.map((r) => r.sig).join(';');
-  const prev = slots.peek<DocEntry>(key);
-  if (prev && prev.sig === sig) {
+  return { rc, doc, key, base, bg, raw, sig, docR: { x: 0, y: 0, w: rc.W, h: rc.H } };
+}
+
+/** How to bring a composite up to date: the rect to re-composite (null = nothing visible changed). */
+interface DocPlan {
+  items: DocItem[];
+  dirty: PxRect | null;
+  /** Index in doc.rootIds of the only top-level layer that changed (-1 when several / none). */
+  root: number;
+}
+
+/**
+ * Plan an incremental composite from a previous one (same items, a few changed). Items whose
+ * layer kept its structure and only had bitmap pixels touched (live painting) contribute just
+ * the area their render changed (see changeOf); other changed items their old ∪ new regions.
+ * Null when a full composite is needed (structure changed, an adjustment changed, too much
+ * changed…).
+ */
+function planIncremental(st: DocState, old: DocItem[], maxFrac: number): DocPlan | null {
+  const { rc, raw } = st;
+  if (old.length !== raw.length) return null;
+  for (let i = 0; i < raw.length; i++) if (raw[i].id !== old[i].id) return null;
+  const changed: number[] = [];
+  for (let i = 0; i < raw.length; i++) if (raw[i].sig !== old[i].sig) changed.push(i);
+  if (changed.length > 8) return null;
+  const items: DocItem[] = old.map((it, i) => ({ ...it, sig: raw[i].sig }));
+  let D: PxRect | null = null;
+  const roots = new Set<number>();
+  for (const i of changed) {
+    const r = raw[i];
+    const it = old[i];
+    roots.add(r.root);
+    const l = r.layer;
+    if (l && it.deps && it.ssig !== undefined && structSig(rc, l) === it.ssig) {
+      const ch = changeOf(rc, l, new Map(it.deps), FULL_FLAGS);
+      if (ch !== 'full') {
+        // Brings the layer's cached render up to date (in place) before compositing.
+        items[i].region = itemRegion(rc, l);
+        items[i].deps = depList(rc, l);
+        D = unionRect(D, ch.out);
+        continue;
+      }
+    }
+    const nr = itemRegion(rc, l);
+    const or = it.region;
+    items[i].region = nr;
+    items[i].ssig = l ? structSig(rc, l) : undefined;
+    items[i].deps = l ? depList(rc, l) : undefined;
+    if (nr === 'full' || or === 'full') return null;
+    D = unionRect(unionRect(D, or), nr);
+  }
+  const dirty = D ? intersectRect(D, st.docR) : null;
+  if (dirty && dirty.w * dirty.h > maxFrac * rc.W * rc.H) return null;
+  return { items, dirty, root: roots.size === 1 ? [...roots][0] : -1 };
+}
+
+/** Start index of the clipping stack (base + clipped layers) a top-level index belongs to. */
+function stackStart(rc: RC, ids: ID[], r: number): number {
+  let i = 0;
+  while (i < ids.length) {
+    const l = rc.doc.layers[ids[i]];
+    let j = i + 1;
+    if (l && l.type !== 'adjustment') while (j < ids.length && rc.doc.layers[ids[j]]?.clipped) j++;
+    if (r < j) return i;
+    i = j;
+  }
+  return r;
+}
+
+/* ---------------- below cache (live painting) ---------------- */
+
+/**
+ * The accumulator right before a top-level index (everything below the layer being painted),
+ * filled lazily in tiles as strokes reach them. While a stroke goes on, each frame restores the
+ * stroke region from here and composites only the painted layer and what lies above it.
+ * Valid while everything below keeps its signature (the slot signature is the prefix signature).
+ */
+interface BelowCache {
+  index: number;
+  canvas: HTMLCanvasElement;
+  valid: Uint8Array;
+  tilesX: number;
+  tilesY: number;
+  /** Accumulator bounds after the layers below (see Acc.bounds). */
+  bounds: PxRect | null;
+}
+
+const BELOW_TILE = 128;
+
+function belowCache(st: DocState, index: number, prefix: string[]): BelowCache | null {
+  const p = prefix[index - 1];
+  if (index <= 0 || st.rc.below || p === undefined) return null;
+  const key = `SB|${st.key}`;
+  const sig = `${index}|${p}`;
+  const hit = slots.get<BelowCache>(key, sig);
+  if (hit) return hit;
+  const tilesX = Math.ceil(st.rc.W / BELOW_TILE);
+  const tilesY = Math.ceil(st.rc.H / BELOW_TILE);
+  const b: BelowCache = { index, canvas: fresh(st.rc.W, st.rc.H), valid: new Uint8Array(tilesX * tilesY), tilesX, tilesY, bounds: null };
+  slots.set(key, sig, b, 0, { composite: true, max: 1, layerId: docTag(st.doc.id), res: [b.canvas] });
+  return b;
+}
+
+/** Composite the layers below into the tiles of `b` that `r` touches and are not filled yet. */
+function fillBelow(st: DocState, b: BelowCache, r: PxRect, prefix: string[]) {
+  const T = BELOW_TILE;
+  const tx0 = Math.max(0, Math.floor(r.x / T));
+  const ty0 = Math.max(0, Math.floor(r.y / T));
+  const tx1 = Math.min(b.tilesX - 1, Math.floor((r.x + r.w - 1) / T));
+  const ty1 = Math.min(b.tilesY - 1, Math.floor((r.y + r.h - 1) / T));
+  let bx0 = Infinity,
+    by0 = Infinity,
+    bx1 = -1,
+    by1 = -1;
+  for (let ty = ty0; ty <= ty1; ty++) {
+    for (let tx = tx0; tx <= tx1; tx++) {
+      if (b.valid[ty * b.tilesX + tx]) continue;
+      bx0 = Math.min(bx0, tx);
+      by0 = Math.min(by0, ty);
+      bx1 = Math.max(bx1, tx);
+      by1 = Math.max(by1, ty);
+    }
+  }
+  if (bx1 < 0) return;
+  const R = intersectRect({ x: bx0 * T, y: by0 * T, w: (bx1 - bx0 + 1) * T, h: (by1 - by0 + 1) * T }, st.docR);
+  if (!R) return;
+  const { rc } = st;
+  const ctx = ctx2d(b.canvas);
+  ctx.save();
+  resetDrawState(ctx);
+  ctx.beginPath();
+  ctx.rect(R.x, R.y, R.w, R.h);
+  ctx.clip();
+  ctx.clearRect(R.x, R.y, R.w, R.h);
+  const acc: Acc = { canvas: b.canvas, ctx, x: 0, y: 0, w: rc.W, h: rc.H, bounds: null, root: true, clip: R };
+  if (st.bg) {
+    ctx.fillStyle = st.bg;
+    ctx.fillRect(R.x, R.y, R.w, R.h);
+    acc.bounds = st.docR;
+  }
+  const stopped = rc.stopped;
+  compositeList(rc, st.doc.rootIds.slice(0, b.index), acc, { prefix, base: st.base, store: false });
+  rc.stopped = stopped;
+  ctx.restore();
+  b.bounds = acc.bounds;
+  for (let ty = by0; ty <= by1; ty++) for (let tx = bx0; tx <= bx1; tx++) b.valid[ty * b.tilesX + tx] = 1;
+}
+
+/**
+ * Re-composite `plan.dirty` of `canvas` (which holds the previous composite) in place. When a
+ * single top-level stack changed, the layers below it come from the below cache.
+ */
+function recomposite(st: DocState, plan: DocPlan, canvas: HTMLCanvasElement) {
+  const dirty = plan.dirty;
+  if (!dirty) return;
+  const { rc, doc } = st;
+  const ctx = ctx2d(canvas);
+  ctx.save();
+  resetDrawState(ctx);
+  ctx.beginPath();
+  ctx.rect(dirty.x, dirty.y, dirty.w, dirty.h);
+  ctx.clip();
+  ctx.clearRect(dirty.x, dirty.y, dirty.w, dirty.h);
+  const acc: Acc = { canvas, ctx, x: 0, y: 0, w: rc.W, h: rc.H, bounds: null, root: true, clip: dirty };
+  const prefix = prefixSigs(rc, doc.rootIds, st.base);
+  const start = plan.root >= 0 ? stackStart(rc, doc.rootIds, plan.root) : -1;
+  const below = start > 0 ? belowCache(st, start, prefix) : null;
+  if (below) {
+    fillBelow(st, below, dirty, prefix);
+    // The dirty rect is clear: a source-over draw copies the cached pixels exactly.
+    ctx.drawImage(below.canvas, 0, 0);
+    acc.bounds = below.bounds;
+    compositeList(rc, doc.rootIds.slice(start), acc);
+  } else {
+    if (st.bg) {
+      ctx.fillStyle = st.bg;
+      ctx.fillRect(dirty.x, dirty.y, dirty.w, dirty.h);
+      acc.bounds = st.docR;
+    }
+    // Resume from a cached adjustment snapshot when everything below it is unchanged (editing
+    // above a global adjustment never re-runs its filter).
+    compositeList(rc, doc.rootIds, acc, { prefix, base: st.base, store: false });
+  }
+  ctx.restore();
+}
+
+function storeDoc(st: DocState, canvas: HTMLCanvasElement, items: DocItem[]) {
+  slots.set(st.key, st.sig, { canvas, items } satisfies DocEntry, 0, { composite: true, max: 1, layerId: docTag(st.doc.id), res: [canvas] });
+}
+
+/** Composite the document (cached; the returned canvas must be treated as read-only). */
+export function compositeDocument(doc: Document, o: DocRenderOptions): HTMLCanvasElement {
+  const st = docState(doc, o);
+  const { rc } = st;
+  const prev = slots.peek<DocEntry>(st.key);
+  if (prev && prev.sig === st.sig) {
     renderStats.docHits++;
-    slots.get(key, sig);
+    slots.get(st.key, st.sig);
     return prev.value.canvas;
   }
   renderStats.docRenders++;
-  const docR: PxRect = { x: 0, y: 0, w: rc.W, h: rc.H };
 
-  // Incremental path: only a few items changed → recomposite their old ∪ new regions.
-  if (prev && prev.sig.startsWith(base) && prev.value.items.length === raw.length && raw.every((r, i) => r.id === prev.value.items[i].id)) {
-    const old = prev.value.items;
-    const changed: number[] = [];
-    for (let i = 0; i < raw.length; i++) if (raw[i].sig !== old[i].sig) changed.push(i);
-    if (changed.length > 0 && changed.length <= 8) {
-      let D: PxRect | null = null;
-      let full = false;
-      const items: DocItem[] = old.map((it, i) => ({ id: it.id, sig: raw[i].sig, region: it.region }));
-      for (const i of changed) {
-        const nr = itemRegion(rc, raw[i].layer);
-        items[i].region = nr;
-        const or = old[i].region;
-        if (nr === 'full' || or === 'full') {
-          full = true;
-          break;
-        }
-        D = unionRect(unionRect(D, or), nr);
+  // Incremental path: only a few items changed → recomposite the area they changed, on a copy
+  // (returned canvases are shared and must not change under their holders).
+  if (prev && prev.sig.startsWith(st.base)) {
+    const plan = planIncremental(st, prev.value.items, 0.55);
+    if (plan) {
+      if (!plan.dirty) {
+        storeDoc(st, prev.value.canvas, plan.items);
+        return prev.value.canvas;
       }
-      if (!full) {
-        const dirty = D ? intersectRect(D, docR) : null;
-        if (!dirty) {
-          slots.set(key, sig, { canvas: prev.value.canvas, items } satisfies DocEntry, 0, { composite: true, max: 1, layerId: docTag(doc.id), res: [prev.value.canvas] });
-          return prev.value.canvas;
-        }
-        if (dirty.w * dirty.h <= 0.55 * rc.W * rc.H) {
-          const out = fresh(rc.W, rc.H);
-          const ctx = ctx2d(out);
-          ctx.drawImage(prev.value.canvas, 0, 0);
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(dirty.x, dirty.y, dirty.w, dirty.h);
-          ctx.clip();
-          ctx.clearRect(dirty.x, dirty.y, dirty.w, dirty.h);
-          const acc: Acc = { canvas: out, ctx, x: 0, y: 0, w: rc.W, h: rc.H, bounds: null, root: true, clip: dirty };
-          if (bg) {
-            ctx.fillStyle = bg;
-            ctx.fillRect(dirty.x, dirty.y, dirty.w, dirty.h);
-            acc.bounds = docR;
-          }
-          // Resume from a cached adjustment snapshot when everything below it is unchanged
-          // (editing above a global adjustment never re-runs its filter).
-          compositeList(rc, doc.rootIds, acc, { prefix: prefixSigs(rc, doc.rootIds, base), base, store: false });
-          ctx.restore();
-          slots.set(key, sig, { canvas: out, items } satisfies DocEntry, 0, { composite: true, max: 1, layerId: docTag(doc.id), res: [out] });
-          return out;
-        }
-      }
+      const out = fresh(rc.W, rc.H);
+      ctx2d(out).drawImage(prev.value.canvas, 0, 0);
+      recomposite(st, plan, out);
+      renderStats.docRegionRenders++;
+      storeDoc(st, out, plan.items);
+      return out;
     }
   }
 
@@ -1534,15 +2231,93 @@ export function compositeDocument(doc: Document, o: DocRenderOptions): HTMLCanva
   const out = fresh(rc.W, rc.H);
   const ctx = ctx2d(out);
   const acc: Acc = { canvas: out, ctx, x: 0, y: 0, w: rc.W, h: rc.H, bounds: null, root: true, clip: null };
-  if (bg) {
-    ctx.fillStyle = bg;
+  if (st.bg) {
+    ctx.fillStyle = st.bg;
     ctx.fillRect(0, 0, rc.W, rc.H);
-    acc.bounds = docR;
+    acc.bounds = st.docR;
   }
-  compositeList(rc, doc.rootIds, acc, { prefix: prefixSigs(rc, doc.rootIds, base), base, store: true });
-  const items: DocItem[] = raw.map((r) => ({ id: r.id, sig: r.sig, region: itemRegion(rc, r.layer) }));
-  slots.set(key, sig, { canvas: out, items } satisfies DocEntry, 0, { composite: true, max: 1, layerId: docTag(doc.id), res: [out] });
+  compositeList(rc, doc.rootIds, acc, { prefix: prefixSigs(rc, doc.rootIds, st.base), base: st.base, store: true });
+  storeDoc(
+    st,
+    out,
+    st.raw.map((r) => makeItem(rc, r)),
+  );
   return out;
+}
+
+/* ---------------- live composite (viewport) ---------------- */
+
+/** Result of compositeDocumentLive. */
+export interface LiveComposite {
+  /** The live canvas (owned by the renderer, updated in place by later calls). */
+  canvas: HTMLCanvasElement;
+  /** Area (output px) this call re-composited: empty when nothing changed, null = everything. */
+  dirty: PxRect | null;
+  /** Whether any pixel of the canvas may have changed. */
+  changed: boolean;
+}
+
+interface LiveState {
+  docId: ID;
+  canvas: HTMLCanvasElement;
+  sig: string;
+  items: DocItem[];
+}
+
+/** Live composites per document composite key (most recent last). */
+const liveStates = new Map<string, LiveState>();
+const LIVE_MAX = 4;
+const NO_RECT: PxRect = Object.freeze({ x: 0, y: 0, w: 0, h: 0 }) as PxRect;
+
+/**
+ * Composite the document into a canvas owned by the renderer that is updated IN PLACE: when only
+ * part of the document changed (a brush frame), only that area is re-composited and reported as
+ * `dirty`, so the caller (the viewport) can redraw just that part. The canvas keeps its identity
+ * across calls — do not hold on to it expecting it to stay unchanged.
+ */
+export function compositeDocumentLive(doc: Document, o: DocRenderOptions): LiveComposite {
+  const st = docState(doc, o);
+  const cur = liveStates.get(st.key);
+  if (cur && cur.canvas.width === st.rc.W && cur.canvas.height === st.rc.H) {
+    if (cur.sig === st.sig) return { canvas: cur.canvas, dirty: NO_RECT, changed: false };
+    if (cur.sig.startsWith(st.base)) {
+      const plan = planIncremental(st, cur.items, 0.7);
+      if (plan) {
+              if (plan.dirty) recomposite(st, plan, cur.canvas);
+        cur.sig = st.sig;
+        cur.items = plan.items;
+        liveStates.delete(st.key);
+        liveStates.set(st.key, cur);
+        renderStats.liveRegionRenders++;
+        return { canvas: cur.canvas, dirty: plan.dirty ?? NO_RECT, changed: !!plan.dirty };
+      }
+    }
+  }
+  renderStats.liveFullRenders++;
+  const src = compositeDocument(doc, o);
+  const entry = slots.peek<DocEntry>(st.key);
+  let canvas = cur?.canvas;
+  if (!canvas || canvas.width !== src.width || canvas.height !== src.height) canvas = fresh(src.width, src.height);
+  const k = ctx2d(canvas);
+  k.save();
+  resetDrawState(k);
+  k.clearRect(0, 0, canvas.width, canvas.height);
+  k.drawImage(src, 0, 0);
+  k.restore();
+  const known = entry && entry.sig === st.sig;
+  liveStates.delete(st.key);
+  liveStates.set(st.key, { docId: doc.id, canvas, sig: known ? st.sig : '', items: known ? entry.value.items : [] });
+  while (liveStates.size > LIVE_MAX) liveStates.delete(liveStates.keys().next().value!);
+  return { canvas, dirty: null, changed: true };
+}
+
+/** Forget live composites (of one document, or all). */
+export function dropLiveComposites(docId?: ID) {
+  if (docId === undefined) {
+    liveStates.clear();
+    return;
+  }
+  for (const [k, v] of liveStates) if (v.docId === docId) liveStates.delete(k);
 }
 
 /** Draw a layer render's pieces (no layer opacity/blend) into a fresh doc-sized canvas. */

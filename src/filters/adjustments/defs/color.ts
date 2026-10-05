@@ -5,7 +5,7 @@
 import { Camera, Gem, Palette, Pipette, Scale, Shuffle, SunMoon } from 'lucide-react';
 import type { ParamDef, ParamValues } from '../../../core/types';
 import type { FilterDef } from '../../../registry';
-import { clamp255, hslToRgbInto, luma, rgbOf, type Pixels } from '../math';
+import { applyLuts, clamp255, hslToRgbInto, luma, pixelWords, rgbOf, type Pixels } from '../math';
 import { bool, boolP, colorP, num, numP, pctP, selectP, str } from '../params';
 
 const scratch = new Float64Array(3);
@@ -116,93 +116,257 @@ export function hueSaturationPixels(img: Pixels, p: ParamValues): Pixels {
   }
 
   if (hue === 0 && sat === 0 && light === 0) return img;
+  const T = hueSatTables(sat, light);
+  // Lightness alone is a per-channel curve.
+  if (hue === 0 && sat === 0) {
+    applyLuts(img, T.lightLut);
+    return img;
+  }
+  // HSL hue rotation keeps max/min (L and S are unchanged): only the sector and the intermediate
+  // channel change. With the shift split into whole sectors K and a fraction φ, a pixel at
+  // sector k + f lands in sector k + K (+1 when f + φ ≥ 1), and C·f' only needs C·f = mid − min
+  // (even sectors) or max − mid (odd ones): no divisions. The saturation/lightness of the max
+  // and min channels only depend on (max, min) → two 64K tables; only the mid channel is computed.
   const shift = hue / 60; // in hue sectors
-  for (let i = 0, n = d.length; i < n; i += 4) {
-    if (d[i + 3] === 0) continue;
-    let r = d[i],
-      g = d[i + 1],
-      b = d[i + 2];
-    if (shift !== 0 && !(r === g && g === b)) {
-      // HSL hue rotation keeps max/min (L and S are unchanged): only the sector and the
-      // intermediate channel change. Equivalent to rgb→hsl→rotate→rgb, without trig/calls.
-      const M = r > g ? (r > b ? r : b) : g > b ? g : b;
-      const m = r < g ? (r < b ? r : b) : g < b ? g : b;
-      const C = M - m;
-      let h = M === r ? (g - b) / C : M === g ? (b - r) / C + 2 : (r - g) / C + 4;
-      h += shift;
-      h = h - 6 * Math.floor(h / 6);
-      const sector = h | 0;
-      const f = h - sector;
-      const up = m + C * f;
-      const down = M - C * f;
-      switch (sector) {
-        case 0:
-          r = M;
-          g = up;
-          b = m;
-          break;
-        case 1:
-          r = down;
-          g = M;
-          b = m;
-          break;
-        case 2:
-          r = m;
-          g = M;
-          b = up;
-          break;
-        case 3:
-          r = m;
-          g = down;
-          b = M;
-          break;
-        case 4:
-          r = up;
-          g = m;
-          b = M;
-          break;
-        default:
-          r = M;
-          g = m;
-          b = down;
+  const K = (((Math.floor(shift) % 6) + 6) % 6) | 0;
+  const phi = shift - Math.floor(shift);
+  const { packed, alpha, lightLut } = T;
+  const sat1 = 1 + sat;
+  const u = pixelWords(img);
+  if (!u) {
+    hueSatBytes(d, K, phi, sat, light, T);
+    return img;
+  }
+  // Whole pixels as little-endian words (r | g << 8 | b << 16 | a << 24): one load/store each.
+  for (let i = 0, n = u.length; i < n; i++) {
+    const p = u[i];
+    const a = p >>> 24;
+    if (a === 0) continue;
+    const r = p & 255,
+      g = (p >> 8) & 255,
+      b = (p >> 16) & 255;
+    // max / mid / min and the source sector (ties resolved like rgb→hsl: red, then green)
+    let M: number, mid: number, m: number, k: number;
+    if (r >= g) {
+      if (g >= b) {
+        M = r;
+        mid = g;
+        m = b;
+        k = 0;
+      } else if (r >= b) {
+        M = r;
+        mid = b;
+        m = g;
+        k = 5;
+      } else {
+        M = b;
+        mid = r;
+        m = g;
+        k = 4;
       }
+    } else if (r >= b) {
+      M = g;
+      mid = r;
+      m = b;
+      k = 1;
+    } else if (g >= b) {
+      M = g;
+      mid = b;
+      m = r;
+      k = 2;
+    } else {
+      M = b;
+      mid = g;
+      m = r;
+      k = 3;
     }
-    if (sat !== 0) {
-      const mx = Math.max(r, g, b);
-      const mn = Math.min(r, g, b);
-      if (mx !== mn) {
-        const L = (mx + mn) / 2; // HSL lightness (0..255)
-        if (sat > 0) {
-          // Photoshop's saturation increase (approaches full saturation without hue shifts).
-          const l01 = L / 255;
-          const delta = (mx - mn) / 255;
-          const s = l01 > 0.5 ? delta / (2 - (mx + mn) / 255) : delta / ((mx + mn) / 255);
-          let alpha = sat + s >= 1 ? s : 1 - sat;
-          alpha = alpha > 0 ? 1 / alpha - 1 : 255;
-          r = r + (r - L) * alpha;
-          g = g + (g - L) * alpha;
-          b = b + (b - L) * alpha;
-        } else {
-          r = L + (r - L) * (1 + sat);
-          g = L + (g - L) * (1 + sat);
-          b = L + (b - L) * (1 + sat);
-        }
-      }
+    const C = M - m;
+    if (C === 0) {
+      // gray: no hue, no saturation → lightness only
+      const v = lightLut[r];
+      u[i] = (a << 24) | (v << 16) | (v << 8) | v;
+      continue;
     }
-    if (light > 0) {
-      r = r + (255 - r) * light;
-      g = g + (255 - g) * light;
-      b = b + (255 - b) * light;
-    } else if (light < 0) {
-      r = r + r * light;
-      g = g + g * light;
-      b = b + b * light;
+    const X = (k & 1 ? M - mid : mid - m) + C * phi;
+    let kk = k + K;
+    let cf = X;
+    if (X >= C) {
+      kk++;
+      cf = X - C;
     }
-    d[i] = r;
-    d[i + 1] = g;
-    d[i + 2] = b;
+    if (kk >= 6) kk -= 6;
+    let v = kk & 1 ? M - cf : m + cf;
+    const t = (M << 8) | m;
+    if (sat > 0) {
+      const L = (M + m) / 2;
+      v = v + (v - L) * alpha[t];
+    } else if (sat < 0) {
+      const L = (M + m) / 2;
+      v = L + (v - L) * sat1;
+    }
+    if (light > 0) v = v + (255 - v) * light;
+    else if (light < 0) v = v + v * light;
+    const vi = v <= 0 ? 0 : v >= 255 ? 255 : (v + 0.5) | 0;
+    const pk = packed[t];
+    const hi = pk & 255,
+      lo = pk >> 8;
+    let o: number;
+    switch (kk) {
+      case 0:
+        o = hi | (vi << 8) | (lo << 16);
+        break;
+      case 1:
+        o = vi | (hi << 8) | (lo << 16);
+        break;
+      case 2:
+        o = lo | (hi << 8) | (vi << 16);
+        break;
+      case 3:
+        o = lo | (vi << 8) | (hi << 16);
+        break;
+      case 4:
+        o = vi | (lo << 8) | (hi << 16);
+        break;
+      default:
+        o = hi | (lo << 8) | (vi << 16);
+    }
+    u[i] = (a << 24) | o;
   }
   return img;
+}
+
+/** Channel (0 = r, 1 = g, 2 = b) holding the max / min / mid value in each HSL hue sector. */
+const HS_POS_MAX = new Uint8Array([0, 1, 1, 2, 2, 0]);
+const HS_POS_MIN = new Uint8Array([2, 2, 0, 0, 1, 1]);
+const HS_POS_MID = new Uint8Array([1, 0, 2, 1, 0, 2]);
+
+/** Byte-wise variant of the hue/saturation loop (big-endian hosts / unaligned buffers). */
+function hueSatBytes(d: Uint8ClampedArray, K: number, phi: number, sat: number, light: number, T: HueSatTables) {
+  const { packed, alpha, lightLut } = T;
+  const sat1 = 1 + sat;
+  for (let i = 0, n = d.length; i < n; i += 4) {
+    if (d[i + 3] === 0) continue;
+    const r = d[i],
+      g = d[i + 1],
+      b = d[i + 2];
+    let M: number, mid: number, m: number, k: number;
+    if (r >= g) {
+      if (g >= b) {
+        M = r;
+        mid = g;
+        m = b;
+        k = 0;
+      } else if (r >= b) {
+        M = r;
+        mid = b;
+        m = g;
+        k = 5;
+      } else {
+        M = b;
+        mid = r;
+        m = g;
+        k = 4;
+      }
+    } else if (r >= b) {
+      M = g;
+      mid = r;
+      m = b;
+      k = 1;
+    } else if (g >= b) {
+      M = g;
+      mid = b;
+      m = r;
+      k = 2;
+    } else {
+      M = b;
+      mid = g;
+      m = r;
+      k = 3;
+    }
+    const C = M - m;
+    if (C === 0) {
+      const v = lightLut[r];
+      d[i] = v;
+      d[i + 1] = v;
+      d[i + 2] = v;
+      continue;
+    }
+    const X = (k & 1 ? M - mid : mid - m) + C * phi;
+    let kk = k + K;
+    let cf = X;
+    if (X >= C) {
+      kk++;
+      cf = X - C;
+    }
+    if (kk >= 6) kk -= 6;
+    let v = kk & 1 ? M - cf : m + cf;
+    const t = (M << 8) | m;
+    if (sat > 0) {
+      const L = (M + m) / 2;
+      v = v + (v - L) * alpha[t];
+    } else if (sat < 0) {
+      const L = (M + m) / 2;
+      v = L + (v - L) * sat1;
+    }
+    if (light > 0) v = v + (255 - v) * light;
+    else if (light < 0) v = v + v * light;
+    const pk = packed[t];
+    d[i + HS_POS_MAX[kk]] = pk & 255;
+    d[i + HS_POS_MIN[kk]] = pk >> 8;
+    d[i + HS_POS_MID[kk]] = v;
+  }
+}
+
+interface HueSatTables {
+  sat: number;
+  light: number;
+  /** Final (saturated + lightened, rounded) value of the max channel | min channel << 8, index max·256 + min. */
+  packed: Int32Array;
+  /** Photoshop saturation-increase factor per (max, min) (sat > 0 only). */
+  alpha: Float64Array;
+  /** Lightness curve (gray pixels / lightness-only edits). */
+  lightLut: Uint8ClampedArray;
+}
+let hueSatCache: HueSatTables | null = null;
+
+/** Per-(max, min) tables of the saturation + lightness steps (cached for the last params). */
+function hueSatTables(sat: number, light: number): HueSatTables {
+  if (hueSatCache && hueSatCache.sat === sat && hueSatCache.light === light) return hueSatCache;
+  const lt = (c: number) => (light > 0 ? c + (255 - c) * light : light < 0 ? c + c * light : c);
+  const lightLut = new Uint8ClampedArray(256);
+  for (let v = 0; v < 256; v++) lightLut[v] = lt(v);
+  const packed = new Int32Array(65536);
+  const q = new Uint8ClampedArray(2); // same rounding as the pixel stores
+  const alpha = new Float64Array(sat > 0 ? 65536 : 1);
+  for (let M = 1; M < 256; M++) {
+    for (let m = 0; m < M; m++) {
+      const t = (M << 8) | m;
+      const L = (M + m) / 2; // HSL lightness (0..255)
+      let vM: number, vm: number;
+      if (sat > 0) {
+        // Photoshop's saturation increase (approaches full saturation without hue shifts).
+        const l01 = L / 255;
+        const delta = (M - m) / 255;
+        const s = l01 > 0.5 ? delta / (2 - (M + m) / 255) : delta / ((M + m) / 255);
+        let a = sat + s >= 1 ? s : 1 - sat;
+        a = a > 0 ? 1 / a - 1 : 255;
+        alpha[t] = a;
+        vM = M + (M - L) * a;
+        vm = m + (m - L) * a;
+      } else if (sat < 0) {
+        vM = L + (M - L) * (1 + sat);
+        vm = L + (m - L) * (1 + sat);
+      } else {
+        vM = M;
+        vm = m;
+      }
+      q[0] = lt(vM);
+      q[1] = lt(vm);
+      packed[t] = q[0] | (q[1] << 8);
+    }
+  }
+  hueSatCache = { sat, light, packed, alpha, lightLut };
+  return hueSatCache;
 }
 
 export const hueSaturation: FilterDef = {

@@ -6,7 +6,7 @@
 import type { Document, ID, Layer } from '../core/types';
 import { useEditor } from '../state/editor';
 import { objId, slots } from './cache';
-import { docTag, forgetLayer } from './engine';
+import { docTag, dropLiveComposites, forgetLayer } from './engine';
 import { maskTag } from './mask';
 
 function dropLayer(id: ID, l: Layer) {
@@ -38,7 +38,10 @@ export function installCacheLifecycle() {
       const b = cur[sid]?.doc;
       if (b === a || (b && b.layers === a.layers)) continue;
       dropRemoved(a, b);
-      if (!b) slots.clear(docTag(a.id), { composites: false });
+      if (!b) {
+        slots.clear(docTag(a.id), { composites: false });
+        dropLiveComposites(a.id);
+      }
     }
   });
 }

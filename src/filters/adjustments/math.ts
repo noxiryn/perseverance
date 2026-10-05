@@ -49,8 +49,48 @@ export function composeLut(first: ArrayLike<number>, second: ArrayLike<number>):
   return l;
 }
 
+/* ---------------- whole-pixel (32-bit) access ---------------- */
+
+/** True on little-endian hosts (every platform Electron ships on): RGBA bytes = r | g<<8 | b<<16 | a<<24. */
+export const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+
+/** Alpha byte of a little-endian pixel word (as a signed 32-bit mask). */
+export const ALPHA_MASK = -16777216; // 0xff000000 | 0
+
+/**
+ * The pixels as little-endian 32-bit words (one load/store per pixel instead of four), or null
+ * when that view isn't possible (big-endian host, unaligned buffer) — callers then fall back to
+ * byte access. Int32 (not Uint32) so V8 keeps the values in integer registers.
+ */
+export function pixelWords(img: Pixels): Int32Array | null {
+  const d = img.data;
+  if (!LITTLE_ENDIAN || d.byteOffset & 3 || d.length & 3) return null;
+  return new Int32Array(d.buffer, d.byteOffset, d.length >> 2);
+}
+
+/** A LUT as plain bytes, rounded/clamped exactly like a byte store of each entry. */
+export function toByteLut(l: ArrayLike<number>): Uint8Array {
+  const q = new Uint8ClampedArray(256);
+  for (let v = 0; v < 256; v++) q[v] = l[v];
+  return new Uint8Array(q.buffer);
+}
+
 /** Apply per-channel LUTs in place (alpha preserved, transparent pixels skipped). */
 export function applyLuts(img: Pixels, r: ArrayLike<number>, g: ArrayLike<number> = r, b: ArrayLike<number> = r): void {
+  const u = pixelWords(img);
+  if (u) {
+    // One word load, three byte-table loads, one word store per pixel.
+    const R = toByteLut(r),
+      G = g === r ? R : toByteLut(g),
+      B = b === r ? R : b === g ? G : toByteLut(b);
+    for (let i = 0, n = u.length; i < n; i++) {
+      const p = u[i];
+      const a = p >>> 24;
+      if (a === 0) continue;
+      u[i] = (a << 24) | (B[(p >> 16) & 255] << 16) | (G[(p >> 8) & 255] << 8) | R[p & 255];
+    }
+    return;
+  }
   const d = img.data;
   for (let i = 0, n = d.length; i < n; i += 4) {
     if (d[i + 3] === 0) continue;

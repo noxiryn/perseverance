@@ -2,7 +2,7 @@
 import { Flame, Lightbulb, Sparkle, Sun, Sunrise, SunDim, Aperture } from 'lucide-react';
 import type { FilterDef } from '../../../registry';
 import type { Img } from '../util';
-import { anchor, blurPlane, bool, clamp, hash, isEmpty, num, pt, rgb, sc, smoothstep, str, toPlanes } from '../util';
+import { anchor, blurPlane, bool, clamp, hash, isEmpty, num, pixelWords, pt, rgb, sc, smoothstep, str, toPlanes } from '../util';
 import { blurPlaneMultires, downsamplePlane, radialAccumulate, upsamplePlane } from '../ops';
 import { hasTransparency } from '../edges';
 import { boolP, colorP, numP, pctP, pointP, pxP, seedP, selectP } from '../params';
@@ -76,36 +76,146 @@ export const vignette: FilterDef = {
     const s = sc(ctx);
     const col = rgb(p.color, '#000000');
     const c = pt(p.center);
-    const cx = c.x * ctx.docWidth,
-      cy = c.y * ctx.docHeight;
-    const P = vignettePrep({
+    const shape: VignetteShape = {
       docW: ctx.docWidth,
       docH: ctx.docHeight,
-      cx,
-      cy,
+      cx: c.x * ctx.docWidth,
+      cy: c.y * ctx.docHeight,
       size: num(p.size, 0.6),
       roundness: num(p.roundness, 0),
       feather: num(p.feather, 0.5),
-    });
-    const inv = 1 / s;
-    // u per column is the same for every row
-    const U = new Float32Array(w);
-    for (let x = 0; x < w; x++) U[x] = Math.abs(ctx.offsetX + (x + 0.5) * inv - cx) * P.irx;
-    for (let y = 0; y < h; y++) {
-      const v = Math.abs(ctx.offsetY + (y + 0.5) * inv - cy) * P.iry;
-      let j = y * w * 4;
-      for (let x = 0; x < w; x++, j += 4) {
-        if (data[j + 3] === 0) continue;
-        const t = vignetteEval(U[x], v, P) * amount;
+    };
+    // The falloff only depends on the geometry → cached; amount / color edits only re-blend.
+    const map = vignetteFalloff(w, h, ctx.offsetX, ctx.offsetY, s, shape);
+    const kT = amount / 65535;
+    const c0 = col[0],
+      c1 = col[1],
+      c2 = col[2];
+    const u = pixelWords(img);
+    if (u) {
+      for (let i = 0, n = w * h; i < n; i++) {
+        const q = map[i];
+        if (q === 0) continue;
+        const px = u[i];
+        const a = px >>> 24;
+        if (a === 0) continue;
+        const t = q === 65535 ? amount : q * kT;
         if (t <= 0.0005) continue;
-        data[j] += (col[0] - data[j]) * t;
-        data[j + 1] += (col[1] - data[j + 1]) * t;
-        data[j + 2] += (col[2] - data[j + 2]) * t;
+        // convex mix of two bytes stays within 0..255: round half to even like a byte store
+        const r = px & 255,
+          g = (px >> 8) & 255,
+          b = (px >> 16) & 255;
+        const fr = r + (c0 - r) * t,
+          fg = g + (c1 - g) * t,
+          fb = b + (c2 - b) * t;
+        let ir = (fr + 0.5) | 0,
+          ig = (fg + 0.5) | 0,
+          ib = (fb + 0.5) | 0;
+        if (ir - 0.5 === fr) ir &= ~1;
+        if (ig - 0.5 === fg) ig &= ~1;
+        if (ib - 0.5 === fb) ib &= ~1;
+        u[i] = (a << 24) | (ib << 16) | (ig << 8) | ir;
       }
+      return img;
+    }
+    for (let i = 0, j = 0, n = w * h; i < n; i++, j += 4) {
+      const q = map[i];
+      if (q === 0 || data[j + 3] === 0) continue;
+      const t = q === 65535 ? amount : q * kT;
+      if (t <= 0.0005) continue;
+      data[j] += (c0 - data[j]) * t;
+      data[j + 1] += (c1 - data[j + 1]) * t;
+      data[j + 2] += (c2 - data[j + 2]) * t;
     }
     return img;
   },
 };
+
+/** Last few falloff maps (one per vignette geometry; 2 bytes per pixel). */
+const falloffCache: { key: string; map: Uint16Array }[] = [];
+
+/**
+ * Vignette strength (0..65535 ≙ 0..1) for every pixel of a w×h image placed at (ox, oy) (doc px)
+ * with the given preview scale. The shape is mirror-symmetric around the center, so each distinct
+ * row offset and each distinct column offset is evaluated once (≈ ¼ of the pixels), and only the
+ * feather band needs the root (sqrt, or the superellipse power for negative roundness).
+ */
+export function vignetteFalloff(w: number, h: number, ox: number, oy: number, s: number, o: VignetteShape): Uint16Array {
+  const key = [w, h, ox, oy, s, o.docW, o.docH, o.cx, o.cy, o.size, o.roundness, o.feather].join(',');
+  for (let k = 0; k < falloffCache.length; k++) {
+    if (falloffCache[k].key === key) {
+      const hit = falloffCache[k];
+      if (k > 0) {
+        falloffCache.splice(k, 1);
+        falloffCache.unshift(hit);
+      }
+      return hit.map;
+    }
+  }
+  const P = vignettePrep(o);
+  const inv = 1 / s;
+  // distinct |u| values: columns mirrored around the center share one evaluation
+  const colIdx = new Int32Array(w);
+  const uniq: number[] = [];
+  const seen = new Map<number, number>();
+  for (let x = 0; x < w; x++) {
+    const uu = Math.fround(Math.abs(ox + (x + 0.5) * inv - o.cx) * P.irx);
+    let k = seen.get(uu);
+    if (k === undefined) {
+      k = uniq.length;
+      uniq.push(uu);
+      seen.set(uu, k);
+    }
+    colIdx[x] = k;
+  }
+  const nu = uniq.length;
+  const round = P.rnd < 0;
+  const pw = P.pw;
+  // per distinct column: u² (or u^pw)
+  const UP = new Float64Array(nu);
+  for (let k = 0; k < nu; k++) UP[k] = round ? Math.pow(uniq[k], pw) : uniq[k] * uniq[k];
+  const e0 = P.e0,
+    e1 = P.e1,
+    span = e1 - e0;
+  // thresholds in the same (squared / powered) space: inside e0 → 0, beyond e1 → 1
+  const lo = e0 <= 0 ? -1 : round ? Math.pow(e0, pw) : e0 * e0;
+  const hi = round ? Math.pow(e1, pw) : e1 * e1;
+  const invPw = 1 / pw;
+  const rowVals = new Uint16Array(nu);
+  const map = new Uint16Array(w * h);
+  const rowOf = new Map<number, number>();
+  for (let y = 0; y < h; y++) {
+    const v = Math.abs(oy + (y + 0.5) * inv - o.cy) * P.iry;
+    const prev = rowOf.get(v);
+    if (prev !== undefined) {
+      map.copyWithin(y * w, prev * w, prev * w + w);
+      continue;
+    }
+    rowOf.set(v, y);
+    const vp = round ? Math.pow(v, pw) : v * v;
+    for (let k = 0; k < nu; k++) {
+      const sum = UP[k] + vp;
+      let q: number;
+      if (sum <= lo) q = 0;
+      else if (sum >= hi) q = 65535;
+      else {
+        const d = round ? Math.pow(sum, invPw) : Math.sqrt(sum);
+        if (d <= e0) q = 0;
+        else if (d >= e1) q = 65535;
+        else {
+          const t = (d - e0) / span;
+          q = Math.round(t * t * (3 - 2 * t) * 65535);
+        }
+      }
+      rowVals[k] = q;
+    }
+    const row = y * w;
+    for (let x = 0; x < w; x++) map[row + x] = rowVals[colIdx[x]];
+  }
+  falloffCache.unshift({ key, map });
+  if (falloffCache.length > 3) falloffCache.length = 3;
+  return map;
+}
 
 /* ------------------------------------------------------------------ */
 /* Shared: glow compositing                                            */

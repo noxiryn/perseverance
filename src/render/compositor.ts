@@ -18,6 +18,8 @@ import { applyFilterStack, makeFilterContext } from '../filters/engine';
 import { VOLATILE_ASSETS, bumpGeneration, px, renderCache, slots } from './cache';
 import {
   compositeDocument,
+  compositeDocumentLive,
+  dropLiveComposites,
   effectsSidesOf,
   filterPad,
   flattenRender,
@@ -64,6 +66,38 @@ export function renderDocument(doc: Document, opts: RenderOptions = {}): HTMLCan
     hidden: opts.hidden ?? null,
     below: opts.below ?? null,
   });
+}
+
+/** Result of renderDocumentLive. */
+export interface LiveRender {
+  /** Live composite canvas: owned by the renderer and updated IN PLACE by later calls. */
+  canvas: HTMLCanvasElement;
+  /**
+   * Area (output px = doc px × scale) that changed since the previous call for the same
+   * document/options: an empty rect (width 0) when nothing changed, null when the whole canvas
+   * must be considered new (first call, structure change, large change…).
+   */
+  dirty: Rect | null;
+  /** Whether any pixel may have changed since the previous call. */
+  changed: boolean;
+}
+
+/**
+ * Live document composite for continuous display (the viewport). Unlike renderDocument, the
+ * returned canvas is updated in place: when only part of the document changed — e.g. a brush
+ * frame touched a few hundred pixels of one layer (`bitmaps.touch(id, rect)`) — only that area
+ * is re-composited (the layers below the painted one come from a cache, adjustments above it run
+ * over the area only) and reported as `dirty`, so the caller can redraw just that part.
+ * Do not keep the canvas expecting it to stay unchanged (copy it, or use renderDocument).
+ */
+export function renderDocumentLive(doc: Document, opts: RenderOptions = {}): LiveRender {
+  const r = compositeDocumentLive(doc, {
+    scale: opts.scale ?? 1,
+    background: opts.background !== false,
+    hidden: opts.hidden ?? null,
+    below: opts.below ?? null,
+  });
+  return { canvas: r.canvas, changed: r.changed, dirty: r.dirty ? { x: r.dirty.x, y: r.dirty.y, width: r.dirty.w, height: r.dirty.h } : null };
 }
 
 /**
@@ -353,6 +387,9 @@ export function fillWithPaint(ctx: CanvasRenderingContext2D, paint: Paint, box: 
  * layer the cached layout and rasters of its text go too (e.g. after a font slice loaded).
  */
 export function invalidateRenderCache(layerId?: ID) {
+  // Live composites only track signatures: an invalidation (same signatures, new pixels) must
+  // rebuild them like the cached composites.
+  dropLiveComposites();
   if (layerId !== undefined) {
     const t = lastLayerText(layerId);
     if (t) invalidateTextLayout(t);

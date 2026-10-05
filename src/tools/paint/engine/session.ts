@@ -147,7 +147,8 @@ export class CompositeSession implements GuardedSession {
     if (!r || this.finished) return;
     this.frame = null;
     this.composite(r);
-    bitmaps.touch(this.target.bitmapId);
+    // Only `r` changed: the renderer re-composites just that region of the document.
+    bitmaps.touch(this.target.bitmapId, r);
     viewport.requestRender();
   }
 
