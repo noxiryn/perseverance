@@ -13,6 +13,12 @@ import { baseName, currentEntryId, markSavedAt, renameDocSilently } from './util
 
 export const PROJECT_FILTERS = [{ name: 'Perseverance Project', extensions: ['pgfx'] }];
 
+/** A desktop write refused by the OS: the file (or its drive) is read-only, or another app holds it. */
+function isReadOnlyError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : '';
+  return /\b(EACCES|EPERM|EROFS|EBUSY)\b/.test(msg);
+}
+
 let saving = false;
 
 /**
@@ -45,8 +51,10 @@ export async function saveDocument(docId?: ID, opts: { saveAs?: boolean } = {}):
         await writeFile(s.filePath, data);
       } catch (e) {
         // The desktop app only writes to paths the user chose (dialogs / opened projects); a path it
-        // doesn't know (e.g. from an older recent-files list) goes through Save As instead.
-        if (!isAccessDenied(e)) throw e;
+        // doesn't know (e.g. from an older recent-files list) goes through Save As instead. So does a
+        // read-only or locked file (the main process refuses to replace it).
+        if (isReadOnlyError(e)) toast(`“${fileNameOf(s.filePath)}” can't be changed (read-only or in use) — choose where to save it.`, 'info', 4200);
+        else if (!isAccessDenied(e)) throw e;
         written = false;
       }
       if (written) {

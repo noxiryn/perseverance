@@ -44,6 +44,23 @@ delete env.VITE_DEV_SERVER_URL;
 
 const results = [];
 const measurements = {};
+const sizeOf = (p) => (fs.existsSync(p) ? fs.statSync(p).size : -1);
+const mtimeOf = (p) => (fs.existsSync(p) ? fs.statSync(p).mtimeMs : -1);
+/** Print the summary and exit (also when a step throws, so one broken step doesn't hide the rest). */
+function finish(crash) {
+  if (crash) check('check script ran to the end', false, String((crash && crash.stack) || crash).split('\n').slice(0, 4).join(' | '));
+  console.log('MEASUREMENTS', JSON.stringify(measurements));
+  const failed = results.filter((r) => !r.ok);
+  console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
+  if (failed.length) {
+    console.error('FAILED:\n' + failed.map((f) => `  - ${f.name}`).join('\n'));
+    process.exit(1);
+  }
+  console.log('DESKTOP CHECK OK');
+  process.exit(0);
+}
+process.on('uncaughtException', (e) => finish(e));
+process.on('unhandledRejection', (e) => finish(e));
 function check(name, ok, detail = '') {
   results.push({ name, ok: !!ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  — ${typeof detail === 'string' ? detail : JSON.stringify(detail)}` : ''}`);
@@ -171,18 +188,20 @@ await poll(async () => fs.existsSync(poster));
 let ss = await sessions(page);
 check('Save As appends .pgfx when the name has no extension', fs.existsSync(poster) && !fs.existsSync(path.join(FILES, 'Poster')) && ss.some((s) => s.path === poster && s.name === 'Poster' && !s.dirty), { files: fs.readdirSync(FILES), sessions: ss });
 check('saved file is a PGFX container', fs.existsSync(poster) && fs.readFileSync(poster).subarray(0, 4).toString() === 'PGFX');
+// Keep going after a failed extension fix so the remaining checks still report.
+if (!fs.existsSync(poster) && fs.existsSync(path.join(FILES, 'Poster'))) fs.copyFileSync(path.join(FILES, 'Poster'), poster);
 const title = await main(app, ({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getTitle());
 check('window title follows the document', /Poster/.test(title), title);
 
 /* ---- Save As onto an existing file after the extension fix asks first ---- */
 await queueSave(app, path.join(FILES, 'Poster'));
-const mtime0 = fs.statSync(poster).mtimeMs;
+const mtime0 = mtimeOf(poster);
 const cancelled = await page.evaluate(async () => {
   const d = window.desktop;
   return d.saveFile({ title: 'Save As', defaultPath: 'Poster.pgfx', filters: [{ name: 'Perseverance Project', extensions: ['pgfx'] }], data: 'nope' });
 });
 let t = await T_(app);
-check('extension fix never silently overwrites an existing file', cancelled === null && fs.statSync(poster).mtimeMs === mtime0 && t.boxes.some((b) => /already exists/.test(b.message)), { cancelled });
+check('extension fix never silently overwrites an existing file', cancelled === null && mtimeOf(poster) === mtime0 && t.boxes.some((b) => /already exists/.test(b.message)), { cancelled });
 
 /* ---- read/write round trip ---- */
 const rt = await page.evaluate(async (p) => {
@@ -197,7 +216,7 @@ const rt = await page.evaluate(async (p) => {
   await d.writeFile(p, a);
   return { size: u.length, size2: b.length, tail: [...b.slice(-3)] };
 }, poster);
-check('writeFile/readFile round trip on a saved path', rt.size2 === rt.size + 3 && rt.tail.join() === '1,2,3' && fs.statSync(poster).size === rt.size, rt);
+check('writeFile/readFile round trip on a saved path', rt.size2 === rt.size + 3 && rt.tail.join() === '1,2,3' && sizeOf(poster) === rt.size, rt);
 check('no temp files left after writes', fs.readdirSync(FILES).every((f) => !f.endsWith('.tmp')), fs.readdirSync(FILES));
 
 /* ---- access policy ---- */
@@ -263,6 +282,64 @@ check('second instance exits and forwards its file (relative path, spaces)', chi
 const w2 = await page.evaluate((p) => window.desktop.writeFile(p, new ArrayBuffer(0)).then(() => 'ok', (e) => e.message), second);
 fs.copyFileSync(poster, second);
 check('a project opened from the OS can be saved back in place', w2 === 'ok', w2);
+
+/* ---- the same project handed over again (Explorer double-click on an open file) switches to its tab ---- */
+await page.evaluate((p) => {
+  const st = window.__app.useEditor.getState();
+  const other = Object.values(st.sessions).find((s) => s.filePath !== p);
+  if (other) st.setActiveDoc(other.doc.id);
+}, second);
+await main(
+  app,
+  ({ app: eApp }, { file, cwd, exe, root }) => eApp.emit('second-instance', {}, [exe, root, file], cwd, { argv: [exe, root, file], cwd }),
+  { file: path.relative(T, second), cwd: T, exe: electronPath, root },
+);
+const switched = await poll(
+  () =>
+    page.evaluate((p) => {
+      const st = window.__app.useEditor.getState();
+      return st.sessions[st.activeDocId]?.filePath === p;
+    }, second),
+  6000,
+);
+await wait(300);
+const copies = (await sessions(page)).filter((s) => s.path === second).length;
+check('an already-open project handed over again switches to its tab (no second copy)', !!switched && copies === 1, { switched, copies });
+
+/* ---- a read-only project: Save never replaces it and falls back to Save As ---- */
+// The check runs as any user (root bypasses permission bits), so the main process' fs.access reports
+// this one file as read-only, exactly as the OS would for a locked / read-only file.
+const locked = path.join(FILES, 'Locked.pgfx');
+fs.copyFileSync(poster, locked);
+await main(
+  app,
+  ({ app: eApp }, { file, cwd, exe, root }) => eApp.emit('second-instance', {}, [exe, root, file], cwd, { argv: [exe, root, file], cwd }),
+  { file: locked, cwd: T, exe: electronPath, root },
+);
+const lockedOpen = await poll(async () => (await sessions(page)).find((s) => s.path === locked), 8000);
+const patched = await main(app, () => {
+  const fsp = process.mainModule.require('node:fs/promises');
+  const orig = fsp.access;
+  globalThis.__t.restoreAccess = () => (fsp.access = orig);
+  fsp.access = async (p, mode) => {
+    if (String(p).endsWith('Locked.pgfx') && mode & 2) throw Object.assign(new Error(`EACCES: permission denied, access '${p}'`), { code: 'EACCES' });
+    return orig(p, mode);
+  };
+  return true;
+}).catch((e) => e.message);
+await makeDirty(page);
+const savesLocked = (await T_(app)).saves.length;
+await queueSave(app, path.join(FILES, 'Unlocked'));
+await page.evaluate(() => window.__app.commands.get('file.save').run());
+const unlocked = await poll(async () => fs.existsSync(path.join(FILES, 'Unlocked.pgfx')), 8000);
+const lockedToast = await page.evaluate(() => document.body.innerText.includes("can't be changed (read-only or in use)"));
+await main(app, () => globalThis.__t.restoreAccess?.());
+t = await T_(app);
+check(
+  'Save on a read-only project leaves it untouched and offers Save As',
+  !!lockedOpen && patched === true && unlocked && sameBytes(locked, poster) && lockedToast && t.saves.length === savesLocked + 1 && t.saves.at(-1) === locked,
+  { lockedOpen: !!lockedOpen, patched, unlocked, lockedToast, saves: t.saves.slice(savesLocked) },
+);
 
 /* ---- a file forwarded while the page is (re)loading waits for it, then opens once ---- */
 const during = path.join(FILES, 'During Reload.pgfx');
@@ -399,7 +476,7 @@ const big = await page.evaluate(async () => {
   return res;
 });
 measurements.largeFiles = big;
-check('300 MB write/read round trip', big.ok100 && big.ok300 && fs.statSync(path.join(FILES, 'big.bin')).size === 300 * 1024 * 1024, big);
+check('300 MB write/read round trip', big.ok100 && big.ok300 && sizeOf(path.join(FILES, 'big.bin')) === 300 * 1024 * 1024, big);
 fs.rmSync(path.join(FILES, 'big.bin'), { force: true });
 
 /* ---- close guard: dirty document → prompt → Cancel keeps the window ---- */
@@ -650,12 +727,4 @@ const logFile = path.join(userData, 'logs', 'main.log');
 const mainLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
 check('main-process log written (crash + warnings recorded)', /render process gone/.test(mainLog) && /close request not acknowledged/.test(mainLog), logFile);
 
-console.log('MEASUREMENTS', JSON.stringify(measurements));
-const failed = results.filter((r) => !r.ok);
-console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
-if (failed.length) {
-  console.error('FAILED:\n' + failed.map((f) => `  - ${f.name}`).join('\n'));
-  process.exit(1);
-}
-console.log('DESKTOP CHECK OK');
-process.exit(0);
+finish();

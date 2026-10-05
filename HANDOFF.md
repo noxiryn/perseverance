@@ -67,7 +67,7 @@ starting point; don't rewrite modules from scratch.
   publish one. `release/Perseverance-Setup-0.1.0.exe` on disk predates the module work (stale).
   README install/sharing/build sections describe Releases vs. Actions artifacts.
 
-## Desktop hardening (electron/, checked with scripts/electron-desktop-check.mjs — 42 checks)
+## Desktop hardening (electron/, checked with scripts/electron-desktop-check.mjs — 46 checks)
 - Security: sandbox + contextIsolation, no Node in the renderer, IPC sender-frame + type checks,
   file grants (read/write only user-chosen paths, persisted in userData), http(s)-only external links,
   navigation/popups blocked, permissions limited to local fonts/clipboard/fullscreen, CSP clean in the
@@ -76,6 +76,12 @@ starting point; don't rewrite modules from scratch.
   load — a cold start with a file argument used to spin the main process at 100% CPU and never load),
   macOS open-file, close guard with ack timeout / "Quit Anyway" / repeated-close way out / forced
   destroy after 5 s, Windows session end never blocked, window bounds restored, Save As adds `.pgfx`.
+  A project handed over again while it is open (Explorer double-click) switches to its tab instead of
+  opening a second copy. Saves keep the replaced file's permissions and refuse read-only files (POSIX
+  rename would replace them silently); Save then falls back to Save As.
+- Before → after (same check script against the f6ce5d3 electron/ files): 7/17 checks passed before the
+  run wedged (a file forwarded while the page loaded spun the main process; no close timeout, no access
+  policy, no Save As extension fix, no window state, no crash prompts) → 46/46.
 - Crash resilience: render-process-gone / unresponsive prompts (Reload / Quit), main-process log in
   `userData/logs/main.log` (uncaught exceptions, renderer console errors, crashes).
 

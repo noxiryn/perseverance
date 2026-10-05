@@ -303,7 +303,8 @@ Reference images (PNG) are on disk at `docs/reference/` (not committed): `ref1-b
   renderer without Node; every IPC handler checks the sender frame and argument types; `readFile` /
   `writeFile` only touch paths the user chose (dialogs, Explorer/Finder/argv; grants persisted in
   `userData/file-access.json`, writes only for projects and Save targets, crash-safe temp+rename);
-  Save As appends the filter's extension; `openExternal` / `window.open` / navigation hand only
+  Save As appends the filter's extension; writes keep the replaced file's mode and refuse read-only files;
+  a project handed over again while open switches to its tab; `openExternal` / `window.open` / navigation hand only
   http(s) to the browser; permissions: local fonts, clipboard, fullscreen. Single instance (argv
   forwarded, files queued until the page has loaded), close guard (the renderer must acknowledge
   `onCloseRequested`, else "Quit Anyway"; closing again while its prompt is open also offers it),

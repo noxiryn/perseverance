@@ -131,6 +131,21 @@ export function setWindowTitle(title: string) {
   desktop?.setTitle(title);
 }
 
+/**
+ * True when two desktop paths name the same file: Windows paths compare case- and slash-insensitively
+ * ("C:\Art\Poster.pgfx" = "c:/art/poster.PGFX"), macOS case-insensitively (default APFS), Linux exactly.
+ */
+export function samePath(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  const win = platformName === 'win32' || /^([a-zA-Z]:[\\/]|\\\\)/.test(a);
+  const key = (p: string) => {
+    let k = win ? p.replace(/\//g, '\\') : p;
+    if (win || platformName === 'darwin') k = k.toLowerCase();
+    return k.length > 1 ? k.replace(/[\\/]+$/, '') : k;
+  };
+  return key(a) === key(b);
+}
+
 export function fileNameOf(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }

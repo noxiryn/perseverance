@@ -4,10 +4,11 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, readdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, readdirSync, symlinkSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { samePath } from './index';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const require = createRequire(import.meta.url);
@@ -227,6 +228,62 @@ describe('atomicWrite', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('keeps the permissions of the file it replaces', async () => {
+    if (process.platform === 'win32') return;
+    const dir = tmp();
+    try {
+      const f = join(dir, 'Poster.pgfx');
+      writeFileSync(f, 'old');
+      chmodSync(f, 0o640);
+      await lib.atomicWrite(f, Buffer.from('new'));
+      expect(statSync(f).mode & 0o777).toBe(0o640);
+      expect(readFileSync(f, 'utf8')).toBe('new');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to replace a read-only file (a rename would silently ignore the lock)', async () => {
+    const dir = tmp();
+    try {
+      const f = join(dir, 'Locked.pgfx');
+      writeFileSync(f, 'old');
+      const fsp = await import('node:fs/promises');
+      let wrote = false;
+      const readOnly = {
+        realpath: fsp.realpath,
+        stat: fsp.stat,
+        access: async () => {
+          throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+        },
+        writeFile: async () => void (wrote = true),
+        unlink: fsp.unlink,
+        rename: fsp.rename,
+        copyFile: fsp.copyFile,
+      };
+      const err = await lib.atomicWrite(f, Buffer.from('new'), { fs: readOnly }).catch((e: Error & { code?: string }) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.code).toBe('EACCES');
+      expect(err.message).toMatch(/^EACCES: .*Locked\.pgfx.*read-only/);
+      expect(wrote).toBe(false);
+      expect(readFileSync(f, 'utf8')).toBe('old');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('renderer path comparison (src/platform samePath)', () => {
+  it('matches Windows paths case- and slash-insensitively, POSIX paths exactly', () => {
+    expect(samePath('C:\\Art\\Poster.pgfx', 'c:/art/POSTER.pgfx')).toBe(true);
+    expect(samePath('\\\\nas\\share\\a.pgfx', '\\\\NAS\\share\\A.PGFX')).toBe(true);
+    expect(samePath('C:\\Art\\Poster.pgfx', 'C:\\Art\\Poster2.pgfx')).toBe(false);
+    expect(samePath('/home/me/a.pgfx', '/home/me/a.pgfx')).toBe(true);
+    expect(samePath('/home/me/a.pgfx', '/home/me/A.pgfx')).toBe(false); // jsdom: not macOS
+    expect(samePath(null, '/a.pgfx')).toBe(false);
+    expect(samePath('', '')).toBe(false);
   });
 });
 

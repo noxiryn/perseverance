@@ -678,6 +678,8 @@ if (!gotLock) {
       if (w.isMinimized()) w.restore();
       w.show();
       w.focus();
+    } else if (app.isReady() && !files.length) {
+      createWindow(); // macOS: the app is still running without a window
     }
     files.forEach((p) => sendOpen(p));
   });

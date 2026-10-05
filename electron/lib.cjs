@@ -154,10 +154,27 @@ async function atomicWrite(target, buffer, deps = {}) {
   } catch {
     /* new file */
   }
+  // An existing file keeps its permissions, and a read-only one is refused: POSIX lets a rename replace
+  // a read-only file whenever its folder is writable, which would silently ignore the lock.
+  let mode = null;
+  const existing = typeof f.stat === 'function' ? await f.stat(real).catch(() => null) : null;
+  if (existing) {
+    if (typeof f.access === 'function') {
+      try {
+        await f.access(real, fs.constants.W_OK);
+      } catch (e) {
+        const err = new Error(`${e && e.code ? `${e.code}: ` : ''}“${nodePath.basename(real)}” is read-only or you don't have permission to change it`);
+        err.code = (e && e.code) || 'EACCES';
+        throw err;
+      }
+    }
+    mode = existing.mode & 0o7777;
+  }
   const dir = nodePath.dirname(real);
   const tmp = nodePath.join(dir, `.${nodePath.basename(real)}.${process.pid}.${Date.now().toString(36)}.tmp`);
   try {
     await f.writeFile(tmp, buffer);
+    if (mode !== null && process.platform !== 'win32' && typeof f.chmod === 'function') await f.chmod(tmp, mode).catch(() => {});
   } catch (e) {
     await f.unlink(tmp).catch(() => {});
     if (e && (e.code === 'EACCES' || e.code === 'EPERM' || e.code === 'EROFS')) {

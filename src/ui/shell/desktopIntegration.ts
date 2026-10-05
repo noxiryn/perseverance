@@ -2,8 +2,9 @@
  * Desktop (Electron) integration: window title + edited state, files opened from the OS,
  * close guard for unsaved documents. Also keeps document.title in sync in the browser.
  */
-import { desktop, setWindowTitle } from '../../platform';
+import { desktop, samePath, setWindowTitle, type OpenedFile } from '../../platform';
 import { useEditor } from '../../state/editor';
+import { toast } from '../../state/ui';
 import { askChoice } from './dialogs/ChoiceDialog';
 import { dirtySessions, openFileWithIo, saveSession } from './documents';
 import { windowTitle } from './docInfo';
@@ -46,6 +47,22 @@ export async function confirmQuit(): Promise<boolean> {
   return true;
 }
 
+/**
+ * A file handed over by the OS (Explorer/Finder double-click, a second instance, the command line).
+ * A project that is already open switches to its tab, like Photoshop, instead of opening a second
+ * copy whose Save would overwrite the first one's.
+ */
+export async function openFromOS(file: OpenedFile): Promise<void> {
+  const st = useEditor.getState();
+  const open = file.path ? Object.values(st.sessions).find((s) => samePath(s.filePath, file.path)) : undefined;
+  if (open) {
+    st.setActiveDoc(open.doc.id);
+    toast(`“${open.doc.name}” is already open.`, 'info');
+    return;
+  }
+  await openFileWithIo(file, { asNewDocument: true });
+}
+
 export function installDesktopIntegration(): () => void {
   if (installed) return () => {};
   installed = true;
@@ -64,7 +81,7 @@ export function installDesktopIntegration(): () => void {
   );
 
   if (desktop) {
-    unsubs.push(desktop.onOpenFile((file) => void openFileWithIo(file, { asNewDocument: true })));
+    unsubs.push(desktop.onOpenFile((file) => void openFromOS(file)));
     unsubs.push(
       desktop.onCloseRequested(async () => {
         if (closing) return;
