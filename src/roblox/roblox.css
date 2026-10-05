@@ -947,3 +947,18 @@
   color: var(--text-faint);
   margin-bottom: 6px;
 }
+
+.roblox-styler-warn {
+  margin: 0 8px 6px;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--warning, #f2b84b) 45%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--warning, #f2b84b) 10%, transparent);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}

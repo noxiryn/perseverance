@@ -4,7 +4,7 @@ import { Button, Checkbox, ColorField, Dialog, NumberField, Select } from '../..
 import type { Document } from '../../core/types';
 import { useEditor } from '../../state/editor';
 import { MAX_DOC_SIZE } from '../newDocument';
-import { isDocAligned } from '../util';
+import { backgroundLayerOf } from '../util';
 import { useDeferredSubmit } from './useDeferredSubmit';
 import '../io.css';
 
@@ -45,10 +45,10 @@ export function CanvasSizeDialog({ close, doc }: { close: (r?: CanvasSizeResult)
   const [w, setW] = useState(doc.width);
   const [h, setH] = useState(doc.height);
   const [anchor, setAnchor] = useState(4);
-  const [ext, setExt] = useState<ExtChoice>('transparent');
+  const hasBackground = !!backgroundLayerOf(doc);
+  // Like Photoshop: new canvas area takes the background color — when there is a Background layer.
+  const [ext, setExt] = useState<ExtChoice>(hasBackground ? 'background' : 'transparent');
   const [other, setOther] = useState('#808080');
-  const bottom = doc.layers[doc.rootIds[0]];
-  const hasBackground = !!bottom && bottom.type === 'raster' && isDocAligned(bottom, doc);
 
   // Values shown in the fields (relative = delta).
   const toShown = (px: number, base: number) => {
@@ -80,7 +80,9 @@ export function CanvasSizeDialog({ close, doc }: { close: (r?: CanvasSizeResult)
     }
   };
   const changed = w !== doc.width || h !== doc.height;
-  const submit = useDeferredSubmit(() => (changed ? close({ width: w, height: h, anchor, extension: extColor() }) : close()));
+  const submit = useDeferredSubmit(() =>
+    changed ? close({ width: w, height: h, anchor, extension: hasBackground ? extColor() : null }) : close(),
+  );
 
   return (
     <Dialog
@@ -143,9 +145,16 @@ export function CanvasSizeDialog({ close, doc }: { close: (r?: CanvasSizeResult)
         </div>
         <span className="ui-label">Extension</span>
         <div className="ui-row">
-          <Select value={ext} options={EXT_OPTIONS} onChange={setExt} width={150} />
-          {ext === 'other' && <ColorField value={other} onChange={setOther} />}
-          {ext !== 'transparent' && ext !== 'other' && (
+          <Select
+            value={hasBackground ? ext : 'transparent'}
+            options={EXT_OPTIONS}
+            onChange={setExt}
+            width={150}
+            disabled={!hasBackground}
+            title={hasBackground ? 'Color of the new area on the Background layer' : 'Only a Background layer is extended with a color'}
+          />
+          {hasBackground && ext === 'other' && <ColorField value={other} onChange={setOther} />}
+          {hasBackground && ext !== 'transparent' && ext !== 'other' && (
             <span className="ui-swatch" style={{ width: 20, height: 20 }}>
               <span style={{ background: extColor() ?? 'transparent' }} />
             </span>
@@ -159,8 +168,8 @@ export function CanvasSizeDialog({ close, doc }: { close: (r?: CanvasSizeResult)
         </b>
         .{' '}
         {hasBackground
-          ? 'The extension color fills new area on the Background layer.'
-          : 'There is no Background layer — new areas will be transparent.'}
+          ? 'The extension color fills new area on the Background layer; other layers keep their pixels.'
+          : 'There is no Background layer, so new areas stay transparent.'}
       </div>
     </Dialog>
   );

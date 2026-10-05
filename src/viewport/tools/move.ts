@@ -62,7 +62,14 @@ interface BandDrag {
   hits: ID[];
 }
 
-let drag: MoveDrag | TransformDrag | BandDrag | null = null;
+/** A press that cannot move anything: the explanation is shown only once the user drags. */
+interface BlockedDrag {
+  kind: 'blocked';
+  screen0: Point;
+  message: string;
+}
+
+let drag: MoveDrag | TransformDrag | BandDrag | BlockedDrag | null = null;
 
 /* ---------------- transform controls cache ---------------- */
 
@@ -205,12 +212,13 @@ function onPointerDown(e: ToolPointerEvent) {
   const cur = activeSession()!;
   const sel = topLevelIds(cur.doc, selectedIds());
   if (!sel.length) {
-    toastOnce('Select a layer to move (or turn on Auto-Select).', 'info');
+    drag = { kind: 'blocked', screen0: screen, message: 'Select a layer to move (or turn on Auto-Select).' };
     return;
   }
   const { movable } = transformableLeaves(cur.doc, sel);
   if (!movable.length) {
-    toastOnce(explain(cur.doc, sel));
+    // Clicks (e.g. a double-click to edit text) stay quiet; only an actual drag explains why nothing moves.
+    drag = { kind: 'blocked', screen0: screen, message: explain(cur.doc, sel) };
     return;
   }
   const starts = new Map<ID, Transform>();
@@ -274,6 +282,12 @@ function onPointerMove(e: ToolPointerEvent) {
     drag.session.move(e);
     return;
   }
+  if (drag.kind === 'blocked') {
+    if (Math.hypot(e.screenX - drag.screen0.x, e.screenY - drag.screen0.y) < 3) return;
+    toastOnce(drag.message, drag.message.startsWith('Select a layer') ? 'info' : 'warning');
+    drag = null;
+    return;
+  }
   if (drag.kind === 'band') {
     const b = drag;
     if (!b.moved && Math.hypot(e.screenX - b.screen0.x, e.screenY - b.screen0.y) < 3) return;
@@ -334,7 +348,7 @@ function onPointerUp() {
   const d = drag;
   drag = null;
   clearSmartGuides();
-  if (!d) return;
+  if (!d || d.kind === 'blocked') return;
   if (d.kind === 'transform') {
     const moved = d.session.end();
     if (!d.persistent) {

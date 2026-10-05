@@ -32,11 +32,12 @@ import {
   opGradient,
   opMapPoint,
   opTransform,
-  scaleTransform,
+  axisAlignment,
+  scaleTransformExact,
   trimBounds,
   type CanvasOp,
 } from './math';
-import { ensureFontsFor, isDocAligned, requireSession } from './util';
+import { backgroundLayerOf, ensureFontsFor, requireSession } from './util';
 import { MAX_DOC_SIZE } from './newDocument';
 
 const afterGeometryChange = () => {
@@ -126,16 +127,27 @@ export function resizeImage(newW: number, newH: number, opts: { method?: Resampl
   const method = opts.method ?? 'smooth';
   const k = Math.sqrt(sx * sy);
 
-  // Precompute new bitmaps outside the recipe.
-  const newRaster = new Map<ID, { id: ID; w: number; h: number }>();
+  const uniform = Math.abs(sx - sy) <= 1e-3 * Math.max(sx, sy);
+
+  // Precompute new bitmaps outside the recipe. Raster pixels are resampled along the layer's
+  // local axes, which is only right when those run along the document axes (or the scale is
+  // uniform); a non-uniform resize of a rotated/skewed layer keeps its pixels and maps the
+  // document-space stretch exactly through the transform instead.
+  const newRaster = new Map<ID, { id: ID | null; w: number; h: number; transform: Transform }>();
   const newMasks = new Map<ID, ID>();
   for (const l of Object.values(doc.layers)) {
     if (l.type === 'raster') {
       const src = bitmaps.tryGet(l.bitmapId);
-      if (src) {
-        const w = Math.max(1, Math.round(l.width * sx));
-        const h = Math.max(1, Math.round(l.height * sy));
-        newRaster.set(l.id, { id: bitmaps.add(resample(src, w, h, method)), w, h });
+      const align = uniform ? 'aligned' : axisAlignment(l.transform);
+      if (src && align !== 'oblique') {
+        const [fx, fy] = align === 'swapped' ? [sy, sx] : [sx, sy];
+        const w = Math.max(1, Math.round(l.width * fx));
+        const h = Math.max(1, Math.round(l.height * fy));
+        const cx = (l.transform.x + l.width / 2) * sx;
+        const cy = (l.transform.y + l.height / 2) * sy;
+        newRaster.set(l.id, { id: bitmaps.add(resample(src, w, h, method)), w, h, transform: { ...l.transform, x: cx - w / 2, y: cy - h / 2 } });
+      } else {
+        newRaster.set(l.id, { id: null, w: l.width, h: l.height, transform: scaleTransformExact(l.transform, l.width, l.height, sx, sy) });
       }
     }
     if (l.mask && !newMasks.has(l.mask.bitmapId)) {
@@ -167,24 +179,27 @@ export function resizeImage(newW: number, newH: number, opts: { method?: Resampl
   }
 
   // Text and shapes: scale their own properties (font size, box size…) like Photoshop, so the
-  // Character/Properties values stay meaningful — when that is exact (uniform scale, or an
-  // unrotated shape); otherwise fall back to scaling the transform.
-  const nativeScaled = new Map<ID, { text?: TextProps; shape?: ShapeProps; transform: Transform }>();
-  const uniform = Math.abs(sx - sy) <= 1e-3 * Math.max(sx, sy);
+  // Character/Properties values stay meaningful — when that is exact (uniform scale, or a shape
+  // whose axes run along the document axes); otherwise map the scale exactly through the
+  // transform (document-space stretch, any rotation/skew).
+  const scaledVector = new Map<ID, { text?: TextProps; shape?: ShapeProps; transform: Transform }>();
   for (const l of Object.values(doc.layers)) {
     if (l.type !== 'text' && l.type !== 'shape') continue;
     const t = l.transform;
     const before = getLayerSize(l);
     const cx = (t.x + before.width / 2) * sx;
     const cy = (t.y + before.height / 2) * sy;
+    const align = uniform ? 'aligned' : axisAlignment(t);
     if (l.type === 'text' && uniform) {
       const text = scaleTextProps(l.text, k);
       const after = getLayerSize({ ...l, text });
-      nativeScaled.set(l.id, { text, transform: { ...t, x: cx - after.width / 2, y: cy - after.height / 2 } });
-    } else if (l.type === 'shape' && (uniform || (!t.rotation && !t.skewX))) {
-      const shape = scaleShapeProps(l.shape, sx, sy);
+      scaledVector.set(l.id, { text, transform: { ...t, x: cx - after.width / 2, y: cy - after.height / 2 } });
+    } else if (l.type === 'shape' && align !== 'oblique') {
+      const shape = align === 'swapped' ? scaleShapeProps(l.shape, sy, sx) : scaleShapeProps(l.shape, sx, sy);
       const after = getLayerSize({ ...l, shape });
-      nativeScaled.set(l.id, { shape, transform: { ...t, x: cx - after.width / 2, y: cy - after.height / 2 } });
+      scaledVector.set(l.id, { shape, transform: { ...t, x: cx - after.width / 2, y: cy - after.height / 2 } });
+    } else {
+      scaledVector.set(l.id, { transform: scaleTransformExact(t, before.width, before.height, sx, sy) });
     }
   }
 
@@ -195,22 +210,17 @@ export function resizeImage(newW: number, newH: number, opts: { method?: Resampl
       if (l.type === 'raster') {
         const r = newRaster.get(l.id);
         if (r) {
-          const cx = (l.transform.x + l.width / 2) * sx;
-          const cy = (l.transform.y + l.height / 2) * sy;
-          l.bitmapId = r.id;
+          if (r.id) l.bitmapId = r.id;
           l.width = r.w;
           l.height = r.h;
-          l.transform = { ...l.transform, x: cx - r.w / 2, y: cy - r.h / 2 };
+          l.transform = r.transform;
         }
       } else if (l.type === 'text' || l.type === 'shape') {
-        const native = nativeScaled.get(l.id);
-        if (native) {
-          if (l.type === 'text' && native.text) l.text = native.text;
-          if (l.type === 'shape' && native.shape) l.shape = native.shape;
-          l.transform = native.transform;
-        } else {
-          const size = getLayerSize(l);
-          l.transform = scaleTransform(l.transform, size.width, size.height, sx, sy);
+        const v = scaledVector.get(l.id);
+        if (v) {
+          if (l.type === 'text' && v.text) l.text = v.text;
+          if (l.type === 'shape' && v.shape) l.shape = v.shape;
+          l.transform = v.transform;
         }
       }
       if (l.mask) l.mask = { ...l.mask, bitmapId: newMasks.get(l.mask.bitmapId) ?? l.mask.bitmapId, feather: l.mask.feather * k };
@@ -256,9 +266,9 @@ export function resizeCanvas(newW: number, newH: number, dx: number, dy: number,
   dy = Math.round(dy);
   if (newW === doc.width && newH === doc.height && !dx && !dy) return;
 
-  // Bottom doc-aligned raster layer = "Background": keep it covering the new canvas.
-  const bottom = doc.layers[doc.rootIds[0]];
-  const bg = bottom && bottom.type === 'raster' && isDocAligned(bottom, doc) ? bottom : null;
+  // The Background layer keeps covering the new canvas (new area = extension color); every other
+  // layer just moves with the canvas origin.
+  const bg = backgroundLayerOf(doc);
   let bgBitmap: ID | null = null;
   if (bg) {
     const src = bitmaps.tryGet(bg.bitmapId);

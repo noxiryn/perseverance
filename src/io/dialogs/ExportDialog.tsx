@@ -5,10 +5,12 @@ import type { Document } from '../../core/types';
 import { createCanvas, ctx2d } from '../../core/canvas';
 import { toast } from '../../state/ui';
 import {
+  afterPaint,
   encodeExport,
   EXT,
   exportSize,
   loadExportOptions,
+  renderExportPreview,
   renderForExport,
   saveExport,
   saveExportOptions,
@@ -29,8 +31,14 @@ const SCALES = [0.25, 0.5, 1, 2, 3, 4];
 
 interface Rendered {
   key: string;
+  /** Full-size export, or a reduced render of a huge one (`reduced`). */
   canvas: HTMLCanvasElement;
+  /** Encoded `canvas` (exact file for full renders; basis of the estimate for reduced ones). */
   blob: Blob | null;
+  width: number;
+  height: number;
+  reduced: boolean;
+  ratio: number;
 }
 
 export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc: Document }) {
@@ -54,13 +62,14 @@ export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc:
     setBusy(true);
     const t = window.setTimeout(async () => {
       try {
-        const canvas = await renderForExport(doc, o);
+        const p = await renderExportPreview(doc, o);
         if (id !== job.current) return;
-        setRendered({ key, canvas, blob: null });
+        const base = { key, canvas: p.canvas, width: p.width, height: p.height, reduced: p.reduced, ratio: p.ratio };
+        setRendered({ ...base, blob: null });
         setError(null);
-        const blob = await encodeExport(canvas, o);
+        const blob = await encodeExport(p.canvas, o);
         if (id !== job.current) return;
-        setRendered({ key, canvas, blob });
+        setRendered({ ...base, blob });
       } catch (e) {
         if (id === job.current) setError((e as Error).message ?? String(e));
       } finally {
@@ -105,9 +114,18 @@ export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc:
     if (saving) return;
     setSaving(true);
     try {
-      let canvas = rendered?.key === key ? rendered.canvas : null;
-      let blob = rendered?.key === key ? rendered.blob : null;
-      if (!canvas) canvas = await renderForExport(doc, o);
+      // Reuse the preview when it IS the export; huge exports are only rendered now.
+      const exact = rendered?.key === key && !rendered.reduced ? rendered : null;
+      let canvas = exact?.canvas ?? null;
+      let blob = exact?.blob ?? null;
+      if (!canvas) {
+        const full = exportSize(doc, o);
+        if (full.width * full.height > 4_000_000) {
+          toast(`Rendering ${full.width}×${full.height} px…`, 'info', 3000);
+          await afterPaint();
+        }
+        canvas = await renderForExport(doc, o);
+      }
       if (!blob) blob = await encodeExport(canvas, o);
       const name = withExtension(safeFileName(fileName.trim() || doc.name), EXT[o.format]);
       saveExportOptions(o);
@@ -124,7 +142,8 @@ export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc:
   };
 
   const submitOnEnter = useDeferredSubmit(() => void doExport());
-  const out = rendered?.key === key ? rendered.canvas : null;
+  const out = rendered?.key === key ? rendered : null;
+  const estimate = out?.blob ? out.blob.size * (out.reduced ? out.ratio : 1) : null;
   const preset = SIZE_PRESETS.find((p) => p.id === o.presetId);
   // What Cover / Fit does when the aspect ratios differ.
   let fitNote: string | null = null;
@@ -169,7 +188,7 @@ export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc:
           )}
           {out && !error && (
             <span className="io-export-badge">
-              {out.width} × {out.height} px
+              {out.width} × {out.height} px{out.reduced ? ' · reduced preview' : ''}
             </span>
           )}
           {busy && <span className="io-export-busy">Rendering…</span>}
@@ -290,7 +309,9 @@ export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc:
               {lossy ? ` · ${Math.round(o.quality * 100)}%` : ''}
             </span>
             <span>File size</span>
-            <span>{error ? '—' : rendered?.key === key && rendered.blob ? `≈ ${formatBytes(rendered.blob.size)}` : 'Estimating…'}</span>
+            <span title={out?.reduced ? 'Estimated from a reduced preview — the image is rendered at full size on export' : undefined}>
+              {error ? '—' : estimate !== null ? `≈ ${formatBytes(Math.round(estimate))}${out?.reduced ? ' (est.)' : ''}` : 'Estimating…'}
+            </span>
           </div>
         </div>
       </div>

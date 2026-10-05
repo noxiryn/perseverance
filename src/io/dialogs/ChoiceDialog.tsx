@@ -1,3 +1,4 @@
+import { useId } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { Button, Dialog } from '../../ui/controls';
 import { openDialog } from '../../state/ui';
@@ -20,15 +21,27 @@ export type ChoiceOptions = {
 
 function ChoiceDialog({ close, title, message, detail, choices, defaultValue }: ChoiceOptions & { close: (r?: string) => void }) {
   const def = defaultValue ?? choices.find((c) => c.variant === 'primary')?.value;
+  const token = useId();
+  // The shared Dialog handles Enter itself (capture phase, default prevented), so a button that
+  // has keyboard focus never receives its click: answer with the FOCUSED button (Tab to “Don't
+  // Save” + Enter must not save), falling back to the default choice.
+  const onSubmit = () => {
+    const el = document.activeElement as HTMLElement | null;
+    const focused = el?.dataset.ioChoiceOwner === token ? el.dataset.ioChoice : undefined;
+    const value = focused !== undefined && choices.some((c) => c.value === focused) ? focused : def;
+    if (value !== undefined) close(value);
+  };
   return (
     <Dialog
       title={title}
       width={440}
       onClose={() => close(undefined)}
-      onSubmit={def ? () => close(def) : undefined}
+      onSubmit={onSubmit}
       footer={choices.map((c, i) => (
         <Button
           key={c.value}
+          data-io-choice={c.value}
+          data-io-choice-owner={token}
           variant={c.variant}
           autoFocus={c.value === def || (!def && i === choices.length - 1)}
           onClick={() => close(c.value)}

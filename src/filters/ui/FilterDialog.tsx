@@ -1,33 +1,41 @@
 /**
  * Filter dialog: parameter editor + in-dialog preview (fit / 100%, before/after) + live
- * on-canvas preview (smart-filter preview or exact destructive preview in the bitmap).
+ * on-canvas preview through the store's preview() (see livePreview.ts).
+ *
+ * In-dialog preview geometry matches what OK produces:
+ *  - destructive: the layer's own pixels (or its mask) in local space, limited to the selection;
+ *    the 100% view is cropped from the full-resolution result (computed once per settings and
+ *    reused by OK);
+ *  - smart: rendered by the compositor in document space exactly like the canvas (same padding,
+ *    image box and stacking on top of the existing smart filters), cropped to the layer bounds.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from 'react';
 import { Eye, LoaderCircle, RotateCcw, SquareSplitHorizontal, WandSparkles } from 'lucide-react';
-import type { ParamValue, ParamValues } from '../../core/types';
+import type { Layer, ParamValue, ParamValues, Rect } from '../../core/types';
+import { uid } from '../../core/ids';
 import { filters, type FilterDef } from '../../registry';
 import { defaultParams } from '../engine';
 import { Button, Checkbox, Dialog, IconButton, ParamEditor } from '../../ui/controls';
 import {
-  BitmapPreview,
-  SmartPreview,
+  applyDestructive,
   applySmart,
+  cropImageData,
   effectiveMode,
   lastModeFor,
   noChangeMessage,
+  runDestructiveOn,
   selectionAlpha,
-  targetBitmapId,
-  targetContext,
   targetSource,
   type ApplyMode,
   type FilterTarget,
 } from './apply';
-import { blendSelection } from './selectionBlend';
-import { cropCanvas, fitImage, paramsKey, runOnCopy } from './preview';
+import { diffBounds } from './selectionBlend';
+import { DestructivePreview, MaskPreview, SmartPreview } from './livePreview';
+import { cropCanvas, fitImage, paramsKey } from './preview';
 import { rememberParams, rememberedParams, setLastFilter } from './memory';
 import { toast } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
-import { getLayerBounds } from '../../render/compositor';
+import { getLayerBounds, renderLayerToDoc } from '../../render/compositor';
 import './fxfilters.css';
 
 const BOX_W = 480;
@@ -42,13 +50,40 @@ export interface FilterDialogProps extends Record<string, unknown> {
   initialParams?: ParamValues;
 }
 
-interface Base {
-  img: ImageData;
-  /** preview px per local px */
-  k: number;
-  cropX: number;
-  cropY: number;
-  sel: Uint8ClampedArray | null;
+const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+/** Smart-mode frame: the layer's document bounds clipped to the canvas (doc px, integer). */
+function smartFrameOf(t: FilterTarget): Rect {
+  const doc = t.doc;
+  let b: Rect | null = null;
+  try {
+    b = getLayerBounds(doc, t.layer.id);
+  } catch {
+    b = null;
+  }
+  if (!b) b = { x: 0, y: 0, width: doc.width, height: doc.height };
+  const x0 = Math.max(0, Math.floor(b.x)),
+    y0 = Math.max(0, Math.floor(b.y));
+  const x1 = Math.min(doc.width, Math.ceil(b.x + b.width)),
+    y1 = Math.min(doc.height, Math.ceil(b.y + b.height));
+  if (x1 - x0 < 1 || y1 - y0 < 1) {
+    return { x: Math.floor(b.x), y: Math.floor(b.y), width: Math.max(1, Math.ceil(b.width)), height: Math.max(1, Math.ceil(b.height)) };
+  }
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+}
+
+/** 100% view window (frame-relative px) centred on the focus fraction. */
+function windowRect(fw: number, fh: number, focus: { x: number; y: number }): Rect {
+  const w = Math.min(BOX_W, fw),
+    h = Math.min(BOX_H, fh);
+  const x = Math.round(Math.max(0, Math.min(fw - w, focus.x * fw - w / 2)));
+  const y = Math.round(Math.max(0, Math.min(fh - h, focus.y * fh - h / 2)));
+  return { x, y, width: w, height: h };
+}
+
+/** Canvas → ImageData of its full area. */
+function canvasData(c: HTMLCanvasElement): ImageData {
+  return cropCanvas(c, 0, 0, c.width, c.height);
 }
 
 /**
@@ -85,167 +120,242 @@ export function FilterDialog({ filterId, mode, target, initialParams, close }: F
   const [slow, setSlow] = useState(false);
   const [applying, setApplying] = useState(false);
   const [offset, setOffset] = useState(() => initialOffset(target));
+  /** Centre of the 100% view as a fraction of the frame. */
+  const [focus, setFocus] = useState({ x: 0.5, y: 0.5 });
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const finished = useRef(false);
   const applyMode: ApplyMode = smart ? 'smart' : 'destructive';
   const canToggle = target.canSmart && target.canDestructive;
+  const key = paramsKey(filterId, params);
 
-  /* ---------------- sources (snapshotted at open, before any live preview) ---------------- */
-  // the destructive source must be captured before the bitmap preview writes into the bitmap
-  const [sources] = useState<Partial<Record<ApplyMode, HTMLCanvasElement>>>(() =>
-    target.canDestructive ? { destructive: targetSource(target, 'destructive') } : {},
-  );
-  const getSource = useCallback(
-    (m: ApplyMode) => {
-      let s = sources[m];
-      if (!s) {
-        s = targetSource(target, m);
-        sources[m] = s;
-      }
-      return s;
-    },
-    [sources, target],
-  );
+  /* ---------------- sources & frames ---------------- */
+  // raw local pixels (layer bitmap or mask) for destructive application
+  const localSrc = useMemo(() => (target.canDestructive ? targetSource(target, 'destructive') : null), [target]);
+  const smartFrame = useMemo(() => smartFrameOf(target), [target]);
+  const frame: Rect = applyMode === 'destructive' && localSrc ? { x: 0, y: 0, width: localSrc.width, height: localSrc.height } : smartFrame;
 
-  const srcSize = useMemo(() => {
-    const s = getSource(applyMode);
-    return { w: s.width, h: s.height };
-  }, [getSource, applyMode]);
-  const [focus, setFocus] = useState(() => ({ x: srcSize.w / 2, y: srcSize.h / 2 }));
+  // destructive: fitted base (+ selection) and full-resolution source (+ selection), lazily
+  const fitBase = useRef<{ img: ImageData; k: number; sel: Uint8ClampedArray | null } | null>(null);
+  const fullBase = useRef<{ img: ImageData; sel: Uint8ClampedArray | null } | null>(null);
+  const fitAfter = useRef<{ key: string; img: ImageData } | null>(null);
+  /** Full-resolution destructive result for one settings key (shared by the 100% view and OK). */
+  const fullAfter = useRef<{ key: string; out: ImageData; rect: Rect | null } | null>(null);
 
-  /* ---------------- preview base (fit or 100% crop) ---------------- */
-  const fitCache = useRef<Partial<Record<ApplyMode, Base>>>({});
-  const cropCache = useRef<{ key: string; base: Base } | null>(null);
-  const lastRender = useRef<{ base: Base; key: string; out: ImageData } | null>(null);
-  const getBase = useCallback((): Base => {
-    const src = getSource(applyMode);
-    const useSel = applyMode === 'destructive';
-    if (!zoom100) {
-      let b = fitCache.current[applyMode];
-      if (!b) {
-        const f = fitImage(src, BOX_W, BOX_H);
-        b = { img: f.img, k: f.k, cropX: 0, cropY: 0, sel: useSel ? selectionAlpha(target, f.img.width, f.img.height, f.k) : null };
-        fitCache.current[applyMode] = b;
-      }
-      return b;
+  const getFitBase = useCallback(() => {
+    if (!fitBase.current && localSrc) {
+      const f = fitImage(localSrc, BOX_W, BOX_H);
+      fitBase.current = { img: f.img, k: f.k, sel: selectionAlpha(target, f.img.width, f.img.height, f.k) };
     }
-    const w = Math.min(BOX_W, src.width),
-      h = Math.min(BOX_H, src.height);
-    const cx = Math.round(Math.max(0, Math.min(src.width - w, focus.x - w / 2)));
-    const cy = Math.round(Math.max(0, Math.min(src.height - h, focus.y - h / 2)));
-    const key = `${applyMode}|${cx},${cy}`;
-    if (cropCache.current?.key === key) return cropCache.current.base;
-    const base = { img: cropCanvas(src, cx, cy, w, h), k: 1, cropX: cx, cropY: cy, sel: useSel ? selectionAlpha(target, w, h, 1, cx, cy) : null };
-    cropCache.current = { key, base };
-    return base;
-  }, [applyMode, focus, getSource, target, zoom100]);
+    return fitBase.current!;
+  }, [localSrc, target]);
+  const getFullBase = useCallback(() => {
+    if (!fullBase.current && localSrc) {
+      const img = canvasData(localSrc);
+      fullBase.current = { img, sel: selectionAlpha(target, img.width, img.height, 1) };
+    }
+    return fullBase.current!;
+  }, [localSrc, target]);
+  const getFullAfter = useCallback(
+    (k: string, p: ParamValues) => {
+      if (fullAfter.current?.key !== k) {
+        const b = getFullBase();
+        const out = runDestructiveOn(def, p, target, b.img, 1, 0, 0, b.sel);
+        fullAfter.current = { key: k, out, rect: diffBounds(b.img.data, out.data, out.width, out.height) };
+      }
+      return fullAfter.current;
+    },
+    [def, getFullBase, target],
+  );
+
+  // smart: compositor renders (doc space) of the layer with / without the new filter
+  const previewInstId = useMemo(() => uid('fxdlg_'), []);
+  const layerWith = useCallback(
+    (p: ParamValues): Layer => ({ ...target.layer, filters: [...target.layer.filters, { id: previewInstId, filterId, enabled: true, params: structuredClone(p) }] }) as Layer,
+    [filterId, previewInstId, target.layer],
+  );
+  const smartRender = useCallback(
+    (layer: Layer, scale: number) => {
+      try {
+        return renderLayerToDoc(target.doc, layer, { scale, effects: false, mask: false });
+      } catch (err) {
+        console.error('[fx-filters] preview render failed', err);
+        return null;
+      }
+    },
+    [target.doc],
+  );
+  const smartBefore = useRef(new Map<number, HTMLCanvasElement | null>());
+  const smartAfterFull = useRef<{ key: string; canvas: HTMLCanvasElement | null } | null>(null);
+  const smartFitK = Math.min(1, BOX_W / smartFrame.width, BOX_H / smartFrame.height);
+  const getSmartBefore = useCallback(
+    (scale: number) => {
+      if (!smartBefore.current.has(scale)) smartBefore.current.set(scale, smartRender(target.layer, scale));
+      return smartBefore.current.get(scale) ?? null;
+    },
+    [smartRender, target.layer],
+  );
+  /** Crop a doc-space render at `scale` to a doc rect (transparent when the render is empty). */
+  const cropDoc = (c: HTMLCanvasElement | null, r: Rect, scale: number): ImageData => {
+    const w = Math.max(1, Math.round(r.width * scale)),
+      h = Math.max(1, Math.round(r.height * scale));
+    if (!c) return new ImageData(w, h);
+    return cropCanvas(c, Math.round(r.x * scale), Math.round(r.y * scale), w, h);
+  };
+
+  /** Is the current view's "after" image already computed (cheap to show)? */
+  const viewReady = (): boolean => {
+    if (!zoom100) return false;
+    return applyMode === 'destructive' ? fullAfter.current?.key === key : smartAfterFull.current?.key === key;
+  };
+
+  /** The preview image for the current view. */
+  const computeView = (showBefore: boolean): ImageData => {
+    if (applyMode === 'destructive' && localSrc) {
+      if (!zoom100) {
+        const b = getFitBase();
+        if (showBefore) return b.img;
+        if (fitAfter.current?.key !== key) fitAfter.current = { key, img: runDestructiveOn(def, params, target, b.img, b.k, 0, 0, b.sel) };
+        return fitAfter.current.img;
+      }
+      const win = windowRect(frame.width, frame.height, focus);
+      return cropImageData(showBefore ? getFullBase().img : getFullAfter(key, params).out, win);
+    }
+    if (!zoom100) {
+      if (showBefore) return cropDoc(getSmartBefore(smartFitK), smartFrame, smartFitK);
+      return cropDoc(smartRender(layerWith(params), smartFitK), smartFrame, smartFitK);
+    }
+    const win = windowRect(smartFrame.width, smartFrame.height, focus);
+    const r = { x: smartFrame.x + win.x, y: smartFrame.y + win.y, width: win.width, height: win.height };
+    if (showBefore) return cropDoc(getSmartBefore(1), r, 1);
+    if (smartAfterFull.current?.key !== key) smartAfterFull.current = { key, canvas: smartRender(layerWith(params), 1) };
+    return cropDoc(smartAfterFull.current.canvas, r, 1);
+  };
 
   /* ---------------- in-dialog preview rendering ---------------- */
   const raf = useRef(0);
+  const heavyTimer = useRef<number | undefined>(undefined);
+  /** Time the last "after" preview took (drives the live preview delay). */
+  const previewMs = useRef(0);
   useEffect(() => {
     cancelAnimationFrame(raf.current);
-    setBusy(true);
-    raf.current = requestAnimationFrame(() => {
-      const base = getBase();
+    window.clearTimeout(heavyTimer.current);
+    const showBefore = before || holding;
+    const run = () => {
       const cv = canvasRef.current;
       if (!cv) return;
-      if (cv.width !== base.img.width || cv.height !== base.img.height) {
-        cv.width = base.img.width;
-        cv.height = base.img.height;
-      }
-      const ctx = cv.getContext('2d')!;
-      if (before || holding) {
-        ctx.putImageData(base.img, 0, 0);
+      const t0 = performance.now();
+      let img: ImageData;
+      try {
+        img = computeView(showBefore);
+      } catch (err) {
+        console.error('[fx-filters] preview failed', err);
         setBusy(false);
         return;
       }
-      const key = paramsKey(filterId, params);
-      const cached = lastRender.current;
-      if (cached && cached.base === base && cached.key === key) {
-        ctx.putImageData(cached.out, 0, 0);
-        setBusy(false);
-        return;
+      if (cv.width !== img.width || cv.height !== img.height) {
+        cv.width = img.width;
+        cv.height = img.height;
       }
-      const fctx = targetContext(target, base.k, base.cropX, base.cropY);
-      const { out, ms } = runOnCopy(def, params, base.img, fctx);
-      if (base.sel) blendSelection(base.img.data, out.data, base.sel);
-      ctx.putImageData(out, 0, 0);
-      lastRender.current = { base, key, out };
-      setSlow(ms > 90);
+      cv.getContext('2d')!.putImageData(img, 0, 0);
+      const ms = performance.now() - t0;
+      if (!showBefore && !zoom100) previewMs.current = ms;
+      if (!showBefore) setSlow(ms > 90);
       setBusy(false);
-    });
-    return () => cancelAnimationFrame(raf.current);
-  }, [params, getBase, before, holding, def, target, filterId]);
+    };
+    if (zoom100 && !showBefore && !viewReady()) {
+      // full-resolution result: wait until the settings stop changing, show the spinner meanwhile
+      setBusy(true);
+      setSlow(true);
+      heavyTimer.current = window.setTimeout(run, 180);
+    } else {
+      setBusy(true);
+      raf.current = requestAnimationFrame(run);
+    }
+    return () => {
+      cancelAnimationFrame(raf.current);
+      window.clearTimeout(heavyTimer.current);
+    };
+    // computeView reads everything below
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, applyMode, zoom100, focus, before, holding]);
 
   /* ---------------- live on-canvas preview ---------------- */
   const smartPrev = useMemo(() => new SmartPreview(target.layer.id, filterId), [target.layer.id, filterId]);
-  const bmpPrev = useMemo(() => {
-    const id = targetBitmapId(target);
-    return target.canDestructive && id ? new BitmapPreview(id, target) : null;
-  }, [target]);
+  const destPrev = useMemo(() => (target.kind === 'content' && target.canDestructive && localSrc ? new DestructivePreview(target, localSrc) : null), [target, localSrc]);
+  const maskPrev = useMemo(() => (target.kind === 'mask' && localSrc ? new MaskPreview(target, localSrc) : null), [target, localSrc]);
   const liveTimer = useRef<number | undefined>(undefined);
   const lastLiveMs = useRef(0);
+  const clearLive = useCallback(() => {
+    window.clearTimeout(liveTimer.current);
+    smartPrev.clear();
+    destPrev?.clear();
+    maskPrev?.clear();
+  }, [destPrev, maskPrev, smartPrev]);
 
   useEffect(() => {
     window.clearTimeout(liveTimer.current);
     if (!live) {
-      smartPrev.clear();
-      bmpPrev?.restore();
+      clearLive();
       return;
     }
-    if (smart) bmpPrev?.restore();
-    else smartPrev.clear();
-    // throttle full-resolution previews by how long the previous one took
-    const delay = Math.min(450, 40 + lastLiveMs.current * 0.8);
+    // one preview at a time (each clear() reverts the store's preview state)
+    if (smart) {
+      destPrev?.clear();
+      maskPrev?.clear();
+    } else smartPrev.clear();
+    // the renderer computes at view scale; pace updates by how heavy the filter is
+    const isMask = !smart && target.kind === 'mask';
+    const delay = isMask ? Math.min(600, 80 + lastLiveMs.current * 1.2) : Math.min(300, 30 + previewMs.current * 1.5);
     liveTimer.current = window.setTimeout(() => {
       const t0 = performance.now();
       try {
         if (smart) smartPrev.update(params);
-        else bmpPrev?.update(def, params, paramsKey(filterId, params, 'd'));
+        else if (target.kind === 'mask') maskPrev?.update(def, params);
+        else destPrev?.update(def, params);
       } catch (err) {
         console.error('[fx-filters] live preview failed', err);
       }
       lastLiveMs.current = performance.now() - t0;
     }, delay);
     return () => window.clearTimeout(liveTimer.current);
-  }, [params, smart, live, smartPrev, bmpPrev, def, filterId]);
+  }, [params, smart, live, smartPrev, destPrev, maskPrev, def, target.kind, clearLive]);
 
-  // revert previews if the dialog goes away without OK (Esc, backdrop click, close button)
+  // revert previews if the dialog goes away without OK (Esc, close button); release the internal filter
   useEffect(
     () => () => {
       window.clearTimeout(liveTimer.current);
       if (!finished.current) {
         smartPrev.clear();
-        bmpPrev?.restore();
+        maskPrev?.clear();
       }
+      destPrev?.dispose();
+      maskPrev?.dispose();
     },
-    [smartPrev, bmpPrev],
+    [smartPrev, destPrev, maskPrev],
   );
 
   /* ---------------- actions ---------------- */
   const cancel = useCallback(() => {
     if (applying) return;
     finished.current = true;
-    window.clearTimeout(liveTimer.current);
-    smartPrev.clear();
-    bmpPrev?.restore();
+    clearLive();
     close();
-  }, [applying, bmpPrev, close, smartPrev]);
+  }, [applying, clearLive, close]);
 
   const ok = useCallback(() => {
     if (applying) return;
     setApplying(true);
     window.clearTimeout(liveTimer.current);
+    window.clearTimeout(heavyTimer.current);
     // let the "Applying…" state paint before a potentially long full-resolution run
     window.setTimeout(() => {
       try {
-        if (smart) {
-          bmpPrev?.restore();
-          smartPrev.clear();
-          applySmart(def, params, target.layer.id);
-        } else {
-          smartPrev.clear();
-          const done = bmpPrev ? bmpPrev.commit(def, params, paramsKey(filterId, params, 'd')) : false;
+        // previews must be reverted before committing (commit builds on the current state)
+        clearLive();
+        if (smart) applySmart(def, params, target.layer.id);
+        else {
+          const pre = fullAfter.current?.key === key ? fullAfter.current : undefined;
+          const done = applyDestructive(def, params, target, pre ? { out: pre.out, rect: pre.rect } : undefined);
           if (!done) toast(noChangeMessage(def, target), 'warning');
         }
         finished.current = true;
@@ -258,7 +368,21 @@ export function FilterDialog({ filterId, mode, target, initialParams, close }: F
         setApplying(false);
       }
     }, 20);
-  }, [applying, bmpPrev, close, def, filterId, params, smart, smartPrev, target.layer.id]);
+  }, [applying, clearLive, close, def, filterId, key, params, smart, target]);
+
+  /**
+   * Enter: OK — except on a focused button (activate that button, as the browser would) or a
+   * select (let it open). Text fields have already been committed by the Dialog.
+   */
+  const submit = useCallback(() => {
+    const a = document.activeElement;
+    if (a instanceof HTMLButtonElement) {
+      if (!a.disabled) a.click();
+      return;
+    }
+    if (a instanceof HTMLSelectElement) return;
+    ok();
+  }, [ok]);
 
   const onChange = useCallback((_k: string, _v: ParamValue, all: ParamValues) => setParams(all), []);
   const reset = () => setParams(defaultParams(def.params));
@@ -272,9 +396,11 @@ export function FilterDialog({ filterId, mode, target, initialParams, close }: F
     const startX = e.clientX,
       startY = e.clientY;
     const f0 = focus;
+    const fw = Math.max(1, frame.width),
+      fh = Math.max(1, frame.height);
     const move = (ev: PointerEvent) => {
       if (!zoom100) return;
-      setFocus({ x: f0.x - (ev.clientX - startX), y: f0.y - (ev.clientY - startY) });
+      setFocus({ x: clamp01(f0.x - (ev.clientX - startX) / fw), y: clamp01(f0.y - (ev.clientY - startY) / fh) });
     };
     const up = () => {
       setHolding(false);
@@ -290,10 +416,9 @@ export function FilterDialog({ filterId, mode, target, initialParams, close }: F
     if (!zoom100) {
       // zoom to 100% at the double-clicked point
       const cv = canvasRef.current;
-      const base = fitCache.current[applyMode];
-      if (cv && base) {
+      if (cv) {
         const r = cv.getBoundingClientRect();
-        setFocus({ x: (e.clientX - r.left) / base.k, y: (e.clientY - r.top) / base.k });
+        setFocus({ x: clamp01((e.clientX - r.left) / Math.max(1, r.width)), y: clamp01((e.clientY - r.top) / Math.max(1, r.height)) });
       }
     }
     setZoom100(!zoom100);
@@ -333,14 +458,12 @@ export function FilterDialog({ filterId, mode, target, initialParams, close }: F
           <span className="fxf-title">
             <Icon size={15} strokeWidth={1.75} />
             {def.name}
-            <span className="fxf-title-target">
-              {target.kind === 'mask' ? 'Layer mask' : target.layer.name}
-            </span>
+            <span className="fxf-title-target">{target.kind === 'mask' ? `Layer mask of “${target.layer.name}”` : target.layer.name}</span>
           </span>
         }
         width={DIALOG_W}
         onClose={cancel}
-        onSubmit={ok}
+        onSubmit={submit}
         footer={
           <div className="fxf-foot">
             <Checkbox checked={live} onChange={setLive} label="Preview" title="Live preview on the canvas" />
@@ -392,17 +515,13 @@ export function FilterDialog({ filterId, mode, target, initialParams, close }: F
               </div>
               <IconButton icon={before ? Eye : SquareSplitHorizontal} size="sm" active={before} title="Toggle before / after" onClick={() => setBefore(!before)} />
               <span className="fxf-dim">
-                {srcSize.w} × {srcSize.h}px{target.doc.selection && applyMode === 'destructive' ? ' · selection' : ''}
+                {frame.width} × {frame.height}px{target.doc.selection && applyMode === 'destructive' ? ' · selection' : ''}
               </span>
             </div>
             {def.description && <p className="fxf-desc">{def.description}</p>}
           </div>
           <div className="fxf-params">
-            {def.params.length ? (
-              <ParamEditor defs={def.params} values={params} onChange={onChange} />
-            ) : (
-              <div className="fxf-empty">This filter has no settings.</div>
-            )}
+            {def.params.length ? <ParamEditor defs={def.params} values={params} onChange={onChange} /> : <div className="fxf-empty">This filter has no settings.</div>}
           </div>
         </div>
         {applying && (

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Button, Checkbox, ColorField, Dialog, NumberField, Select, Slider } from '../../ui/controls';
 import { useEditor } from '../../state/editor';
-import { BLEND_OPTIONS, type StrokeSpec } from '../fillStroke';
+import { BLEND_OPTIONS, useTransparencyLocked, type StrokeSpec } from '../fillStroke';
 import type { StrokeLocation } from '../math';
 import { readJSON, writeJSON } from '../util';
 import { useDeferredSubmit } from './useDeferredSubmit';
@@ -17,6 +17,7 @@ const LOCATIONS: { value: StrokeLocation; label: string }[] = [
 
 export function StrokeDialog({ close }: { close: (r?: StrokeSpec) => void }) {
   const primary = useEditor((st) => st.primaryColor);
+  const transparencyLock = useTransparencyLocked();
   const [spec, setSpec] = useState<StrokeSpec>(() => ({
     width: 4,
     location: 'center',
@@ -67,7 +68,13 @@ export function StrokeDialog({ close }: { close: (r?: StrokeSpec) => void }) {
         <span className="ui-label">Opacity</span>
         <Slider value={Math.round(spec.opacity * 100)} min={1} max={100} unit="%" onChange={(v) => set('opacity', v / 100)} />
         <span />
-        <Checkbox checked={spec.preserveTransparency} onChange={(v) => set('preserveTransparency', v)} label="Preserve Transparency" />
+        <Checkbox
+          checked={spec.preserveTransparency || transparencyLock}
+          disabled={transparencyLock}
+          onChange={(v) => set('preserveTransparency', v)}
+          label="Preserve Transparency"
+          title={transparencyLock ? 'The layer locks transparent pixels, so only existing pixels are changed' : 'Only change pixels that are not transparent'}
+        />
       </div>
     </Dialog>
   );

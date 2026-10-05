@@ -11,9 +11,9 @@ import { activeSession, useEditor } from '../state/editor';
 import { toast, useUI } from '../state/ui';
 import { viewport } from '../editor/viewport';
 import { isTypingTarget } from '../ui/shortcuts';
-import { placeCanvas, placeImageBlob } from './open';
+import { placeCanvas } from './open';
 import { drawDocCanvasOnMask, drawDocCanvasOnRaster, pixelTarget, selectionClippedFill, selectionRect } from './pixels';
-import { rasterToDocCanvas, requireSession } from './util';
+import { baseName, rasterToDocCanvas, requireSession } from './util';
 
 interface ClipData {
   canvas: HTMLCanvasElement;
@@ -246,18 +246,24 @@ async function readSystemImage(): Promise<Blob | null> {
   return null;
 }
 
-/** Paste an image that came from the system clipboard (another app) as a new centered layer. */
+/**
+ * Paste an image that came from the system clipboard (another app) as a new layer, centered at
+ * 1:1 like Photoshop — never resampled (a screenshot pasted into a same-sized thumbnail fills it).
+ */
 function pasteExternal(external: HTMLCanvasElement, name = 'Pasted Image') {
   const s = activeSession();
-  const id = placeCanvas(external, s ? nextLayerName(s.doc) : name, { label: 'Paste', quiet: true });
-  const placed = id ? activeSession()?.doc.layers[id] : null;
-  const scaled = placed && placed.type === 'raster' && placed.width !== external.width;
+  if (!s) {
+    placeCanvas(external, name, { label: 'Paste', quiet: true });
+    toast('Pasted into a new document', 'success', 2200);
+    return;
+  }
+  const at = { x: Math.round((s.doc.width - external.width) / 2), y: Math.round((s.doc.height - external.height) / 2) };
+  placeCanvas(external, nextLayerName(s.doc), { at, label: 'Paste', quiet: true });
+  const larger = external.width > s.doc.width || external.height > s.doc.height;
   toast(
-    s
-      ? `Pasted ${external.width}×${external.height} image${scaled && placed.type === 'raster' ? ` (scaled to ${placed.width}×${placed.height} to fit)` : ''}`
-      : 'Pasted into a new document',
+    `Pasted ${external.width}×${external.height} image${larger ? ' — larger than the canvas; use Free Transform (Ctrl+T) to scale it' : ''}`,
     'success',
-    2200,
+    larger ? 3600 : 2200,
   );
 }
 
@@ -315,11 +321,7 @@ export function installPasteListener() {
     const file = img?.getAsFile();
     if (file) {
       e.preventDefault();
-      const name = file.name && file.name !== 'image.png' ? file.name : 'Pasted Image';
-      if (!clip) {
-        void placeImageBlob(file, name);
-        return;
-      }
+      const name = file.name && file.name !== 'image.png' ? baseName(file.name) : 'Pasted Image';
       void decode(file).then((external) => {
         if (!external) return void toast('The pasted image could not be read.', 'error');
         if (preferSystem(external, clip)) pasteExternal(external, name);

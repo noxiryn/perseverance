@@ -118,6 +118,17 @@ async function resolveTarget(s: DocSession, action: string): Promise<ReturnType<
   return choice === 'new' ? 'new' : null;
 }
 
+/** True when the active layer's "Lock transparent pixels" forces Preserve Transparency (pixel content, not a mask). */
+export function transparencyLocked(s: DocSession | null): boolean {
+  const t = s ? pixelTarget(s) : null;
+  return !!t && t.kind === 'raster' && !!t.layer.locks.transparency;
+}
+
+/** React hook form of `transparencyLocked` for the dialogs. */
+export function useTransparencyLocked(): boolean {
+  return useEditor((st) => transparencyLocked(st.activeDocId ? (st.sessions[st.activeDocId] ?? null) : null));
+}
+
 /** Apply a doc-space source canvas to the target (one undo step). */
 function applySource(
   s: DocSession,
@@ -137,8 +148,12 @@ function applySource(
     if (o.blendMode !== 'normal') layer.blendMode = o.blendMode;
     useEditor.getState().addLayer(layer, { label });
   } else {
+    // A layer with "Lock transparent pixels" always preserves transparency (Photoshop behaviour).
+    const preserveTransparency = o.preserveTransparency || (target.kind === 'raster' && !!target.layer.locks.transparency);
     const patch =
-      target.kind === 'mask' ? drawDocCanvasOnMask(target.bitmapId, src, rect, o) : drawDocCanvasOnRaster(target.layer, src, rect, o);
+      target.kind === 'mask'
+        ? drawDocCanvasOnMask(target.bitmapId, src, rect, o)
+        : drawDocCanvasOnRaster(target.layer, src, rect, { ...o, preserveTransparency });
     if (!patch) {
       toast('The area does not overlap the layer.', 'info');
       return;

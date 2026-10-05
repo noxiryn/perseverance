@@ -13,6 +13,7 @@ import { resolveParams } from '../../filters/engine';
 import { uid } from '../../core/ids';
 import type { Layer, ParamValue } from '../../core/types';
 import { viewport } from '../../editor/viewport';
+import { bitmaps } from '../../core/bitmaps';
 import '../roblox.css';
 import { STYLES, applyBuiltStyleDraft, buildStyle, readStylerMeta, resolveControls, setControlDraft, styleById, type ResolvedControl, type StyleDef } from './styles';
 
@@ -38,6 +39,23 @@ export function applyStyle(layerId: string, style: StyleDef | null) {
     if (l) applyBuiltStyleDraft(l, built);
   });
   viewport.requestRender();
+}
+
+/**
+ * True when a pixel layer still has an opaque background (its border is fully opaque and no
+ * mask hides it): the styles' face shadow, rims and outlines need a cut-out character.
+ */
+function hasOpaqueBackground(layer: Layer): boolean {
+  if (layer.type !== 'raster' || (layer.mask && layer.mask.enabled !== false) || !bitmaps.has(layer.bitmapId)) return false;
+  const c = bitmaps.get(layer.bitmapId);
+  const w = c.width,
+    h = c.height;
+  const pts: [number, number][] = [[0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1], [w >> 1, 0], [0, h >> 1], [w - 1, h >> 1], [w >> 1, h - 1]];
+  try {
+    return pts.every(([x, y]) => bitmaps.read(layer.bitmapId, { x, y, width: 1, height: 1 }).data[3] === 255);
+  } catch {
+    return false;
+  }
 }
 
 function QuickButton({ icon: Icon, label, onClick, active, title }: { icon: typeof Box; label: string; onClick: () => void; active?: boolean; title?: string }) {
@@ -102,6 +120,7 @@ export function StylerPanel() {
   const meta = stylable ? readStylerMeta(layer) : null;
   const style = styleById(meta?.style);
   const controls = useMemo(() => (layer && style ? resolveControls(style, layer) : []), [layer, style]);
+  const opaqueBg = useMemo(() => (layer && stylable ? hasOpaqueBackground(layer) : false), [layer, stylable]);
   const avail = useMemo(() => {
     void filterList;
     void effectList;
@@ -147,6 +166,14 @@ export function StylerPanel() {
               </>
             )}
           </div>
+          {opaqueBg && (
+            <div className="roblox-styler-warn">
+              <span>This layer still has its background — the face shadow, rims and outlines follow the whole picture.</span>
+              <button type="button" className="roblox-link" onClick={() => runCommand('roblox.removeBackground')}>
+                Remove Background…
+              </button>
+            </div>
+          )}
           <div className="roblox-styler-grid">
             {STYLES.map((s) => {
               const ok = avail(s);
@@ -177,7 +204,6 @@ export function StylerPanel() {
             <div className="roblox-styler-controls">
               <div className="roblox-hint">
                 Pick a style to turn your character into a toon, comic, noir, crimson, gothic or neon look. Switching styles replaces only what the styler added.
-                {meta === null && layer.type === 'raster' && ' Tip: remove the background first so outlines and rims follow the character.'}
               </div>
             </div>
           )}

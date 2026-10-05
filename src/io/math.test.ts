@@ -20,6 +20,9 @@ import {
   pushRecent,
   safeFileName,
   scaleTransform,
+  scaleTransformExact,
+  turnAffine,
+  axisAlignment,
   strokeCoverage,
   toPsdBlend,
   trimBounds,
@@ -316,4 +319,89 @@ describe('gradient fills under canvas rotation', () => {
         expect(o.offsetX).toBeCloseTo(oa.x - a.x, 9);
         expect(o.offsetY).toBeCloseTo(oa.y - a.y, 9);
       });
+});
+
+describe('layer turn affine (masks follow Edit ▸ Transform)', () => {
+  const turns: LayerTurn[] = ['flipH', 'flipV', 'rotate90cw', 'rotate90ccw', 'rotate180'];
+  for (const op of turns)
+    it(`${op} affine equals turnPoint`, () => {
+      const pivot = { x: 123.5, y: -40 };
+      const A = turnAffine(op, pivot);
+      for (const [x, y] of [
+        [0, 0],
+        [10, 3],
+        [-7, 250],
+        [123.5, -40],
+      ]) {
+        const want = turnPoint(op, x, y, pivot);
+        expect(A.a * x + A.c * y + A.e).toBeCloseTo(want.x, 9);
+        expect(A.b * x + A.d * y + A.f).toBeCloseTo(want.y, 9);
+      }
+    });
+});
+
+describe('Image Size of rotated/skewed layers (exact decomposition)', () => {
+  it('classifies axis alignment', () => {
+    const t = (rotation: number, skewX = 0): Transform => ({ x: 0, y: 0, scaleX: 1, scaleY: 1, rotation, skewX });
+    expect(axisAlignment(t(0))).toBe('aligned');
+    expect(axisAlignment(t(180))).toBe('aligned');
+    expect(axisAlignment(t(-180))).toBe('aligned');
+    expect(axisAlignment(t(90))).toBe('swapped');
+    expect(axisAlignment(t(-90))).toBe('swapped');
+    expect(axisAlignment(t(30))).toBe('oblique');
+    expect(axisAlignment(t(0, 10))).toBe('oblique');
+  });
+
+  const cases: Transform[] = [
+    { x: 40, y: 60, scaleX: 1, scaleY: 1, rotation: 90 },
+    { x: 40, y: 60, scaleX: 1, scaleY: 1, rotation: 30 },
+    { x: -10, y: 300, scaleX: -1, scaleY: 2, rotation: -135, skewX: 12 },
+    { x: 5, y: 5, scaleX: 0.5, scaleY: -1.5, rotation: 200, skewX: -20 },
+    { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 },
+  ];
+  const w = 160,
+    h = 90;
+  for (const t of cases)
+    for (const [sx, sy] of [
+      [2, 1],
+      [0.5, 1.25],
+      [1.5, 1.5],
+    ])
+      it(`maps every local point like the document scale (rot ${t.rotation}, skew ${t.skewX ?? 0}, ${sx}×${sy})`, () => {
+        const before = matrix(t, w, h);
+        const r = scaleTransformExact(t, w, h, sx, sy);
+        const after = matrix(r, w, h);
+        for (const [u, v] of [
+          [0, 0],
+          [w, 0],
+          [w, h],
+          [0, h],
+          [37, 61],
+        ]) {
+          const p = apply(before, u, v);
+          const got = apply(after, u, v);
+          expect(got.x).toBeCloseTo(p.x * sx, 6);
+          expect(got.y).toBeCloseTo(p.y * sy, 6);
+        }
+        // Keeps the sign of the horizontal scale (a flipped layer stays flipped).
+        expect(Math.sign(r.scaleX)).toBe(Math.sign(t.scaleX));
+      });
+
+  it('a 90°-rotated layer scaled 2× horizontally gets wider on the document, not taller', () => {
+    const t: Transform = { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 90 };
+    const r = scaleTransformExact(t, 100, 50, 2, 1);
+    // Local y axis runs along document x after a 90° turn → scaleY doubles.
+    expect(r.scaleX).toBeCloseTo(1, 9);
+    expect(r.scaleY).toBeCloseTo(2, 9);
+    expect(r.rotation).toBeCloseTo(90, 9);
+    expect(r.skewX ?? 0).toBeCloseTo(0, 9);
+  });
+
+  it('does not add a skew property to upright layers', () => {
+    const t: Transform = { x: 10, y: 20, scaleX: 1, scaleY: 1, rotation: 0 };
+    const r = scaleTransformExact(t, 100, 50, 2, 3);
+    expect('skewX' in r).toBe(false);
+    expect(r.scaleX).toBeCloseTo(2, 9);
+    expect(r.scaleY).toBeCloseTo(3, 9);
+  });
 });

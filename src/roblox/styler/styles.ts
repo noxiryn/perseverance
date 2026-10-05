@@ -178,7 +178,8 @@ export const STYLES: StyleDef[] = [
       topShade(0.42, 0.7),
       {
         key: 'base',
-        options: [{ filterId: 'toon-roblox', params: { levels: 3, saturation: -100, shadowColor: '#000000', shadowStrength: 0.7, shadowThreshold: 0.5, outlineWidth: 2, edges: 0.3 } }],
+        // 4 tones: with 3, skin was lifted to near-white (a pale band under the hair shadow).
+        options: [{ filterId: 'toon-roblox', params: { levels: 4, saturation: -100, shadowColor: '#000000', shadowStrength: 0.7, shadowThreshold: 0.42, outlineWidth: 2, edges: 0.3 } }],
       },
     ],
     effects: [{ key: 'shadow', effectId: 'drop-shadow', params: { color: '#000000', opacity: 0.85, angle: 135, distance: 26, spread: 0.1, size: 28, blendMode: 'multiply' } }],

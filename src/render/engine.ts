@@ -104,7 +104,9 @@ interface MoveInfo {
   /** Raw output-px translation of the layer when `base` was built. */
   e: number;
   f: number;
-  /** Clip growth: a shifted region must stay inside expandSides(doc, clip) to be unclipped. */
+  /** Unclipped padded region of the base (content raster bounds grown by effects/filters). */
+  full: PxRect;
+  /** Document clip growth: regions are clipped to expandSides(doc, clip). */
   clip: Sides;
 }
 
@@ -575,7 +577,10 @@ class LayerFields implements EffectFields {
     if (e) renderStats.fieldHits++;
     else {
       renderStats.fieldComputes++;
-      const B = fieldBucket(maxDist);
+      // A shallower field of the same content exists: a size is being dragged up — compute
+      // with more headroom so the drag recomputes only every ~60% of growth.
+      const growing = this.inherited.some((f) => f.mode === mode && f.maxDist < maxDist);
+      const B = growing ? Math.max(fieldBucket(maxDist), Math.ceil(maxDist * 1.6 + 2)) : fieldBucket(maxDist);
       const rect = expandRect(abs, B - maxDist);
       const a = this.alpha({ x: rect.x - reg.x, y: rect.y - reg.y, w: rect.w, h: rect.h });
       e = { mode, maxDist: B, rect, src: { ...reg }, data: edgeDistance(a, rect.w, rect.h, mode, B) };
@@ -679,8 +684,12 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
       if (!wholePx(ddx) || !wholePx(ddy)) continue;
       const dx = Math.round(ddx);
       const dy = Math.round(ddy);
+      // Valid when everything a fresh render would hold at the new position (its clipped
+      // region) is inside the shifted base: pixels the base lacked (clipped away near the
+      // document edge) must not move into view.
+      const need = intersectRect(shiftRect(mv.full, dx, dy), expandSides({ x: 0, y: 0, w: rc.W, h: rc.H }, mv.clip));
+      if (!need || !containsRect(shiftRect(mv.base.region, dx, dy), need)) continue;
       const moved = shiftRender(mv.base, dx, dy, contentSig(rc, l, flags));
-      if (!containsRect(expandSides({ x: 0, y: 0, w: rc.W, h: rc.H }, mv.clip), moved.region)) continue;
       moved.move = mv;
       renderStats.translateHits++;
       slots.set(key, sig, moved, 0, { layerId: l.id, max: 2, res: renderResources(moved) });
@@ -696,11 +705,14 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
     r = null;
   }
   if (r && tsig && geom && !(r.core && borrowed.has(r.core))) {
-    // Only unclipped renders can be shifted (a clipped one is missing pixels elsewhere).
+    // Renders whose region is exactly the document-clipped padded region can be shifted
+    // (not those cut further by the canvas size limit).
     const grow = addSides(flags.effects ? effectsSidesOf(l, rc.s) : NO_SIDES, flags.filters ? filterPad(l.filters, rc.s) : 0);
     const b = boundsOfMatrixRect(geom.m, geom.local);
     const full = expandSides(coverRect(b.x, b.y, b.w, b.h), grow);
-    if (sameRect(full, r.region)) r.move = { sig: tfull, base: r, e: geom.m.e, f: geom.m.f, clip: flipSides(grow) };
+    const clip = flipSides(grow);
+    const expected = intersectRect(full, expandSides({ x: 0, y: 0, w: rc.W, h: rc.H }, clip));
+    if (expected && sameRect(expected, r.region)) r.move = { sig: tfull, base: r, e: geom.m.e, f: geom.m.f, full, clip };
   }
   slots.set(key, sig, r, 0, { layerId: l.id, max: 2, res: renderResources(r) });
   return r;

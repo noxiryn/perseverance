@@ -133,6 +133,19 @@ export function isDocAligned(layer: RasterLayer, doc: Document): boolean {
   );
 }
 
+/**
+ * The document's "Background" layer: the bottom root layer when it is a raster layer named
+ * "Background" that exactly covers the canvas (new documents, opened images and PSD backgrounds).
+ * Canvas Size paints the extension color into it; an ordinary bottom layer (e.g. "Layer 1" of a
+ * transparent document) is never treated as a background.
+ */
+export function backgroundLayerOf(doc: Document): RasterLayer | null {
+  const bottom = doc.layers[doc.rootIds[0]];
+  if (!bottom || bottom.type !== 'raster') return null;
+  if (bottom.name.trim().toLowerCase() !== 'background') return null;
+  return isDocAligned(bottom, doc) ? bottom : null;
+}
+
 /** Raster layer's pixels drawn into a doc-sized canvas (no effects/opacity). */
 export function rasterToDocCanvas(doc: Document, layer: RasterLayer, scale = 1): HTMLCanvasElement {
   const out = createCanvas(doc.width * scale, doc.height * scale);
@@ -194,9 +207,26 @@ export function refreshView() {
   viewport.requestRender();
 }
 
-/** Selected transformable layers (or the active one), excluding locked ones. */
+/** Child → parent group id for every layer in a group. */
+export function parentIndex(doc: Document): Map<ID, ID> {
+  const m = new Map<ID, ID>();
+  for (const l of Object.values(doc.layers)) if (l.type === 'group') for (const c of l.childIds) m.set(c, l.id);
+  return m;
+}
+
+/** True when the layer or any group containing it locks position (or everything). */
+export function isPositionLocked(doc: Document, id: ID, parents: Map<ID, ID> = parentIndex(doc)): boolean {
+  for (let cur: ID | undefined = id; cur; cur = parents.get(cur)) {
+    const l = doc.layers[cur];
+    if (l && (l.locks.all || l.locks.position)) return true;
+  }
+  return false;
+}
+
+/** Selected transformable layers (or the active one; groups expanded), excluding position-locked ones. */
 export function selectedTransformables(s: DocSession): TransformableLayer[] {
   const ids = s.selectedLayerIds.length ? s.selectedLayerIds : s.activeLayerId ? [s.activeLayerId] : [];
+  const parents = parentIndex(s.doc);
   const out: TransformableLayer[] = [];
   const add = (l: Layer | undefined) => {
     if (!l) return;
@@ -204,12 +234,33 @@ export function selectedTransformables(s: DocSession): TransformableLayer[] {
       for (const c of l.childIds) add(s.doc.layers[c]);
       return;
     }
-    if ((l.type === 'raster' || l.type === 'text' || l.type === 'shape') && !l.locks.all && !l.locks.position) {
+    if ((l.type === 'raster' || l.type === 'text' || l.type === 'shape') && !isPositionLocked(s.doc, l.id, parents)) {
       if (!out.includes(l)) out.push(l);
     }
   };
   for (const id of ids) add(s.doc.layers[id]);
   return out;
+}
+
+/**
+ * Layers whose (document-space) masks must follow a transform of `targets`: the targets
+ * themselves plus every selected group containing them (and nested groups), skipping
+ * position-locked layers.
+ */
+export function maskFollowers(s: DocSession, targets: TransformableLayer[]): Layer[] {
+  const doc = s.doc;
+  const parents = parentIndex(doc);
+  const ids = s.selectedLayerIds.length ? s.selectedLayerIds : s.activeLayerId ? [s.activeLayerId] : [];
+  const out = new Map<ID, Layer>();
+  for (const t of targets) if (t.mask) out.set(t.id, t);
+  const visitGroup = (id: ID) => {
+    const l = doc.layers[id];
+    if (!l || l.type !== 'group') return;
+    if (l.mask && !isPositionLocked(doc, id, parents)) out.set(id, l);
+    l.childIds.forEach(visitGroup);
+  };
+  ids.forEach(visitGroup);
+  return [...out.values()];
 }
 
 /** Yield to the browser (idle time when available) — keeps long async jobs from freezing the UI. */

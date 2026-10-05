@@ -354,7 +354,8 @@ export const ioCommands: CommandDef[] = [
     menu: 'Edit',
     group: '20-clipboard',
     order: 60,
-    shortcut: 'Delete',
+    // Backspace is the delete key on Mac keyboards.
+    shortcut: 'Delete / Backspace',
     icon: Trash2,
     keywords: ['delete', 'erase selection', 'remove'],
     enabled: hasDoc,

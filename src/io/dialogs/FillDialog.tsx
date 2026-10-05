@@ -3,7 +3,7 @@ import { Button, Checkbox, ColorField, Dialog, Select, Slider } from '../../ui/c
 import { assets, useRegistry, type AssetDef } from '../../registry';
 import { useEditor } from '../../state/editor';
 import { defaultParams } from '../../filters/engine';
-import { BLEND_OPTIONS, type FillContents, type FillSpec } from '../fillStroke';
+import { BLEND_OPTIONS, useTransparencyLocked, type FillContents, type FillSpec } from '../fillStroke';
 import { readJSON, writeJSON } from '../util';
 import { useDeferredSubmit } from './useDeferredSubmit';
 import '../io.css';
@@ -106,6 +106,7 @@ function PatternThumb({ def }: { def: AssetDef }) {
 
 export function FillDialog({ close }: { close: (r?: FillSpec) => void }) {
   const [spec, setSpec] = useState<FillSpec>(() => ({ ...DEFAULTS, ...readJSON<Partial<FillSpec>>(KEY, {}) }));
+  const transparencyLock = useTransparencyLocked();
   const primary = useEditor((st) => st.primaryColor);
   const secondary = useEditor((st) => st.secondaryColor);
   const allAssets = useRegistry(assets);
@@ -214,7 +215,13 @@ export function FillDialog({ close }: { close: (r?: FillSpec) => void }) {
         <span className="ui-label">Opacity</span>
         <Slider value={Math.round(spec.opacity * 100)} min={1} max={100} unit="%" onChange={(v) => set('opacity', v / 100)} />
         <span />
-        <Checkbox checked={spec.preserveTransparency} onChange={(v) => set('preserveTransparency', v)} label="Preserve Transparency" />
+        <Checkbox
+          checked={spec.preserveTransparency || transparencyLock}
+          disabled={transparencyLock}
+          onChange={(v) => set('preserveTransparency', v)}
+          label="Preserve Transparency"
+          title={transparencyLock ? 'The layer locks transparent pixels, so only existing pixels are changed' : 'Only change pixels that are not transparent'}
+        />
       </div>
     </Dialog>
   );

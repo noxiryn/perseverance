@@ -91,33 +91,51 @@ export function documentOpaqueBounds(doc: Document) {
   };
 }
 
-/** Render the export image. */
-export async function renderForExport(doc: Document, o: ExportOptions): Promise<HTMLCanvasElement> {
-  await ensureFontsFor(doc);
-  const fill = o.format === 'jpeg' || o.fillBackground;
-  const region = o.trim ? documentOpaqueBounds(doc) : null;
-  if (o.trim && !region) throw new Error('the image is completely transparent — nothing to export after trimming');
-  const src = region ?? { x: 0, y: 0, width: doc.width, height: doc.height };
-  const preset = SIZE_PRESETS.find((p) => p.id === o.presetId);
+/** Where the document lands in the export: source region, output size, scale and offset. */
+export interface ExportPlan {
+  /** Doc-space source region (the whole document, or the trimmed bounds). */
+  region: { x: number; y: number; width: number; height: number };
+  width: number;
+  height: number;
+  /** Doc → output scale. */
+  scale: number;
+  /** Top-left of the scaled region in the output (letterbox / cover offset). */
+  dx: number;
+  dy: number;
+  fill: boolean;
+}
 
-  let scale: number;
-  let out: HTMLCanvasElement;
-  let dx: number, dy: number;
+/** Plan an export (throws when trimming leaves nothing). */
+export function planExport(doc: Document, o: ExportOptions): ExportPlan {
+  const fill = o.format === 'jpeg' || o.fillBackground;
+  const trimmed = o.trim ? documentOpaqueBounds(doc) : null;
+  if (o.trim && !trimmed) throw new Error('the image is completely transparent — nothing to export after trimming');
+  const region = trimmed ?? { x: 0, y: 0, width: doc.width, height: doc.height };
+  const preset = SIZE_PRESETS.find((p) => p.id === o.presetId);
   if (preset) {
-    const f = fitRect(src.width, src.height, preset.width, preset.height, o.fit);
-    scale = f.scale;
-    out = createCanvas(preset.width, preset.height);
-    dx = f.x;
-    dy = f.y;
-  } else {
-    scale = Math.max(0.01, Math.min(8, o.scale));
-    out = createCanvas(src.width * scale, src.height * scale);
-    dx = 0;
-    dy = 0;
+    const f = fitRect(region.width, region.height, preset.width, preset.height, o.fit);
+    return { region, width: preset.width, height: preset.height, scale: f.scale, dx: f.x, dy: f.y, fill };
   }
+  const scale = Math.max(0.01, Math.min(8, o.scale));
+  return {
+    region,
+    width: Math.max(1, Math.round(region.width * scale)),
+    height: Math.max(1, Math.round(region.height * scale)),
+    scale,
+    dx: 0,
+    dy: 0,
+    fill,
+  };
+}
+
+/** Render a plan, uniformly reduced by `k` (≤ 1) for previews. */
+function drawPlan(doc: Document, o: ExportOptions, plan: ExportPlan, k = 1): HTMLCanvasElement {
+  const out = createCanvas(Math.max(1, Math.round(plan.width * k)), Math.max(1, Math.round(plan.height * k)));
+  const scale = plan.scale * k;
+  const src = plan.region;
   const full = renderDocument(doc, { scale, background: true });
   const ctx = ctx2d(out);
-  if (fill) {
+  if (plan.fill) {
     ctx.fillStyle = o.background || '#ffffff';
     ctx.fillRect(0, 0, out.width, out.height);
   }
@@ -129,12 +147,52 @@ export async function renderForExport(doc: Document, o: ExportOptions): Promise<
     src.y * scale,
     src.width * scale,
     src.height * scale,
-    Math.round(dx),
-    Math.round(dy),
+    Math.round(plan.dx * k),
+    Math.round(plan.dy * k),
     Math.round(src.width * scale),
     Math.round(src.height * scale),
   );
   return out;
+}
+
+/** Render the export image at full size. */
+export async function renderForExport(doc: Document, o: ExportOptions): Promise<HTMLCanvasElement> {
+  await ensureFontsFor(doc);
+  return drawPlan(doc, o, planExport(doc, o));
+}
+
+/** Outputs above this many pixels are previewed (and their file size estimated) from a reduced render. */
+export const LARGE_EXPORT_PIXELS = 8_000_000;
+/** Pixel budget of a reduced preview render. */
+const PREVIEW_PIXELS = 2_000_000;
+
+export interface ExportPreview {
+  canvas: HTMLCanvasElement;
+  /** Full export size. */
+  width: number;
+  height: number;
+  /** True when `canvas` is a reduced render (the full image is rendered on export). */
+  reduced: boolean;
+  /** Full pixels ÷ preview pixels — scales an encoded preview's byte count into an estimate. */
+  ratio: number;
+}
+
+/**
+ * Render for the Export dialog: full size for ordinary outputs, a reduced render for huge ones
+ * (e.g. a 4× thumbnail at 7680×4320) so changing options never freezes the dialog.
+ */
+export async function renderExportPreview(doc: Document, o: ExportOptions): Promise<ExportPreview> {
+  await ensureFontsFor(doc);
+  const plan = planExport(doc, o);
+  const px = plan.width * plan.height;
+  const k = px > LARGE_EXPORT_PIXELS ? Math.sqrt(PREVIEW_PIXELS / px) : 1;
+  const canvas = drawPlan(doc, o, plan, k);
+  return { canvas, width: plan.width, height: plan.height, reduced: k < 1, ratio: px / (canvas.width * canvas.height) };
+}
+
+/** Wait until the browser has painted (so a toast / busy state shows before a long synchronous render). */
+export function afterPaint(): Promise<void> {
+  return new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
 }
 
 export function encodeExport(canvas: HTMLCanvasElement, o: ExportOptions): Promise<Blob> {
@@ -159,6 +217,10 @@ export async function quickExportPng() {
     return;
   }
   try {
+    if (s.doc.width * s.doc.height > LARGE_EXPORT_PIXELS) {
+      toast(`Rendering ${s.doc.width}×${s.doc.height} px…`, 'info', 2500);
+      await afterPaint();
+    }
     const canvas = await renderForExport(s.doc, { ...DEFAULT_EXPORT, format: 'png' });
     const blob = await encodeExport(canvas, { ...DEFAULT_EXPORT, format: 'png' });
     const res = await saveExport(blob, `${safeFileName(s.doc.name)}.png`, 'png');

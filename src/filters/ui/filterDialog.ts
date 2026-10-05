@@ -1,8 +1,9 @@
 /**
  * CONTRACT (owned by the fx-filters module): open the filter dialog with live preview for
  * a registered filter and apply it to the active layer.
- *  - mode 'auto' (default): smart filter for non-raster layers, destructive for raster layers
- *    unless the user ticks "Smart Filter";
+ *  - mode 'auto' (default): smart filter for non-raster layers, destructive for (unlocked) raster
+ *    layers unless the user ticks "Smart Filter"; when the layer mask is being edited the filter
+ *    is applied to the mask (any layer type);
  *  - 'smart': add to layer.filters; 'destructive': bake into the raster bitmap (respecting the
  *    selection).
  * Resolves when the dialog closes.
@@ -38,5 +39,6 @@ export async function openFilterDialogWith(filterId: string, mode: 'auto' | Appl
     else setLastFilter({ filterId, params: p, mode });
     return;
   }
-  await openDialog<unknown, FilterDialogProps>(FilterDialog, { filterId, mode, target: r.target, initialParams: params });
+  // clicks on the (visible) canvas must not discard the settings: only Cancel / Esc close it
+  await openDialog<unknown, FilterDialogProps>(FilterDialog, { filterId, mode, target: r.target, initialParams: params }, { closeOnBackdrop: false });
 }

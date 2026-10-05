@@ -131,13 +131,19 @@ export function distanceToOutside(inside: Uint8Array, w: number, h: number, bord
   return d;
 }
 
-/** Separable 3-pass box blur of a float channel (≈ gaussian with sigma ≈ radius/2). In place. */
+/**
+ * Separable 3-pass box blur of a float channel (≈ gaussian with sigma ≈ radius/2), edges clamped.
+ * In place. Both passes walk memory row by row (the vertical pass keeps one running sum per
+ * column), which is several times faster than a strided column walk on large images.
+ */
 export function blurFloat(buf: Float32Array, w: number, h: number, radius: number): Float32Array {
   const r = Math.round(radius / 2);
   if (r < 1 || w < 2 || h < 2) return buf;
   const tmp = new Float32Array(buf.length);
+  const acc = new Float64Array(w);
   const iarr = 1 / (r + r + 1);
   for (let pass = 0; pass < 3; pass++) {
+    // Horizontal: buf → tmp
     for (let y = 0; y < h; y++) {
       const row = y * w;
       const first = buf[row];
@@ -150,15 +156,21 @@ export function blurFloat(buf: Float32Array, w: number, h: number, radius: numbe
         val -= x - r >= 0 ? buf[row + x - r] : first;
       }
     }
-    for (let x = 0; x < w; x++) {
-      const first = tmp[x];
-      const last = tmp[(h - 1) * w + x];
-      let val = (r + 1) * first;
-      for (let j = 0; j < r; j++) val += tmp[Math.min(j, h - 1) * w + x];
-      for (let y = 0; y < h; y++) {
-        val += y + r < h ? tmp[(y + r) * w + x] : last;
-        buf[y * w + x] = val * iarr;
-        val -= y - r >= 0 ? tmp[(y - r) * w + x] : first;
+    // Vertical: tmp → buf (running sums for all columns at once)
+    const lastRow = (h - 1) * w;
+    for (let x = 0; x < w; x++) acc[x] = (r + 1) * tmp[x];
+    for (let j = 0; j < r; j++) {
+      const row = Math.min(j, h - 1) * w;
+      for (let x = 0; x < w; x++) acc[x] += tmp[row + x];
+    }
+    for (let y = 0; y < h; y++) {
+      const add = y + r < h ? (y + r) * w : lastRow;
+      const sub = y - r >= 0 ? (y - r) * w : 0;
+      const out = y * w;
+      for (let x = 0; x < w; x++) {
+        const v = acc[x] + tmp[add + x];
+        buf[out + x] = v * iarr;
+        acc[x] = v - tmp[sub + x];
       }
     }
   }

@@ -14,8 +14,7 @@ import { activeSession } from '../../state/editor';
 import { toast } from '../../state/ui';
 import { renderDocument } from '../../render/compositor';
 import { renderPlaceholderCharacter } from '../../roblox/placeholder';
-import { applyDestructive, applySmart, committedDoc, effectiveMode, lastModeFor, noChangeMessage, resolveTarget, selectionAlpha, targetContext, targetSource, type FilterTarget } from './apply';
-import { blendSelection } from './selectionBlend';
+import { applyDestructive, applySmart, committedDoc, effectiveMode, lastModeFor, noChangeMessage, resolveTarget, runDestructiveOn, selectionAlpha, targetContext, targetSource, type FilterTarget } from './apply';
 import { fitImage, paramsKey, runOnCopy } from './preview';
 import { getLastFilter, rememberParams, rememberedParams, setLastFilter } from './memory';
 import { categoriesOf, isBrowsableFilter, matchesQuery, sortFilters } from './galleryModel';
@@ -211,19 +210,23 @@ export function FilterGallery({ initialFilterId, close }: FilterGalleryProps & {
         const b = bigBase;
         c.width = b.img.width;
         c.height = b.img.height;
-        const fctx = t
-          ? targetContext(t, b.k)
-          : makeFilterContext({ docWidth: src.docW, docHeight: src.docH, offsetX: 0, offsetY: 0, scale: b.img.width / src.docW });
-        const { out, ms } = runOnCopy(sel, params, b.img, fctx);
-        if (b.sel) blendSelection(b.img.data, out.data, b.sel);
+        const t0 = performance.now();
+        let out: ImageData;
+        if (t && !smart) out = runDestructiveOn(sel, params, t, b.img, b.k, 0, 0, b.sel);
+        else {
+          const fctx = t
+            ? targetContext(t, b.k)
+            : makeFilterContext({ docWidth: src.docW, docHeight: src.docH, offsetX: 0, offsetY: 0, scale: b.img.width / src.docW });
+          out = runOnCopy(sel, params, b.img, fctx).out;
+        }
         c.getContext('2d')!.putImageData(out, 0, 0);
-        slowRef.current = ms > 120;
+        slowRef.current = performance.now() - t0 > 120;
         setBusy(false);
       },
       slowRef.current ? 40 : 0,
     );
     return () => window.clearTimeout(timer.current);
-  }, [sel, params, bigBase, t, src]);
+  }, [sel, params, bigBase, t, src, smart]);
 
   // keep the selected thumbnail in view when filtering/searching
   useEffect(() => {
@@ -258,13 +261,54 @@ export function FilterGallery({ initialFilterId, close }: FilterGalleryProps & {
   const onChange = useCallback((_k: string, _v: ParamValue, allP: ParamValues) => setParams(allP), []);
   const Icon = sel?.icon ?? WandSparkles;
 
+  /**
+   * Keyboard: Enter in the search box selects the first match (it never applies — the Dialog gets
+   * no onSubmit, so Enter on a thumbnail or button just activates it); Ctrl/Cmd+Enter applies.
+   */
+  const onKeyDownCapture = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'Enter' || e.repeat) return;
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      apply();
+      return;
+    }
+    const el = e.target as HTMLElement;
+    if (el instanceof HTMLInputElement && el.closest('.fxf-cats')) {
+      e.preventDefault();
+      const first = shown[0];
+      if (first) {
+        select(first.id);
+        // move focus to the selected thumbnail so arrow/Enter keep working from there
+        window.setTimeout(() => (gridRef.current?.querySelector('.fxf-thumb.active') as HTMLElement | null)?.focus(), 0);
+      }
+    }
+  };
+
+  /** Arrow keys move the selection through the visible thumbnails. */
+  const onGridKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const keys: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -1, ArrowDown: 1 };
+    if (!(e.key in keys) || !shown.length) return;
+    const grid = gridRef.current;
+    const first = grid?.querySelector('.fxf-thumb') as HTMLElement | null;
+    // columns from the layout (thumbnails are equal width)
+    const cols = grid && first ? Math.max(1, Math.floor((grid.clientWidth + 8) / (first.offsetWidth + 8))) : 1;
+    const step = e.key === 'ArrowUp' || e.key === 'ArrowDown' ? keys[e.key] * cols : keys[e.key];
+    const i = Math.max(0, shown.findIndex((f) => f.id === selId));
+    const next = shown[Math.max(0, Math.min(shown.length - 1, i + step))];
+    e.preventDefault();
+    if (next && next.id !== selId) {
+      select(next.id);
+      window.setTimeout(() => (gridRef.current?.querySelector('.fxf-thumb.active') as HTMLElement | null)?.focus(), 0);
+    }
+  };
+
   return (
-    <div className="fxf-gallery-wrap">
+    <div className="fxf-gallery-wrap" onKeyDownCapture={onKeyDownCapture}>
       <Dialog
         title="Filter Gallery"
         width="min(1240px, calc(100vw - 60px))"
         onClose={() => !applying && close()}
-        onSubmit={apply}
         footer={
           <div className="fxf-foot">
             <span className="fxf-source" title={src.reason}>
@@ -285,7 +329,7 @@ export function FilterGallery({ initialFilterId, close }: FilterGalleryProps & {
             <Button onClick={() => close()} disabled={applying}>
               Cancel
             </Button>
-            <Button variant="primary" onClick={apply} disabled={!t || !sel || applying}>
+            <Button variant="primary" onClick={apply} disabled={!t || !sel || applying} title="Apply the selected filter (Ctrl+Enter)">
               {applying ? 'Applying…' : 'Apply'}
             </Button>
           </div>
@@ -307,7 +351,7 @@ export function FilterGallery({ initialFilterId, close }: FilterGalleryProps & {
               ))}
             </div>
           </div>
-          <div className="fxf-grid" ref={gridRef}>
+          <div className="fxf-grid" ref={gridRef} onKeyDown={onGridKeyDown}>
             {shown.length === 0 && <div className="fxf-empty">No filters match “{query}”.</div>}
             {shown.map((f) => {
               const FI = f.icon ?? WandSparkles;

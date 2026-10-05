@@ -4,6 +4,9 @@
  */
 import type { FilterCategory, FilterDef } from '../../registry';
 
+/** Internal filter used for destructive on-canvas previews (never listed). */
+export const LIVE_PREVIEW_FILTER_ID = 'fx-live-preview';
+
 export const CATEGORY_ORDER: FilterCategory[] = [
   'Stylize',
   'Comic & Print',
@@ -31,6 +34,7 @@ export function categoryRank(c: string): number {
  * Light filter, so it is kept.
  */
 export function isBrowsableFilter(f: FilterDef): boolean {
+  if (f.id === LIVE_PREVIEW_FILTER_ID) return false;
   if (!f.adjustment) return true;
   return f.category !== 'Adjustments' && f.category !== 'Color';
 }
