@@ -214,3 +214,116 @@ export function makeBuffer(width: number, height: number, fill?: [number, number
   if (fill) for (let i = 0; i < data.length; i += 4) data.set(fill, i);
   return { data, width, height };
 }
+
+/* ------------------------------------------------------------------ */
+/* Content frame (padding-aware neighbourhood operations)              */
+/* ------------------------------------------------------------------ */
+
+export interface ContentFrame {
+  /** Bounds of the pixels with alpha > 0 (inclusive). */
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  /**
+   * Sides where the content is CUT (by the layer box or the canvas edge) rather than ending in a
+   * silhouette: a straight opaque run covers at least half of that side. Neighbourhood operations
+   * (rim light, outlines, edge detection, blurs) extend the content beyond cut sides instead of
+   * treating the transparent padding there as background.
+   */
+  cut: { left: boolean; right: boolean; top: boolean; bottom: boolean };
+  /** True when the content itself (inside its bounds) has transparent pixels — an alpha-shaped subject. */
+  transparent: boolean;
+}
+
+/**
+ * Analyse where the content of a buffer is. Smart filters receive the layer padded with a
+ * transparent margin, so "has transparent pixels" is NOT a reliable signal of a cut-out subject:
+ * an opaque photo covering the canvas arrives framed by transparency. Only transparency inside
+ * the content bounds counts, and straight opaque runs along a bound mark a cut side.
+ */
+export function contentFrame(img: PixelBuffer, minShare = 0.002, cutShare = 0.5): ContentFrame | null {
+  const b = alphaBounds(img, 0);
+  if (!b) return null;
+  const { width: w, data: d } = img;
+  const bw = b.x1 - b.x0 + 1,
+    bh = b.y1 - b.y0 + 1;
+  // Transparency inside the content bounds.
+  let count = 0;
+  const need = Math.max(1, Math.floor(bw * bh * minShare));
+  let transparent = false;
+  for (let y = b.y0; y <= b.y1 && !transparent; y++) {
+    let p = (y * w + b.x0) * 4 + 3;
+    for (let x = b.x0; x <= b.x1; x++, p += 4) {
+      if (d[p] < 250 && ++count >= need) {
+        transparent = true;
+        break;
+      }
+    }
+  }
+  const longestRun = (x: number, y: number, dx: number, dy: number, len: number) => {
+    let best = 0,
+      run = 0;
+    for (let k = 0; k < len; k++) {
+      if (d[((y + dy * k) * w + (x + dx * k)) * 4 + 3] >= 200) {
+        if (++run > best) best = run;
+      } else run = 0;
+    }
+    return best / len;
+  };
+  return {
+    ...b,
+    cut: {
+      top: longestRun(b.x0, b.y0, 1, 0, bw) >= cutShare,
+      bottom: longestRun(b.x0, b.y1, 1, 0, bw) >= cutShare,
+      left: longestRun(b.x0, b.y0, 0, 1, bh) >= cutShare,
+      right: longestRun(b.x1, b.y0, 0, 1, bh) >= cutShare,
+    },
+    transparent,
+  };
+}
+
+export interface FrameField {
+  buf: Float32Array;
+  W: number;
+  H: number;
+  /** Image coordinate of the field's (0, 0): image x = field x + ox. */
+  ox: number;
+  oy: number;
+}
+
+/**
+ * Float field covering the content bounds plus a margin `m`. Inside the bounds it holds
+ * `value(pixelIndex)`; beyond cut sides the edge values are replicated (content continues);
+ * beyond silhouette sides it holds `fill` (transparent background).
+ */
+export function frameField(img: PixelBuffer, f: ContentFrame, m: number, value: (i: number) => number, fill = 0): FrameField {
+  const w = img.width;
+  const M = Math.max(0, Math.ceil(m));
+  const W = f.x1 - f.x0 + 1 + 2 * M,
+    H = f.y1 - f.y0 + 1 + 2 * M;
+  const ox = f.x0 - M,
+    oy = f.y0 - M;
+  const buf = new Float32Array(W * H);
+  // Column source map for one row (−1 = fill).
+  const colSrc = new Int32Array(W);
+  for (let fx = 0; fx < W; fx++) {
+    const x = fx + ox;
+    colSrc[fx] = x < f.x0 ? (f.cut.left ? f.x0 : -1) : x > f.x1 ? (f.cut.right ? f.x1 : -1) : x;
+  }
+  for (let fy = 0; fy < H; fy++) {
+    const y = fy + oy;
+    const sy = y < f.y0 ? (f.cut.top ? f.y0 : -1) : y > f.y1 ? (f.cut.bottom ? f.y1 : -1) : y;
+    const row = fy * W;
+    if (sy < 0) {
+      if (fill !== 0) buf.fill(fill, row, row + W);
+      continue;
+    }
+    const base = sy * w;
+    for (let fx = 0; fx < W; fx++) {
+      const sx = colSrc[fx];
+      buf[row + fx] = sx < 0 ? fill : value(base + sx);
+    }
+  }
+  return { buf, W, H, ox, oy };
+}

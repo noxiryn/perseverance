@@ -9,25 +9,63 @@
  *   - `behind`: behind-stage effects, each composited with its own blend mode.
  * The accumulator then draws behind pieces and the core with the layer opacity/blend mode.
  *
+ * Regions: the padded region grows per side by the layer effects' reach (a shadow only grows it
+ * in its own direction) and is clipped to the part of the document those effects can affect.
+ * Effects receive the full raster extent of the content (`bounds`, including text stroke/warp/
+ * descender and smart-filter overflow) and the layout box separately (`paintBox`).
+ *
  * Caching: LayerRenders live in per-layer slots keyed by a signature (object identity of the
  * layer + bitmap/mask versions + descendants for groups + scale/doc size), so during a live
- * preview only the changed layer re-renders. The document composite and the accumulator right
- * after each top-level adjustment layer are cached too (editing above an adjustment does not
- * re-run its filter).
+ * preview only the changed layer re-renders. Within a re-render:
+ *   - a moved layer reuses its previous render shifted by whole pixels (translation reuse),
+ *   - an effect-only edit reuses the previous masked/filtered content (content reuse) and the
+ *     distance fields computed from it (strokes/bevels only re-map coverage).
+ * The document composite and the accumulator right after each top-level adjustment layer are
+ * cached too (editing above an adjustment does not re-run its filter). Every cached canvas and
+ * field is counted once against the slot budget, however many entries share it.
  */
-import type { AdjustmentLayer, Document, FilterInstance, GroupLayer, ID, Layer, LayerMask, Paint, Rect } from '../core/types';
+import type { AdjustmentLayer, Document, FilterInstance, GroupLayer, ID, Layer, LayerMask, Paint, Rect, TextProps } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
 import { ctx2d } from '../core/canvas';
 import { transformMatrix } from '../core/geometry';
 import { effects, filters, type EffectDef } from '../registry';
 import { applyFilterStack, compositeOp, makeFilterContext, resolveParams, runFilter } from '../filters/engine';
-import { cacheGeneration, objId, px, slots } from './cache';
+import { cacheGeneration, objId, px, slots, type Resource } from './cache';
+import { edgeDistance } from './distance';
 import { applyMask, lerpInto, maskAlpha } from './mask';
 import { fillWithPaint } from './paint';
 import { renderShapeContent, shapeLocalBounds } from './shapes';
-import { layoutTextProps, renderTextContent, textFontReady, textLocalBounds, type LocalContent } from './text';
-import { MAX_SIDE, acquire, coverRect, expandRect, fresh, intersectRect, release, unionRect, type PxRect } from './surface';
-import { effectClips, effectReach, effectStage, effectTranslationSafe, type EffectArgsExt } from './effects';
+import { layoutTextProps, renderTextContent, textCacheEpoch, textFontReady, textLocalBounds, type LocalContent } from './text';
+import {
+  MAX_SIDE,
+  NO_SIDES,
+  acquire,
+  addSides,
+  containsRect,
+  coverRect,
+  expandRect,
+  expandSides,
+  flipSides,
+  fresh,
+  intersectRect,
+  maxSide,
+  maxSides,
+  release,
+  sameRect,
+  unionRect,
+  type PxRect,
+  type Sides,
+} from './surface';
+import {
+  effectClips,
+  effectExtent,
+  effectStage,
+  effectTranslationSafe,
+  type DistanceMode,
+  type EffectArgsExt,
+  type EffectFields,
+  type LocalRect,
+} from './effects';
 
 /* ================================================================== */
 /* Types                                                               */
@@ -46,6 +84,29 @@ export interface BehindPiece {
   op: GlobalCompositeOperation;
 }
 
+/** A distance field of a layer's content (absolute output px). */
+export interface FieldEntry {
+  mode: DistanceMode;
+  /** Distances are exact below this value. */
+  maxDist: number;
+  /** Area covered by `data`. */
+  rect: PxRect;
+  /** Content area the field was computed from (alpha outside it was taken as 0). */
+  src: PxRect;
+  data: Float32Array;
+}
+
+/** Translation reuse info: the unshifted render a moved layer's render is derived from. */
+interface MoveInfo {
+  sig: string;
+  base: LayerRender;
+  /** Raw output-px translation of the layer when `base` was built. */
+  e: number;
+  f: number;
+  /** Clip growth: a shifted region must stay inside expandSides(doc, clip) to be unclipped. */
+  clip: Sides;
+}
+
 export interface LayerRender {
   /** Canvas placement in output px. */
   region: PxRect;
@@ -54,8 +115,16 @@ export interface LayerRender {
   /** Masked + filtered content at full alpha. */
   shape: HTMLCanvasElement | null;
   behind: BehindPiece[];
-  /** Layer content bounds in output px (the layer's box), unclipped. */
+  /** Layer layout box in output px, unclipped. */
   bounds: PxRect;
+  /** @internal Signature of `shape` (content + transform + filters + mask), see contentSig. */
+  csig?: string;
+  /** @internal Raster extent of the content (output px, unclipped). */
+  extent?: PxRect;
+  /** @internal Distance fields of `shape`, reusable by renders with the same csig. */
+  fields?: FieldEntry[];
+  /** @internal Translation reuse. */
+  move?: MoveInfo;
 }
 
 /** Per-call render context. */
@@ -91,7 +160,18 @@ interface Acc {
 const borrowed = new WeakSet<HTMLCanvasElement>();
 
 /** Simple counters for profiling (window.__app tests read them). */
-export const renderStats = { layerRenders: 0, layerHits: 0, translateHits: 0, docRenders: 0, docHits: 0, adjustments: 0, snapshotHits: 0 };
+export const renderStats = {
+  layerRenders: 0,
+  layerHits: 0,
+  translateHits: 0,
+  contentReuse: 0,
+  fieldHits: 0,
+  fieldComputes: 0,
+  docRenders: 0,
+  docHits: 0,
+  adjustments: 0,
+  snapshotHits: 0,
+};
 
 /* ================================================================== */
 /* Context & signatures                                                */
@@ -122,6 +202,11 @@ export function containsId(doc: Document, g: GroupLayer, id: ID): boolean {
   return false;
 }
 
+/** Text-state fragment of signatures: font generation, text epoch, face readiness. */
+function textStateSig(t: TextProps): string {
+  return `g${cacheGeneration()}e${textCacheEpoch()}${textFontReady(t) ? 'r' : 'p'}`;
+}
+
 /** Signature of a layer's render (content, effects, mask; descendants for groups). */
 export function layerSig(rc: RC, l: Layer): string {
   const memo = rc.sigMemo.get(l);
@@ -129,9 +214,9 @@ export function layerSig(rc: RC, l: Layer): string {
   let s = String(objId(l));
   if (l.type === 'raster') s += `.${bitmaps.version(l.bitmapId)}`;
   if (l.mask) s += `m${bitmaps.version(l.mask.bitmapId)}`;
-  // Text re-renders when fonts finish loading (generation bump) or its own face becomes ready
-  // (covers documents that are not open, e.g. template previews).
-  if (l.type === 'text') s += `g${cacheGeneration()}${textFontReady(l.text) ? 'r' : 'p'}`;
+  // Text re-renders when fonts finish loading (generation bump), when a font slice loads (text
+  // epoch) or when its own face becomes ready (covers documents that are not open).
+  if (l.type === 'text') s += textStateSig(l.text);
   if (l.type === 'group') s += `[${listSig(rc, l.childIds, { stopped: false })}]`;
   rc.sigMemo.set(l, s);
   return s;
@@ -165,6 +250,38 @@ export function listSig(rc: RC, ids: ID[], st: { stopped: boolean }): string {
     }
   }
   return out;
+}
+
+/**
+ * Signature of a layer's masked + filtered content canvas (`shape`): everything it depends on
+ * EXCEPT effects, opacity, fill opacity and blend mode. Renders with equal content signatures
+ * share content pixels and distance fields (an effect-only edit never re-draws the content,
+ * re-runs smart filters or re-applies the mask).
+ */
+function contentSig(rc: RC, l: Layer, flags: RenderFlags): string {
+  let s: string;
+  switch (l.type) {
+    case 'raster':
+      s = `r${l.bitmapId}.${bitmaps.version(l.bitmapId)}.${l.width}x${l.height}|t${objId(l.transform)}`;
+      break;
+    case 'text':
+      s = `t${objId(l.text)}${textStateSig(l.text)}|t${objId(l.transform)}`;
+      break;
+    case 'shape':
+      s = `s${objId(l.shape)}|t${objId(l.transform)}`;
+      break;
+    case 'fill':
+      s = `f${objId(l.fill)}`;
+      break;
+    case 'group':
+      s = `g[${listSig(rc, l.childIds, { stopped: false })}]`;
+      break;
+    default:
+      s = `x${objId(l)}`;
+  }
+  if (flags.filters && hasFilters(l.filters)) s += `|f${objId(l.filters)}`;
+  if (flags.mask && l.mask?.enabled) s += `|m${objId(l.mask)}.${bitmaps.version(l.mask.bitmapId)}`;
+  return `${s}|${rc.W}x${rc.H}|${rc.s}`;
 }
 
 /* ================================================================== */
@@ -208,15 +325,16 @@ export function filterPad(list: FilterInstance[] | undefined, s: number): number
   return pad > 0 ? Math.ceil(pad * s) + 2 : 0;
 }
 
-/** Max effect reach (output px). */
-export function effectsReachOf(l: Layer, s: number): number {
-  return effectsReach(l, s);
+/** Per-side reach (output px) of a layer's enabled effects. */
+export function effectsSidesOf(l: Layer, s: number): Sides {
+  let r: Sides = NO_SIDES;
+  for (const e of activeEffects(l)) r = maxSides(r, effectExtent(e.def, e.params, s));
+  return { l: Math.ceil(r.l), t: Math.ceil(r.t), r: Math.ceil(r.r), b: Math.ceil(r.b) };
 }
 
-function effectsReach(l: Layer, s: number): number {
-  let r = 0;
-  for (const e of activeEffects(l)) r = Math.max(r, effectReach(e.def, e.params, s));
-  return Math.ceil(r);
+/** Max effect reach over all sides (output px). */
+export function effectsReachOf(l: Layer, s: number): number {
+  return maxSide(effectsSidesOf(l, s));
 }
 
 function isPassThroughSimple(g: GroupLayer): boolean {
@@ -281,6 +399,19 @@ function boundsOfMatrixRect(m: DOMMatrix, r: Rect): { x: number; y: number; w: n
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 
+/** Last TextProps rendered per text layer (invalidateRenderCache(id) drops its layout too). */
+const layerTexts = new Map<ID, TextProps>();
+
+/** The text style a layer was last rendered/measured with (null when unknown). */
+export function lastLayerText(id: ID): TextProps | null {
+  return layerTexts.get(id) ?? null;
+}
+
+/** Forget per-layer bookkeeping (the layer was deleted / its document closed). */
+export function forgetLayer(id: ID) {
+  layerTexts.delete(id);
+}
+
 /** Output-px matrix of a transformable layer (local box → output px) and its local raster bounds. */
 export function layerGeometry(l: Layer, s: number): { m: DOMMatrix; local: Rect; box: Rect } | null {
   if (l.type === 'raster') {
@@ -289,6 +420,10 @@ export function layerGeometry(l: Layer, s: number): { m: DOMMatrix; local: Rect;
     return { m, local: box, box };
   }
   if (l.type === 'text') {
+    if (layerTexts.get(l.id) !== l.text) {
+      if (layerTexts.size > 4096) layerTexts.clear();
+      layerTexts.set(l.id, l.text);
+    }
     const layout = layoutTextProps(l.text);
     const m = new DOMMatrix().scaleSelf(s, s).multiplySelf(transformMatrix(l.transform, layout.width, layout.height));
     return { m, local: textLocalBounds(l.text), box: { x: 0, y: 0, width: layout.width, height: layout.height } };
@@ -303,6 +438,89 @@ export function layerGeometry(l: Layer, s: number): { m: DOMMatrix; local: Rect;
 }
 
 /* ================================================================== */
+/* Distance fields shared by effects                                   */
+/* ================================================================== */
+
+/**
+ * Fields are computed ~25% deeper (and that much wider) than asked: dragging a stroke/bevel size
+ * up reuses them for a while instead of recomputing the distance transform every frame.
+ */
+export function fieldBucket(maxDist: number): number {
+  return Math.ceil((maxDist * 1.25 + 2) / 4) * 4;
+}
+
+function subArray<T extends Float32Array | Uint8Array>(src: T, sr: PxRect, r: PxRect, make: (n: number) => T): T {
+  const out = make(r.w * r.h);
+  for (let y = 0; y < r.h; y++) {
+    const so = (r.y - sr.y + y) * sr.w + (r.x - sr.x);
+    out.set(src.subarray(so, so + r.w), y * r.w);
+  }
+  return out;
+}
+
+/** Alpha of a canvas over a rect that may extend past its edges (zero there). */
+function readAlphaPadded(c: HTMLCanvasElement, r: LocalRect): Uint8Array {
+  const out = new Uint8Array(r.w * r.h);
+  const i = intersectRect(r, { x: 0, y: 0, w: c.width, h: c.height });
+  if (!i) return out;
+  const d = ctx2d(c).getImageData(i.x, i.y, i.w, i.h).data;
+  for (let y = 0; y < i.h; y++) {
+    let o = (i.y - r.y + y) * r.w + (i.x - r.x);
+    for (let x = 0, j = y * i.w * 4 + 3; x < i.w; x++, j += 4) out[o++] = d[j];
+  }
+  return out;
+}
+
+/** EffectFields of one layer render: alpha reads and distance fields, cached and shared. */
+class LayerFields implements EffectFields {
+  /** Fields used or computed by this render (carried by the LayerRender for later reuse). */
+  readonly entries: FieldEntry[] = [];
+  private reads: { rect: LocalRect; data: Uint8Array }[] = [];
+
+  constructor(
+    private readonly C: HTMLCanvasElement,
+    private readonly region: PxRect,
+    private readonly extent: PxRect,
+    private readonly inherited: FieldEntry[],
+  ) {}
+
+  alpha(r: LocalRect): Uint8Array {
+    for (const rd of this.reads) {
+      if (sameRect(rd.rect, r)) return rd.data;
+      if (containsRect(rd.rect, r)) return subArray(rd.data, rd.rect, r, (n) => new Uint8Array(n));
+    }
+    const data = readAlphaPadded(this.C, r);
+    this.reads.push({ rect: { ...r }, data });
+    if (this.reads.length > 4) this.reads.shift();
+    return data;
+  }
+
+  distance(mode: DistanceMode, maxDist: number, r: LocalRect): Float32Array {
+    const reg = this.region;
+    const abs: PxRect = { x: r.x + reg.x, y: r.y + reg.y, w: r.w, h: r.h };
+    // The field at a pixel depends on the content within maxDist of it: that part of the
+    // content must have been present when the field was computed.
+    const needSrc = intersectRect(expandRect(abs, maxDist + 2), this.extent);
+    const ok = (e: FieldEntry) => e.mode === mode && e.maxDist >= maxDist && containsRect(e.rect, abs) && (!needSrc || containsRect(e.src, needSrc));
+    let e = this.entries.find(ok);
+    if (!e) {
+      e = this.inherited.find(ok);
+      if (e) this.entries.push(e);
+    }
+    if (e) renderStats.fieldHits++;
+    else {
+      renderStats.fieldComputes++;
+      const B = fieldBucket(maxDist);
+      const rect = expandRect(abs, B - maxDist);
+      const a = this.alpha({ x: rect.x - reg.x, y: rect.y - reg.y, w: rect.w, h: rect.h });
+      e = { mode, maxDist: B, rect, src: { ...reg }, data: edgeDistance(a, rect.w, rect.h, mode, B) };
+      this.entries.push(e);
+    }
+    return sameRect(e.rect, abs) ? e.data : subArray(e.data, e.rect, abs, (n) => new Float32Array(n));
+  }
+}
+
+/* ================================================================== */
 /* Layer render                                                        */
 /* ================================================================== */
 
@@ -311,14 +529,6 @@ function flagsKey(f: RenderFlags): string {
 }
 
 /* ---------------- translation reuse ---------------- */
-
-interface TranslatedEntry {
-  render: LayerRender;
-  /** Integer output-px translation of the layer when the render was built. */
-  ex: number;
-  ey: number;
-  margin: number;
-}
 
 const fracQ = (v: number) => {
   const f = v - Math.floor(v);
@@ -342,25 +552,36 @@ function translationSig(l: Layer, flags: RenderFlags, m: DOMMatrix): string | nu
     l.type === 'raster'
       ? `r${l.bitmapId}.${bitmaps.version(l.bitmapId)}.${l.width}x${l.height}`
       : l.type === 'text'
-        ? `t${objId(l.text)}g${cacheGeneration()}${textFontReady(l.text) ? 'r' : 'p'}`
+        ? `t${objId(l.text)}${textStateSig(l.text)}`
         : `s${objId(l.shape)}`;
   const fill = Number.isFinite(l.fillOpacity) ? l.fillOpacity : 1;
   const knock = fill * Math.max(0, Math.min(1, l.opacity)) < 0.999 ? 1 : 0;
   return `${content}|e${flags.effects ? objId(l.effects) : 0}|${t.rotation}|${t.scaleX}|${t.scaleY}|${t.skewX ?? 0}|${fill}|${knock}|${fracQ(m.e)},${fracQ(m.f)}`;
 }
 
-function shiftRender(r: LayerRender, dx: number, dy: number): LayerRender {
+const shiftRect = (r: PxRect, dx: number, dy: number): PxRect => ({ x: r.x + dx, y: r.y + dy, w: r.w, h: r.h });
+
+/** A render moved by whole output pixels (canvases and fields shared, positions shifted). */
+function shiftRender(r: LayerRender, dx: number, dy: number, csig: string | undefined): LayerRender {
   return {
-    region: { x: r.region.x + dx, y: r.region.y + dy, w: r.region.w, h: r.region.h },
+    region: shiftRect(r.region, dx, dy),
     core: r.core,
     shape: r.shape,
     behind: r.behind,
-    bounds: { x: r.bounds.x + dx, y: r.bounds.y + dy, w: r.bounds.w, h: r.bounds.h },
+    bounds: shiftRect(r.bounds, dx, dy),
+    csig,
+    extent: r.extent && shiftRect(r.extent, dx, dy),
+    fields: r.fields?.map((f) => ({ ...f, rect: shiftRect(f.rect, dx, dy), src: shiftRect(f.src, dx, dy) })),
   };
 }
 
-function containsRect(outer: PxRect, inner: PxRect): boolean {
-  return inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h;
+/** Resources of a render counted against the cache budget (borrowed bitmaps excluded). */
+function renderResources(r: LayerRender | null): Resource[] {
+  if (!r) return [];
+  const out: Resource[] = [];
+  for (const c of [r.core, r.shape, ...r.behind.map((b) => b.canvas)]) if (c && !borrowed.has(c)) out.push(c);
+  if (r.fields) for (const f of r.fields) out.push(f.data);
+  return out;
 }
 
 /** Render (or fetch from cache) a non-adjustment layer. Null when it draws nothing. */
@@ -374,54 +595,44 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
     renderStats.layerHits++;
     return hit;
   }
-  // A moved layer (same content, integer delta) reuses its previous render, shifted: dragging a
-  // layer with strokes/shadows never recomputes its effects.
+  const prevs = slots.values<LayerRender | null>(key);
+  // A moved layer (same content, whole-pixel delta) reuses its previous render, shifted:
+  // dragging a layer with strokes/shadows never recomputes its effects.
   const geom = layerGeometry(l, rc.s);
   const tsig = geom ? translationSig(l, flags, geom.m) : null;
-  const tkey = `LT|${l.id}|${rc.s.toFixed(5)}|${fk}`;
   const tfull = tsig ? `${tsig}|${rc.W}x${rc.H}` : '';
   if (tsig && geom) {
-    const prev = slots.get<TranslatedEntry>(tkey, tfull);
-    if (prev) {
-      const dx = Math.round(geom.m.e) - prev.ex;
-      const dy = Math.round(geom.m.f) - prev.ey;
-      const moved = shiftRender(prev.render, dx, dy);
-      if (containsRect(expandRect({ x: 0, y: 0, w: rc.W, h: rc.H }, prev.margin), moved.region)) {
-        renderStats.translateHits++;
-        slots.set(key, sig, moved, 0, { layerId: l.id, max: 2 });
-        return moved;
-      }
+    for (const p of prevs) {
+      const mv = p?.move;
+      if (!mv || mv.sig !== tfull) continue;
+      // Shift relative to the unshifted base: rounding errors never accumulate, and positions
+      // just below/above .5 shift exactly like a fresh render would place them.
+      const dx = Math.round(geom.m.e - mv.e);
+      const dy = Math.round(geom.m.f - mv.f);
+      const moved = shiftRender(mv.base, dx, dy, contentSig(rc, l, flags));
+      if (!containsRect(expandSides({ x: 0, y: 0, w: rc.W, h: rc.H }, mv.clip), moved.region)) continue;
+      moved.move = mv;
+      renderStats.translateHits++;
+      slots.set(key, sig, moved, 0, { layerId: l.id, max: 2, res: renderResources(moved) });
+      return moved;
     }
   }
   renderStats.layerRenders++;
   let r: LayerRender | null = null;
   try {
-    r = buildLayerRender(rc, l, flags);
+    r = buildLayerRender(rc, l, flags, prevs);
   } catch (err) {
     warnOnce(`layer ${l.id} (${l.type}) failed to render`, err);
     r = null;
   }
   if (r && tsig && geom && !(r.core && borrowed.has(r.core))) {
     // Only unclipped renders can be shifted (a clipped one is missing pixels elsewhere).
-    const margin = (flags.effects ? effectsReach(l, rc.s) : 0) + (flags.filters ? filterPad(l.filters, rc.s) : 0);
+    const grow = addSides(flags.effects ? effectsSidesOf(l, rc.s) : NO_SIDES, flags.filters ? filterPad(l.filters, rc.s) : 0);
     const b = boundsOfMatrixRect(geom.m, geom.local);
-    const full = expandRect(coverRect(b.x, b.y, b.w, b.h), margin);
-    if (full.x === r.region.x && full.y === r.region.y && full.w === r.region.w && full.h === r.region.h) {
-      slots.set(tkey, tfull, { render: r, ex: Math.round(geom.m.e), ey: Math.round(geom.m.f), margin } satisfies TranslatedEntry, 0, { layerId: l.id, max: 1 });
-    }
+    const full = expandSides(coverRect(b.x, b.y, b.w, b.h), grow);
+    if (sameRect(full, r.region)) r.move = { sig: tfull, base: r, e: geom.m.e, f: geom.m.f, clip: flipSides(grow) };
   }
-  let pixels = 0;
-  if (r) {
-    const seen = new Set<HTMLCanvasElement>();
-    for (const c of [r.core, r.shape, ...r.behind.map((b) => b.canvas)]) {
-      // Borrowed canvases (zero-copy bitmap renders) are owned by the bitmap store.
-      if (c && !seen.has(c) && !borrowed.has(c)) {
-        seen.add(c);
-        pixels += px(c);
-      }
-    }
-  }
-  slots.set(key, sig, r, pixels, { layerId: l.id, max: 2 });
+  slots.set(key, sig, r, 0, { layerId: l.id, max: 2, res: renderResources(r) });
   return r;
 }
 
@@ -444,7 +655,25 @@ function groupExtent(rc: RC, g: GroupLayer): PxRect | null {
   return r;
 }
 
-function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags): LayerRender | null {
+/** Previous content canvas with the same content signature, adapted to `region` (or null). */
+function reuseContent(prevs: (LayerRender | null)[], csig: string, region: PxRect, extent: PxRect, fpad: number): { C: HTMLCanvasElement | null; fields: FieldEntry[] } {
+  for (const p of prevs) {
+    if (!p || p.csig !== csig) continue;
+    const fields = p.fields ?? [];
+    if (!p.shape) return { C: null, fields };
+    // Every content pixel the new canvas (and its smart filters' footprint) needs must be in
+    // the previous canvas.
+    const need = intersectRect(extent, expandRect(region, fpad));
+    if (need && !containsRect(p.region, need)) return { C: null, fields };
+    if (sameRect(p.region, region) && !borrowed.has(p.shape)) return { C: p.shape, fields };
+    const C = fresh(region.w, region.h);
+    ctx2d(C).drawImage(p.shape, p.region.x - region.x, p.region.y - region.y);
+    return { C, fields };
+  }
+  return { C: null, fields: [] };
+}
+
+function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRender | null)[]): LayerRender | null {
   const { doc, s, W, H } = rc;
   const docR: PxRect = { x: 0, y: 0, w: W, h: H };
   // 1) content box (output px, float) ------------------------------------------------------
@@ -464,8 +693,9 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags): LayerRender | n
   if (l.type === 'raster' && !bitmaps.tryGet(l.bitmapId)) return null;
 
   const fx = flags.effects ? activeEffects(l) : [];
-  const reach = flags.effects ? effectsReach(l, s) : 0;
+  const sides = flags.effects ? effectsSidesOf(l, s) : NO_SIDES;
   const fpad = flags.filters ? filterPad(l.filters, s) : 0;
+  const csig = contentSig(rc, l, flags);
 
   // Plain raster at 1:1 and an integer offset: the bitmap itself is the render (zero copy).
   if (l.type === 'raster' && !fx.length && !(flags.filters && hasFilters(l.filters)) && !(flags.mask && l.mask?.enabled) && !(l.fillOpacity < 0.999)) {
@@ -477,14 +707,19 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags): LayerRender | n
       const region = { x: ex, y: ey, w: bmp.width, h: bmp.height };
       if (!intersectRect(region, docR)) return null;
       borrowed.add(bmp);
-      return { region, core: bmp, shape: bmp, behind: [], bounds: region };
+      return { region, core: bmp, shape: bmp, behind: [], bounds: region, csig, extent: region };
     }
   }
-  const margin = reach + fpad;
-  const region = intersectRect(expandRect(coverRect(box.x, box.y, box.w, box.h), margin), expandRect(docR, margin));
+  // Region: the content's raster bounds grown per side by the effects' reach (+ smart-filter
+  // growth), limited to what can affect the document (content farther out than an effect can
+  // pull it in, or effect output beyond the document, is never visible).
+  const grow = addSides(sides, fpad);
+  const cover = coverRect(box.x, box.y, box.w, box.h);
+  const extent = expandRect(cover, fpad);
+  const region = intersectRect(expandSides(cover, grow), expandSides(docR, flipSides(grow)));
   if (!region) return null;
   if (region.w > MAX_SIDE || region.h > MAX_SIDE) {
-    const clipped = intersectRect(region, expandRect(docR, Math.min(margin, 64)));
+    const clipped = intersectRect(region, expandRect(docR, Math.min(maxSide(grow), 64)));
     if (!clipped) return null;
     region.x = clipped.x;
     region.y = clipped.y;
@@ -492,65 +727,73 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags): LayerRender | n
     region.h = Math.min(MAX_SIDE, clipped.h);
   }
 
-  // 2) content -------------------------------------------------------------------------------
-  let C = fresh(region.w, region.h);
-  const cctx = ctx2d(C);
-  switch (l.type) {
-    case 'raster': {
-      const bmp = bitmaps.tryGet(l.bitmapId)!;
-      const m = geom!.m;
-      const ex = Math.round(m.e - region.x);
-      const ey = Math.round(m.f - region.y);
-      if (Math.abs(m.a - 1) < 1e-9 && Math.abs(m.d - 1) < 1e-9 && Math.abs(m.b) < 1e-9 && Math.abs(m.c) < 1e-9 && Math.abs(m.e - region.x - ex) < 1e-3 && Math.abs(m.f - region.y - ey) < 1e-3) {
-        cctx.drawImage(bmp, ex, ey);
-      } else {
-        cctx.setTransform(m.a, m.b, m.c, m.d, m.e - region.x, m.f - region.y);
-        cctx.imageSmoothingEnabled = true;
-        cctx.imageSmoothingQuality = 'high';
-        cctx.drawImage(bmp, 0, 0);
-        cctx.setTransform(1, 0, 0, 1, 0, 0);
+  // 2–4) content, smart filters, mask (or the previous render's content when only effects,
+  // opacity or blending changed) ------------------------------------------------------------
+  const reuse = reuseContent(prevs, csig, region, extent, fpad);
+  let C: HTMLCanvasElement;
+  if (reuse.C) {
+    C = reuse.C;
+    renderStats.contentReuse++;
+  } else {
+    C = fresh(region.w, region.h);
+    const cctx = ctx2d(C);
+    switch (l.type) {
+      case 'raster': {
+        const bmp = bitmaps.tryGet(l.bitmapId)!;
+        const m = geom!.m;
+        const ex = Math.round(m.e - region.x);
+        const ey = Math.round(m.f - region.y);
+        if (Math.abs(m.a - 1) < 1e-9 && Math.abs(m.d - 1) < 1e-9 && Math.abs(m.b) < 1e-9 && Math.abs(m.c) < 1e-9 && Math.abs(m.e - region.x - ex) < 1e-3 && Math.abs(m.f - region.y - ey) < 1e-3) {
+          cctx.drawImage(bmp, ex, ey);
+        } else {
+          cctx.setTransform(m.a, m.b, m.c, m.d, m.e - region.x, m.f - region.y);
+          cctx.imageSmoothingEnabled = true;
+          cctx.imageSmoothingQuality = 'high';
+          cctx.drawImage(bmp, 0, 0);
+          cctx.setTransform(1, 0, 0, 1, 0, 0);
+        }
+        break;
       }
-      break;
+      case 'text': {
+        const m = geom!.m;
+        const { k, fx: phx, fy: phy } = localRasterParams(m);
+        drawLocal(cctx, renderTextContent(l.text, k, phx, phy), m, region.x, region.y);
+        break;
+      }
+      case 'shape': {
+        const m = geom!.m;
+        const { k, fx: phx, fy: phy } = localRasterParams(m);
+        drawLocal(cctx, renderShapeContent(l.shape, k, phx, phy), m, region.x, region.y);
+        break;
+      }
+      case 'fill': {
+        cctx.setTransform(s, 0, 0, s, -region.x, -region.y);
+        fillWithPaint(cctx, l.fill as Paint, { x: 0, y: 0, width: doc.width, height: doc.height });
+        cctx.setTransform(1, 0, 0, 1, 0, 0);
+        break;
+      }
+      case 'group': {
+        const acc: Acc = { canvas: C, ctx: cctx, x: region.x, y: region.y, w: region.w, h: region.h, bounds: null, root: false, clip: null };
+        compositeList(rc, l.childIds, acc);
+        break;
+      }
     }
-    case 'text': {
-      const m = geom!.m;
-      const { k, fx: phx, fy: phy } = localRasterParams(m);
-      drawLocal(cctx, renderTextContent(l.text, k, phx, phy), m, region.x, region.y);
-      break;
+
+    // 3) smart filters
+    if (flags.filters && hasFilters(l.filters)) {
+      try {
+        const out = applyFilterStack(C, l.filters, makeFilterContext({ docWidth: doc.width, docHeight: doc.height, offsetX: region.x / s, offsetY: region.y / s, scale: s }));
+        if (out !== C) C = out;
+      } catch (err) {
+        warnOnce(`smart filters of ${l.id} failed`, err);
+      }
     }
-    case 'shape': {
-      const m = geom!.m;
-      const { k, fx: phx, fy: phy } = localRasterParams(m);
-      drawLocal(cctx, renderShapeContent(l.shape, k, phx, phy), m, region.x, region.y);
-      break;
-    }
-    case 'fill': {
-      cctx.setTransform(s, 0, 0, s, -region.x, -region.y);
-      fillWithPaint(cctx, l.fill as Paint, { x: 0, y: 0, width: doc.width, height: doc.height });
-      cctx.setTransform(1, 0, 0, 1, 0, 0);
-      break;
-    }
-    case 'group': {
-      const acc: Acc = { canvas: C, ctx: cctx, x: region.x, y: region.y, w: region.w, h: region.h, bounds: null, root: false, clip: null };
-      compositeList(rc, l.childIds, acc);
-      break;
-    }
+
+    // 4) mask
+    if (flags.mask && l.mask && l.mask.enabled) applyMask(C, region, l.mask, s, doc.width, doc.height);
   }
 
-  // 3) smart filters -------------------------------------------------------------------------
-  if (flags.filters && hasFilters(l.filters)) {
-    try {
-      const out = applyFilterStack(C, l.filters, makeFilterContext({ docWidth: doc.width, docHeight: doc.height, offsetX: region.x / s, offsetY: region.y / s, scale: s }));
-      if (out !== C) C = out;
-    } catch (err) {
-      warnOnce(`smart filters of ${l.id} failed`, err);
-    }
-  }
-
-  // 4) mask ----------------------------------------------------------------------------------
-  if (flags.mask && l.mask && l.mask.enabled) applyMask(C, region, l.mask, s, doc.width, doc.height);
-
-  const bounds = coverRect(contentBox!.x, contentBox!.y, contentBox!.w, contentBox!.h);
+  const layoutBox = coverRect(contentBox!.x, contentBox!.y, contentBox!.w, contentBox!.h);
   const fill = Math.max(0, Math.min(1, Number.isFinite(l.fillOpacity) ? l.fillOpacity : 1));
 
   // 5) effects -------------------------------------------------------------------------------
@@ -562,10 +805,15 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags): LayerRender | n
       k.globalAlpha = fill;
       k.drawImage(C, 0, 0);
     }
-    return { region, core: fill > 0 ? core : null, shape: C, behind: [], bounds };
+    return { region, core: fill > 0 ? core : null, shape: C, behind: [], bounds: layoutBox, csig, extent, fields: reuse.fields.length ? reuse.fields : undefined };
   }
 
-  const localBounds = { x: bounds.x - region.x, y: bounds.y - region.y, w: bounds.w, h: bounds.h };
+  // Effects work on everything the content covers (text stroke/warp/descenders, shape stroke,
+  // filter growth), not just the layout box; gradients still follow the layout box.
+  const ext = intersectRect(extent, region);
+  const effectBounds: LocalRect = ext ? { x: ext.x - region.x, y: ext.y - region.y, w: ext.w, h: ext.h } : { x: 0, y: 0, w: 0, h: 0 };
+  const paintBox: LocalRect = { x: layoutBox.x - region.x, y: layoutBox.y - region.y, w: layoutBox.w, h: layoutBox.h };
+  const fieldsP = new LayerFields(C, region, extent, reuse.fields);
   const sorted = fx
     .map((e) => ({ ...e, stage: effectStage(e.def, e.params) }))
     .sort((a, b) => a.def.order - b.def.order || a.idx - b.idx);
@@ -605,7 +853,8 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags): LayerRender | n
       scale: s,
       docWidth: doc.width,
       docHeight: doc.height,
-      region: { x: region.x, y: region.y, bounds: localBounds },
+      region: { x: region.x, y: region.y, bounds: effectBounds, paintBox },
+      fields: fieldsP,
       addPiece: (piece, pop) => {
         if (isBehind) {
           const copy = fresh(region.w, region.h);
@@ -636,7 +885,7 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags): LayerRender | n
       release(target);
     }
   }
-  return { region, core, shape: C, behind, bounds };
+  return { region, core, shape: C, behind, bounds: layoutBox, csig, extent, fields: fieldsP.entries.length ? fieldsP.entries : undefined };
 }
 
 /* ================================================================== */
@@ -806,6 +1055,11 @@ function compositePassThrough(rc: RC, acc: Acc, g: GroupLayer) {
 
 /* ---------------- root plan: snapshots around top-level adjustments ---------------- */
 
+/** Slot tag of a document's composites and snapshots (dropped when the document closes). */
+export function docTag(docId: ID): string {
+  return `doc:${docId}`;
+}
+
 interface Snapshot {
   canvas: HTMLCanvasElement;
   bounds: PxRect | null;
@@ -865,7 +1119,7 @@ function storeSnapshot(rc: RC, acc: Acc, adj: Layer, kind: 'pre' | 'post', sig: 
   if (slots.get<Snapshot>(key, sig)) return;
   const copy = fresh(acc.w, acc.h);
   ctx2d(copy).drawImage(acc.canvas, 0, 0);
-  slots.set(key, sig, { canvas: copy, bounds: acc.bounds } satisfies Snapshot, px(copy), { composite: true, max: 1 });
+  slots.set(key, sig, { canvas: copy, bounds: acc.bounds } satisfies Snapshot, 0, { composite: true, max: 1, layerId: docTag(rc.doc.id), res: [copy] });
 }
 
 /** Resume from the highest cached adjustment snapshot. Returns the index to continue from. */
@@ -1090,7 +1344,7 @@ export function compositeDocument(doc: Document, o: DocRenderOptions): HTMLCanva
       if (!full) {
         const dirty = D ? intersectRect(D, docR) : null;
         if (!dirty) {
-          slots.set(key, sig, { canvas: prev.value.canvas, items } satisfies DocEntry, 0, { composite: true, max: 1 });
+          slots.set(key, sig, { canvas: prev.value.canvas, items } satisfies DocEntry, 0, { composite: true, max: 1, layerId: docTag(doc.id), res: [prev.value.canvas] });
           return prev.value.canvas;
         }
         if (dirty.w * dirty.h <= 0.55 * rc.W * rc.H) {
@@ -1112,7 +1366,7 @@ export function compositeDocument(doc: Document, o: DocRenderOptions): HTMLCanva
           // (editing above a global adjustment never re-runs its filter).
           compositeList(rc, doc.rootIds, acc, { prefix: prefixSigs(rc, doc.rootIds, base), base, store: false });
           ctx.restore();
-          slots.set(key, sig, { canvas: out, items } satisfies DocEntry, px(out), { composite: true, max: 1 });
+          slots.set(key, sig, { canvas: out, items } satisfies DocEntry, 0, { composite: true, max: 1, layerId: docTag(doc.id), res: [out] });
           return out;
         }
       }
@@ -1130,7 +1384,7 @@ export function compositeDocument(doc: Document, o: DocRenderOptions): HTMLCanva
   }
   compositeList(rc, doc.rootIds, acc, { prefix: prefixSigs(rc, doc.rootIds, base), base, store: true });
   const items: DocItem[] = raw.map((r) => ({ id: r.id, sig: r.sig, region: itemRegion(rc, r.layer) }));
-  slots.set(key, sig, { canvas: out, items } satisfies DocEntry, px(out), { composite: true, max: 1 });
+  slots.set(key, sig, { canvas: out, items } satisfies DocEntry, 0, { composite: true, max: 1, layerId: docTag(doc.id), res: [out] });
   return out;
 }
 

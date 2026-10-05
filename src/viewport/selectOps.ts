@@ -15,7 +15,7 @@ import {
   setSelection,
   type SelectionMode,
 } from '../editor/selection';
-import { rasterizeLayer } from '../render/compositor';
+import { renderLayerToDoc } from '../render/compositor';
 import { activeDoc, activeSession, useEditor } from '../state/editor';
 import { toast } from '../state/ui';
 import { borderAlpha, morphAlpha, smoothAlpha } from './math/mask';
@@ -95,7 +95,17 @@ export function modifySelection(kind: ModifyKind, amount: number) {
   setSelection(sel, sel ? LABELS[kind] : 'Deselect');
 }
 
-/** Select ▸ Load Selection: selection from the active layer's opaque pixels. */
+/**
+ * The layer's own pixels in document space — without layer effects (drop shadow, stroke, glow…)
+ * and, by default, without its layer mask — like Photoshop's "load layer transparency".
+ */
+export function layerPixels(doc: Document, id: string, opts: { mask?: boolean } = {}): HTMLCanvasElement | null {
+  const l = doc.layers[id];
+  if (!l) return null;
+  return renderLayerToDoc(doc, l, { effects: false, mask: opts.mask ?? false });
+}
+
+/** Select ▸ Load Selection: selection from the active layer's own opaque pixels (effects excluded). */
 export function loadLayerSelection(mode: SelectionMode = 'new') {
   const s = activeSession();
   if (!s) {
@@ -110,7 +120,7 @@ export function loadLayerSelection(mode: SelectionMode = 'new') {
   }
   let canvas: HTMLCanvasElement | null = null;
   try {
-    canvas = rasterizeLayer(s.doc, id);
+    canvas = layerPixels(s.doc, id);
   } catch (err) {
     console.error('[select] rasterize failed', err);
   }

@@ -7,7 +7,8 @@ import { Pipette } from 'lucide-react';
 import type { ToolDef, ToolPointerEvent } from '../../registry';
 import { createCanvas, ctxRead } from '../../core/canvas';
 import { viewport } from '../../editor/viewport';
-import { rasterizeLayer, renderDocument } from '../../render/compositor';
+import { renderDocument } from '../../render/compositor';
+import { layerPixels } from '../selectOps';
 import { activeSession, toolOptions, useEditor, useToolOptions } from '../../state/editor';
 import { Checkbox, Select } from '../../ui/controls';
 import { CURSORS } from '../draw';
@@ -47,7 +48,8 @@ function sourceData(): { data: Uint8ClampedArray; width: number; height: number 
         toastOnce('Select a layer to sample, or set Sample to “All Layers”.', 'info');
         return null;
       }
-      src = rasterizeLayer(doc, s.activeLayerId);
+      // The layer's own (masked) pixels, without effects such as drop shadows or strokes.
+      src = layerPixels(doc, s.activeLayerId, { mask: true });
       if (!src) {
         toastOnce('The current layer has no pixels to sample.', 'info');
         return null;

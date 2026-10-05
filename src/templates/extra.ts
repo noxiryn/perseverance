@@ -138,7 +138,7 @@ export const updateBanner = defineTemplate({
       const stars: [number, number, number, number][] = [
         [980, 160, 46, 12],
         [1060, 470, 30, -10],
-        [640, 620, 36, 18],
+        [650, 762, 36, 18], // right of the badge, clear of the subtitle
         [1820, 120, 40, -6],
       ];
       for (const [x, y, r, rot] of stars) b.star(x, y, r, 5, 0.48, solid('#ffe14d'), { stroke: stroke('#1a1a40', 6), rotation: rot, name: 'Star' });

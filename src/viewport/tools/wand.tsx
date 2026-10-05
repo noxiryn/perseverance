@@ -8,7 +8,8 @@ import { colorSelectMask, deselect, type SelectionMode } from '../../editor/sele
 import { viewport } from '../../editor/viewport';
 import { activeSession, toolOptions, useToolOptions } from '../../state/editor';
 import { Checkbox, NumberField } from '../../ui/controls';
-import { rasterizeLayer, renderDocument } from '../../render/compositor';
+import { renderDocument } from '../../render/compositor';
+import { layerPixels } from '../selectOps';
 import { CURSORS } from '../draw';
 import { toastOnce } from '../state';
 import {
@@ -112,7 +113,8 @@ function runWand(x: number, y: number, mode: SelectionMode) {
         toastOnce('Select a layer to sample, or enable “Sample All Layers”.', 'info');
         return;
       }
-      source = rasterizeLayer(doc, id);
+      // The layer's own pixels (masked), without effects such as drop shadows or strokes.
+      source = layerPixels(doc, id, { mask: true });
       if (!source) {
         toastOnce('The active layer has no pixels to sample. Enable “Sample All Layers” to use the composite.', 'info');
         return;

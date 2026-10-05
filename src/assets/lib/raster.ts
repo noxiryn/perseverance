@@ -12,7 +12,10 @@ import type { Rand } from './util';
 /**
  * Draw shapes (in white, any alpha) with `draw`, soften them with a blur of `blur` px and
  * re-sharpen the alpha with a smoothstep threshold. Overlapping/nearby shapes merge into
- * organic liquid forms (ink splats, drips). Rendered at most `maxPx` pixels and up-scaled.
+ * organic liquid forms (ink splats, drips). The output is at most `maxPx` pixels (up-scaled to
+ * W×H otherwise). The blur itself runs at a reduced resolution — detail finer than the blur
+ * radius disappears anyway — and the blurred field is up-sampled before thresholding, so the
+ * edges stay crisp while the expensive filter pass touches only a fraction of the pixels.
  */
 export function gooShape(
   W: number,
@@ -25,15 +28,29 @@ export function gooShape(
   const s = Math.min(1, Math.sqrt((o.maxPx ?? 2_400_000) / Math.max(1, W * H)));
   const w = Math.max(1, Math.round(W * s));
   const h = Math.max(1, Math.round(H * s));
-  const [src, sctx] = newCanvas(w, h);
-  sctx.scale(s, s);
+  const br = blur * s; // blur radius in output px
+  const q = br > 3 ? Math.max(0.25, 3 / br) : 1; // blur-pass scale
+  const bw = Math.max(1, Math.round(w * q));
+  const bh = Math.max(1, Math.round(h * q));
+  const [src, sctx] = newCanvas(bw, bh);
+  sctx.scale(s * q, s * q);
   sctx.fillStyle = '#ffffff';
   sctx.strokeStyle = '#ffffff';
   draw(sctx);
+  let field: HTMLCanvasElement = src;
+  if (br > 0) {
+    const [bl, bctx] = newCanvas(bw, bh);
+    bctx.filter = `blur(${Math.max(0.4, br * q)}px)`;
+    bctx.drawImage(src, 0, 0);
+    bctx.filter = 'none';
+    field = bl;
+  }
   const [dst, dctx] = newReadCanvas(w, h);
-  if (blur > 0) dctx.filter = `blur(${Math.max(0.4, blur * s)}px)`;
-  dctx.drawImage(src, 0, 0);
-  dctx.filter = 'none';
+  if (field.width !== w || field.height !== h) {
+    dctx.imageSmoothingEnabled = true;
+    dctx.imageSmoothingQuality = 'medium';
+    dctx.drawImage(field, 0, 0, w, h);
+  } else dctx.drawImage(field, 0, 0);
   const img = dctx.getImageData(0, 0, w, h);
   const d = img.data;
   const c = rgbOf(color);

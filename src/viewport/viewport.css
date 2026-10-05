@@ -13,7 +13,8 @@
   contain: strict;
 }
 
-.viewport-root canvas {
+/* Only the two stacked viewport canvases (not canvases inside floating UI such as Color Range). */
+.viewport-root > canvas {
   position: absolute;
   left: 0;
   top: 0;
@@ -175,6 +176,8 @@
 }
 
 .viewport-cr-preview canvas {
+  display: block;
+  flex: none;
   max-width: 100%;
   max-height: 100%;
   image-rendering: auto;

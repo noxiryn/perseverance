@@ -246,13 +246,17 @@ const paintSplatter = defineAsset(
         ctx.fillStyle = col;
         ctx.fill(spray);
       });
-      // wet gloss highlights on the paint
+      // wet gloss highlights on the paint: a soft, offset copy (blurred at 1/3 resolution)
+      const gs = 1 / 3;
+      const [gl, gctx] = newCanvas(Math.max(1, Math.round(W * gs)), Math.max(1, Math.round(H * gs)));
+      gctx.filter = `blur(${Math.max(0.5, 3 * u * gs)}px)`;
+      gctx.drawImage(c, 0, 0, gl.width, gl.height);
+      gctx.filter = 'none';
       ctx.save();
       ctx.globalCompositeOperation = 'source-atop';
-      ctx.filter = `blur(${Math.max(1, 3 * u)}px)`;
-      ctx.translate(-3 * u, -3 * u);
       ctx.globalAlpha = 0.18;
-      ctx.drawImage(c, 0, 0);
+      ctx.imageSmoothingQuality = 'medium';
+      ctx.drawImage(gl, -3 * u, -3 * u, W, H);
       ctx.restore();
       return c;
     },

@@ -18,9 +18,10 @@ import { applyFilterStack, makeFilterContext } from '../filters/engine';
 import { VOLATILE_ASSETS, bumpGeneration, px, renderCache, slots } from './cache';
 import {
   compositeDocument,
-  effectsReachOf,
+  effectsSidesOf,
   filterPad,
   flattenRender,
+  lastLayerText,
   layerGeometry,
   layerSig,
   makeRC,
@@ -28,13 +29,14 @@ import {
   renderStats,
   type RC,
 } from './engine';
+import { maskValue } from './mask';
 import { fillWithPaint as paintFill } from './paint';
 import { renderShapeContent } from './shapes';
-import { layoutTextProps, renderTextContent, requestTextFont, resetTextCaches, type LocalContent, type TextLayout } from './text';
+import { invalidateTextLayout, layoutTextProps, renderTextContent, requestTextFont, resetTextCaches, type LocalContent, type TextLayout } from './text';
 import { clearPool, fresh } from './surface';
 
 export type { TextLayout, TextLayoutLine, CaretInfo } from './text';
-export { caretAt, caretPositions, indexAtPoint, selectionRects, fontString, textLocalBounds } from './text';
+export { caretAt, caretPositions, indexAtPoint, selectionRects, fontString, textLocalBounds, invalidateTextLayout } from './text';
 export { shapePath, shapeFillRule, shapeLocalBounds } from './shapes';
 export { createGradient, paintStyle, assetImage } from './paint';
 export { gradientGeometry } from './gradientMath';
@@ -145,10 +147,11 @@ export function getLayerBounds(doc: Document, layerId: ID): Rect | null {
     return transformedBounds(l.transform, s.width, s.height);
   }
   if (l.type === 'group') {
+    // Hidden children draw nothing: they must not enlarge the group's box / selection outline.
     let r: Rect | null = null;
     for (const c of l.childIds) {
       const cl = doc.layers[c];
-      if (!cl || cl.type === 'adjustment') continue;
+      if (!cl || !cl.visible || cl.type === 'adjustment') continue;
       r = unionR(r, getLayerBounds(doc, c));
     }
     return r;
@@ -163,7 +166,8 @@ export function getLayerBounds(doc: Document, layerId: ID): Rect | null {
 export function getLayerVisualBounds(doc: Document, layerId: ID): Rect | null {
   const l = doc.layers[layerId];
   if (!l || l.type === 'adjustment') return null;
-  const grow = effectsReachOf(l, 1) + filterPad(l.filters, 1);
+  const fpad = filterPad(l.filters, 1);
+  const sides = effectsSidesOf(l, 1);
   let r: Rect | null = null;
   const geom = layerGeometry(l, 1);
   if (geom) {
@@ -185,7 +189,9 @@ export function getLayerVisualBounds(doc: Document, layerId: ID): Rect | null {
     }
   }
   if (!r) return null;
-  return { x: r.x - grow, y: r.y - grow, width: r.width + 2 * grow, height: r.height + 2 * grow };
+  const gl = sides.l + fpad;
+  const gt = sides.t + fpad;
+  return { x: r.x - gl, y: r.y - gt, width: r.width + gl + sides.r + fpad, height: r.height + gt + sides.b + fpad };
 }
 
 function alphaAt(c: HTMLCanvasElement | null, x: number, y: number): number {
@@ -211,13 +217,47 @@ function sampleLayer(rc: RC, l: Layer, x: number, y: number, shapeOnly = false):
   return a;
 }
 
+/** Visibility (0..255) of an enabled layer mask at a doc point (feather ignored). */
+function maskVisibilityAt(doc: Document, l: Layer, x: number, y: number): number {
+  const m = l.mask;
+  if (!m || !m.enabled) return 255;
+  const bmp = bitmaps.tryGet(m.bitmapId);
+  if (!bmp) return 255;
+  const mx = Math.min(bmp.width - 1, Math.max(0, Math.floor((x * bmp.width) / doc.width)));
+  const my = Math.min(bmp.height - 1, Math.max(0, Math.floor((y * bmp.height) / doc.height)));
+  let lum = 255;
+  try {
+    const d = ctx2d(bmp).getImageData(mx, my, 1, 1).data;
+    lum = (d[0] * d[3]) / 255;
+  } catch {
+    return 255;
+  }
+  return maskValue(lum, !!m.inverted, Number.isFinite(m.density) ? m.density : 1);
+}
+
+/** Base layer of a clipped layer at index i in a sibling list (null when none). */
+function clipBaseOf(doc: Document, ids: ID[], i: number): Layer | null {
+  let k = i - 1;
+  while (k >= 0 && doc.layers[ids[k]]?.clipped) k--;
+  const base = k >= 0 ? doc.layers[ids[k]] : undefined;
+  return base && base.type !== 'adjustment' ? base : null;
+}
+
 /**
  * Topmost visible leaf layer (descending into visible groups; skipping fill/adjustment and fully
- * locked layers) whose rendered alpha at doc (x, y) exceeds ~10/255.
+ * locked layers) whose rendered alpha at doc (x, y) exceeds ~10/255. Layers hidden at the point
+ * by an ancestor group (its mask, 0% opacity/fill, an isolated group's own result, or the base of
+ * a clipped group) are skipped.
  */
 export function hitTestLayer(doc: Document, x: number, y: number): ID | null {
   if (!(x >= 0 && y >= 0 && x < doc.width && y < doc.height)) return null;
   const rc = makeRC(doc, 1);
+  const clipOk = (ids: ID[], i: number, l: Layer): boolean => {
+    if (!l.clipped) return true;
+    const base = clipBaseOf(doc, ids, i);
+    if (!base) return true;
+    return base.visible && sampleLayer(rc, base, x, y, true) > 10;
+  };
   const visit = (ids: ID[]): ID | null => {
     for (let i = ids.length - 1; i >= 0; i--) {
       const l = doc.layers[ids[i]];
@@ -225,6 +265,12 @@ export function hitTestLayer(doc: Document, x: number, y: number): ID | null {
       if (l.type === 'group') {
         // Everything inside a fully locked group is locked too.
         if (l.locks?.all) continue;
+        const a = Math.max(0, Math.min(1, l.opacity)) * Math.max(0, Math.min(1, Number.isFinite(l.fillOpacity) ? l.fillOpacity : 1));
+        if (a <= 0.02) continue;
+        if (maskVisibilityAt(doc, l, x, y) <= 10) continue;
+        if (!clipOk(ids, i, l)) continue;
+        // An isolated group shows exactly its own render: nothing inside is visible where it is clear.
+        if (l.blendMode !== 'pass-through' && sampleLayer(rc, l, x, y) <= 10) continue;
         const r = visit(l.childIds);
         if (r) return r;
         continue;
@@ -234,14 +280,7 @@ export function hitTestLayer(doc: Document, x: number, y: number): ID | null {
       const vb = getLayerVisualBounds(doc, l.id);
       if (!vb || x < vb.x || y < vb.y || x > vb.x + vb.width || y > vb.y + vb.height) continue;
       if (sampleLayer(rc, l, x, y) <= 10) continue;
-      if (l.clipped) {
-        let k = i - 1;
-        while (k >= 0 && doc.layers[ids[k]]?.clipped) k--;
-        const base = k >= 0 ? doc.layers[ids[k]] : undefined;
-        if (base && base.type !== 'adjustment') {
-          if (!base.visible || sampleLayer(rc, base, x, y, true) <= 10) continue;
-        }
-      }
+      if (!clipOk(ids, i, l)) continue;
       return l.id;
     }
     return null;
@@ -307,9 +346,14 @@ export function fillWithPaint(ctx: CanvasRenderingContext2D, paint: Paint, box: 
   paintFill(ctx, paint, box, path);
 }
 
-/** Drop cached renders (all, or for one layer — composites are always dropped). */
+/**
+ * Drop cached renders (all, or for one layer — composites are always dropped). For a text
+ * layer the cached layout and rasters of its text go too (e.g. after a font slice loaded).
+ */
 export function invalidateRenderCache(layerId?: ID) {
   if (layerId !== undefined) {
+    const t = lastLayerText(layerId);
+    if (t) invalidateTextLayout(t);
     slots.clear(layerId);
     return;
   }

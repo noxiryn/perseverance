@@ -279,7 +279,7 @@ const brickWall = defineAsset(
       const r = makeRand(seed);
       const brick = rgbOf(str(p, 'brickColor', '#8a3b2b'));
       const mortarC = rgbOf(str(p, 'mortarColor', '#b5ab9a'));
-      const s = Math.min(1, Math.sqrt(1_400_000 / (W * H)));
+      const s = Math.min(1, Math.sqrt(1_000_000 / (W * H)));
       const w = Math.round(W * s);
       const h = Math.round(H * s);
       const k = s * u; // working px per unit
@@ -419,7 +419,7 @@ const stoneWall = defineAsset(
       const variation = num(p, 'variation', 0.5);
       const rough = num(p, 'roughness', 0.55);
       const moss = num(p, 'moss', 0);
-      const s = Math.min(1, Math.sqrt(1_000_000 / (W * H)));
+      const s = Math.min(1, Math.sqrt(780_000 / (W * H)));
       const w = Math.round(W * s);
       const h = Math.round(H * s);
       const k = s * u;
@@ -449,8 +449,8 @@ const stoneWall = defineAsset(
           const px = x + wv * cell * 0.08;
           const py = y + wv * cell * 0.06;
           worleyAt(grid, px, py, hit, sx);
-          const edge = (hit.f2 - hit.f1) * 0.5 - mw * 0.5 + sampleField(fTex, fw, fh, fx, fy) * mw * 0.5 * rough;
           const tex = sampleField(fTex, fw, fh, fx, fy);
+          const edge = (hit.f2 - hit.f1) * 0.5 - mw * 0.5 + tex * mw * 0.5 * rough;
           const big = sampleField(fBig, fw, fh, fx, fy);
           const o = (y * w + x) * 4;
           let c: RGB;
