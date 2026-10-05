@@ -202,11 +202,30 @@ export function grainTile(seed: number, size = 256, soft = 0): HTMLCanvasElement
  * `scale` enlarges the grain; a random offset avoids identical alignment between layers.
  */
 export function fillGrain(ctx: CanvasRenderingContext2D, w: number, h: number, seed: number, scale = 1, soft = 0) {
-  const tile = grainTile(seed, 256, soft);
+  // A handful of tiles per softness serve every seed (the seed picks one of them plus a random
+  // offset and quarter turn): building a fresh tile per seed made every new seed pay for a
+  // 256² noise + blur pass and let the tile cache grow without bound.
+  const hsh = grainHash(seed);
+  const tile = grainTile(GRAIN_VARIANT_SEEDS[hsh & 3], 256, soft);
   const pat = ctx.createPattern(tile, 'repeat');
   if (!pat) return;
-  const off = ((seed * 7919) % 256) | 0;
-  pat.setTransform(new DOMMatrix().translate(off, (off * 3) % 256).scale(scale));
+  pat.setTransform(
+    new DOMMatrix()
+      .translate((hsh >>> 4) & 255, (hsh >>> 12) & 255)
+      .rotate(((hsh >>> 2) & 3) * 90)
+      .scale(scale),
+  );
   ctx.fillStyle = pat;
   ctx.fillRect(0, 0, w, h);
+}
+
+const GRAIN_VARIANT_SEEDS = [11, 23, 37, 53];
+
+/** 32-bit integer hash of a seed (any number). Pure. */
+export function grainHash(seed: number): number {
+  let x = Math.imul((Math.round(seed) | 0) ^ 0x9e3779b9, 0x85ebca6b);
+  x ^= x >>> 13;
+  x = Math.imul(x, 0xc2b2ae35);
+  x ^= x >>> 16;
+  return x >>> 0;
 }

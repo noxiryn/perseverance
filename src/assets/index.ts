@@ -86,14 +86,17 @@ commands.register({
 });
 
 installCanvasDrop();
-void loadUserAssets();
-// Warm up the few faces text-drawing assets use once the app is idle (they are tiny local files),
-// so placing a newspaper/film-frame asset right away already renders with the right fonts.
+// Once the app is idle: open the My Assets library (small previews only — full images decode on
+// demand) so imported images show up in the registry, and warm up the few faces text-drawing
+// assets use (tiny local files) so placing a newspaper/film-frame asset renders right away.
 if (typeof window !== 'undefined') {
-  const warm = () => void loadAssetFonts();
+  const warm = () => {
+    void loadUserAssets();
+    void loadAssetFonts();
+  };
   if ('requestIdleCallback' in window) window.requestIdleCallback(warm, { timeout: 2500 });
   else setTimeout(warm, 1200);
 }
 
-export { createAssetLayer, placeAsset, placeAssetAt, prepareAsset, regenerateAssetLayer } from './place';
+export { createAssetLayer, placeAsset, placeAssetAt, placeAssetWhenReady, prepareAsset, regenerateAssetLayer } from './place';
 export { BUILTIN_ASSETS } from './catalog';

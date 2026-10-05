@@ -1,6 +1,10 @@
 /**
  * "My Assets": user-imported images stored in IndexedDB ('perseverance-assets') and exposed as
  * element assets (category 'My Assets') in the assets registry so every module can place them.
+ *
+ * Memory: at startup only a small preview of each image is decoded (thumbnails and previews
+ * draw from it). The full-resolution image is decoded on demand — when a card is hovered or
+ * selected, or right before placing (`prepareAsset`) — and kept in a small LRU.
  */
 import { create } from 'zustand';
 import type { AssetDef } from '../../registry';
@@ -14,6 +18,12 @@ const DB_NAME = 'perseverance-assets';
 const STORE = 'assets';
 /** Longest side kept for imported images (keeps the library light). */
 export const MAX_SIDE = 4096;
+/** Longest side of the always-resident preview (covers 128–200px cards and the 416px live preview). */
+export const PREVIEW_SIDE = 432;
+/** Vector images (SVG) are rasterized with this longest side when imported. */
+export const SVG_SIDE = 2048;
+/** Full-resolution images kept decoded at once. */
+const MAX_FULL = 4;
 
 export interface UserAssetRecord {
   id: string;
@@ -42,8 +52,132 @@ interface UserAssetsState {
 
 export const useUserAssets = create<UserAssetsState>()(() => ({ items: [], loaded: false, error: null }));
 
-/** Decoded images by record id (for synchronous generate()). */
-const images = new Map<string, HTMLCanvasElement | ImageBitmap>();
+type Img = HTMLCanvasElement | ImageBitmap;
+
+/** Stored blobs by record id (IndexedDB blobs are disk-backed, cheap to hold). */
+const blobs = new Map<string, Blob>();
+/** Small resident previews by record id. */
+const previews = new Map<string, Img>();
+/** Full-resolution decodes, least recently used first. */
+const full = new Map<string, Img>();
+const decoding = new Map<string, Promise<void>>();
+
+function release(img: Img) {
+  if (typeof ImageBitmap !== 'undefined' && img instanceof ImageBitmap) img.close();
+}
+
+function touchFull(id: string, img: Img) {
+  full.delete(id);
+  full.set(id, img);
+  while (full.size > MAX_FULL) {
+    const [oldId, old] = full.entries().next().value as [string, Img];
+    full.delete(oldId);
+    release(old);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Decoding                                                            */
+/* ------------------------------------------------------------------ */
+
+/** Longest-side clamp. Pure. */
+export function clampSize(w: number, h: number, max = MAX_SIDE): { width: number; height: number } {
+  const s = Math.min(1, max / Math.max(w, h, 1));
+  return { width: Math.max(1, Math.round(w * s)), height: Math.max(1, Math.round(h * s)) };
+}
+
+/** Size an image of w×h is rasterized at: bitmaps are clamped, vectors scaled to `vector`. Pure. */
+export function importSize(w: number, h: number, isVector: boolean, vector = SVG_SIDE): { width: number; height: number } {
+  if (!isVector) return clampSize(w, h);
+  const s = vector / Math.max(w, h, 1);
+  return { width: Math.max(1, Math.round(w * s)), height: Math.max(1, Math.round(h * s)) };
+}
+
+export function isSvg(name: string, blob: Blob): boolean {
+  return blob.type === 'image/svg+xml' || /\.svgz?$/i.test(name);
+}
+
+/** Decode through an <img> element (handles SVG, which createImageBitmap can't decode from a blob). */
+async function decodeViaImg(blob: Blob): Promise<HTMLImageElement> {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    img.decoding = 'async';
+    img.src = url;
+    await img.decode();
+    return img;
+  } finally {
+    // the decoded image stays usable for drawing after the URL is revoked
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+}
+
+function canvasOf(w: number, h: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d');
+  if (!ctx) throw new Error('Canvas is not available');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  return [c, ctx];
+}
+
+function encodePng(c: HTMLCanvasElement): Promise<Blob> {
+  return new Promise<Blob>((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('Encoding failed'))), 'image/png'));
+}
+
+/** Downscaled copy (≤ PREVIEW_SIDE) of a decoded image. */
+function makePreview(img: CanvasImageSource, w: number, h: number): Img {
+  const s = clampSize(w, h, PREVIEW_SIDE);
+  const [c, ctx] = canvasOf(s.width, s.height);
+  ctx.drawImage(img, 0, 0, s.width, s.height);
+  return c;
+}
+
+/** Preview straight from the stored blob (the decoder resizes; the full image is never kept). */
+async function decodePreview(blob: Blob, w: number, h: number): Promise<Img> {
+  const s = clampSize(w, h, PREVIEW_SIDE);
+  try {
+    return await createImageBitmap(blob, { resizeWidth: s.width, resizeHeight: s.height, resizeQuality: 'high' });
+  } catch {
+    const img = await decodeViaImg(blob);
+    return makePreview(img, s.width, s.height);
+  }
+}
+
+/** Decode a user image at full resolution into the LRU (once; concurrent calls share). Never rejects. */
+export function ensureFullImage(id: string): Promise<void> {
+  if (full.has(id)) {
+    touchFull(id, full.get(id)!);
+    return Promise.resolve();
+  }
+  const pending = decoding.get(id);
+  if (pending) return pending;
+  const blob = blobs.get(id);
+  if (!blob) return Promise.resolve();
+  const p = (async () => {
+    try {
+      let img: Img;
+      try {
+        img = await createImageBitmap(blob);
+      } catch {
+        const el = await decodeViaImg(blob);
+        const [c, ctx] = canvasOf(el.naturalWidth || 1, el.naturalHeight || 1);
+        ctx.drawImage(el, 0, 0);
+        img = c;
+      }
+      if (blobs.has(id)) touchFull(id, img);
+      else release(img); // deleted while decoding
+    } catch (err) {
+      console.warn('[assets] could not decode a My Assets image', err);
+    } finally {
+      decoding.delete(id);
+    }
+  })();
+  decoding.set(id, p);
+  return p;
+}
 
 /* ------------------------------------------------------------------ */
 /* IndexedDB                                                           */
@@ -96,30 +230,28 @@ function makeDef(e: UserAssetEntry): AssetDef {
     defaultBlendMode: 'normal',
     defaultOpacity: 1,
     generate(_p, { width, height }) {
-      const c = document.createElement('canvas');
-      c.width = Math.max(1, Math.round(width));
-      c.height = Math.max(1, Math.round(height));
-      const img = images.get(e.id);
-      const ctx = c.getContext('2d');
-      if (img && ctx) {
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(img, 0, 0, c.width, c.height);
+      const [c, ctx] = canvasOf(Math.max(1, Math.round(width)), Math.max(1, Math.round(height)));
+      const big = full.get(e.id);
+      const small = previews.get(e.id);
+      // the preview is enough for thumbnails; larger renders use (or start decoding) the full image
+      const fitsPreview = !!small && Math.max(c.width / small.width, c.height / small.height) <= 1.05;
+      let src: Img | undefined;
+      if (big && !fitsPreview) {
+        touchFull(e.id, big);
+        src = big;
+      } else {
+        src = small ?? big;
+        if (!fitsPreview && !big) void ensureFullImage(e.id);
       }
+      if (src) ctx.drawImage(src, 0, 0, c.width, c.height);
       return c;
     },
   };
 }
 
 function register(e: UserAssetEntry) {
-  assetMeta.set(e.assetId, { bg: 'checker' });
+  assetMeta.set(e.assetId, { bg: 'checker', isReady: () => full.has(e.id), prepare: () => ensureFullImage(e.id) });
   assets.register(makeDef(e));
-}
-
-/** Longest-side clamp. Pure. */
-export function clampSize(w: number, h: number, max = MAX_SIDE): { width: number; height: number } {
-  const s = Math.min(1, max / Math.max(w, h, 1));
-  return { width: Math.max(1, Math.round(w * s)), height: Math.max(1, Math.round(h * s)) };
 }
 
 /** Strip the extension and tidy a file name for display. Pure. */
@@ -145,15 +277,17 @@ export function loadUserAssets(): Promise<void> {
       const items: UserAssetEntry[] = [];
       for (const r of recs) {
         try {
-          images.set(r.id, await createImageBitmap(r.blob));
+          previews.set(r.id, await decodePreview(r.blob, r.width, r.height));
         } catch {
           continue; // undecodable blob: skip
         }
+        blobs.set(r.id, r.blob);
         const e: UserAssetEntry = { id: r.id, assetId: userAssetId(r.id), name: r.name, width: r.width, height: r.height, created: r.created };
         register(e);
         items.push(e);
       }
-      useUserAssets.setState({ items, loaded: true, error: null });
+      // keep anything imported while the library was loading
+      useUserAssets.setState((st) => ({ items: [...items, ...st.items.filter((x) => !items.some((y) => y.id === x.id))], loaded: true, error: null }));
     } catch (err) {
       useUserAssets.setState({ loaded: true, error: err instanceof Error ? err.message : String(err) });
     }
@@ -161,43 +295,73 @@ export function loadUserAssets(): Promise<void> {
   return loading;
 }
 
-/** Import image blobs (files) into the library. Returns the new entries. */
-export async function importImages(files: { name: string; blob: Blob }[]): Promise<UserAssetEntry[]> {
+export interface ImportResult {
+  added: UserAssetEntry[];
+  failed: { name: string; reason: string }[];
+}
+
+/** Decode one file into a storable record + its full image. Throws a readable message. */
+async function prepareImport(name: string, blob: Blob): Promise<{ rec: UserAssetRecord; img: Img }> {
+  const vector = isSvg(name, blob);
+  let src: ImageBitmap | HTMLImageElement;
+  let w: number;
+  let h: number;
+  try {
+    if (vector) throw new Error('vector');
+    src = await createImageBitmap(blob);
+    w = src.width;
+    h = src.height;
+  } catch {
+    try {
+      src = await decodeViaImg(blob);
+    } catch {
+      throw new Error('not a readable image');
+    }
+    // SVGs without an intrinsic size report 0 (or 300×150): fall back to a square canvas
+    w = src.naturalWidth || 1024;
+    h = src.naturalHeight || 1024;
+  }
+  const size = importSize(w, h, vector);
+  let img: Img;
+  let stored = blob;
+  if (src instanceof ImageBitmap && size.width === w && size.height === h) img = src;
+  else {
+    const [c, ctx] = canvasOf(size.width, size.height);
+    ctx.drawImage(src, 0, 0, size.width, size.height);
+    if (src instanceof ImageBitmap) src.close();
+    stored = await encodePng(c);
+    img = c;
+  }
+  return { rec: { id: uid('ua_'), name: displayName(name), blob: stored, width: size.width, height: size.height, created: Date.now() }, img };
+}
+
+/**
+ * Import image blobs (files) into the library. Each file succeeds or fails on its own; the
+ * store is updated with everything that was added even when some files failed.
+ */
+export async function importImages(files: { name: string; blob: Blob }[]): Promise<ImportResult> {
   await loadUserAssets();
   const added: UserAssetEntry[] = [];
-  for (const f of files) {
-    let bmp: ImageBitmap;
-    try {
-      bmp = await createImageBitmap(f.blob);
-    } catch {
-      throw new Error(`“${f.name}” is not a readable image`);
+  const failed: ImportResult['failed'] = [];
+  try {
+    for (const f of files) {
+      try {
+        const { rec, img } = await prepareImport(f.name, f.blob);
+        await tx('readwrite', (s) => s.put(rec));
+        blobs.set(rec.id, rec.blob);
+        previews.set(rec.id, makePreview(img, rec.width, rec.height));
+        touchFull(rec.id, img);
+        const e: UserAssetEntry = { id: rec.id, assetId: userAssetId(rec.id), name: rec.name, width: rec.width, height: rec.height, created: rec.created };
+        register(e);
+        added.push(e);
+      } catch (err) {
+        failed.push({ name: f.name, reason: err instanceof Error ? err.message : String(err) });
+      }
     }
-    let blob = f.blob;
-    let { width, height } = { width: bmp.width, height: bmp.height };
-    let img: HTMLCanvasElement | ImageBitmap = bmp;
-    if (Math.max(width, height) > MAX_SIDE) {
-      const s = clampSize(width, height);
-      const c = document.createElement('canvas');
-      c.width = s.width;
-      c.height = s.height;
-      const ctx = c.getContext('2d')!;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(bmp, 0, 0, s.width, s.height);
-      bmp.close();
-      blob = await new Promise<Blob>((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('Encoding failed'))), 'image/png'));
-      width = s.width;
-      height = s.height;
-      img = c;
-    }
-    const rec: UserAssetRecord = { id: uid('ua_'), name: displayName(f.name), blob, width, height, created: Date.now() };
-    await tx('readwrite', (s) => s.put(rec));
-    images.set(rec.id, img);
-    const e: UserAssetEntry = { id: rec.id, assetId: userAssetId(rec.id), name: rec.name, width, height, created: rec.created };
-    register(e);
-    added.push(e);
+  } finally {
+    if (added.length) useUserAssets.setState((st) => ({ items: [...st.items, ...added] }));
   }
-  if (added.length) useUserAssets.setState((st) => ({ items: [...st.items, ...added] }));
-  return added;
+  return { added, failed };
 }
 
 export async function renameUserAsset(id: string, name: string): Promise<void> {
@@ -216,13 +380,15 @@ export async function renameUserAsset(id: string, name: string): Promise<void> {
 export async function deleteUserAsset(id: string): Promise<void> {
   await tx('readwrite', (s) => s.delete(id));
   const assetId = userAssetId(id);
-  images.delete(id);
+  blobs.delete(id);
+  const f = full.get(id);
+  if (f) release(f);
+  full.delete(id);
+  const pv = previews.get(id);
+  if (pv) release(pv);
+  previews.delete(id);
   assets.unregister(assetId);
+  assetMeta.delete(assetId);
   invalidateThumbs(assetId);
   useUserAssets.setState((st) => ({ items: st.items.filter((e) => e.id !== id) }));
-}
-
-/** Decoded image of a user asset (for full-quality placement). */
-export function userAssetImage(id: string): HTMLCanvasElement | ImageBitmap | null {
-  return images.get(id) ?? null;
 }

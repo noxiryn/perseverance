@@ -254,17 +254,9 @@ function blurMultires(buf: Float32Array, w: number, h: number, ch: number, sigma
     }
   }
   const sl = Math.sqrt(Math.max(0.09, sigma * sigma - (f * f) / 4)) / f;
-  if (sl < 2) {
-    if (ch === 1) gaussSmallPlane(small, w2, h2, sl);
-    else if (ch === 4) gaussSmallRGBA(small, w2, h2, sl);
-    else {
-      const { r, alpha } = boxForSigma(sl, 3);
-      boxBlurInterleaved(small, w2, h2, ch, r, 3, alpha);
-    }
-  } else {
-    const { r, alpha } = boxForSigma(sl, 3);
-    boxBlurInterleaved(small, w2, h2, ch, r, 3, alpha);
-  }
+  if (sl < 1 && ch === 1) gaussSmallPlane(small, w2, h2, sl);
+  else if (sl < 1 && ch === 4) gaussSmallRGBA(small, w2, h2, sl);
+  else boxBlurPasses(small, w2, h2, ch, boxPassesForSigma(sl));
   // bilinear upsample (cell centers at (i + 0.5)·f)
   const invF = 1 / f;
   const xi0 = new Int32Array(w),
@@ -314,9 +306,8 @@ export function blurPlane(buf: Float32Array, w: number, h: number, sigma: number
     blurMultires(buf, w, h, 1, sigma);
     return buf;
   }
-  // 3 extended-box passes with exactly the gaussian's variance
-  const { r, alpha } = boxForSigma(sigma, 3);
-  boxBlurInterleaved(buf, w, h, 1, r, 3, alpha);
+  // 3 box passes with exactly the gaussian's variance
+  boxBlurPasses(buf, w, h, 1, boxPassesForSigma(sigma));
   return buf;
 }
 
@@ -328,6 +319,29 @@ export function boxBlurPlane(buf: Float32Array, w: number, h: number, r: number,
   return boxBlurInterleaved(buf, w, h, 1, r, passes);
 }
 
+/** One box pass: radius r, optional fractional end taps of weight alpha at ±(r + 1). */
+export interface BoxPass {
+  r: number;
+  alpha: number;
+}
+
+/**
+ * Box passes reproducing a gaussian of `sigma` exactly (same variance): two plain boxes of
+ * radius r (r(r+1) ≤ σ²) and one extended box that makes up the remaining variance. Same cost
+ * as three plain boxes (+~10%), but the blur grows smoothly with σ instead of in whole-pixel steps.
+ */
+export function boxPassesForSigma(sigma: number): BoxPass[] {
+  const V = sigma * sigma;
+  const r = Math.max(0, Math.floor((-1 + Math.sqrt(1 + 4 * V)) / 2));
+  if (r < 1) {
+    // small blurs: three identical extended 3-tap boxes keep a gaussian-like profile
+    const b = boxForSigma(sigma, 3);
+    return [b, b, b];
+  }
+  const V3 = Math.max(0, V - (2 * r * (r + 1)) / 3);
+  return [{ r, alpha: 0 }, { r, alpha: 0 }, boxForSigma(Math.sqrt(V3), 1)];
+}
+
 /**
  * Box blur of interleaved data (`ch` floats per pixel) in place, `passes` times (3 ≈ gaussian
  * with sigma = sqrt(r(r+1))). With `alpha` > 0 each box is "extended": the taps at ±(r + 1) weigh
@@ -335,28 +349,39 @@ export function boxBlurPlane(buf: Float32Array, w: number, h: number, r: number,
  * with float precision between passes (no 8-bit rounding).
  */
 export function boxBlurInterleaved(buf: Float32Array, w: number, h: number, ch: number, r: number, passes = 3, alpha = 0): Float32Array {
-  if (r < 0 || w < 1 || h < 1 || (r === 0 && !(alpha > 0))) return buf;
-  const ext = alpha > 1e-6;
-  const inv = 1 / (2 * r + 1 + (ext ? 2 * alpha : 0));
+  const list: BoxPass[] = [];
+  for (let i = 0; i < passes; i++) list.push({ r, alpha });
+  return boxBlurPasses(buf, w, h, ch, list);
+}
+
+/** Run a list of (extended) box passes over interleaved data in place (clamp-to-edge). */
+export function boxBlurPasses(buf: Float32Array, w: number, h: number, ch: number, list: BoxPass[]): Float32Array {
+  if (w < 1 || h < 1) return buf;
   const stride = w * ch;
-  const tmp = new Float32Array(buf.length);
-  const sums = new Float64Array(stride);
-  // x ranges where the add / remove taps are clamped
-  const xAdd = Math.max(0, Math.min(w, w - r - 1)); // x < xAdd: add tap x+r+1 inside
-  const xRem = Math.min(w, r + 1); // x >= xRem: remove tap x-r inside (> 0)
-  for (let p = 0; p < passes; p++) {
+  let tmp: Float32Array | null = null;
+  let sums: Float64Array | null = null;
+  for (const pass of list) {
+    const r = Math.max(0, Math.floor(pass.r));
+    const alpha = pass.alpha;
+    const ext = alpha > 1e-6;
+    if (r === 0 && !ext) continue;
+    tmp ??= new Float32Array(buf.length);
+    sums ??= new Float64Array(stride);
+    const inv = 1 / (2 * r + 1 + (ext ? 2 * alpha : 0));
+    // x ranges where the add / remove taps are clamped
+    const xAdd = Math.max(0, Math.min(w, w - r - 1)); // x < xAdd: add tap x+r+1 inside
+    const xRem = Math.min(w, r + 1); // x >= xRem: remove tap x-r inside (> 0)
+    const xm = Math.min(xAdd, xRem);
     // horizontal: buf → tmp
     for (let y = 0; y < h; y++) {
       const row = y * stride;
       for (let c = 0; c < ch; c++) {
         const b0 = row + c;
-        const bl = b0 + (w - 1) * ch;
         const first = buf[b0],
-          lastV = buf[bl];
+          lastV = buf[b0 + (w - 1) * ch];
         let sum = 0;
         for (let k = -r; k <= r; k++) sum += k < 0 ? first : k >= w ? lastV : buf[b0 + k * ch];
         let o = b0;
-        const xm = Math.min(xAdd, xRem);
         let x = 0;
         if (!ext) {
           // left edge: removed tap clamps to the first pixel
@@ -386,7 +411,9 @@ export function boxBlurInterleaved(buf: Float32Array, w: number, h: number, ch: 
             sum += lastV - (rem > 0 ? buf[b0 + rem * ch] : first);
           }
         } else {
-          // same phases, plus the fractional taps at x − r − 1 and x + r + 1
+          // same phases plus the fractional taps at x − r − 1 (the previous removed tap, kept in a
+          // register) and x + r + 1 (the tap being added)
+          let prevRem = first;
           for (; x < xm; x++, o += ch) {
             const add = buf[b0 + (x + r + 1) * ch];
             tmp[o] = (sum + alpha * (first + add)) * inv;
@@ -395,10 +422,13 @@ export function boxBlurInterleaved(buf: Float32Array, w: number, h: number, ch: 
           if (xAdd >= xRem) {
             let ia = b0 + (x + r + 1) * ch,
               ir = b0 + (x - r) * ch;
+            prevRem = x - r - 1 > 0 ? buf[ir - ch] : first;
             for (; x < xAdd; x++, o += ch, ia += ch, ir += ch) {
-              const add = buf[ia];
-              tmp[o] = (sum + alpha * (buf[ir - ch] + add)) * inv;
-              sum += add - buf[ir];
+              const add = buf[ia],
+                rem = buf[ir];
+              tmp[o] = (sum + alpha * (prevRem + add)) * inv;
+              sum += add - rem;
+              prevRem = rem;
             }
           } else {
             for (; x < xRem; x++, o += ch) {
@@ -415,7 +445,7 @@ export function boxBlurInterleaved(buf: Float32Array, w: number, h: number, ch: 
         }
       }
     }
-    // vertical: tmp → buf
+    // vertical: tmp → buf, row by row (one running sum per column → sequential memory)
     sums.fill(0);
     for (let k = -r; k <= r; k++) {
       const rk = (k < 0 ? 0 : k >= h ? h - 1 : k) * stride;
@@ -612,8 +642,8 @@ function gaussSmallRGBA(f: Float32Array, w: number, h: number, sigma: number) {
 
 /**
  * Gaussian blur of an RGBA image in place with premultiplied alpha (no dark fringes at
- * transparent edges). `sigma` in image px: exact gaussian kernel below 1 px, 3 extended box
- * passes of exactly the same variance above (at reduced resolution for big radii).
+ * transparent edges). `sigma` in image px: exact gaussian kernel below 1 px, 3 box passes of
+ * exactly the same variance above (at reduced resolution for big radii).
  *
  * This (rather than core/blur's boxBlurImageData) backs Gaussian Blur and every blur-based
  * filter on purpose: it honours fractional radii (boxBlurImageData rounds to whole px and its
@@ -627,10 +657,7 @@ export function blurImage<T extends Img>(img: T, sigma: number): T {
   const f = premultipliedFloats(img.data);
   if (sigma < 1) gaussSmallRGBA(f, w, h, sigma);
   else if (sigma >= MULTIRES_SIGMA && w >= 16 && h >= 16) blurMultires(f, w, h, 4, sigma);
-  else {
-    const { r, alpha } = boxForSigma(sigma, 3);
-    boxBlurInterleaved(f, w, h, 4, r, 3, alpha);
-  }
+  else boxBlurPasses(f, w, h, 4, boxPassesForSigma(sigma));
   unpremultiplyFloats(f, img.data);
   return img;
 }

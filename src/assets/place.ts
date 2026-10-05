@@ -56,26 +56,38 @@ export function assetNeedsFonts(assetId: string): boolean {
   return !!assetMeta.get(assetId)?.fonts;
 }
 
-/**
- * Await everything an asset needs to render faithfully (currently: the fonts of text-drawing
- * assets). Template/look builders may call it before `createAssetLayer`. Never rejects.
- */
-export function prepareAsset(assetId: string): Promise<void> {
-  return assetNeedsFonts(assetId) ? loadAssetFonts() : Promise.resolve();
+/** True when the asset renders at full quality right now (fonts loaded, source decoded). */
+export function assetReady(assetId: string): boolean {
+  const m = assetMeta.get(assetId);
+  if (m?.fonts && !assetFontsReady()) return false;
+  return m?.isReady ? m.isReady() : true;
 }
 
 /**
- * A text-drawing asset rendered before its fonts were ready used fallback faces: re-render it
- * into the SAME bitmap once they load, unless the bitmap was edited meanwhile (the bitmap is
- * brand new and owned by the asset layer, so this only corrects its initial content).
+ * Await everything an asset needs to render faithfully (the fonts of text-drawing assets, the
+ * full-resolution decode of user images). Template/look builders may call it before
+ * `createAssetLayer`. Never rejects.
  */
-function refreshWhenFontsReady(assetId: string, params: ParamValues, bitmapId: ID) {
-  if (!assetNeedsFonts(assetId) || assetFontsReady()) return;
+export function prepareAsset(assetId: string): Promise<void> {
+  const m = assetMeta.get(assetId);
+  const jobs: Promise<unknown>[] = [];
+  if (m?.fonts) jobs.push(loadAssetFonts());
+  if (m?.prepare && !(m.isReady?.() ?? false)) jobs.push(m.prepare().catch(() => undefined));
+  return jobs.length ? Promise.all(jobs).then(() => undefined) : Promise.resolve();
+}
+
+/**
+ * An asset rendered before it was ready (fallback fonts, preview-resolution user image) is
+ * re-rendered into the SAME bitmap once it is, unless the bitmap was edited meanwhile (the
+ * bitmap is brand new and owned by the asset layer, so this only corrects its initial content).
+ */
+function refreshWhenReady(assetId: string, params: ParamValues, bitmapId: ID) {
+  if (assetReady(assetId)) return;
   const v = bitmaps.version(bitmapId);
-  void loadAssetFonts().then(() => {
+  void prepareAsset(assetId).then(() => {
     const c = bitmaps.tryGet(bitmapId);
     const def = assets.get(assetId);
-    if (!c || !def || bitmaps.version(bitmapId) !== v) return;
+    if (!c || !def || bitmaps.version(bitmapId) !== v || !assetReady(assetId)) return;
     try {
       const fresh = def.generate(params, { width: c.width, height: c.height });
       const ctx = c.getContext('2d');
@@ -85,7 +97,7 @@ function refreshWhenFontsReady(assetId: string, params: ParamValues, bitmapId: I
       bitmaps.touch(bitmapId);
       viewport.requestRender();
     } catch (err) {
-      console.error(`[assets] font refresh of "${assetId}" failed`, err);
+      console.error(`[assets] refresh of "${assetId}" failed`, err);
     }
   });
 }
@@ -103,7 +115,7 @@ export function createAssetLayer(
   const size = assetLayerSize(def, docWidth, docHeight, opts);
   const canvas = def.generate(p, size);
   const bitmapId = bitmaps.add(canvas);
-  if (def.category !== USER_CATEGORY) refreshWhenFontsReady(assetId, p, bitmapId);
+  refreshWhenReady(assetId, p, bitmapId);
   const layer = makeRasterLayer({
     name: opts.name ?? def.name,
     bitmapId,
@@ -144,6 +156,16 @@ export function placeAsset(assetId: string, params?: ParamValues, opts: AssetLay
   const id = useEditor.getState().addLayer(layer, { label: `Place ${layer.name}` });
   viewport.requestRender();
   return id;
+}
+
+/**
+ * `placeAsset` after `prepareAsset` (fonts loaded / user image decoded), so the layer is right
+ * from its first frame. Used by the library UI; resolves to the new layer id or null.
+ */
+export async function placeAssetWhenReady(assetId: string, params?: ParamValues, opts: AssetLayerOptions = {}, at?: Point | null): Promise<ID | null> {
+  if (!activeDoc()) return placeAsset(assetId, params, opts); // toasts the helpful message
+  if (!assetReady(assetId)) await prepareAsset(assetId);
+  return at ? placeAssetAt(assetId, params, at, opts) : placeAsset(assetId, params, opts);
 }
 
 /**
@@ -209,7 +231,7 @@ export function regenerateAssetLayer(layerId: ID, params: ParamValues): void {
   if (!canvas) return;
   const bitmapId = bitmaps.add(canvas);
   const p = resolveParams(def, params);
-  refreshWhenFontsReady(assetId, p, bitmapId);
+  refreshWhenReady(assetId, p, bitmapId);
   useEditor.getState().updateLayer<RasterLayer>(
     layerId,
     (d) => {

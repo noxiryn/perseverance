@@ -31,11 +31,11 @@ import {
 } from './apply';
 import { diffBounds } from './selectionBlend';
 import { DestructivePreview, MaskPreview, SmartPreview } from './livePreview';
-import { cropCanvas, fitImage, paramsKey } from './preview';
+import { cropCanvas, cropDocRender, fitImage, layerWithFilter, paramsKey, renderSmart, smartFrameOf } from './preview';
 import { rememberParams, rememberedParams, setLastFilter } from './memory';
 import { toast } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
-import { getLayerBounds, renderLayerToDoc } from '../../render/compositor';
+import { getLayerBounds } from '../../render/compositor';
 import './fxfilters.css';
 
 const BOX_W = 480;
@@ -51,26 +51,6 @@ export interface FilterDialogProps extends Record<string, unknown> {
 }
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
-
-/** Smart-mode frame: the layer's document bounds clipped to the canvas (doc px, integer). */
-function smartFrameOf(t: FilterTarget): Rect {
-  const doc = t.doc;
-  let b: Rect | null = null;
-  try {
-    b = getLayerBounds(doc, t.layer.id);
-  } catch {
-    b = null;
-  }
-  if (!b) b = { x: 0, y: 0, width: doc.width, height: doc.height };
-  const x0 = Math.max(0, Math.floor(b.x)),
-    y0 = Math.max(0, Math.floor(b.y));
-  const x1 = Math.min(doc.width, Math.ceil(b.x + b.width)),
-    y1 = Math.min(doc.height, Math.ceil(b.y + b.height));
-  if (x1 - x0 < 1 || y1 - y0 < 1) {
-    return { x: Math.floor(b.x), y: Math.floor(b.y), width: Math.max(1, Math.ceil(b.width)), height: Math.max(1, Math.ceil(b.height)) };
-  }
-  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
-}
 
 /** 100% view window (frame-relative px) centred on the focus fraction. */
 function windowRect(fw: number, fh: number, focus: { x: number; y: number }): Rect {
@@ -169,21 +149,8 @@ export function FilterDialog({ filterId, mode, target, initialParams, close }: F
 
   // smart: compositor renders (doc space) of the layer with / without the new filter
   const previewInstId = useMemo(() => uid('fxdlg_'), []);
-  const layerWith = useCallback(
-    (p: ParamValues): Layer => ({ ...target.layer, filters: [...target.layer.filters, { id: previewInstId, filterId, enabled: true, params: structuredClone(p) }] }) as Layer,
-    [filterId, previewInstId, target.layer],
-  );
-  const smartRender = useCallback(
-    (layer: Layer, scale: number) => {
-      try {
-        return renderLayerToDoc(target.doc, layer, { scale, effects: false, mask: false });
-      } catch (err) {
-        console.error('[fx-filters] preview render failed', err);
-        return null;
-      }
-    },
-    [target.doc],
-  );
+  const layerWith = useCallback((p: ParamValues): Layer => layerWithFilter(target, previewInstId, filterId, p), [filterId, previewInstId, target]);
+  const smartRender = useCallback((layer: Layer, scale: number) => renderSmart(target, layer, scale), [target]);
   const smartBefore = useRef(new Map<number, HTMLCanvasElement | null>());
   const smartAfterFull = useRef<{ key: string; canvas: HTMLCanvasElement | null } | null>(null);
   const smartFitK = Math.min(1, BOX_W / smartFrame.width, BOX_H / smartFrame.height);
@@ -194,13 +161,7 @@ export function FilterDialog({ filterId, mode, target, initialParams, close }: F
     },
     [smartRender, target.layer],
   );
-  /** Crop a doc-space render at `scale` to a doc rect (transparent when the render is empty). */
-  const cropDoc = (c: HTMLCanvasElement | null, r: Rect, scale: number): ImageData => {
-    const w = Math.max(1, Math.round(r.width * scale)),
-      h = Math.max(1, Math.round(r.height * scale));
-    if (!c) return new ImageData(w, h);
-    return cropCanvas(c, Math.round(r.x * scale), Math.round(r.y * scale), w, h);
-  };
+  const cropDoc = cropDocRender;
 
   /** Is the current view's "after" image already computed (cheap to show)? */
   const viewReady = (): boolean => {

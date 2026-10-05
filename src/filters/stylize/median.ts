@@ -92,15 +92,15 @@ function median1D(src: Uint8Array, dst: Uint8Array, len: number, lines: number, 
   }
 }
 
-/** Median of one 8-bit channel plane. */
-export function medianChannel(src: Uint8Array, w: number, h: number, radius: number): Uint8Array {
+/** Median of one 8-bit channel plane (`separable`: rows then columns, O(1) per pixel). */
+export function medianChannel(src: Uint8Array, w: number, h: number, radius: number, separable = false): Uint8Array {
   const r = Math.max(0, Math.round(radius));
   const dst = new Uint8Array(src.length);
   if (r === 0) {
     dst.set(src);
     return dst;
   }
-  if (r <= 6) {
+  if (r <= 6 && !separable) {
     median2D(src, dst, w, h, r);
     return dst;
   }
@@ -110,8 +110,12 @@ export function medianChannel(src: Uint8Array, w: number, h: number, radius: num
   return dst;
 }
 
-/** Median filter of an RGBA image in place (premultiplied so transparent edges stay clean). */
-export function medianImage<T extends Img>(img: T, radius: number, preserveAlpha = true): T {
+/**
+ * Median filter of an RGBA image in place (premultiplied so transparent edges stay clean).
+ * `separable` trades the exact square-window median for a ~3× faster rows-then-columns median
+ * (still edge preserving) — used where the median is only a simplification pre-pass.
+ */
+export function medianImage<T extends Img>(img: T, radius: number, preserveAlpha = true, separable = false): T {
   const r = Math.round(radius);
   if (r < 1) return img;
   const { width: w, height: h, data } = img;
@@ -136,7 +140,7 @@ export function medianImage<T extends Img>(img: T, radius: number, preserveAlpha
         flat = false;
         break;
       }
-    return flat ? c : medianChannel(c, w, h, r);
+    return flat ? c : medianChannel(c, w, h, r, separable);
   });
   for (let i = 0, j = 0; i < n; i++, j += 4) {
     const a = out[3][i];

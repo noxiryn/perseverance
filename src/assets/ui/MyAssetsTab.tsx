@@ -7,10 +7,10 @@ import { FolderHeart, ImagePlus, Pencil, Trash2, Upload } from 'lucide-react';
 import { Button, Dialog, TextInput, showContextMenu } from '../../ui/controls';
 import { openDialog, toast } from '../../state/ui';
 import { openFiles } from '../../platform';
-import { deleteUserAsset, importImages, loadUserAssets, renameUserAsset, useUserAssets } from '../lib/userAssets';
+import { deleteUserAsset, ensureFullImage, importImages, loadUserAssets, renameUserAsset, useUserAssets } from '../lib/userAssets';
 import type { UserAssetEntry } from '../lib/userAssets';
 import { startDrag } from '../lib/dnd';
-import { placeAsset } from '../place';
+import { placeAssetWhenReady } from '../place';
 import { AssetThumb } from './AssetThumb';
 
 const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'avif'];
@@ -37,17 +37,56 @@ function RenameDialog({ close, name }: { close: (r?: string) => void; name: stri
   );
 }
 
+function DeleteDialog({ close, name }: { close: (r?: boolean) => void; name: string }) {
+  return (
+    <Dialog
+      title="Delete Asset"
+      width={360}
+      onClose={() => close(false)}
+      onSubmit={() => close(true)}
+      footer={
+        <>
+          <Button onClick={() => close(false)}>Cancel</Button>
+          <Button variant="primary" icon={Trash2} onClick={() => close(true)}>
+            Delete
+          </Button>
+        </>
+      }
+    >
+      <div className="assets-confirm">
+        Remove “{name}” from My Assets? The image is deleted from this computer’s library and can’t be restored with Undo. Layers already placed in
+        documents are not affected.
+      </div>
+    </Dialog>
+  );
+}
+
+/** Summary toast for an import batch (successes and per-file failures). Pure. */
+export function importSummary(added: string[], failed: string[]): { message: string; kind: 'success' | 'warning' | 'error' } {
+  const quote = (n: string) => `“${n}”`;
+  const ok = added.length === 1 ? `Added ${quote(added[0])} to My Assets` : `Added ${added.length} images to My Assets`;
+  if (!failed.length) return { message: ok, kind: 'success' };
+  const list = failed.length <= 2 ? failed.map(quote).join(' and ') : `${failed.length} files`;
+  const bad = `${list} could not be read as ${failed.length === 1 ? 'an image' : 'images'}`;
+  return added.length ? { message: `${ok}. ${bad}.`, kind: 'warning' } : { message: `${bad}.`, kind: 'error' };
+}
+
 async function importBlobs(files: { name: string; blob: Blob }[]) {
   const images = files.filter((f) => f.blob.type.startsWith('image/') || IMAGE_EXTS.includes(f.name.split('.').pop()?.toLowerCase() ?? ''));
+  const skipped = files.length - images.length;
   if (!images.length) {
-    toast('Only image files can be added to My Assets', 'warning');
+    toast('Only image files (PNG, JPG, WebP, GIF, SVG…) can be added to My Assets', 'warning');
     return;
   }
   try {
-    const added = await importImages(images);
-    toast(added.length === 1 ? `Added “${added[0].name}” to My Assets` : `Added ${added.length} images to My Assets`);
+    const { added, failed } = await importImages(images);
+    const s = importSummary(
+      added.map((a) => a.name),
+      failed.map((f) => f.name),
+    );
+    toast(skipped ? `${s.message} (${skipped} non-image ${skipped === 1 ? 'file' : 'files'} skipped)` : s.message, s.kind, failed.length ? 4500 : 2600);
   } catch (err) {
-    toast(err instanceof Error ? err.message : 'Could not import the image', 'error');
+    toast(err instanceof Error ? err.message : 'Could not import the images', 'error');
   }
 }
 
@@ -67,7 +106,7 @@ function mimeOf(name: string): string {
 function UserCard({ e }: { e: UserAssetEntry }) {
   const menu = (ev: React.MouseEvent) =>
     showContextMenu(ev, [
-      { label: 'Place in Document', icon: ImagePlus, run: () => placeAsset(e.assetId) },
+      { label: 'Place in Document', icon: ImagePlus, run: () => void placeAssetWhenReady(e.assetId) },
       { separator: true },
       {
         label: 'Rename…',
@@ -81,7 +120,13 @@ function UserCard({ e }: { e: UserAssetEntry }) {
         label: 'Delete',
         icon: Trash2,
         run: async () => {
-          await deleteUserAsset(e.id).catch(() => toast('Could not delete the asset', 'error'));
+          if (!(await openDialog(DeleteDialog, { name: e.name }))) return;
+          try {
+            await deleteUserAsset(e.id);
+          } catch {
+            toast(`Could not delete “${e.name}”`, 'error');
+            return;
+          }
           toast(`Removed “${e.name}” from My Assets`, 'info');
         },
       },
@@ -92,7 +137,8 @@ function UserCard({ e }: { e: UserAssetEntry }) {
       title={`${e.name} (${e.width}×${e.height}) — click to place, drag onto the canvas, right-click for options`}
       draggable
       onDragStart={(ev) => startDrag(ev, { kind: 'asset', id: e.assetId })}
-      onClick={() => placeAsset(e.assetId)}
+      onClick={() => void placeAssetWhenReady(e.assetId)}
+      onPointerEnter={() => void ensureFullImage(e.id)}
       onContextMenu={menu}
     >
       <AssetThumb assetId={e.assetId} square />
@@ -131,7 +177,7 @@ export function MyAssetsTab() {
     <div className="assets-scroll" {...dragProps}>
       <div className={`assets-drop${over ? ' over' : ''}${items.length ? ' compact' : ''}`}>
         {!items.length && <Upload size={18} />}
-        <span>{over ? 'Drop to add to My Assets' : items.length ? 'Drop images here or' : 'Drop PNG/JPG/WebP images here to keep them in your library'}</span>
+        <span>{over ? 'Drop to add to My Assets' : items.length ? 'Drop images here or' : 'Drop PNG/JPG/WebP/SVG images here to keep them in your library'}</span>
         <Button size="small" icon={ImagePlus} onClick={() => void importFromDialog()}>
           Add Images…
         </Button>

@@ -15,7 +15,7 @@ import { toast } from '../../state/ui';
 import { renderDocument } from '../../render/compositor';
 import { renderPlaceholderCharacter } from '../../roblox/placeholder';
 import { applyDestructive, applySmart, committedDoc, effectiveMode, lastModeFor, noChangeMessage, resolveTarget, runDestructiveOn, selectionAlpha, targetContext, targetSource, type FilterTarget } from './apply';
-import { fitImage, paramsKey, runOnCopy } from './preview';
+import { cropDocRender, fitImage, layerWithFilter, paramsKey, renderSmart, runOnCopy, smartFrameOf } from './preview';
 import { getLastFilter, rememberParams, rememberedParams, setLastFilter } from './memory';
 import { categoriesOf, isBrowsableFilter, matchesQuery, sortFilters } from './galleryModel';
 import { openFilterDialogWith } from './filterDialog';
@@ -208,16 +208,23 @@ export function FilterGallery({ initialFilterId, close }: FilterGalleryProps & {
         const c = bigRef.current;
         if (!c) return;
         const b = bigBase;
-        c.width = b.img.width;
-        c.height = b.img.height;
         const t0 = performance.now();
         let out: ImageData;
         if (t && !smart) out = runDestructiveOn(sel, params, t, b.img, b.k, 0, 0, b.sel);
-        else {
+        else if (t && smart && t.kind === 'content') {
+          // smart: through the compositor in document space, exactly like the canvas
+          const fr = smartFrameOf(t);
+          const k = Math.min(1, BIG_W / fr.width, BIG_H / fr.height);
+          out = cropDocRender(renderSmart(t, layerWithFilter(t, 'fxgal_preview', sel.id, params), k), fr, k);
+        } else {
           const fctx = t
             ? targetContext(t, b.k)
             : makeFilterContext({ docWidth: src.docW, docHeight: src.docH, offsetX: 0, offsetY: 0, scale: b.img.width / src.docW });
           out = runOnCopy(sel, params, b.img, fctx).out;
+        }
+        if (c.width !== out.width || c.height !== out.height) {
+          c.width = out.width;
+          c.height = out.height;
         }
         c.getContext('2d')!.putImageData(out, 0, 0);
         slowRef.current = performance.now() - t0 > 120;

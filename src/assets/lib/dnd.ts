@@ -8,7 +8,7 @@ import type { ParamValues, Point } from '../../core/types';
 import { viewport } from '../../editor/viewport';
 import { activeDoc } from '../../state/editor';
 import { toast } from '../../state/ui';
-import { placeAssetAt } from '../place';
+import { placeAssetWhenReady, prepareAsset } from '../place';
 import type { AssetLayerOptions } from '../place';
 import { addShapePreset } from './shapes';
 
@@ -32,6 +32,8 @@ export function parsePayload(raw: string | null | undefined): DragPayload | null
 }
 
 export function startDrag(e: ReactDragEvent, payload: DragPayload, image?: HTMLCanvasElement | null) {
+  // start decoding/loading what the asset needs while it is being dragged
+  if (payload.kind === 'asset') void prepareAsset(payload.id);
   e.dataTransfer.setData(ASSET_MIME, JSON.stringify(payload));
   e.dataTransfer.setData('text/plain', payload.id);
   e.dataTransfer.effectAllowed = 'copy';
@@ -48,13 +50,17 @@ function hasPayload(e: DragEvent) {
   return !!e.dataTransfer && Array.from(e.dataTransfer.types).includes(ASSET_MIME);
 }
 
-/** Viewport-relative point if the client point is over the canvas viewport. */
-function viewportPoint(clientX: number, clientY: number): Point | null {
+/**
+ * Viewport-relative point when the event targets the canvas viewport itself. Checking the
+ * target (not just the geometry) keeps panels/flyouts that float over the canvas area from
+ * accepting asset drops meant for themselves.
+ */
+function viewportPoint(e: DragEvent): Point | null {
   const el = viewport.element();
-  if (!el) return null;
+  if (!el || !(e.target instanceof Node) || !el.contains(e.target)) return null;
   const r = el.getBoundingClientRect();
-  if (clientX < r.left || clientY < r.top || clientX > r.right || clientY > r.bottom) return null;
-  return { x: clientX - r.left, y: clientY - r.top };
+  if (e.clientX < r.left || e.clientY < r.top || e.clientX > r.right || e.clientY > r.bottom) return null;
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
 }
 
 let installed = false;
@@ -64,14 +70,14 @@ export function installCanvasDrop() {
   installed = true;
   window.addEventListener('dragover', (e) => {
     if (!hasPayload(e)) return;
-    if (viewportPoint(e.clientX, e.clientY)) {
+    if (viewportPoint(e)) {
       e.preventDefault();
       if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
     }
   });
   window.addEventListener('drop', (e) => {
     if (!hasPayload(e) || e.defaultPrevented) return;
-    const vp = viewportPoint(e.clientX, e.clientY);
+    const vp = viewportPoint(e);
     if (!vp) return;
     e.preventDefault();
     const payload = parsePayload(e.dataTransfer?.getData(ASSET_MIME));
@@ -82,6 +88,6 @@ export function installCanvasDrop() {
     }
     const at = viewport.screenToDoc(vp);
     if (payload.kind === 'shape') addShapePreset(payload.id, at);
-    else placeAssetAt(payload.id, payload.params, at, { blendMode: payload.blendMode, opacity: payload.opacity });
+    else void placeAssetWhenReady(payload.id, payload.params, { blendMode: payload.blendMode, opacity: payload.opacity }, at);
   });
 }

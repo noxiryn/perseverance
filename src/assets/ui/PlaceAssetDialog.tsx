@@ -1,31 +1,34 @@
 /**
  * File ▸ Place Asset… — a roomy dialog version of the library: categories, large thumbnails
- * and the asset settings side by side.
+ * and the asset settings side by side. Its category, search and selection are local to the
+ * dialog (the Libraries panel keeps its own); only the per-asset settings are shared.
  */
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Library } from 'lucide-react';
 import { assets } from '../../registry';
 import { Dialog, SearchInput } from '../../ui/controls';
-import { placeAsset } from '../place';
+import { placeAssetWhenReady } from '../place';
 import { AssetGrid, useFilteredAssets } from './AssetGrid';
 import { AssetSettings } from './AssetSettings';
 import { useLibrary } from './store';
 import '../assets.css';
 
 export function PlaceAssetDialog({ close }: { close: (placed?: boolean) => void }) {
-  const category = useLibrary((s) => s.category);
-  const query = useLibrary((s) => s.query);
-  const setCategory = useLibrary((s) => s.setCategory);
-  const setQuery = useLibrary((s) => s.setQuery);
-  const selectedId = useLibrary((s) => s.selectedId);
-  const select = useLibrary((s) => s.select);
+  const [category, setCategory] = useState('All');
+  const [query, setQuery] = useState('');
+  const [selectedId, select] = useState<string | null>(null);
   const { all, list, categories } = useFilteredAssets(category, query);
   const selected = selectedId ? assets.get(selectedId) : undefined;
 
   // preselect the first visible asset so the settings column is never empty
   useEffect(() => {
     if (!selected && list.length) select(list[0].id);
-  }, [selected, list, select]);
+  }, [selected, list]);
+
+  const activate = async (id: string) => {
+    const st = useLibrary.getState().settings[id];
+    if (await placeAssetWhenReady(id, st?.params, { blendMode: st?.blendMode, opacity: st?.opacity })) close(true);
+  };
 
   return (
     <Dialog
@@ -57,10 +60,8 @@ export function PlaceAssetDialog({ close }: { close: (placed?: boolean) => void 
               large
               selectedId={selectedId}
               onSelect={select}
-              onActivate={(id) => {
-                const st = useLibrary.getState().settings[id];
-                if (placeAsset(id, st?.params, { blendMode: st?.blendMode, opacity: st?.opacity })) close(true);
-              }}
+              onActivate={(id) => void activate(id)}
+              emptyText={query ? `No assets match “${query}”.` : 'No assets in this category yet.'}
             />
           </div>
         </div>

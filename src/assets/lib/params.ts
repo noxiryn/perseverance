@@ -11,6 +11,13 @@ export interface AssetMeta {
   bg?: PreviewBg;
   /** The generator draws text: wait for fonts before rendering thumbnails. */
   fonts?: boolean;
+  /**
+   * Whether the asset can render at full quality right now (e.g. a user image whose full
+   * resolution is decoded). Absent = always ready.
+   */
+  isReady?: () => boolean;
+  /** Make the asset ready (decode its source…). Must never reject. */
+  prepare?: () => Promise<void>;
 }
 
 export const assetMeta = new Map<string, AssetMeta>();

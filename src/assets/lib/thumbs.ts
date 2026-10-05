@@ -8,7 +8,7 @@ import { assets } from '../../registry';
 import { resolveParams } from '../../filters/engine';
 import { assetMeta } from './params';
 import type { PreviewBg } from './params';
-import { loadAssetFonts } from './fonts';
+import { assetFontsReady, loadAssetFonts } from './fonts';
 
 /** Deterministic JSON-ish key for param objects (key order independent). Pure. */
 export function stableKey(v: unknown): string {
@@ -132,25 +132,98 @@ function schedule() {
   ric(run, { timeout: 400 });
 }
 
-async function run(deadline: { timeRemaining(): number; didTimeout: boolean }) {
+/** Measured render cost per asset (ms, moving average) — used to fit jobs into idle slices. */
+const cost = new Map<string, number>();
+/** Assumed cost of an asset that was never rendered yet. */
+const UNKNOWN_COST = 24;
+/** A job up to this cost may overrun an idle slice (once per slice) — one frame at worst. */
+const SMALL_OVERRUN = 24;
+/** Heavier jobs run at most this often (ms) when they never fit an idle slice. */
+const HEAVY_SPACING = 250;
+/** Thumbnails are generated slightly above their display size (cards show them at ≤ 128 CSS px). */
+const THUMB_OVERSAMPLE = 1.25;
+const COST_KEY = 'perseverance.assets.thumbCost';
+
+// costs measured in earlier sessions (a per-viewer convenience; safe to lose)
+try {
+  const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(COST_KEY) : null;
+  if (saved) for (const [k, v] of Object.entries(JSON.parse(saved) as Record<string, number>)) if (typeof v === 'number' && v >= 0) cost.set(k, v);
+} catch {
+  /* storage unavailable */
+}
+let saveTimer = 0;
+function saveCosts() {
+  if (saveTimer || typeof window === 'undefined') return;
+  saveTimer = window.setTimeout(() => {
+    saveTimer = 0;
+    try {
+      localStorage.setItem(COST_KEY, JSON.stringify(Object.fromEntries([...cost].map(([k, v]) => [k, Math.round(v * 10) / 10]))));
+    } catch {
+      /* storage unavailable */
+    }
+  }, 3000);
+}
+
+/** Since when (performance.now) jobs have been waiting without any render; 0 = not starving. */
+let starvedSince = 0;
+
+/**
+ * Whether a job of estimated cost `est` may start now. Pure (exported for tests).
+ * - it fits the rest of the idle period, or
+ * - nothing ran in this slice yet and it is small (a single short overrun), or
+ * - nothing ran in this slice and the queue has been starving (or the idle callback timed out).
+ */
+export function mayRun(est: number, left: number, renderedInSlice: number, starving: boolean): boolean {
+  if (est <= left + 2) return true;
+  if (renderedInSlice > 0) return false;
+  return est <= SMALL_OVERRUN || starving;
+}
+
+function run(deadline: { timeRemaining(): number; didTimeout: boolean }) {
   scheduled = false;
   // most recently requested first (what the user is looking at)
   const jobs = [...queue.values()].sort((a, b) => b.priority - a.priority);
-  let budget = Math.max(6, deadline.timeRemaining());
+  let rendered = 0;
+  let waitingForFonts = false;
   for (const job of jobs) {
-    if (budget <= 0) break;
+    if (queue.get(job.key) !== job) continue; // cancelled or superseded meanwhile
     const def = assets.get(job.assetId);
+    if (!def) {
+      queue.delete(job.key);
+      continue;
+    }
+    // text-drawing assets wait for their fonts (loaded off this slice, then re-scheduled)
+    if (assetMeta.get(def.id)?.fonts && !assetFontsReady()) {
+      waitingForFonts = true;
+      continue;
+    }
+    const hit = cache.get(job.key);
+    if (hit) {
+      queue.delete(job.key);
+      for (const cb of job.cbs) cb(hit);
+      continue;
+    }
+    const est = cost.get(def.id) ?? UNKNOWN_COST;
+    const starving = deadline.didTimeout || (starvedSince > 0 && performance.now() - starvedSince > HEAVY_SPACING);
+    if (!mayRun(est, deadline.timeRemaining(), rendered, starving)) {
+      if (!starvedSince && !rendered) starvedSince = performance.now();
+      continue;
+    }
     queue.delete(job.key);
-    if (!def) continue;
-    if (assetMeta.get(def.id)?.fonts) await loadAssetFonts();
     const t0 = performance.now();
-    const c = renderPreview(def, job.params, job.size);
+    const c = renderPreview(def, job.params, job.size, THUMB_OVERSAMPLE);
+    const dt = performance.now() - t0;
+    cost.set(def.id, cost.has(def.id) ? cost.get(def.id)! * 0.5 + dt * 0.5 : dt);
+    saveCosts();
     store(job.key, c);
     for (const cb of job.cbs) cb(c);
-    budget -= performance.now() - t0;
-    // keep each idle slice short; continue on the next idle period
-    if (!deadline.didTimeout && deadline.timeRemaining() <= 1) break;
+    rendered++;
+    starvedSince = 0;
+    if (deadline.timeRemaining() <= 1) break;
   }
+  // heavy jobs left over: they become due HEAVY_SPACING ms after this point
+  if (rendered && queue.size) starvedSince = performance.now();
+  if (waitingForFonts && !assetFontsReady()) void loadAssetFonts().then(schedule);
   schedule();
 }
 
@@ -175,7 +248,8 @@ export function requestThumb(assetId: string, cb: (c: HTMLCanvasElement) => void
   const j = job;
   return () => {
     j.cbs = j.cbs.filter((f) => f !== cb);
-    if (!j.cbs.length) queue.delete(key);
+    // only drop the job this closure belongs to (a newer job may own the key by now)
+    if (!j.cbs.length && queue.get(key) === j) queue.delete(key);
   };
 }
 

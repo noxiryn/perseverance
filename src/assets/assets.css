@@ -32,13 +32,51 @@
   padding-right: 2px;
 }
 
+.assets-chips-wrap {
+  position: relative;
+  min-width: 0;
+}
 .assets-chips {
   display: flex;
   gap: 4px;
   overflow-x: auto;
   scrollbar-width: none;
   padding-bottom: 1px;
-  mask-image: linear-gradient(90deg, #000 85%, transparent);
+}
+/* soft fades only on the sides that have more chips */
+.assets-chips-wrap.fade-r .assets-chips {
+  mask-image: linear-gradient(90deg, #000 calc(100% - 40px), transparent calc(100% - 6px));
+}
+.assets-chips-wrap.fade-l .assets-chips {
+  mask-image: linear-gradient(90deg, transparent 6px, #000 40px);
+}
+.assets-chips-wrap.fade-l.fade-r .assets-chips {
+  mask-image: linear-gradient(90deg, transparent 6px, #000 40px, #000 calc(100% - 40px), transparent calc(100% - 6px));
+}
+.assets-chips-arrow {
+  position: absolute;
+  top: 0;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  cursor: pointer;
+  z-index: 1;
+}
+.assets-chips-arrow:hover {
+  color: var(--text-strong);
+  border-color: var(--border-strong);
+}
+.assets-chips-arrow.left {
+  left: 0;
+}
+.assets-chips-arrow.right {
+  right: 0;
 }
 .assets-chips::-webkit-scrollbar {
   display: none;
@@ -349,6 +387,12 @@
   justify-content: space-between;
   padding: 8px 10px;
   text-align: left;
+}
+
+.assets-confirm {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  line-height: 1.5;
 }
 
 .assets-empty {

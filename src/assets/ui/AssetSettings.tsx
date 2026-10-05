@@ -12,7 +12,7 @@ import { useActiveDoc } from '../../state/editor';
 import { assetMeta } from '../lib/params';
 import { loadAssetFonts } from '../lib/fonts';
 import { renderPreview } from '../lib/thumbs';
-import { placeAsset } from '../place';
+import { placeAssetWhenReady } from '../place';
 import { BLEND_OPTIONS } from './blend';
 import { useLibrary } from './store';
 
@@ -70,8 +70,8 @@ export function AssetSettings({
   const opacity = st?.opacity ?? def.defaultOpacity ?? 1;
   const hasSeed = def.params.some((p) => p.type === 'seed');
 
-  const place = () => {
-    const id = placeAsset(def.id, values, { blendMode: blend, opacity });
+  const place = async () => {
+    const id = await placeAssetWhenReady(def.id, values, { blendMode: blend, opacity });
     if (id) onPlaced?.();
   };
 
@@ -129,7 +129,7 @@ export function AssetSettings({
             Close
           </Button>
         )}
-        <Button variant="primary" icon={ImagePlus} disabled={!doc} title={doc ? 'Add as a new layer' : 'Open a document first'} onClick={place}>
+        <Button variant="primary" icon={ImagePlus} disabled={!doc} title={doc ? 'Add as a new layer' : 'Open a document first'} onClick={() => void place()}>
           Place
         </Button>
       </div>

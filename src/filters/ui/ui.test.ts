@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FilterDef } from '../../registry';
 import { blendSelection, diffBounds } from './selectionBlend';
-import { categoriesOf, categoryRank, isBrowsableFilter, matchesQuery, sortFilters } from './galleryModel';
+import { LIVE_PREVIEW_FILTER_ID, categoriesOf, categoryRank, isBrowsableFilter, matchesQuery, sortFilters } from './galleryModel';
 import { getLastFilter, rememberParams, rememberedParams, setLastFilter, subscribeLastFilter } from './memory';
 
 const f = (id: string, category: FilterDef['category'], extra: Partial<FilterDef> = {}): FilterDef => ({
@@ -20,6 +20,8 @@ describe('gallery model', () => {
     expect(isBrowsableFilter(f('vignette', 'Light', { adjustment: true }))).toBe(true);
     expect(isBrowsableFilter(f('halftone', 'Comic & Print'))).toBe(true);
     expect(isBrowsableFilter(f('rim-light', 'Roblox'))).toBe(true);
+    // the internal on-canvas preview filter is never listed
+    expect(isBrowsableFilter(f(LIVE_PREVIEW_FILTER_ID, 'Other'))).toBe(false);
   });
 
   it('sorts by category order then name and counts categories', () => {

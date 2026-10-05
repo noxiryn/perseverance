@@ -361,7 +361,8 @@ export const cutout: FilterDef = {
     const simp = Math.max(0, num(p.simplicity, 3)) * s;
     const fid = clamp(num(p.fidelity, 0.6), 0, 1);
     const work = { data: new Uint8ClampedArray(data), width: w, height: h };
-    if (simp >= 0.75) medianImage(work, simp);
+    // simplification pre-pass: the separable median is plenty here (quantization + mode filter follow)
+    if (simp >= 0.75) medianImage(work, simp, true, true);
     const wd = work.data;
     const lab = new Float32Array(n * 3);
     for (let i = 0, j = 0; i < n; i++, j += 4) toOklab(wd[j], wd[j + 1], wd[j + 2], lab, i * 3);
