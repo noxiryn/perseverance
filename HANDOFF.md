@@ -35,6 +35,13 @@ If a module wasn't marked done, re-run its review + fix pass: have an agent audi
 against its spec in ARCHITECTURE.md §3/§5, then fix what it finds. The code on disk is the
 starting point; don't rewrite modules from scratch.
 
+## Integration status (latest)
+- Whole tree: `npx tsc -b` clean, `npx vitest run` 844 tests pass, `npx vite build` OK (dist ≈35 MB, mostly fonts).
+- `scripts/smoke.mjs` against `vite preview`: SMOKE OK (23 templates, 14 panels, all tools dragged, 293 commands, 0 errors).
+- `xvfb-run -a node scripts/electron-smoke.mjs`: the real Electron app boots from dist/ with the desktop bridge, 0 errors.
+- Reference templates visually match the four reference styles.
+- In progress: perf (dirty-rect painting, hot filter LUTs) + Electron hardening workflow; assets module polish.
+
 ## Remaining steps after the modules
 1. **Integrate**: `npm run typecheck` (whole tree) + `npx vite build`; fix cross-module mismatches.
 2. **Pending core requests** (from module reports):

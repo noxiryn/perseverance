@@ -254,6 +254,16 @@ function register(e: UserAssetEntry) {
   assets.register(makeDef(e));
 }
 
+/** Summary toast for an import batch (successes and per-file failures). Pure. */
+export function importSummary(added: string[], failed: string[]): { message: string; kind: 'success' | 'warning' | 'error' } {
+  const quote = (n: string) => `“${n}”`;
+  const ok = added.length === 1 ? `Added ${quote(added[0])} to My Assets` : `Added ${added.length} images to My Assets`;
+  if (!failed.length) return { message: ok, kind: 'success' };
+  const list = failed.length <= 2 ? failed.map(quote).join(' and ') : `${failed.length} files`;
+  const bad = `${list} could not be read as ${failed.length === 1 ? 'an image' : 'images'}`;
+  return added.length ? { message: `${ok}. ${bad}.`, kind: 'warning' } : { message: `${bad}.`, kind: 'error' };
+}
+
 /** Strip the extension and tidy a file name for display. Pure. */
 export function displayName(file: string): string {
   const base = file.replace(/\\/g, '/').split('/').pop() ?? file;

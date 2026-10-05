@@ -152,7 +152,7 @@ function polygonsOf(g: TendrilGeometry, r: Rand, spurs: number): Pt[][] {
   return out;
 }
 
-interface Group {
+export interface Group {
   polys: Pt[][];
 }
 
@@ -163,13 +163,13 @@ function rotate(v: Pt, a: number): Pt {
 }
 
 /** A placed curl (for spacing) and a sampled stem centerline (for crossing checks). */
-interface PlacedCurl {
+export interface PlacedCurl {
   x: number;
   y: number;
   R: number;
   W: number;
 }
-interface PlacedStem {
+export interface PlacedStem {
   pts: Pt[];
   W: number;
 }
@@ -226,8 +226,19 @@ export function stemPenalty(stem: Pt[], W: number, own: PlacedCurl, curls: Place
   return pen;
 }
 
-/** Tendrils growing in from the left edge / bottom-left (mirrored for the right side). */
-function layoutSide(W: number, H: number, u: number, r: Rand, n: number, mirror: boolean, o: { width: number; scale: number; angular: boolean; spurs: number }): Group[] {
+/**
+ * Tendrils growing in from the left edge / bottom-left (mirrored for the right side). Returns the
+ * polygon groups plus every placed curl (unmirrored, for tests). Pure.
+ */
+export function layoutSide(
+  W: number,
+  H: number,
+  u: number,
+  r: Rand,
+  n: number,
+  mirror: boolean,
+  o: { width: number; scale: number; angular: boolean; spurs: number },
+): { groups: Group[]; curls: PlacedCurl[] } {
   const reachX = Math.min(W * 0.34, Math.max(W * 0.2, H * 0.42));
   const band = { maxX: reachX * 1.15, minY: H * 0.12 };
   const curls: PlacedCurl[] = [];
@@ -354,7 +365,7 @@ function layoutSide(W: number, H: number, u: number, r: Rand, n: number, mirror:
     g.polys.push(...polygonsOf(geo, r, o.spurs));
     if (mirror) for (const poly of g.polys) for (const q of poly) q.x = W - q.x;
   }
-  return groups.filter((g): g is Group => !!g);
+  return { groups: groups.filter((g): g is Group => !!g), curls };
 }
 
 export const swirlTendrils = defineAsset(
@@ -409,15 +420,15 @@ export const swirlTendrils = defineAsset(
       let groups: Group[];
       if (side === 'both') {
         const nl = Math.ceil(count / 2);
-        const left = layoutSide(W, H, u, r.fork(1), nl, false, o);
-        const right = count - nl > 0 ? layoutSide(W, H, u, r.fork(2), count - nl, true, o) : [];
+        const left = layoutSide(W, H, u, r.fork(1), nl, false, o).groups;
+        const right = count - nl > 0 ? layoutSide(W, H, u, r.fork(2), count - nl, true, o).groups : [];
         // interleave so neither side is consistently on top
         groups = [];
         for (let i = 0; i < Math.max(left.length, right.length); i++) {
           if (left[i]) groups.push(left[i]);
           if (right[i]) groups.push(right[i]);
         }
-      } else groups = layoutSide(W, H, u, r, count, side === 'right', o);
+      } else groups = layoutSide(W, H, u, r, count, side === 'right', o).groups;
       const ow = num(p, 'outlineWidth', 4) * u;
       const ra = (num(p, 'rimAngle', 135) * Math.PI) / 180;
       // rim offset towards the light (angle measured counter-clockwise from +x, y up)

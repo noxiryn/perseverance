@@ -7,7 +7,7 @@ import { FolderHeart, ImagePlus, Pencil, Trash2, Upload } from 'lucide-react';
 import { Button, Dialog, TextInput, showContextMenu } from '../../ui/controls';
 import { openDialog, toast } from '../../state/ui';
 import { openFiles } from '../../platform';
-import { deleteUserAsset, ensureFullImage, importImages, loadUserAssets, renameUserAsset, useUserAssets } from '../lib/userAssets';
+import { deleteUserAsset, ensureFullImage, importImages, importSummary, loadUserAssets, renameUserAsset, useUserAssets } from '../lib/userAssets';
 import type { UserAssetEntry } from '../lib/userAssets';
 import { startDrag } from '../lib/dnd';
 import { placeAssetWhenReady } from '../place';
@@ -59,16 +59,6 @@ function DeleteDialog({ close, name }: { close: (r?: boolean) => void; name: str
       </div>
     </Dialog>
   );
-}
-
-/** Summary toast for an import batch (successes and per-file failures). Pure. */
-export function importSummary(added: string[], failed: string[]): { message: string; kind: 'success' | 'warning' | 'error' } {
-  const quote = (n: string) => `“${n}”`;
-  const ok = added.length === 1 ? `Added ${quote(added[0])} to My Assets` : `Added ${added.length} images to My Assets`;
-  if (!failed.length) return { message: ok, kind: 'success' };
-  const list = failed.length <= 2 ? failed.map(quote).join(' and ') : `${failed.length} files`;
-  const bad = `${list} could not be read as ${failed.length === 1 ? 'an image' : 'images'}`;
-  return added.length ? { message: `${ok}. ${bad}.`, kind: 'warning' } : { message: `${bad}.`, kind: 'error' };
 }
 
 async function importBlobs(files: { name: string; blob: Blob }[]) {
