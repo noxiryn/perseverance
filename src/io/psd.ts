@@ -2,145 +2,39 @@
  * Photoshop (.psd) export and import via ag-psd.
  *  - Export: every leaf layer is rendered (optionally with baked layer styles), groups become PSD
  *    folders; names, opacity, blend modes, visibility, clipping, masks and a composite image are kept.
- *    Simple adjustment layers are written as native PSD adjustment layers.
+ *    Adjustment layers with a Photoshop equivalent are written as native adjustment layers (see
+ *    psdAdjustments.ts); the others (duotone, split toning, color lookup, vignette…) are baked into
+ *    a pixel layer showing their effect on what is below them, with the same mask, opacity and
+ *    blending. The document background colour becomes a bottom "Background Color" fill layer.
  *  - Import: pixel layers → raster layers (left/top → transform), groups, masks, opacity, blending,
- *    visibility, clipping, and supported adjustment layers.
+ *    visibility, clipping, supported adjustment layers; our "Background Color" layer becomes the
+ *    document background again.
  */
-import { readPsd, writePsd, type Layer as PsdLayer, type Psd, type AdjustmentLayer as PsdAdjustment, type LayerMaskData } from 'ag-psd';
-import type { CurvePoints, CurvesValue, Document, ID, Layer, LayerMask, ParamValues } from '../core/types';
+import { readPsd, writePsd, type Layer as PsdLayer, type Psd, type LayerMaskData } from 'ag-psd';
+import type { AdjustmentLayer, Document, ID, Layer, LayerMask, ParamValues } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
 import { createCanvas, ctx2d, opaqueBounds } from '../core/canvas';
-import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeFillLayer, makeGroupLayer, makeRasterLayer } from '../core/document';
+import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeFillLayer, makeGroupLayer, makeRasterLayer, parentOf, siblingsOf } from '../core/document';
 import { renderDocument, renderLayerToDoc } from '../render/compositor';
 import { effects as effectRegistry, filters } from '../registry';
-import { resolveParams } from '../filters/engine';
+import { makeFilterContext, resolveParams, runFilter } from '../filters/engine';
 import { saveFile, type OpenedFile } from '../platform';
 import { activeSession, useEditor } from '../state/editor';
 import { openDialog, toast } from '../state/ui';
 import { formatBytes, fromPsdBlend, safeFileName, toPsdBlend } from './math';
-import { effectLabel, effectsFromPsd, effectsToPsd, fillFromPsd, fillToPsd } from './psdEffects';
-import { baseName, ensureFontsFor } from './util';
+import { effectLabel, effectsFromPsd, effectsToPsd, fillFromPsd, fillToPsd, toPsdColor } from './psdEffects';
+import { fromPsdAdjustment, toPsdAdjustment } from './psdAdjustments';
+import { backgroundLayerOf, baseName, ensureFontsFor } from './util';
 
-/* ------------------------------------------------------------------ */
-/* Adjustment mapping                                                  */
-/* ------------------------------------------------------------------ */
+/** Name of the bottom fill layer that carries the document background colour in exported PSDs. */
+export const PSD_BACKGROUND_LAYER = 'Background Color';
 
 function paramsOf(filterId: string, params: ParamValues): ParamValues {
   const def = filters.get(filterId);
   return def ? resolveParams(def, params) : params;
 }
 
-const n = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
-const IDENTITY: CurvePoints = [
-  [0, 0],
-  [255, 255],
-];
-
-function toPsdAdjustment(filterId: string, raw: ParamValues): PsdAdjustment | null {
-  const p = paramsOf(filterId, raw);
-  switch (filterId) {
-    case 'brightness-contrast':
-      return {
-        type: 'brightness/contrast',
-        brightness: Math.round(n(p.brightness, 0)),
-        contrast: Math.round(n(p.contrast, 0)),
-        useLegacy: false,
-      };
-    case 'levels':
-      return {
-        type: 'levels',
-        rgb: {
-          shadowInput: Math.round(n(p.inBlack, 0)),
-          highlightInput: Math.round(n(p.inWhite, 255)),
-          shadowOutput: Math.round(n(p.outBlack, 0)),
-          highlightOutput: Math.round(n(p.outWhite, 255)),
-          midtoneInput: n(p.gamma, 1),
-        },
-      };
-    case 'curves': {
-      const c = (p.curves as CurvesValue | undefined) ?? { rgb: IDENTITY, r: IDENTITY, g: IDENTITY, b: IDENTITY };
-      const ch = (pts: CurvePoints | undefined) =>
-        (pts?.length ? pts : IDENTITY).map(([x, y]) => ({ input: Math.round(x), output: Math.round(y) }));
-      return { type: 'curves', rgb: ch(c.rgb), red: ch(c.r), green: ch(c.g), blue: ch(c.b) };
-    }
-    case 'exposure':
-      return { type: 'exposure', exposure: n(p.exposure, 0), offset: n(p.offset, 0), gamma: n(p.gamma, 1) };
-    case 'vibrance':
-      return { type: 'vibrance', vibrance: Math.round(n(p.vibrance, 0)), saturation: Math.round(n(p.saturation, 0)) };
-    case 'hue-saturation':
-      if (p.colorize) return null;
-      return {
-        type: 'hue/saturation',
-        master: {
-          a: 0,
-          b: 0,
-          c: 0,
-          d: 0,
-          hue: Math.round(n(p.hue, 0)),
-          saturation: Math.round(n(p.saturation, 0)),
-          lightness: Math.round(n(p.lightness, 0)),
-        },
-      };
-    case 'invert':
-      return { type: 'invert' };
-    case 'posterize':
-      return { type: 'posterize', levels: Math.round(n(p.levels, 4)) };
-    case 'threshold':
-      return { type: 'threshold', level: Math.round(n(p.level, 128)) };
-    default:
-      return null;
-  }
-}
-
-function fromPsdAdjustment(a: PsdAdjustment): { filterId: string; params: ParamValues; name: string } | null {
-  switch (a.type) {
-    case 'brightness/contrast':
-      return {
-        filterId: 'brightness-contrast',
-        name: 'Brightness/Contrast',
-        params: { brightness: a.brightness ?? 0, contrast: a.contrast ?? 0 },
-      };
-    case 'levels': {
-      const c = a.rgb;
-      return {
-        filterId: 'levels',
-        name: 'Levels',
-        params: c
-          ? {
-              inBlack: c.shadowInput,
-              inWhite: c.highlightInput,
-              outBlack: c.shadowOutput,
-              outWhite: c.highlightOutput,
-              gamma: c.midtoneInput || 1,
-            }
-          : {},
-      };
-    }
-    case 'curves': {
-      const ch = (c?: { input: number; output: number }[]): CurvePoints =>
-        c && c.length >= 2 ? c.map((pt) => [pt.input, pt.output] as [number, number]).sort((x, y) => x[0] - y[0]) : IDENTITY;
-      return { filterId: 'curves', name: 'Curves', params: { curves: { rgb: ch(a.rgb), r: ch(a.red), g: ch(a.green), b: ch(a.blue) } } };
-    }
-    case 'exposure':
-      return { filterId: 'exposure', name: 'Exposure', params: { exposure: a.exposure ?? 0, offset: a.offset ?? 0, gamma: a.gamma ?? 1 } };
-    case 'vibrance':
-      return { filterId: 'vibrance', name: 'Vibrance', params: { vibrance: a.vibrance ?? 0, saturation: a.saturation ?? 0 } };
-    case 'hue/saturation':
-      return {
-        filterId: 'hue-saturation',
-        name: 'Hue/Saturation',
-        params: { hue: a.master?.hue ?? 0, saturation: a.master?.saturation ?? 0, lightness: a.master?.lightness ?? 0, colorize: false },
-      };
-    case 'invert':
-      return { filterId: 'invert', name: 'Invert', params: {} };
-    case 'posterize':
-      return { filterId: 'posterize', name: 'Posterize', params: { levels: a.levels ?? 4 } };
-    case 'threshold':
-      return { filterId: 'threshold', name: 'Threshold', params: { level: a.level ?? 128 } };
-    default:
-      return null;
-  }
-}
+const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
 /* ------------------------------------------------------------------ */
 /* Export                                                              */
@@ -177,17 +71,109 @@ function maskToPsd(doc: Document, mask: LayerMask): LayerMaskData | undefined {
 }
 
 export interface PsdBuildReport {
-  /** Adjustment layers with no PSD equivalent (left out). */
+  /** Adjustment layers that could not be exported at all (unknown filter). */
   skipped: string[];
+  /** Adjustment layers with no PSD equivalent, baked into pixel layers. */
+  bakedAdjustments: string[];
   /** Layers whose styles had to be baked into pixels (no Photoshop equivalent). */
   baked: string[];
   /** Groups whose styles could not be exported (folders cannot hold baked pixels). */
   lostGroupStyles: string[];
 }
 
+/** Copy of a (cached, shared) render so later renders can't change it. */
+function copyCanvas(src: HTMLCanvasElement): HTMLCanvasElement {
+  const c = createCanvas(src.width, src.height);
+  ctx2d(c).drawImage(src, 0, 0);
+  return c;
+}
+
+/** Render `rootIds` of `doc` on their own (doc space, transparent), optionally only below `below`. */
+function renderIsolated(doc: Document, rootIds: ID[], overrides: Record<ID, Layer>, below?: ID): HTMLCanvasElement {
+  const temp: Document = { ...doc, id: `${doc.id}~psd-bake`, background: null, layers: { ...doc.layers, ...overrides }, rootIds, selection: null };
+  return copyCanvas(renderDocument(temp, { background: false, below }));
+}
+
+/**
+ * What an adjustment layer applies to (doc space): everything below it — or, inside an isolated
+ * (non pass-through) group, the group's content below it; for a clipped adjustment, its clip base
+ * plus the layers clipped to it below the adjustment.
+ */
+function adjustmentBackdrop(doc: Document, l: AdjustmentLayer): HTMLCanvasElement {
+  if (l.clipped) {
+    const sibs = siblingsOf(doc, l.id);
+    const i = sibs.indexOf(l.id);
+    let baseIdx = i - 1;
+    while (baseIdx >= 0 && doc.layers[sibs[baseIdx]]?.clipped) baseIdx--;
+    const base = baseIdx >= 0 ? doc.layers[sibs[baseIdx]] : undefined;
+    if (base && base.type !== 'adjustment') {
+      // The clip stack composites the base's content at full opacity; its own opacity/blend apply
+      // to the whole stack afterwards.
+      const solo = { ...base, opacity: 1, clipped: false, blendMode: base.type === 'group' && base.blendMode === 'pass-through' ? 'pass-through' : 'normal' } as Layer;
+      return renderIsolated(doc, sibs.slice(baseIdx, i), { [base.id]: solo });
+    }
+  }
+  for (let p = parentOf(doc, l.id); p; p = parentOf(doc, p)) {
+    const g = doc.layers[p];
+    if (g?.type === 'group' && g.blendMode !== 'pass-through') return renderIsolated(doc, g.childIds, {}, l.id);
+  }
+  return copyCanvas(renderDocument(doc, { below: l.id, background: true }));
+}
+
+/** An adjustment Photoshop doesn't have, rendered into pixels (doc-sized), or null (unknown filter). */
+function bakeAdjustment(doc: Document, l: AdjustmentLayer): HTMLCanvasElement | null {
+  const def = filters.get(l.adjustment.filterId);
+  if (!def) return null;
+  const c = adjustmentBackdrop(doc, l);
+  const ctx = ctx2d(c, { willReadFrequently: true });
+  const img = ctx.getImageData(0, 0, c.width, c.height);
+  const out = runFilter(def, img, l.adjustment.params, makeFilterContext({ docWidth: doc.width, docHeight: doc.height }));
+  ctx.putImageData(out, 0, 0);
+  return c;
+}
+
+/** True when the bottom layer is an opaque, doc-covering "Background" that hides doc.background. */
+function backgroundHidden(doc: Document): boolean {
+  const bg = backgroundLayerOf(doc);
+  if (!bg || !bg.visible || bg.opacity < 1 || bg.fillOpacity < 1 || bg.blendMode !== 'normal' || (bg.mask && bg.mask.enabled)) return false;
+  const src = bitmaps.tryGet(bg.bitmapId);
+  if (!src) return false;
+  try {
+    // Read a scratch copy: reading the live bitmap back would move it off the GPU for good.
+    const c = createCanvas(src.width, src.height);
+    const ctx = ctx2d(c, { willReadFrequently: true });
+    ctx.drawImage(src, 0, 0);
+    const d = ctx.getImageData(0, 0, c.width, c.height).data;
+    for (let i = 3; i < d.length; i += 4) if (d[i] < 255) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Bottom fill layer carrying the document background colour (null when none or fully covered). */
+function backgroundToPsd(doc: Document): PsdLayer | null {
+  if (!doc.background || backgroundHidden(doc)) return null;
+  const c = createCanvas(doc.width, doc.height);
+  const ctx = ctx2d(c);
+  ctx.fillStyle = doc.background;
+  ctx.fillRect(0, 0, c.width, c.height);
+  return {
+    name: PSD_BACKGROUND_LAYER,
+    opacity: 1,
+    blendMode: 'normal',
+    top: 0,
+    left: 0,
+    bottom: doc.height,
+    right: doc.width,
+    canvas: c,
+    vectorFill: { type: 'color', color: toPsdColor(doc.background, '#ffffff') },
+  };
+}
+
 /** Build the ag-psd structure for a document. */
 export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd } & PsdBuildReport {
-  const report: PsdBuildReport = { skipped: [], baked: [], lostGroupStyles: [] };
+  const report: PsdBuildReport = { skipped: [], bakedAdjustments: [], baked: [], lostGroupStyles: [] };
   const convert = (id: ID): PsdLayer | null => {
     const l = doc.layers[id];
     if (!l) return null;
@@ -213,12 +199,23 @@ export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd } & 
       return { ...common, opened: !l.collapsed, children };
     }
     if (l.type === 'adjustment') {
-      const a = toPsdAdjustment(l.adjustment.filterId, l.adjustment.params);
-      if (!a) {
+      const inst = l.adjustment;
+      // Our adjustment strength is opacity × fill × the instance's own opacity.
+      common.opacity = clamp01(l.opacity * (Number.isFinite(l.fillOpacity) ? l.fillOpacity : 1) * (inst.opacity ?? 1));
+      if (!inst.enabled) common.hidden = true;
+      const a = toPsdAdjustment(inst.filterId, paramsOf(inst.filterId, inst.params));
+      if (a) return { ...common, adjustment: a };
+      const baked = bakeAdjustment(doc, l);
+      if (!baked) {
         report.skipped.push(l.name);
         return null;
       }
-      return { ...common, adjustment: a };
+      report.bakedAdjustments.push(l.name);
+      const bb = opaqueBounds(baked);
+      if (!bb) return { ...common, top: 0, left: 0, bottom: 0, right: 0 };
+      const c = createCanvas(bb.width, bb.height);
+      ctx2d(c).drawImage(baked, bb.x, bb.y, bb.width, bb.height, 0, 0, bb.width, bb.height);
+      return { ...common, top: bb.y, left: bb.x, bottom: bb.y + bb.height, right: bb.x + bb.width, canvas: c };
     }
     const enabledFx = l.effects.filter((e) => e.enabled);
     let bake = opts.bakeStyles && enabledFx.length > 0;
@@ -249,6 +246,8 @@ export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd } & 
     return { ...common, top: b.y, left: b.x, bottom: b.y + b.height, right: b.x + b.width, canvas: c };
   };
   const children = doc.rootIds.map(convert).filter((c): c is PsdLayer => !!c);
+  const bg = backgroundToPsd(doc);
+  if (bg) children.unshift(bg);
   const comp = renderDocument(doc, { background: true });
   const composite = createCanvas(comp.width, comp.height);
   ctx2d(composite).drawImage(comp, 0, 0);
@@ -267,7 +266,7 @@ export async function exportPsd(opts: PsdExportOptions): Promise<void> {
     await ensureFontsFor(s.doc);
     // Let the toast paint before the (synchronous) layer rendering and encoding.
     await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
-    const { psd, skipped, baked, lostGroupStyles } = buildPsd(s.doc, opts);
+    const { psd, skipped, bakedAdjustments, baked, lostGroupStyles } = buildPsd(s.doc, opts);
     const data = writePsd(psd, { generateThumbnail: true, noBackground: true });
     const res = await saveFile({
       title: 'Export PSD',
@@ -278,8 +277,11 @@ export async function exportPsd(opts: PsdExportOptions): Promise<void> {
     if (!res) return;
     const list = (a: string[]) => `${a.slice(0, 3).join(', ')}${a.length > 3 ? '…' : ''}`;
     const notes: string[] = [];
-    if (skipped.length)
-      notes.push(`${skipped.length} adjustment layer${skipped.length > 1 ? 's' : ''} without a PSD equivalent skipped (${list(skipped)})`);
+    if (bakedAdjustments.length)
+      notes.push(
+        `${bakedAdjustments.length} adjustment layer${bakedAdjustments.length > 1 ? 's' : ''} without a Photoshop equivalent baked into pixels (${list(bakedAdjustments)})`,
+      );
+    if (skipped.length) notes.push(`${skipped.length} unknown adjustment layer${skipped.length > 1 ? 's' : ''} left out (${list(skipped)})`);
     if (baked.length) notes.push(`styles baked into pixels on ${list(baked)}`);
     if (lostGroupStyles.length) notes.push(`group styles not exported: ${list(lostGroupStyles)}`);
     const size = formatBytes(data.byteLength);
@@ -320,6 +322,14 @@ function maskFromPsd(doc: Document, m: LayerMaskData | undefined): LayerMask | n
     feather: m.userMaskFeather ?? 0,
     inverted: false,
   };
+}
+
+/** The colour of an exported "Background Color" layer (plain solid fill at the bottom), or null. */
+function backgroundFromPsd(l: PsdLayer): string | null {
+  if (l.name !== PSD_BACKGROUND_LAYER || l.children || l.adjustment || l.hidden || l.clipping || l.vectorMask) return null;
+  if ((l.opacity ?? 1) < 1 || (l.fillOpacity ?? 1) < 1 || (l.blendMode && l.blendMode !== 'normal') || l.mask?.canvas || l.effects) return null;
+  const fill = fillFromPsd(l.vectorFill);
+  return fill?.type === 'solid' ? fill.color : null;
 }
 
 /** Convert an ag-psd structure to a Document (bitmaps are registered in the store). */
@@ -390,7 +400,15 @@ export function psdToDocument(psd: Psd, name: string): { doc: Document; unsuppor
       insertLayerDraft(doc, layer, { parentId });
     }
   };
-  if (psd.children?.length) add(psd.children, null);
+  let list = psd.children ?? [];
+  // Our own "Background Color" layer (see backgroundToPsd) is the document background again.
+  const bottom = list[0];
+  const bgFill = bottom && list.length > 1 ? backgroundFromPsd(bottom) : null;
+  if (bgFill) {
+    doc.background = bgFill;
+    list = list.slice(1);
+  }
+  if (list.length) add(list, null);
   else if (psd.canvas) {
     const layer = makeRasterLayer({
       name: 'Background',

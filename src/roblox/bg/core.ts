@@ -2,8 +2,11 @@
  * Background removal core (pure, typed-array based):
  *  - 'auto'  : sample the dominant border colors and flood-fill from every edge with a tolerance.
  *              The flood also follows smooth color gradients (sky, fog, vignettes) away from the
- *              border palette, removes thin background seams (e.g. the antialiased horizon line
- *              between sky and baseplate) and drops small leftover islands,
+ *              border palette — only where the color drifts slowly with the distance from the
+ *              plainly flooded background, so a subject part whose color is just above the
+ *              tolerance is never entered through the short (even JPEG-blurred) ramp at its
+ *              edge —, removes thin background seams (e.g. the antialiased horizon line between
+ *              sky and baseplate) and drops small leftover islands,
  *  - 'color' : key out one picked color (globally or contiguous from the edges),
  *  - 'green' : chroma key on green dominance.
  * Contiguous floods only cross pixels at or below the tolerance; the softness band gives partial
@@ -172,6 +175,42 @@ export function backgroundDistance(img: PixelBuffer, params: BgParams, palette: 
   return D;
 }
 
+/**
+ * 3×3 median of a distance map (edge pixels use their in-image neighbours) for the pixels whose
+ * value is within [lo, hi]; the others are copied. Compression noise (JPEG) scatters a subject
+ * color that is just above the tolerance to both sides of it; the median keeps it on its side so
+ * the flood can't percolate into the subject, while edges stay sharp (unlike a blur). Limiting it
+ * to values near the tolerance keeps it cheap and leaves thin, clearly different details (1px
+ * outlines, hair) alone. Pure.
+ */
+export function median3(src: Float32Array, w: number, h: number, lo = -Infinity, hi = Infinity): Float32Array {
+  const out = new Float32Array(src);
+  const v = new Float64Array(9);
+  for (let y = 0; y < h; y++) {
+    const y0 = y > 0 ? y - 1 : y,
+      y1 = y < h - 1 ? y + 1 : y;
+    for (let x = 0; x < w; x++) {
+      const c = src[y * w + x];
+      if (c < lo || c > hi) continue;
+      const x0 = x > 0 ? x - 1 : x,
+        x1 = x < w - 1 ? x + 1 : x;
+      let k = 0;
+      for (let yy = y0; yy <= y1; yy++) {
+        const row = yy * w;
+        for (let xx = x0; xx <= x1; xx++) {
+          // insertion sort while collecting (≤ 9 values)
+          const val = src[row + xx];
+          let j = k++;
+          while (j > 0 && v[j - 1] > val) (v[j] = v[j - 1]), j--;
+          v[j] = val;
+        }
+      }
+      out[y * w + x] = k & 1 ? v[k >> 1] : (v[(k >> 1) - 1] + v[k >> 1]) / 2;
+    }
+  }
+  return out;
+}
+
 /** Palette used for a mode (auto → border colors, color → key color, green → green key). */
 export function paletteFor(img: PixelBuffer, params: BgParams): RGB[] {
   if (params.mode === 'auto') return sampleBorderPalette(img);
@@ -180,23 +219,56 @@ export function paletteFor(img: PixelBuffer, params: BgParams): RGB[] {
 
 /** Auto mode: neighbouring pixels closer than this (0..100) continue the flood along a gradient. */
 export const GRADIENT_STEP = 2.2;
+/**
+ * Auto mode: how fast (0..100 per px of distance from the plainly flooded background) a
+ * gradient-followed background may drift above the tolerance. Background gradients drift slowly
+ * (a studio sky ≈0.07 per px); a subject part is above the tolerance right next to its edge.
+ * The distance is Euclidean, so a path running along the edge can't build up an allowance.
+ */
+export const GRADIENT_RATE = 0.1;
+/** Auto mode: drift above the tolerance allowed regardless of the distance (noise). */
+export const GRADIENT_SLACK = 0.2;
 /** How far (0..100) beyond tolerance + softness a gradient-followed background may drift. */
-export const GRADIENT_DRIFT = 24;
+export const GRADIENT_DRIFT = 8;
 /** Width (px) of the partially transparent band next to the removed background. */
 export const SOFT_EDGE_BAND = 2;
 /** Auto mode: background seams up to this many px thick between removed areas are removed too. */
 export const SEAM_MAX = 3;
+/**
+ * A gradient-removed area whose outline touches the kept subject for more than this share looks
+ * like a subject part (e.g. a shirt close to the background color): reported as `enclosedRemoved`.
+ */
+export const ENCLOSED_SHARE = 0.5;
 /** Auto mode: kept islands smaller than this share of the largest kept region are dropped. */
 export const ISLAND_SHARE = 0.015;
 
 const ALPHA_MIN = 16;
 
+/** Gradient-following options of `floodBackground` (distances 0..100). */
+export interface GradientFollow {
+  /** Largest color step between neighbours. */
+  step: number;
+  /** Largest distance to the palette a followed pixel may have. */
+  cap: number;
+  /**
+   * Allowed drift above the tolerance per px of (Euclidean) distance from the plain flood
+   * (default: unlimited).
+   */
+  rate?: number;
+  /** Drift above the tolerance allowed at any distance (default 0). */
+  slack?: number;
+}
+
 /**
  * Flood the background from every border pixel. A pixel joins when its background distance is
- * at or below `tol`, or — with `grad` — when it is a small color step away from the pixel it is
- * reached from and has not drifted further than `grad.cap` from the palette.
+ * at or below `tol`, or — with `grad`, in a second pass — when it is a small color step away from
+ * the pixel it is reached from, has not drifted further than `grad.cap` from the palette and
+ * drifted above `tol` no faster than `grad.rate` per px of distance from the plain flood. The
+ * second pass only grows by small color steps, even into pixels within tolerance: a subject part
+ * whose color happens to match the palette is not swallowed when the gradient reaches its edge.
+ * Returns 1 for the plain flood, 2 for gradient-followed pixels.
  */
-export function floodBackground(img: PixelBuffer, D: Float32Array, tol: number, grad: { step: number; cap: number } | null): Uint8Array {
+export function floodBackground(img: PixelBuffer, D: Float32Array, tol: number, grad: GradientFollow | null): Uint8Array {
   const { width: w, height: h, data: d } = img;
   const n = w * h;
   const R = new Uint8Array(n);
@@ -208,24 +280,46 @@ export function floodBackground(img: PixelBuffer, D: Float32Array, tol: number, 
   };
   for (let x = 0; x < w; x++) seed(x), seed((h - 1) * w + x);
   for (let y = 0; y < h; y++) seed(y * w), seed(y * w + w - 1);
-  const stepSq = grad ? (grad.step / DIST_SCALE) ** 2 : 0;
-  const cap = grad ? grad.cap : 0;
   const last = n - w;
+  // Pass 1: plain flood (pixels within tolerance).
+  while (head < tail) {
+    const i = queue[head++];
+    const x = i % w;
+    if (x > 0) seed(i - 1);
+    if (x < w - 1) seed(i + 1);
+    if (i >= w) seed(i - w);
+    if (i < last) seed(i + w);
+  }
+  if (!grad) return R;
+  // Pass 2: follow smooth gradients out of the plain flood.
+  const stepSq = (grad.step / DIST_SCALE) ** 2;
+  const cap = grad.cap;
+  const rate = grad.rate ?? Infinity;
+  const slack = grad.slack ?? 0;
+  let dist: Float32Array | null = null;
+  if (Number.isFinite(rate)) {
+    const outside = new Uint8Array(n);
+    for (let i = 0; i < n; i++) outside[i] = R[i] ? 0 : 1;
+    dist = distanceToOutside(outside, w, h, false);
+  }
+  // Pass-2 frontier: plain-flood pixels next to an unreached one.
+  tail = 0;
+  for (let i = 0; i < n; i++) {
+    if (!R[i]) continue;
+    const x = i % w;
+    if ((x > 0 && !R[i - 1]) || (x < w - 1 && !R[i + 1]) || (i >= w && !R[i - w]) || (i < last && !R[i + w])) queue[tail++] = i;
+  }
+  head = 0;
   // One shared neighbour visit (no per-pixel allocations — this runs over millions of pixels).
   const visit = (i: number, j: number) => {
     if (R[j]) return;
     const dj = D[j];
-    if (dj <= tol) {
-      R[j] = 1;
-      queue[tail++] = j;
-      return;
-    }
-    if (!grad || dj > cap) return;
+    if (dj > cap || (dist && dj - tol > slack + rate * dist[j])) return;
     const p = i * 4,
       q = j * 4;
     if (d[p + 3] < ALPHA_MIN || d[q + 3] < ALPHA_MIN) return;
     if (colorDistanceSq(d[p], d[p + 1], d[p + 2], d[q], d[q + 1], d[q + 2]) <= stepSq) {
-      R[j] = 1;
+      R[j] = 2;
       queue[tail++] = j;
     }
   };
@@ -347,39 +441,108 @@ export function dropIslands(maskF: Float32Array, w: number, h: number, share = I
 }
 
 /**
- * Compute the keep-mask (0 = removed, 255 = kept) for an image. The result does NOT include the
- * image's own alpha; multiply with `applyMask`.
+ * Share (0..1) of the subject that gradient-following removed in areas mostly outlined by the
+ * kept subject (likely subject parts close to the background color). `reach` is the flood result
+ * (2 = gradient-followed), `maskF` the keep mask (> 0.5 = kept). Pure.
  */
-export function computeKeepMask(img: PixelBuffer, params: BgParams, palette = paletteFor(img, params)): Uint8ClampedArray {
+export function enclosedRemovedShare(reach: Uint8Array, maskF: Float32Array, w: number, h: number, minArea = 64): number {
+  const n = w * h;
+  const seen = new Uint8Array(n);
+  const queue = new Int32Array(n);
+  let kept = 0;
+  for (let i = 0; i < n; i++) if (maskF[i] > 0.5) kept++;
+  let enclosed = 0;
+  for (let s = 0; s < n; s++) {
+    if (reach[s] !== 2 || seen[s]) continue;
+    let head = 0,
+      tail = 0,
+      area = 0,
+      edgeKept = 0,
+      edgeAll = 0;
+    seen[s] = 1;
+    queue[tail++] = s;
+    while (head < tail) {
+      const i = queue[head++];
+      area++;
+      const x = i % w;
+      for (let k = 0; k < 4; k++) {
+        if ((k === 0 && x === 0) || (k === 1 && x === w - 1) || (k === 2 && i < w) || (k === 3 && i >= n - w)) {
+          edgeAll++; // the image border counts as background
+          continue;
+        }
+        const j = k === 0 ? i - 1 : k === 1 ? i + 1 : k === 2 ? i - w : i + w;
+        if (reach[j] === 2) {
+          if (!seen[j]) (seen[j] = 1), (queue[tail++] = j);
+          continue;
+        }
+        edgeAll++;
+        if (!reach[j] && maskF[j] > 0.5) edgeKept++;
+      }
+    }
+    if (area >= minArea && edgeAll && edgeKept / edgeAll > ENCLOSED_SHARE) enclosed += area;
+  }
+  return kept + enclosed ? enclosed / (kept + enclosed) : 0;
+}
+
+export interface KeepMaskOptions {
+  /**
+   * Resolution of `img` relative to the layer it previews (dialog previews run downscaled):
+   * per-pixel gradient limits and pixel widths are scaled so preview and result agree.
+   */
+  scale?: number;
+}
+
+export interface KeepMaskResult {
+  /** Final keep-mask (0 = removed, 255 = kept), with shrink and feather. */
+  mask: Uint8ClampedArray;
+  /** The keep-mask before shrink and feather (quality checks). */
+  raw: Uint8ClampedArray;
+  /** See enclosedRemovedShare (auto mode only, else 0). */
+  enclosedRemoved: number;
+}
+
+/**
+ * Compute the keep-mask (0 = removed, 255 = kept) for an image, plus the unfeathered mask and
+ * quality numbers. The result does NOT include the image's own alpha; multiply with `applyMask`.
+ */
+export function keepMaskDetailed(img: PixelBuffer, params: BgParams, palette = paletteFor(img, params), opts: KeepMaskOptions = {}): KeepMaskResult {
   const { width: w, height: h } = img;
   const n = w * h;
-  const D = backgroundDistance(img, params, palette);
+  const scale = Math.max(0.05, Math.min(1, opts.scale ?? 1));
+  const auto = params.mode === 'auto';
+  const D0 = backgroundDistance(img, params, palette);
   const tol = Math.max(0, params.tolerance);
   const soft = Math.max(0.001, params.softness);
   const limit = tol + soft;
-  const auto = params.mode === 'auto';
+  // Auto mode works on tight defaults: denoise the distances that decide the flood (see median3).
+  const D = auto && palette.length ? median3(D0, w, h, tol - 2, limit + GRADIENT_DRIFT + 2) : D0;
   const contiguous = auto ? true : params.contiguous;
   const maskF = new Float32Array(n);
+  let enclosedRemoved = 0;
   if (contiguous) {
     // Smart extras need real border colors (an empty palette means the border is transparent and
     // the image alpha already separates the subject).
     const smart = auto && palette.length > 0;
-    const core = floodBackground(img, D, tol, smart ? { step: GRADIENT_STEP, cap: limit + GRADIENT_DRIFT } : null);
-    if (smart) removeSeams(img, core, tol + soft * 0.5);
+    // A downscaled preview pixel spans 1/scale layer pixels: colors change faster per pixel.
+    // Distances are in image px: a preview px spans 1/scale layer px.
+    const core = floodBackground(img, D, tol, smart ? { step: GRADIENT_STEP / scale, cap: limit + GRADIENT_DRIFT, rate: GRADIENT_RATE / scale, slack: GRADIENT_SLACK } : null);
+    if (smart) removeSeams(img, core, tol + soft * 0.5, Math.max(1, Math.round(SEAM_MAX * scale)));
     // Soft edge: pixels within the softness band get partial alpha, but only in a thin band next
     // to the removed background (BFS depth-limited) — never deep inside the subject.
+    const band = Math.max(1, Math.round(SOFT_EDGE_BAND * scale));
     maskF.fill(1);
     const depth = new Uint8Array(n);
     const queue = new Int32Array(n);
     let head = 0,
       tail = 0;
-    for (let i = 0; i < n; i++) {
-      if (core[i]) {
-        maskF[i] = 0;
-        queue[tail++] = i;
-      }
-    }
     const last = n - w;
+    for (let i = 0; i < n; i++) {
+      if (!core[i]) continue;
+      maskF[i] = 0;
+      // only the removed pixels next to kept ones can start the band
+      const x = i % w;
+      if ((x > 0 && !core[i - 1]) || (x < w - 1 && !core[i + 1]) || (i >= w && !core[i - w]) || (i < last && !core[i + w])) queue[tail++] = i;
+    }
     const grow = (j: number, di: number) => {
       if (core[j] || depth[j]) return;
       const v = D[j];
@@ -391,20 +554,25 @@ export function computeKeepMask(img: PixelBuffer, params: BgParams, palette = pa
     while (head < tail) {
       const i = queue[head++];
       const di = depth[i];
-      if (di >= SOFT_EDGE_BAND) continue;
+      if (di >= band) continue;
       const x = i % w;
       if (x > 0) grow(i - 1, di);
       if (x < w - 1) grow(i + 1, di);
       if (i >= w) grow(i - w, di);
       if (i < last) grow(i + w, di);
     }
-    if (smart) dropIslands(maskF, w, h);
+    if (smart) {
+      dropIslands(maskF, w, h);
+      enclosedRemoved = enclosedRemovedShare(core, maskF, w, h, Math.max(16, Math.round(64 * scale * scale)));
+    }
   } else {
     for (let i = 0; i < n; i++) {
       const v = D[i];
       maskF[i] = v <= tol ? 0 : v >= limit ? 1 : (v - tol) / soft;
     }
   }
+  const raw = new Uint8ClampedArray(n);
+  for (let i = 0; i < n; i++) raw[i] = maskF[i] * 255 + 0.5;
   // Shrink edge
   if (params.shrink > 0.01) {
     const inside = new Uint8Array(n);
@@ -417,7 +585,15 @@ export function computeKeepMask(img: PixelBuffer, params: BgParams, palette = pa
   if (params.feather > 0.25) blurFloat(maskF, w, h, params.feather * 2);
   const out = new Uint8ClampedArray(n);
   for (let i = 0; i < n; i++) out[i] = maskF[i] * 255 + 0.5;
-  return out;
+  return { mask: out, raw, enclosedRemoved };
+}
+
+/**
+ * Compute the keep-mask (0 = removed, 255 = kept) for an image. The result does NOT include the
+ * image's own alpha; multiply with `applyMask`.
+ */
+export function computeKeepMask(img: PixelBuffer, params: BgParams, palette = paletteFor(img, params), opts: KeepMaskOptions = {}): Uint8ClampedArray {
+  return keepMaskDetailed(img, params, palette, opts).mask;
 }
 
 export interface CutoutStats {
@@ -429,9 +605,15 @@ export interface CutoutStats {
 
 /** Interior pixels partially transparent above this share → the dialog warns. */
 export const PARTIAL_INTERIOR_WARN = 0.05;
+/** Subject share removed in enclosed areas (enclosedRemoved) above this → the dialog warns. */
+export const ENCLOSED_REMOVED_WARN = 0.02;
 
-/** Quality numbers for a keep-mask over an image (preview footer + warnings). */
-export function cutoutStats(img: PixelBuffer, mask: Uint8ClampedArray): CutoutStats {
+/**
+ * Quality numbers for a keep-mask over an image (preview footer + warnings). Pass the mask from
+ * before feather and shrink as `raw` (KeepMaskResult.raw): a feathered edge is not a
+ * semi-transparent subject.
+ */
+export function cutoutStats(img: PixelBuffer, mask: Uint8ClampedArray, raw: Uint8ClampedArray = mask): CutoutStats {
   const { width: w, height: h, data: d } = img;
   const n = w * h;
   const inside = new Uint8Array(n);
@@ -443,7 +625,7 @@ export function cutoutStats(img: PixelBuffer, mask: Uint8ClampedArray): CutoutSt
       opaque++;
       if (mask[i] < 128) removed++;
     }
-    inside[i] = visible && mask[i] > 8 ? 1 : 0;
+    inside[i] = visible && raw[i] > 8 ? 1 : 0;
   }
   const dist = distanceToOutside(inside, w, h, true);
   let interior = 0,
@@ -451,7 +633,7 @@ export function cutoutStats(img: PixelBuffer, mask: Uint8ClampedArray): CutoutSt
   for (let i = 0; i < n; i++) {
     if (dist[i] <= 3) continue;
     interior++;
-    if (mask[i] < 240) partial++;
+    if (raw[i] < 240) partial++;
   }
   return { removed: opaque ? removed / opaque : 0, partialInterior: interior ? partial / interior : 0 };
 }
@@ -559,15 +741,21 @@ export function applyMask(img: PixelBuffer, mask: Uint8ClampedArray): PixelBuffe
   return img;
 }
 
+export interface RemoveBackgroundResult extends KeepMaskResult {
+  palette: RGB[];
+  decontaminated: DecontaminateResult;
+}
+
 /**
- * Full pipeline: returns { mask, palette, decontaminated } and modifies `img` in place when
- * decontaminating (only edge pixels; `decontaminated.rect` bounds the changed area).
+ * Full pipeline: returns the masks, the palette and the decontamination result, and modifies
+ * `img` in place when decontaminating (only edge pixels; `decontaminated.rect` bounds the
+ * changed area).
  */
-export function removeBackground(img: PixelBuffer, params: BgParams): { mask: Uint8ClampedArray; palette: RGB[]; decontaminated: DecontaminateResult } {
+export function removeBackground(img: PixelBuffer, params: BgParams, opts: KeepMaskOptions = {}): RemoveBackgroundResult {
   const palette = paletteFor(img, params);
-  const mask = computeKeepMask(img, params, palette);
-  const decontaminated = decontaminate(img, mask, params, palette);
-  return { mask, palette, decontaminated };
+  const res = keepMaskDetailed(img, params, palette, opts);
+  const decontaminated = decontaminate(img, res.mask, params, palette);
+  return { ...res, palette, decontaminated };
 }
 
 /** Bounds of mask pixels below 255 (pixels whose alpha a 'delete' output changes), or null. */

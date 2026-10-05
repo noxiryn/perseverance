@@ -8,6 +8,11 @@
  * Each records the instance ids it added, so applying one can replace what the others added
  * instead of stacking (two gradient maps + two halftones turn a character into a dark blob).
  * Filters and effects the user added by hand are never touched.
+ *
+ * Only RESTYLING filters (color maps, halftones, cel/toon shading…) replace a whole treatment;
+ * additive ones (rim light, glitch, blur…) only replace the same filter type, so a rim-light look
+ * keeps the template's colors. A look keeps what it took off (`takeCharacterStylingDraft`) and
+ * puts it back when it is removed (`restoreCharacterStylingDraft`).
  */
 import type { FilterInstance, Layer, LayerEffect } from '../core/types';
 
@@ -60,29 +65,79 @@ export function hasCharacterStyling(layer: Pick<Layer, 'meta' | 'filters' | 'eff
   });
 }
 
+/**
+ * Filters that redefine a character's colors or shading. Two of them stacked muddy the character
+ * (double gradient maps / halftones), so adding one replaces the whole existing treatment.
+ */
+export const RESTYLING_FILTERS: ReadonlySet<string> = new Set([
+  'gradient-map',
+  'halftone',
+  'comic-dots',
+  'newsprint',
+  'dither',
+  'risograph',
+  'screen-print',
+  'cel-shade',
+  'toon-roblox',
+  'posterize',
+  'posterize-edges',
+  'silhouette',
+  'cutout',
+  'watercolor',
+  'charcoal',
+  'pencil-sketch',
+  'ink-wash',
+  'poster-edges',
+  'stamp',
+  'sketch',
+  'oil-paint',
+  'kuwahara',
+  'black-white',
+  'threshold',
+  'sepia',
+  'old-photo',
+  'solarize',
+]);
+
+/** True when any of these filter ids restyles a character (see RESTYLING_FILTERS). */
+export function restylesCharacter(filterIds: Iterable<string>): boolean {
+  for (const id of filterIds) if (RESTYLING_FILTERS.has(id)) return true;
+  return false;
+}
+
 export interface StripOptions {
-  /** Only strip effects (keep the owners' filters) whose effect id is in this set. */
+  /**
+   * Partial strip: only the owners' effects whose effect id is in this set (and, with
+   * `onlyFilterTypes`, their filters of those types) are removed; the owner records stay.
+   */
   onlyEffectTypes?: ReadonlySet<string>;
+  /** Partial strip: only the owners' filters whose filter id is in this set are removed. */
+  onlyFilterTypes?: ReadonlySet<string>;
 }
 
 /**
  * Immer-draft mutation: remove the filters/effects the given owners added to a layer, and their
- * meta records. With `onlyEffectTypes`, only those owners' effects of these types are removed
- * (filters and the records stay, minus the removed ids). Returns the number of removed instances.
+ * meta records. With `onlyEffectTypes` / `onlyFilterTypes`, only those owners' instances of these
+ * types are removed (the records stay). Returns the number of removed instances.
  */
 export function stripCharacterStylingDraft(layer: Layer, owners: readonly StylingOwner[], opts: StripOptions = {}): number {
   let removed = 0;
   const meta: Record<string, unknown> = { ...(layer.meta ?? {}) };
   let metaChanged = false;
+  const partial = !!(opts.onlyEffectTypes || opts.onlyFilterTypes);
   for (const owner of owners) {
     const ids = ownedIds(layer, owner);
     if (!ids) continue;
-    if (opts.onlyEffectTypes) {
-      const drop = new Set(ids.effectIds.filter((id) => layer.effects.some((e) => e.id === id && opts.onlyEffectTypes!.has(e.effectId))));
-      if (!drop.size) continue;
-      const before = layer.effects.length;
-      layer.effects = layer.effects.filter((e: LayerEffect) => !drop.has(e.id));
-      removed += before - layer.effects.length;
+    if (partial) {
+      const fset = opts.onlyFilterTypes;
+      const eset = opts.onlyEffectTypes;
+      const dropF = new Set(fset ? ids.filterIds.filter((id) => layer.filters.some((f) => f.id === id && fset.has(f.filterId))) : []);
+      const dropE = new Set(eset ? ids.effectIds.filter((id) => layer.effects.some((e) => e.id === id && eset.has(e.effectId))) : []);
+      if (!dropF.size && !dropE.size) continue;
+      const before = layer.filters.length + layer.effects.length;
+      if (dropF.size) layer.filters = layer.filters.filter((f: FilterInstance) => !dropF.has(f.id));
+      if (dropE.size) layer.effects = layer.effects.filter((e: LayerEffect) => !dropE.has(e.id));
+      removed += before - layer.filters.length - layer.effects.length;
       continue;
     }
     const fids = new Set(ids.filterIds);
@@ -99,6 +154,65 @@ export function stripCharacterStylingDraft(layer: Layer, owners: readonly Stylin
     else delete layer.meta;
   }
   return removed;
+}
+
+/** What a look took off a layer (restored when the look is removed). JSON-safe. */
+export interface ReplacedStyling {
+  filters: { index: number; instance: FilterInstance }[];
+  effects: { index: number; instance: LayerEffect }[];
+  /** Owner records removed with them (meta key → record). */
+  records: Record<string, unknown>;
+}
+
+const plain = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+
+/**
+ * `stripCharacterStylingDraft` that also returns what it removed (plain copies with their
+ * positions, plus the removed owner records), or null when nothing changed.
+ */
+export function takeCharacterStylingDraft(layer: Layer, owners: readonly StylingOwner[], opts: StripOptions = {}): ReplacedStyling | null {
+  const beforeF = layer.filters.map((f, index) => ({ index, id: f.id }));
+  const beforeE = layer.effects.map((e, index) => ({ index, id: e.id }));
+  const snapF = new Map(layer.filters.map((f) => [f.id, f]));
+  const snapE = new Map(layer.effects.map((e) => [e.id, e]));
+  const beforeMeta: Record<string, unknown> = { ...(layer.meta ?? {}) };
+  const records: Record<string, unknown> = {};
+  for (const o of owners) {
+    const key = META_KEY[o];
+    if (key in beforeMeta) records[key] = plain(beforeMeta[key]);
+  }
+  const removed = stripCharacterStylingDraft(layer, owners, opts);
+  const keptF = new Set(layer.filters.map((f) => f.id));
+  const keptE = new Set(layer.effects.map((e) => e.id));
+  const after = layer.meta ?? {};
+  for (const key of Object.keys(records)) if (key in after) delete records[key];
+  if (!removed && !Object.keys(records).length) return null;
+  return {
+    filters: beforeF.filter((x) => !keptF.has(x.id)).map((x) => ({ index: x.index, instance: plain(snapF.get(x.id)!) })),
+    effects: beforeE.filter((x) => !keptE.has(x.id)).map((x) => ({ index: x.index, instance: plain(snapE.get(x.id)!) })),
+    records,
+  };
+}
+
+/**
+ * Immer-draft mutation: put back what `takeCharacterStylingDraft` removed (at their old
+ * positions; instances / records that are back already are skipped).
+ */
+export function restoreCharacterStylingDraft(layer: Layer, rep: ReplacedStyling | null | undefined) {
+  if (!rep || typeof rep !== 'object') return;
+  const fids = new Set(layer.filters.map((f) => f.id));
+  for (const { index, instance } of [...(rep.filters ?? [])].sort((a, b) => a.index - b.index)) {
+    if (!instance || fids.has(instance.id)) continue;
+    layer.filters.splice(Math.max(0, Math.min(index, layer.filters.length)), 0, plain(instance));
+  }
+  const eids = new Set(layer.effects.map((e) => e.id));
+  for (const { index, instance } of [...(rep.effects ?? [])].sort((a, b) => a.index - b.index)) {
+    if (!instance || eids.has(instance.id)) continue;
+    layer.effects.splice(Math.max(0, Math.min(index, layer.effects.length)), 0, plain(instance));
+  }
+  const recs = rep.records && typeof rep.records === 'object' ? rep.records : {};
+  const missing = Object.keys(recs).filter((k) => !(k in (layer.meta ?? {})));
+  if (missing.length) layer.meta = { ...(layer.meta ?? {}), ...Object.fromEntries(missing.map((k) => [k, plain(recs[k])])) };
 }
 
 /**

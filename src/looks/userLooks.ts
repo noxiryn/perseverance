@@ -1,17 +1,20 @@
 /**
  * "My Looks": looks the user saved from a finished composition — the target layer's smart
  * filters and effects plus the overlays and grades of the look groups and of the generated
- * asset / adjustment layers stacked above the target. Stored per user in localStorage and
- * registered in the looks registry (category "My Looks") so they apply like built-in looks.
+ * asset / adjustment layers stacked above the target. Layer masks are kept (as small captured
+ * mask images), so a masked "smoke in front" stays confined where it was. Stored per user in
+ * localStorage and registered in the looks registry (category "My Looks") so they apply like
+ * built-in looks.
  */
-import type { Color, Document, ID, Layer, ParamValues } from '../core/types';
+import type { Color, Document, ID, Layer, LayerMask, ParamValues } from '../core/types';
 import { looks, type LookDef } from '../registry';
 import { activeSession } from '../state/editor';
 import { toast } from '../state/ui';
 import { uid } from '../core/ids';
 import { assetIdOfLayer } from '../assets/place';
 import { parentOf } from '../core/document';
-import { isLookGroup, lookTargets, type ExtLookDef, type LookOverlayDef } from './engine';
+import { isLookGroup, lookTargets, type ExtLookDef, type LookAdjustmentDef, type LookOverlayDef } from './engine';
+import { captureMaskSpec, type OverlayMaskSpec } from './masks';
 import { promptSave } from './SavePresetDialog';
 
 export const USER_LOOK_CATEGORY = 'My Looks';
@@ -43,8 +46,15 @@ function paramColors(params: ParamValues | undefined, out: Color[]) {
 
 export interface LookCapture {
   look: ExtLookDef;
-  counts: { filters: number; effects: number; overlays: number; adjustments: number };
+  counts: { filters: number; effects: number; overlays: number; adjustments: number; masked: number };
+  /** Masked layers left out because their mask couldn't be captured. */
+  maskSkipped: string[];
 }
+
+/** Captures a layer mask for a saved look (null when it can't). */
+export type MaskEncoder = (mask: LayerMask, doc: Document) => OverlayMaskSpec | null;
+
+const defaultMaskEncoder: MaskEncoder = (m, d) => captureMaskSpec(m, d.width, d.height);
 
 /**
  * Build a look from a document (pure): `targetId`'s enabled smart filters/effects, every layer
@@ -52,28 +62,53 @@ export interface LookCapture {
  * / adjustment layers stacked above the target at the top level. Without a target, only the look
  * groups are captured (other layers can't be told apart from the composition itself).
  */
-export function captureLook(doc: Document, targetId: ID | null, name: string, id = `${USER_LOOK_PREFIX}${uid('lk_')}`): LookCapture {
+export function captureLook(
+  doc: Document,
+  targetId: ID | null,
+  name: string,
+  id = `${USER_LOOK_PREFIX}${uid('lk_')}`,
+  encodeMask: MaskEncoder = defaultMaskEncoder,
+): LookCapture {
   const target = targetId ? doc.layers[targetId] : null;
   const look: ExtLookDef = { id, name, category: USER_LOOK_CATEGORY, description: 'Saved from your document.', swatch: [], overlays: [], adjustments: [] };
   const colors: Color[] = [];
+  const maskSkipped: string[] = [];
+  let masked = 0;
   if (target && target.type !== 'adjustment') {
-    const fl = target.filters.filter((f) => f.enabled).map((f) => ({ filterId: f.filterId, params: structuredClone(f.params) }));
+    // The target's filters were its character treatment: whole-document mode puts them on the
+    // document's character again.
+    const fl = target.filters.filter((f) => f.enabled).map((f) => ({ filterId: f.filterId, params: structuredClone(f.params), scope: 'character' as const }));
     const ef = target.effects.filter((e) => e.enabled).map((e) => ({ effectId: e.effectId, params: structuredClone(e.params) }));
     if (fl.length) look.layerFilters = fl;
     if (ef.length) look.layerEffects = ef;
     fl.forEach((f) => paramColors(f.params, colors));
     ef.forEach((e) => paramColors(e.params, colors));
   }
+  /** The layer's mask as a spec: undefined = no (enabled) mask, null = couldn't be captured. */
+  const maskOf = (l: Layer): OverlayMaskSpec | null | undefined => {
+    if (!l.mask || !l.mask.enabled) return undefined;
+    const spec = encodeMask(l.mask, doc);
+    if (!spec) maskSkipped.push(l.name);
+    else masked++;
+    return spec;
+  };
   const take = (l: Layer, placement: 'top' | 'behind') => {
     if (!l.visible) return;
     if (l.type === 'adjustment') {
-      look.adjustments!.push({ filterId: l.adjustment.filterId, params: structuredClone(l.adjustment.params), name: l.name, blendMode: l.blendMode, opacity: l.opacity });
+      const mask = maskOf(l);
+      if (mask === null) return; // a full-canvas version would grade parts it never touched
+      const a: LookAdjustmentDef = { filterId: l.adjustment.filterId, params: structuredClone(l.adjustment.params), name: l.name, blendMode: l.blendMode, opacity: l.opacity };
+      if (mask) a.mask = mask;
+      look.adjustments!.push(a);
       paramColors(l.adjustment.params, colors);
       return;
     }
     const assetId = assetIdOfLayer(l);
     if (!assetId || l.type !== 'raster') return;
+    const mask = maskOf(l);
+    if (mask === null) return; // unmasked, a "smoke in front" would cover the whole character
     const o: LookOverlayDef = { assetId, params: structuredClone((l.generator?.params ?? {}) as ParamValues), name: l.name, blendMode: l.blendMode, opacity: l.opacity };
+    if (mask) o.mask = mask;
     if (placement === 'behind') o.placement = 'behind';
     look.overlays!.push(o);
     paramColors(o.params, colors);
@@ -111,7 +146,9 @@ export function captureLook(doc: Document, targetId: ID | null, name: string, id
       effects: look.layerEffects?.length ?? 0,
       overlays: look.overlays!.length,
       adjustments: look.adjustments!.length,
+      masked,
     },
+    maskSkipped,
   };
 }
 
@@ -183,10 +220,14 @@ export async function saveCurrentLook(requestedTargetId: ID | null) {
     c.overlays && `${c.overlays} overlay${c.overlays > 1 ? 's' : ''}`,
     c.adjustments && `${c.adjustments} adjustment${c.adjustments > 1 ? 's' : ''}`,
   ].filter(Boolean);
+  const notes = [
+    c.masked ? `${c.masked > 1 ? `${c.masked} masked layers keep their masks` : 'The masked layer keeps its mask'}.` : '',
+    probe.maskSkipped.length ? `Left out (their masks couldn't be saved): ${probe.maskSkipped.join(', ')}.` : '',
+  ].filter(Boolean);
   const res = await promptSave({
     title: 'Save as Look',
     defaultName: `${s.doc.name} look`,
-    description: `Saves ${parts.join(', ')}${target ? ` — from “${target.name}”, the layers above it and the look groups` : ' from the look groups'}. It appears under My Looks and applies like any look.`,
+    description: `Saves ${parts.join(', ')}${target ? ` — from “${target.name}”, the layers above it and the look groups` : ' from the look groups'}. It appears under My Looks and applies like any look.${notes.length ? ` ${notes.join(' ')}` : ''}`,
   });
   if (!res) return;
   const { look } = captureLook(s.doc, targetId, res.name);

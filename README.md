@@ -17,25 +17,49 @@ It runs fully **offline**: fonts and assets are bundled or generated, and nothin
 
 ## Install
 
+Installers are built by GitHub Actions (*Build installers*, `.github/workflows/release.yml`):
+
+- **Releases** — [github.com/noxiryn/perseverance/releases](https://github.com/noxiryn/perseverance/releases).
+  Each version tag (e.g. `v0.1.0`) publishes the Windows installer + portable `.exe`, the macOS
+  `.dmg` and the Linux `.AppImage` there. This is the link to give people: no GitHub account
+  needed. (If the page is still empty, no version has been tagged yet — use the next option.)
+- **Latest build** — every push builds the Windows installer: **Actions** tab → *Build installers*
+  → the newest run with a green check → *Artifacts* → **`perseverance-Windows`**. You must be signed
+  in to GitHub; it downloads as a `.zip` holding `Perseverance-Setup-<version>.exe` and
+  `Perseverance-Portable-<version>.exe`, and expires after 90 days.
+
 ### Windows
-1. Download **`Perseverance-Setup-<version>.exe`** from the
-   [Releases page](https://github.com/noxiryn/perseverance/releases) (or from the latest
-   *Build installers* run under the **Actions** tab → *Artifacts*).
-2. Run it and pick an install folder. You get Start Menu and Desktop shortcuts.
+1. Get **`Perseverance-Setup-<version>.exe`** (from a Release, or unzipped from the artifact).
+2. Run it and pick an install folder. You get Start Menu and Desktop shortcuts, and `.pgfx`
+   projects open in Perseverance when you double-click them.
 3. The installer isn't code-signed, so Windows SmartScreen may say *"Windows protected your PC"*.
    Click **More info → Run anyway**.
 
-Prefer no installer? Download **`Perseverance-Portable-<version>.exe`** and run it directly.
+Prefer no installer? Run **`Perseverance-Portable-<version>.exe`** directly. It doesn't register
+the `.pgfx` file type (double-clicking projects won't open them); use **File → Open…** instead.
 
-### macOS / Linux
-- macOS: open the `.dmg` and drag Perseverance into Applications. The first time, right-click
-  the app → **Open** (it isn't notarized).
+### macOS / Linux (tagged releases)
+- macOS: open the `.dmg` and drag Perseverance into Applications. It isn't notarized, so the first
+  launch is blocked: on macOS 15 Sequoia and later open **System Settings → Privacy & Security**,
+  scroll to the message about Perseverance and click **Open Anyway** (on macOS 14 and older,
+  Control-click the app → **Open**).
 - Linux: `chmod +x Perseverance-<version>.AppImage` and run it.
 
+**New here?** Open **Help → Make Your First Roblox Thumbnail…** (or click **Make a Roblox
+thumbnail** on the start screen): it walks you from a template to your own character to the
+exported thumbnail.
+
 ### Sharing it with friends
-Send them the same `Perseverance-Setup-<version>.exe` (or the portable `.exe`). It's a
-standalone installer with nothing else to download. Projects save as **`.pgfx`** files, which you
-can share and open in any copy of Perseverance. Double-clicking a `.pgfx` opens it in the app.
+Send them the Releases link (or the `Perseverance-Setup-<version>.exe` file itself): it's a
+standalone installer with nothing else to download. Actions artifacts are a poor fit for sharing —
+they need a GitHub login, come zipped and expire.
+
+Projects save as **`.pgfx`** files that open in any copy of Perseverance:
+- Bundled fonts work everywhere, and fonts you added with **Type → Add Font File…** are embedded
+  in the project, so the text looks the same on your friend's computer.
+- **System fonts** (the ones installed in Windows/macOS) are **not** embedded. If your friend
+  doesn't have one, Perseverance names the missing fonts when the project opens and the text uses
+  a fallback font until they install it (or add the font file with Type → Add Font File…).
 
 ---
 
@@ -89,11 +113,28 @@ npm run dist:mac     # → release/*.dmg    (on macOS)
 npm run dist:linux   # → release/*.AppImage
 ```
 
-Building the Windows installer on Linux needs Wine (`apt install wine wine32:i386`).
+Building the Windows installer on Linux needs Wine with 32-bit support:
 
-**Automatic builds:** every push runs the *Build installers* GitHub Action and uploads the Windows
-installer as an artifact. Pushing a tag such as `v0.1.0` builds Windows, macOS and Linux
-installers and publishes them to a GitHub Release.
+```bash
+sudo dpkg --add-architecture i386 && sudo apt update
+sudo apt install -y wine wine32:i386
+npm run dist:win
+```
+
+**Automatic builds** (`.github/workflows/release.yml`): every push typechecks, tests and builds the
+app on Windows and uploads the installers as the `perseverance-Windows` artifact. Pushing a tag
+such as `v0.1.0` (or running the workflow manually with *Create a GitHub Release* ticked) builds
+Windows, macOS and Linux installers and publishes them as a GitHub Release:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Windows and macOS file systems are case-insensitive, so two source files whose names differ only
+in case (e.g. `filterDialog.ts` / `FilterDialog.tsx`) break the Windows build even though Linux
+builds pass; `src/core/filenames.test.ts` fails the test run on such clashes. electron-builder's
+caches must stay outside the repo (the workflow keeps them in `../eb-cache`): with
+`"type": "module"` in package.json its extracted CommonJS helpers fail inside the project.
 
 ### Project layout
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the document model, rendering pipeline, plugin

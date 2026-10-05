@@ -908,34 +908,15 @@ export function selectiveColorPixels(img: Pixels, p: ParamValues): Pixels {
   // Precomputed per-range channel factors: delta_v = ((−1 − a)·k − a) · (relative ? 1 − v : 1).
   const fac = new Float32Array(9 * 3);
   for (let k = 0; k < 9; k++) for (let c = 0; c < 3; c++) fac[k * 3 + c] = (-1 - adj[k * 4 + c]) * adj[k * 4 + 3] - adj[k * 4 + c];
-  // Contribution tables (0 for inactive ranges, so they add nothing):
-  //  - hue ranges by amount: HUE[((range · 256) + amount) · 3 + c] = amount/255 · factor
-  //  - whites by min, blacks by max.
-  const HUE = new Float64Array(6 * 256 * 3);
-  for (let k = 0; k < 6; k++) {
-    if (!active[k]) continue;
-    for (let v = 0; v < 256; v++) {
-      const a = v / 255;
-      for (let c = 0; c < 3; c++) HUE[(k * 256 + v) * 3 + c] = a * fac[k * 3 + c];
-    }
-  }
-  const aW = active[6],
+  const aR = active[0],
+    aY = active[1],
+    aG = active[2],
+    aC = active[3],
+    aB = active[4],
+    aM = active[5],
+    aW = active[6],
     aN = active[7],
     aK = active[8];
-  const WB = new Float64Array(256 * 6); // [whites by min (3) | blacks by max (3)]
-  for (let v = 0; v < 256; v++) {
-    if (aW && v > 128) {
-      const a = ((v - 128) * 2) / 255;
-      for (let c = 0; c < 3; c++) WB[v * 6 + c] = a * fac[18 + c];
-    }
-    if (aK && v < 128) {
-      const a = ((128 - v) * 2) / 255;
-      for (let c = 0; c < 3; c++) WB[v * 6 + 3 + c] = a * fac[24 + c];
-    }
-  }
-  const n0 = fac[21],
-    n1 = fac[22],
-    n2 = fac[23];
   const d = img.data;
   const live = pixelWords(img);
   const u = live ?? readWords(img);
@@ -973,37 +954,45 @@ export function selectiveColorPixels(img: Pixels, p: ParamValues): Pixels {
     const mx = r > g ? (r > b ? r : b) : g > b ? g : b;
     const mn = r < g ? (r < b ? r : b) : g < b ? g : b;
     const md = r + g + b - mx - mn;
-    // Accumulate weighted factors (amount/255 · factor) per channel: primary range (max channel,
-    // by max − mid), secondary (the max+mid pair, by mid − min), whites, blacks, neutrals.
+    // Accumulate weighted factors (amount/255 · factor) per channel.
     let f0 = 0,
       f1 = 0,
       f2 = 0;
     if (mx !== mn) {
-      const pi = ((r === mx ? 0 : g === mx ? 2 : 4) * 256 + mx - md) * 3;
-      const si = ((b === mn ? 1 : r === mn ? 3 : 5) * 256 + md - mn) * 3;
-      f0 = HUE[pi] + HUE[si];
-      f1 = HUE[pi + 1] + HUE[si + 1];
-      f2 = HUE[pi + 2] + HUE[si + 2];
+      const prim = r === mx ? (aR ? 0 : -1) : g === mx ? (aG ? 2 : -1) : aB ? 4 : -1;
+      if (prim >= 0) {
+        const a = (mx - md) / 255;
+        f0 += a * fac[prim * 3];
+        f1 += a * fac[prim * 3 + 1];
+        f2 += a * fac[prim * 3 + 2];
+      }
+      const sec = b === mn ? (aY ? 1 : -1) : r === mn ? (aC ? 3 : -1) : aM ? 5 : -1;
+      if (sec >= 0) {
+        const a = (md - mn) / 255;
+        f0 += a * fac[sec * 3];
+        f1 += a * fac[sec * 3 + 1];
+        f2 += a * fac[sec * 3 + 2];
+      }
     }
-    if (aW) {
-      const k = mn * 6;
-      f0 += WB[k];
-      f1 += WB[k + 1];
-      f2 += WB[k + 2];
+    if (aW && mn > 128) {
+      const a = ((mn - 128) * 2) / 255;
+      f0 += a * fac[18];
+      f1 += a * fac[19];
+      f2 += a * fac[20];
     }
-    if (aK) {
-      const k = mx * 6 + 3;
-      f0 += WB[k];
-      f1 += WB[k + 1];
-      f2 += WB[k + 2];
+    if (aK && mx < 128) {
+      const a = ((128 - mx) * 2) / 255;
+      f0 += a * fac[24];
+      f1 += a * fac[25];
+      f2 += a * fac[26];
     }
     if (aN) {
       const a = 255 - (Math.abs(mx - 127.5) + Math.abs(mn - 127.5));
       if (a > 0) {
         const t = a / 255;
-        f0 += t * n0;
-        f1 += t * n1;
-        f2 += t * n2;
+        f0 += t * fac[21];
+        f1 += t * fac[22];
+        f2 += t * fac[23];
       }
     }
     if (f0 !== 0 || f1 !== 0 || f2 !== 0) {

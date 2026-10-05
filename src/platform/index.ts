@@ -20,8 +20,17 @@ interface DesktopBridge {
   platform: 'win32' | 'darwin' | 'linux' | string;
   version: string;
   openFiles(opts: { title?: string; filters?: FileFilter[]; multiple?: boolean }): Promise<OpenedFile[]>;
+  /**
+   * Native Save dialog + write. Resolves the path actually written: the main process appends the
+   * first filter's extension when the chosen name lacks it ("Poster" → "Poster.pgfx").
+   */
   saveFile(opts: { title?: string; defaultPath?: string; filters?: FileFilter[]; data: ArrayBuffer | string }): Promise<string | null>;
+  /**
+   * Crash-safe write (temp file + rename) to a path the user chose: a Save dialog result, or a project
+   * opened via dialog / Explorer / Finder. Any other path rejects with an `ENOTGRANTED` error.
+   */
   writeFile(path: string, data: ArrayBuffer | string): Promise<void>;
+  /** Read a file the user opened or saved before (recent files). Other paths reject with `ENOTGRANTED`. */
   readFile(path: string): Promise<ArrayBuffer>;
   showItemInFolder(path: string): void;
   openExternal(url: string): void;
@@ -29,7 +38,11 @@ interface DesktopBridge {
   setDocumentEdited(edited: boolean): void;
   /** Files passed on the command line / double-clicked in Explorer / dropped on the dock icon. */
   onOpenFile(cb: (file: OpenedFile) => void): () => void;
-  /** Main process asks before closing; respond with confirmClose(true|false). */
+  /**
+   * Main process asks before closing; respond with confirmClose(true|false). The preload acknowledges
+   * the request at once; if the page is hung (no acknowledgement within a few seconds) the main
+   * process offers "Quit Anyway", so a busy or crashed renderer never traps the user.
+   */
   onCloseRequested(cb: () => void): () => void;
   confirmClose(ok: boolean): void;
   minimize(): void;
@@ -89,6 +102,15 @@ export async function saveFile(opts: { title?: string; defaultPath: string; filt
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
   return a.download;
+}
+
+/**
+ * True for the error the desktop bridge raises when the main process refuses a path the user never
+ * chose (see DesktopBridge.writeFile/readFile). Callers fall back to a Save As / Open dialog.
+ */
+export function isAccessDenied(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : '';
+  return msg.includes('ENOTGRANTED');
 }
 
 /** Write directly to a known path (desktop only). Returns false in the browser. */

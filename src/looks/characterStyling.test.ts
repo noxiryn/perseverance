@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import type { FilterInstance, Layer, LayerEffect } from '../core/types';
-import { adoptTemplateStylingDraft, hasCharacterStyling, ownedIds, stripCharacterStylingDraft, stylingOwnersOn, templateStyleOf } from './characterStyling';
+import {
+  adoptTemplateStylingDraft,
+  hasCharacterStyling,
+  ownedIds,
+  restoreCharacterStylingDraft,
+  restylesCharacter,
+  stripCharacterStylingDraft,
+  stylingOwnersOn,
+  takeCharacterStylingDraft,
+  templateStyleOf,
+} from './characterStyling';
 
 const f = (id: string, filterId = 'halftone'): FilterInstance => ({ id, filterId, enabled: true, params: {}, opacity: 1, blendMode: 'normal' });
 const e = (id: string, effectId = 'outer-glow'): LayerEffect => ({ id, effectId, enabled: true, params: {} });
@@ -92,5 +102,40 @@ describe('character styling ownership', () => {
   it('templateStyleOf skips instances owned by the styler or a look', () => {
     const l = crimson();
     expect(templateStyleOf(l)).toEqual({ filterIds: ['t1', 't2', 'u1'], effectIds: ['te', 'ue'] });
+  });
+
+  it('take + restore puts the replaced treatment back in place', () => {
+    const l = crimson();
+    const before = JSON.parse(JSON.stringify({ filters: l.filters, effects: l.effects, meta: l.meta }));
+    const rep = takeCharacterStylingDraft(l, ['template', 'styler']);
+    expect(rep?.filters.map((x) => [x.index, x.instance.id])).toEqual([
+      [0, 't1'],
+      [1, 't2'],
+      [3, 's1'],
+    ]);
+    expect(Object.keys(rep!.records).sort()).toEqual(['styler', 'templateStyle']);
+    expect(l.filters.map((x) => x.id)).toEqual(['u1', 'k1']);
+    restoreCharacterStylingDraft(l, rep);
+    expect(JSON.parse(JSON.stringify({ filters: l.filters, effects: l.effects, meta: l.meta }))).toEqual(before);
+    // nothing to take → null; restoring twice doesn't duplicate
+    expect(takeCharacterStylingDraft(layer({}, [f('x')], []), ['template'])).toBeNull();
+    restoreCharacterStylingDraft(l, rep);
+    expect(l.filters).toHaveLength(5);
+  });
+
+  it('a partial strip by filter type keeps the other instances and the records', () => {
+    const l = crimson();
+    const rep = takeCharacterStylingDraft(l, ['template', 'styler'], { onlyFilterTypes: new Set(['cel-shade']), onlyEffectTypes: new Set(['outer-glow']) });
+    expect(l.filters.map((x) => x.id)).toEqual(['t1', 't2', 'u1', 'k1']);
+    expect(l.effects.map((x) => x.id)).toEqual(['ke', 'ue']);
+    expect(rep?.records).toEqual({});
+    expect(l.meta?.templateStyle).toBeDefined();
+    expect(l.meta?.styler).toBeDefined();
+  });
+
+  it('knows restyling filters from additive ones', () => {
+    expect(restylesCharacter(['rim-light', 'glitch'])).toBe(false);
+    expect(restylesCharacter(['rim-light', 'gradient-map'])).toBe(true);
+    expect(restylesCharacter(['cel-shade'])).toBe(true);
   });
 });

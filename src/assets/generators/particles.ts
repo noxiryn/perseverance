@@ -133,7 +133,7 @@ const sparksEmbers = defineAsset(
       return c;
     },
   },
-  { bg: 'dark' },
+  { bg: 'dark', onLight: {} },
 );
 
 /* ------------------------------------------------------------------ */
@@ -184,7 +184,7 @@ const dustParticles = defineAsset(
       return c;
     },
   },
-  { bg: 'dark' },
+  { bg: 'dark', onLight: {} },
 );
 
 /* ------------------------------------------------------------------ */
@@ -321,7 +321,7 @@ const rain = defineAsset(
       return c;
     },
   },
-  { bg: 'dark' },
+  { bg: 'dark', onLight: {} },
 );
 
 /* ------------------------------------------------------------------ */
@@ -412,7 +412,7 @@ const stars = defineAsset(
       return c;
     },
   },
-  { bg: 'dark' },
+  { bg: 'dark', onLight: {} },
 );
 
 /* ------------------------------------------------------------------ */

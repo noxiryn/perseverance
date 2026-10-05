@@ -3,6 +3,9 @@
  * ARCHITECTURE.md §5.4–5.6; anything not registered at apply time is skipped gracefully.
  * Atmosphere overlays that would cover the character (smoke, rays, fog, bokeh, grids, speed
  * lines, star fields) use `placement: 'behind'`: with a target they go directly below it.
+ * A look's character treatment (cel shading, Crimson Film's gradient map + halftone) is marked
+ * `scope: 'character'`: in whole-document mode it goes on the document's character, while
+ * image-wide filters (glitch, RGB split, risograph) style everything as adjustment layers.
  */
 import type { CurvePoints, CurvesValue, Gradient } from '../core/types';
 import type { ExtLookDef } from './engine';
@@ -51,6 +54,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
       {
         filterId: 'cel-shade',
         params: { levels: 4, smoothness: 0.15, outline: true, outlineThickness: 2, outlineColor: '#0b0b0b', edgeThreshold: 0.35, saturation: -10 },
+        scope: 'character',
       },
     ],
     overlays: [
@@ -138,8 +142,9 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
             [1, '#fff1ea'],
           ]),
         },
+        scope: 'character',
       },
-      { filterId: 'halftone', params: { shape: 'dot', size: 6, angle: 45, mode: 'mono', ink: '#220000', paper: '#ffffff', mix: 0.3 } },
+      { filterId: 'halftone', params: { shape: 'dot', size: 6, angle: 45, mode: 'mono', ink: '#220000', paper: '#ffffff', mix: 0.3 }, scope: 'character' },
     ],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#ff1f1f', opacity: 0.35, size: 40, blendMode: 'screen' } }],
     overlays: [
@@ -325,7 +330,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     description: 'Manga ink: hard black outlines, two-tone shading, screentone and ink splatter on paper.',
     swatch: ['#000000', '#3a3a3a', '#d9d9d9', '#fbfaf6'],
     layerFilters: [
-      { filterId: 'cel-shade', params: { levels: 3, smoothness: 0.05, outline: true, outlineThickness: 3, outlineColor: '#000000', saturation: -100 } },
+      { filterId: 'cel-shade', params: { levels: 3, smoothness: 0.05, outline: true, outlineThickness: 3, outlineColor: '#000000', saturation: -100 }, scope: 'character' },
     ],
     overlays: [
       { assetId: 'paper-texture', params: { tone: '#f4f1ea' }, blendMode: 'multiply', name: 'Paper' },
@@ -344,7 +349,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     description: 'Pop-art comic: bold outline, punchy colors, halftone dots and a hard offset shadow.',
     swatch: ['#111111', '#e63946', '#ffd166', '#118ab2'],
     layerFilters: [
-      { filterId: 'cel-shade', params: { levels: 4, smoothness: 0.1, outline: true, outlineThickness: 3, outlineColor: '#111111', saturation: 35 } },
+      { filterId: 'cel-shade', params: { levels: 4, smoothness: 0.1, outline: true, outlineThickness: 3, outlineColor: '#111111', saturation: 35 }, scope: 'character' },
     ],
     layerEffects: [
       { effectId: 'stroke', params: { color: '#111111', size: 6, position: 'outside' } },
@@ -468,7 +473,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     description: 'Anime key frame: cel shading, white outline, speed lines and screentone.',
     swatch: ['#0d0d0d', '#ff3d3d', '#fefefe', '#3d7bff'],
     layerFilters: [
-      { filterId: 'cel-shade', params: { levels: 3, smoothness: 0.1, outline: true, outlineThickness: 3, outlineColor: '#0d0d0d', saturation: 20 } },
+      { filterId: 'cel-shade', params: { levels: 3, smoothness: 0.1, outline: true, outlineThickness: 3, outlineColor: '#0d0d0d', saturation: 20 }, scope: 'character' },
     ],
     layerEffects: [
       { effectId: 'stroke', params: { color: '#ffffff', size: 8, position: 'outside' } },

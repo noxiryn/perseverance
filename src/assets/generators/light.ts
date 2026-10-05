@@ -143,7 +143,7 @@ const sunburstRays = defineAsset(
       return c;
     },
   },
-  { bg: 'mid' },
+  { bg: 'mid', onLight: {} },
 );
 
 /* ------------------------------------------------------------------ */
@@ -215,7 +215,7 @@ const lightRays = defineAsset(
       return c;
     },
   },
-  { bg: 'dark' },
+  { bg: 'dark', onLight: {} },
 );
 
 /* ------------------------------------------------------------------ */

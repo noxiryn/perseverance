@@ -3,7 +3,7 @@ import { bitmaps } from '../core/bitmaps';
 import { createDocument, insertLayerDraft, makeRasterLayer } from '../core/document';
 import type { DialogEntry } from './ui';
 import { useUI } from './ui';
-import { BITMAP_GC_GRACE_MS, HISTORY_LIMIT, cancelBitmapGc, referencedBitmaps, requestBitmapGc, useEditor } from './editor';
+import { BITMAP_GC_GRACE_MS, HISTORY_LIMIT, cancelBitmapGc, gcBitmaps, referencedBitmaps, requestBitmapGc, useEditor } from './editor';
 
 /** A bitmap without pixels (jsdom has no 2D context; the store only needs the canvas object). */
 const newBitmap = () => bitmaps.add(document.createElement('canvas'));
@@ -125,6 +125,35 @@ describe('bitmap garbage collection', () => {
     useUI.setState({ dialogs: [] });
     vi.advanceTimersByTime(6000);
     expect(bitmaps.has(held)).toBe(false);
+  });
+
+  it('keeps the pixels of a step replaced by coalescing while the gesture may still read them', () => {
+    vi.useFakeTimers();
+    const a = openDocWithLayer();
+    const sel1 = newBitmap();
+    const sel2 = newBitmap();
+    const nudge = (id: string) =>
+      useEditor.getState().commit(
+        'Nudge Selection',
+        (d) => {
+          d.selection = { bitmapId: id, bounds: { x: 0, y: 0, width: 1, height: 1 } };
+        },
+        { coalesce: true },
+      );
+    cancelBitmapGc();
+    vi.advanceTimersByTime(BITMAP_GC_GRACE_MS + 2000); // sel1 is old now
+    useEditor.getState().commit('Nudge Selection', (d) => {
+      d.selection = { bitmapId: sel1, bounds: { x: 0, y: 0, width: 1, height: 1 } };
+    }); // a fresh step that the next press coalesces into
+    nudge(sel2);
+    expect(bitmaps.has(sel1)).toBe(true);
+    gcBitmaps();
+    expect(bitmaps.has(sel1)).toBe(true); // guarded for a few seconds
+    vi.advanceTimersByTime(6000);
+    cancelBitmapGc();
+    gcBitmaps();
+    expect(bitmaps.has(sel1)).toBe(false);
+    expect(bitmaps.has(a.bmp)).toBe(true);
   });
 
   it('counts live previews as references', () => {

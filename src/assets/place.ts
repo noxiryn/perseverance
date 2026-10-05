@@ -17,7 +17,7 @@ import { toast } from '../state/ui';
 import { viewport } from '../editor/viewport';
 import { assetMeta } from './lib/params';
 import { assetFontsReady, loadAssetFonts } from './lib/fonts';
-import { adaptToBackdrop, meanLuminance } from './lib/backdrop';
+import { MAX_ADAPTED_COVERAGE, adaptToBackdrop, meanAlpha, meanLuminance } from './lib/backdrop';
 import { renderThumbnail } from '../render/compositor';
 import { ctxRead } from '../core/canvas';
 import { parseColor } from '../core/color';
@@ -149,21 +149,30 @@ export function placeAsset(assetId: string, params?: ParamValues, opts: AssetLay
     toast('That asset is no longer available', 'warning');
     return null;
   }
-  // Light-only blends (Screen…) can't show on a light canvas: place dark-on-light instead.
+  // Light-only blends (Screen…) can't show on a light canvas: light overlays with a dark-on-light
+  // variant are placed in Multiply with a dark color instead (see lib/backdrop.ts).
   const blend = opts.blendMode ?? def.defaultBlendMode ?? 'normal';
   const size = assetLayerSize(def, doc.width, doc.height, opts);
   const box =
     def.sizing === 'document'
       ? { x: 0, y: 0, width: doc.width, height: doc.height }
       : { x: opts.x ?? (doc.width - size.width) / 2, y: opts.y ?? (doc.height - size.height) / 2, width: size.width, height: size.height };
-  const adapt = blend === (def.defaultBlendMode ?? 'normal') ? adaptToBackdrop(def, resolveParams(def, params), blend, backdropLuminance(doc, box)) : null;
-  if (adapt?.changed) {
-    params = adapt.params;
-    opts = { ...opts, blendMode: adapt.blendMode };
-  }
+  let adapt =
+    blend === (def.defaultBlendMode ?? 'normal')
+      ? adaptToBackdrop(def, resolveParams(def, params), blend, backdropLuminance(doc, box), assetMeta.get(assetId)?.onLight)
+      : null;
   let layer: RasterLayer | null = null;
   try {
-    layer = createAssetLayer(assetId, params, doc.width, doc.height, opts);
+    if (adapt?.changed) {
+      layer = createAssetLayer(assetId, adapt.params, doc.width, doc.height, { ...opts, blendMode: adapt.blendMode });
+      // A mostly opaque result (dense fog, an opaque base turned back on…) would darken the whole
+      // canvas in Multiply instead of adding dark detail: place it as asked and hint instead.
+      if (layer && layerCoverage(layer) > MAX_ADAPTED_COVERAGE) {
+        layer = null; // its unreferenced bitmap is collected by the store's GC
+        adapt = { ...adapt, changed: false, invisible: true };
+      }
+    }
+    if (!layer) layer = createAssetLayer(assetId, params, doc.width, doc.height, opts);
   } catch (err) {
     console.error(`[assets] failed to generate "${assetId}"`, err);
     toast(`Could not generate “${def.name}”`, 'error');
@@ -174,9 +183,26 @@ export function placeAsset(assetId: string, params?: ParamValues, opts: AssetLay
   viewport.requestRender();
   const blendName = blend.replace(/(^|-)(\w)/g, (_m, sep: string, c: string) => (sep ? ' ' : '') + c.toUpperCase());
   if (adapt?.changed)
-    toast(`“${def.name}” uses ${blendName} by default, which can't show on a light background — placed in Multiply with a darker color (switch the layer back to ${blendName} on dark backgrounds).`, 'info', 5200);
-  else if (adapt?.invisible) toast(`“${def.name}” is in ${blendName} mode, which doesn't show on a light background — try Multiply or a darker color.`, 'info', 4600);
+    toast(
+      `“${def.name}” uses ${blendName} by default, which can't show on a light background — placed in Multiply with a darker color${adapt.note ? ` ${adapt.note}` : ''} (switch the layer back to ${blendName} on dark backgrounds).`,
+      'info',
+      5200,
+    );
+  else if (adapt?.invisible) toast(`“${def.name}” is in ${blendName} mode, which doesn't show on a light background — place it over a darker area or try Multiply with a darker color.`, 'info', 4600);
   return id;
+}
+
+/** Mean alpha (0..1) of a generated layer, measured on a small downscale. */
+function layerCoverage(layer: RasterLayer): number {
+  const src = bitmaps.get(layer.bitmapId);
+  if (!src) return 0;
+  const s = Math.min(1, 128 / Math.max(1, layer.width, layer.height));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(layer.width * s));
+  c.height = Math.max(1, Math.round(layer.height * s));
+  const ctx = ctxRead(c);
+  ctx.drawImage(src, 0, 0, c.width, c.height);
+  return meanAlpha(ctx.getImageData(0, 0, c.width, c.height).data);
 }
 
 /** Mean luminance (0..1) of the current composite inside a doc-space box (low-res render), or null. */

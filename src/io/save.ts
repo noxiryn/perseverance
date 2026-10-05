@@ -2,7 +2,7 @@
  * Save / Save As for .pgfx projects. Desktop writes to the session's path; the browser downloads.
  */
 import type { ID } from '../core/types';
-import { fileNameOf, isDesktop, saveFile, writeFile } from '../platform';
+import { fileNameOf, isAccessDenied, isDesktop, saveFile, writeFile } from '../platform';
 import { useEditor } from '../state/editor';
 import { toast } from '../state/ui';
 import { safeFileName } from './math';
@@ -40,12 +40,22 @@ export async function saveDocument(docId?: ID, opts: { saveAs?: boolean } = {}):
   try {
     const data = await encodeProject(committed);
     if (!opts.saveAs && s.filePath && isDesktop) {
-      await writeFile(s.filePath, data);
-      markSavedAt(id, entryId);
-      addRecentFile(s.filePath);
-      void removeRecovery(id);
-      toast(`Saved “${fileNameOf(s.filePath)}”`, 'success');
-      return true;
+      let written = true;
+      try {
+        await writeFile(s.filePath, data);
+      } catch (e) {
+        // The desktop app only writes to paths the user chose (dialogs / opened projects); a path it
+        // doesn't know (e.g. from an older recent-files list) goes through Save As instead.
+        if (!isAccessDenied(e)) throw e;
+        written = false;
+      }
+      if (written) {
+        markSavedAt(id, entryId);
+        addRecentFile(s.filePath);
+        void removeRecovery(id);
+        toast(`Saved “${fileNameOf(s.filePath)}”`, 'success');
+        return true;
+      }
     }
     const defaultPath = s.filePath && isDesktop ? s.filePath : `${safeFileName(committed.name)}.pgfx`;
     const result = await saveFile({ title: 'Save As', defaultPath, filters: PROJECT_FILTERS, data });

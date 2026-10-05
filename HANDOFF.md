@@ -43,6 +43,30 @@ starting point; don't rewrite modules from scratch.
 - All 13 modules done. In progress: perf (dirty-rect painting, hot filter LUTs) + Electron hardening workflow.
 - Next: final whole-app review → fixes → installer → README.
 
+## Final review fixes — robustness & docs (docs/status/final-review.json)
+- **Bitmap GC** (`src/state/editor.ts`): a closed document's pixels and pixels only used by dropped
+  history entries (discarded redo branch, coalesced step, trimmed steps) are freed immediately;
+  a throttled idle pass (~31 s after the first change, postponed while a dialog is open) frees
+  other unreferenced bitmaps older than the 30 s grace. Pinned bitmaps are never freed. Tests:
+  `src/state/editor.test.ts`.
+- **Consistent saves** (`src/io/project.ts`, `pngCache.ts startEncodes`): every bitmap's PNG encode
+  is started synchronously (canvas.toBlob snapshots at call time) before the first await; Save and
+  autosave write the committed history step they mark as saved, so undo/redo/edits during a save
+  can't mix states.
+- **Fonts in projects** (`src/io/projectFonts.ts`, container `fonts` entries): user-added font files
+  used by text layers are embedded in .pgfx files and registered for the session on open when
+  missing; still-missing families (e.g. system fonts) are named in a warning toast.
+- **PSD** (`src/io/psdAdjustments.ts`): color balance, black & white, photo filter, channel mixer,
+  gradient map, selective color and colorize hue/sat are native both ways; other adjustments are
+  baked into pixel layers (mask/opacity/blend kept); `doc.background` exports as a bottom
+  "Background Color" fill layer and is restored on import.
+- **Free Transform on tab switch** (`src/viewport/transform/controller.ts commitTransformInOwnDoc`):
+  applied in its own document (with a toast) instead of being dropped.
+- **CI / installers**: Build installers is green since f6ce5d3 (Windows case-clash rename b4d8728 +
+  electron-builder caches outside the repo). No GitHub Release exists yet — push a tag (`v0.1.0`) to
+  publish one. `release/Perseverance-Setup-0.1.0.exe` on disk predates the module work (stale).
+  README install/sharing/build sections describe Releases vs. Actions artifacts.
+
 ## Remaining steps after the modules
 1. **Integrate**: `npm run typecheck` (whole tree) + `npx vite build`; fix cross-module mismatches.
 2. **Pending core requests** (from module reports):
@@ -61,8 +85,15 @@ starting point; don't rewrite modules from scratch.
      `renderLayer`) so layers-panels' Rasterize Layer Style is exact for non-Normal blend layers.
    - (done) shell start screen / palette open templates via openTemplate(id) from src/templates (character
      selected); palette looks use currentTargetId().
-   - PERF: hue/saturation (src/filters/adjustments/defs/color.ts) ~100 ms and vignette (fx-filters) ~120-160 ms per
-     1080p pass dominate full composites — LUT / per-row precompute. Renderer already exports invalidateTextLayout.
+   - (done, filter-perf) hue/saturation ~100 → ~35-45 ms and vignette ~45-270 → ~25-35 ms per 1080p pass (per-(max,min)
+     tables, cached falloff rows + fixed-point blend); film grain ~5×, bloom ~2.5-3×, add noise / chromatic aberration /
+     gaussian blur / halftone 1.2-1.8×, dithered gradient map 2-3×; a per-color cache speeds the costlier adjustments
+     on rendered art. Outputs identical (vignette ±1); checked against the previous code in
+     src/filters/{adjustments,stylize}/perf.test.ts (old implementations in perf.reference.ts). Renderer already
+     exports invalidateTextLayout.
+   - PERF (open): cel shade (~0.6-0.9 s), cutout (~1.0-1.5 s), vibrance / selective color / color balance (~40-90 ms) and
+     the box-blur core stay above the 1080p targets with bit-exact JS; next step would be a Web Worker / WASM (CSP
+     needs 'wasm-unsafe-eval') or tolerance-based algorithms.
    - Optional: editor store `beforeCommit` hook so Free Transform can commit itself before another command
      (viewport currently repairs history via transform/historySplit.ts).
    - Optional: FilterContext.contentRect so edge-sensitive filters (rim-light, toon) know the real layer box.
@@ -71,7 +102,8 @@ starting point; don't rewrite modules from scratch.
    - (done) FilterDef.hidden honored by palette / Properties smart-filter menu / adjustments / gallery; Dialog Enter
      on buttons/links/selects/search fields no longer submits.
    - Optional: FilterContext layer bounds (or edge-repeat padding) so smart blurs match destructive results at edges.
-   - PERF: slow filters at 1080p (watercolor, ink-wash, screen-print, risograph ~1s) — consider a Web Worker.
+   - PERF: slow filters at 1080p (watercolor, ink-wash, screen-print, risograph ~1.5-2 s; only the shared blur / edge
+     primitives were optimized, no measurable change) — consider a Web Worker.
    - (done) CommandDef.paletteHidden (edit.redoAlt hidden from the palette); ARCHITECTURE §5.3 Edit/Transform layout.
    - Optional: renderLayerToDoc option to skip fillOpacity (PSD export renders a copy with fill 1 today).
    - (done) NumberField `disabled` prop; (done) NumberField arrow keys keep the displayed text in sync.
@@ -96,8 +128,8 @@ starting point; don't rewrite modules from scratch.
    (`tpl-gothic-paper`, `tpl-sunburst-icon`, `tpl-noir-thumbnail`, `tpl-crimson-thumbnail`) and compare.
 5. **Final review pass** (correctness, perf, Electron security) and fixes.
 6. **Installer**:
-   - Linux container needs Wine for NSIS: `apt-get install -y wine wine32:i386` (with `dpkg --add-architecture i386`), then
-     `rm -rf ~/.wine && wineboot --init`.
+   - Linux container needs Wine for NSIS: `dpkg --add-architecture i386 && apt-get update && apt-get install -y wine wine32:i386`,
+     then `rm -rf ~/.wine && wineboot --init`.
    - `npm run build && WINEDEBUG=-all npx electron-builder --win nsis --x64 --publish never`
      → `release/Perseverance-Setup-<version>.exe`.
    - Or push a tag `v0.1.0`: `.github/workflows/release.yml` builds Windows/macOS/Linux and publishes a Release.

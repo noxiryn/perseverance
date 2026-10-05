@@ -125,8 +125,9 @@ function makeSession(doc: Document, filePath: string | null, label: string, acti
  * / dialog previewed with a temporary bitmap and cancelled. Three mechanisms free them:
  *
  *  1. Immediately (no grace period) for bitmaps referenced ONLY by a closed session or by dropped
- *     history entries — nothing can reach those any more (they are not in any open document, its
- *     live preview or remaining history). Freshly created tool bitmaps are never in that set.
+ *     history entries (discarded redo branch, trimmed steps) — nothing can reach those any more
+ *     (they are not in any open document, its live preview or remaining history). Freshly created
+ *     tool bitmaps are never in that set.
  *  2. A throttled idle pass (`requestBitmapGc`) ~31 s after the first document change since the
  *     last pass: frees everything unreferenced that is older than the store's 30 s grace (bitmaps a
  *     tool created but has not committed yet are younger than that). It is postponed while a
@@ -183,9 +184,27 @@ export function freeUnreferencedBitmaps(candidates: Set<ID>, sessions: Record<ID
   return drop.size;
 }
 
+/**
+ * Bitmaps of history steps replaced by coalescing, protected for a few seconds. A coalescing
+ * gesture (arrow-key nudges, slider scrubbing) often keeps using the state it started from —
+ * e.g. the selection nudge re-cuts every press from the mask it started with — and that state can
+ * be the very step a later press coalesces into.
+ */
+const COALESCE_GUARD_MS = 5000;
+let coalesceGuard: { ids: Set<ID>; until: number } = { ids: new Set(), until: 0 };
+
+function guardCoalesced(entry: HistoryEntry) {
+  const now = Date.now();
+  const ids = now < coalesceGuard.until ? coalesceGuard.ids : new Set<ID>();
+  entryBitmaps([entry], ids);
+  coalesceGuard = { ids, until: now + COALESCE_GUARD_MS };
+}
+
 /** Full pass: remove every unreferenced bitmap older than the grace period (pinned ones stay). */
 export function gcBitmaps(sessions: Record<ID, DocSession> = useEditor.getState().sessions) {
-  bitmaps.retainOnly(referencedBitmaps(sessions), BITMAP_GC_GRACE_MS);
+  const keep = referencedBitmaps(sessions);
+  if (Date.now() < coalesceGuard.until) for (const id of coalesceGuard.ids) keep.add(id);
+  bitmaps.retainOnly(keep, BITMAP_GC_GRACE_MS);
 }
 
 let gcTimer: ReturnType<typeof setTimeout> | null = null;
@@ -314,8 +333,9 @@ export const useEditor = create<EditorState>()((set, get) => {
         return;
       }
       let entries = s.history.entries.slice(0, s.history.index + 1);
-      // Entries no longer reachable after this commit: the discarded redo branch, a step replaced
-      // by coalescing, and steps trimmed off the front. Their pixels are freed below.
+      // Entries no longer reachable after this commit: the discarded redo branch and steps trimmed
+      // off the front. Their pixels are freed below. (A step replaced by coalescing is left to the
+      // idle pass, after a short guard: the gesture may still be reading its pixels.)
       const dropped: HistoryEntry[] = s.history.entries.slice(s.history.index + 1);
       const last = entries[entries.length - 1];
       if (
@@ -327,7 +347,7 @@ export const useEditor = create<EditorState>()((set, get) => {
         !opts.patches?.length
       ) {
         entries[entries.length - 1] = { ...last, doc, timestamp: Date.now() };
-        dropped.push(last);
+        guardCoalesced(last);
       } else {
         entries.push(newEntry(label, doc, opts.patches));
       }

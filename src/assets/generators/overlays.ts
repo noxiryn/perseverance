@@ -226,7 +226,7 @@ const filmScratches = defineAsset(
       return c;
     },
   },
-  { bg: 'dark' },
+  { bg: 'dark', onLight: { params: { background: false }, note: 'without the black film base' } },
 );
 
 /* ------------------------------------------------------------------ */
@@ -304,7 +304,7 @@ const dustSpecks = defineAsset(
       return c;
     },
   },
-  { bg: 'dark' },
+  { bg: 'dark', onLight: {} },
 );
 
 /* ------------------------------------------------------------------ */

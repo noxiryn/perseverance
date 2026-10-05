@@ -37,6 +37,19 @@ beforeAll(() => {
   filters.register({ id: 't-cel', name: 'Cel', category: 'Stylize', params: [{ key: 'levels', label: 'Levels', type: 'number', min: 2, max: 8, default: 4 }], apply: ident });
   filters.register({ id: 't-rim', name: 'Rim', category: 'Roblox', params: [], apply: ident });
   filters.register({ id: 't-curves', name: 'Curves', category: 'Adjustments', adjustment: true, params: [{ key: 'amount', label: 'Amount', type: 'number', min: 0, max: 1, default: 0.5 }], apply: ident });
+  // Stand-ins for the real filters the built-in looks use (ids matter: restyling / scope rules).
+  for (const [id, name, category] of [
+    ['halftone', 'Halftone', 'Comic & Print'],
+    ['gradient-map', 'Gradient Map', 'Color'],
+    ['glitch', 'Glitch', 'Retro & Glitch'],
+    ['chromatic-aberration', 'Chromatic Aberration', 'Retro & Glitch'],
+    ['rim-light', 'Rim Light', 'Roblox'],
+    ['vignette', 'Vignette', 'Adjustments'],
+    ['brightness-contrast', 'Brightness/Contrast', 'Adjustments'],
+    ['color-lookup', 'Color Lookup', 'Adjustments'],
+  ] as const)
+    filters.register({ id, name, category, params: [], apply: ident });
+  effects.register({ id: 'outer-glow', name: 'Outer Glow', stage: 'behind', order: 2, params: [], render: () => {} });
   effects.register({ id: 't-shadow', name: 'Shadow', stage: 'behind', order: 1, params: [{ key: 'size', label: 'Size', type: 'number', min: 0, max: 100, default: 12 }], render: () => {} });
 });
 
@@ -59,7 +72,7 @@ function makeDoc(): { doc: Document; charId: string; textId: string; adjId: stri
   const ch = makeRasterLayer({ name: 'Character', bitmapId: 'bm_char', width: 40, height: 40 });
   ch.filters.push(makeFilterInstance('user-filter'));
   const text = makeTextLayer({ name: 'Title' });
-  const adj = makeAdjustmentLayer({ filterId: 't-curves' });
+  const adj = makeAdjustmentLayer({ filterId: 't-levels' });
   insertLayerDraft(doc, ch);
   insertLayerDraft(doc, text);
   insertLayerDraft(doc, adj);
@@ -386,7 +399,7 @@ const ATMOS: ExtLookDef = {
   name: 'Atmos',
   category: 'Test',
   swatch: ['#000'],
-  layerFilters: [{ filterId: 't-cel' }],
+  layerFilters: [{ filterId: 'halftone', scope: 'character' }],
   overlays: [
     { assetId: 'smoke', name: 'Smoke', placement: 'behind' },
     { assetId: 'scratches', name: 'Scratches' },
@@ -497,10 +510,18 @@ describe('look vs character styling ownership', () => {
       insertLookDraft(d, buildLook(ATMOS, d, charId, fakeOverlay), charId);
     });
     const l = out.layers[charId];
-    expect(l.filters.map((f) => f.filterId)).toEqual(['user-filter', 't-cel']);
+    expect(l.filters.map((f) => f.filterId)).toEqual(['user-filter', 'halftone']);
     expect(l.meta?.templateStyle).toBeUndefined();
     expect(l.meta?.styler).toBeUndefined();
     expect(lookMetaOf(l)?.lookId).toBe('atmos');
+    // Remove Look brings the template and styler treatment back (same instances, same order).
+    const removed = produce(out, (d) => {
+      stripLookDraft(d, charId);
+    });
+    const r = removed.layers[charId];
+    expect(r.filters).toEqual(styled.layers[charId].filters);
+    expect(r.meta).toEqual(styled.layers[charId].meta);
+    expect(lookMetaOf(r)).toBeNull();
   });
 
   it('a look that only adds effects keeps the styler filters and drops duplicate effect types', () => {
@@ -520,5 +541,122 @@ describe('look vs character styling ownership', () => {
     expect(l.filters.map((f) => f.filterId)).toEqual(['user-filter', 't-rim']);
     expect(l.effects).toHaveLength(1);
     expect(l.effects[0].id).not.toBe('se');
+  });
+});
+
+/* ---------- filter scope, additive looks, duplicate grades (final review round 2) ---------- */
+
+/** Crimson-template-like document: background, styled placeholder, title, Vignette + Contrast. */
+function crimsonTemplateDoc() {
+  const { doc, charId, textId, bgId } = docWithBackground();
+  const out = produce(doc, (d) => {
+    const l = d.layers[charId];
+    const gm = makeFilterInstance('gradient-map');
+    const ht = makeFilterInstance('halftone');
+    l.filters = [gm, ht];
+    l.effects = [{ id: 'tglow', effectId: 'outer-glow', enabled: true, params: {} }];
+    l.meta = { placeholder: true, kind: 'character', templateStyle: { filterIds: [gm.id, ht.id], effectIds: ['tglow'] } };
+    insertLayerDraft(d, makeAdjustmentLayer({ name: 'Vignette', filterId: 'vignette' }));
+    insertLayerDraft(d, makeAdjustmentLayer({ name: 'Contrast', filterId: 'brightness-contrast' }));
+  });
+  return { doc: out, charId, textId, bgId };
+}
+
+const builtin = (id: string) => BUILTIN_LOOKS.find((l) => l.id === id)!;
+
+describe('look filter scope in whole-document mode', () => {
+  it('Glitch Signal styles the whole document and keeps the template treatment', () => {
+    const { doc, charId } = crimsonTemplateDoc();
+    const t = lookTargets(doc, null);
+    expect(t.targetId).toBe(charId);
+    const built = buildLook(builtin('glitch-signal'), doc, t.targetId, fakeOverlay, { documentWide: !!t.character });
+    expect(built.filters).toEqual([]);
+    expect(built.restyles).toBe(false);
+    const adjustments = built.groupLayers.filter((l) => l.type === 'adjustment').map((l) => (l as Extract<Layer, { type: 'adjustment' }>).adjustment.filterId);
+    expect(adjustments).toEqual(expect.arrayContaining(['glitch', 'chromatic-aberration']));
+    const out = produce(doc, (d) => {
+      insertLookDraft(d, built, t.targetId);
+    });
+    const ch = out.layers[charId];
+    expect(ch.filters).toEqual(doc.layers[charId].filters);
+    expect(ch.effects).toEqual(doc.layers[charId].effects);
+    expect(ch.meta?.templateStyle).toEqual(doc.layers[charId].meta?.templateStyle);
+    expect(lookGroups(out)[0].childIds.some((id) => (out.layers[id] as { adjustment?: { filterId: string } }).adjustment?.filterId === 'glitch')).toBe(true);
+  });
+
+  it('a character-scope treatment (Crimson Film) still goes on the character', () => {
+    const { doc, charId } = crimsonTemplateDoc();
+    const built = buildLook(builtin('crimson-film'), doc, charId, fakeOverlay, { documentWide: true });
+    expect(built.filters.map((f) => f.filterId)).toEqual(['gradient-map', 'halftone']);
+    expect(built.restyles).toBe(true);
+    expect(built.groupLayers.some((l) => l.type === 'adjustment' && l.adjustment.filterId === 'gradient-map')).toBe(false);
+  });
+
+  it('active-layer mode puts every look filter on the chosen layer', () => {
+    const { doc, charId } = crimsonTemplateDoc();
+    const built = buildLook(builtin('glitch-signal'), doc, charId, fakeOverlay);
+    expect(built.filters.map((f) => f.filterId)).toEqual(['glitch', 'chromatic-aberration']);
+    // additive filters keep the template's colors
+    const out = produce(doc, (d) => {
+      insertLookDraft(d, built, charId);
+    });
+    expect(out.layers[charId].filters.map((f) => f.filterId)).toEqual(['gradient-map', 'halftone', 'glitch', 'chromatic-aberration']);
+  });
+});
+
+describe('additive looks and Remove Look', () => {
+  it('a rim-light look replaces only the same effect type and Remove Look restores it', () => {
+    const { doc, charId } = crimsonTemplateDoc();
+    const built = buildLook(builtin('ice-cold'), doc, charId, fakeOverlay);
+    expect(built.restyles).toBe(false);
+    const out = produce(doc, (d) => {
+      insertLookDraft(d, built, charId);
+    });
+    const ch = out.layers[charId];
+    expect(ch.filters.map((f) => f.filterId)).toEqual(['gradient-map', 'halftone', 'rim-light']);
+    expect(ch.effects.map((e) => e.id)).not.toContain('tglow'); // no double glow
+    expect(ch.effects.filter((e) => e.effectId === 'outer-glow')).toHaveLength(1);
+    expect(lookMetaOf(ch)?.replaced?.effects.map((e) => e.instance.id)).toEqual(['tglow']);
+    const removed = produce(out, (d) => {
+      stripLookDraft(d, charId);
+    });
+    expect(removed.layers[charId].filters).toEqual(doc.layers[charId].filters);
+    expect(removed.layers[charId].effects).toEqual(doc.layers[charId].effects);
+    expect(removed.layers[charId].meta).toEqual(doc.layers[charId].meta);
+  });
+
+  it('applying a second look restores what the first replaced before replacing again', () => {
+    const { doc, charId } = crimsonTemplateDoc();
+    const first = produce(doc, (d) => {
+      insertLookDraft(d, buildLook(builtin('crimson-film'), d, charId, fakeOverlay), charId);
+    });
+    expect(first.layers[charId].meta?.templateStyle).toBeUndefined();
+    const second = produce(first, (d) => {
+      insertLookDraft(d, buildLook(builtin('glitch-signal'), d, charId, fakeOverlay), charId);
+    });
+    // the template treatment is back under the additive glitch look
+    expect(second.layers[charId].meta?.templateStyle).toEqual(doc.layers[charId].meta?.templateStyle);
+    expect(second.layers[charId].filters.map((f) => f.filterId)).toEqual(['gradient-map', 'halftone', 'glitch', 'chromatic-aberration']);
+    const removed = produce(second, (d) => {
+      stripLookDraft(d, charId);
+    });
+    expect(removed.layers[charId].filters).toEqual(doc.layers[charId].filters);
+    expect(removed.layers[charId].effects).toEqual(doc.layers[charId].effects);
+  });
+});
+
+describe('duplicate grades', () => {
+  it('skips adjustments already in the document and treats vignette asset/adjustment as one', () => {
+    const { doc, charId } = crimsonTemplateDoc();
+    const built = buildLook(builtin('crimson-film'), doc, charId, fakeOverlay);
+    expect(built.duplicates).toEqual(expect.arrayContaining(['Vignette', 'Contrast']));
+    expect(built.groupLayers.map((l) => l.name)).not.toContain('Vignette');
+    expect(built.groupLayers.some((l) => l.type === 'adjustment' && l.adjustment.filterId === 'brightness-contrast')).toBe(false);
+    // a hidden duplicate doesn't count
+    const hidden = produce(doc, (d) => {
+      for (const l of Object.values(d.layers)) if (l.type === 'adjustment') l.visible = false;
+    });
+    const again = buildLook(builtin('crimson-film'), hidden, charId, fakeOverlay);
+    expect(again.groupLayers.map((l) => l.name)).toEqual(expect.arrayContaining(['Vignette', 'Contrast']));
   });
 });

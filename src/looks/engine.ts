@@ -13,17 +13,23 @@
  *    of the document (meta {lookId, lookLayerIds}). Atmosphere overlays marked
  *    `placement: 'behind'` (smoke, rays, fog, bokeh…) go into a second look group directly BELOW
  *    the target instead, so the character stands in front of them (as in the templates).
- *  - overlays whose asset is already in the document (e.g. a template's own film scratches) are
- *    skipped instead of being doubled.
- * Whole-document mode uses the document's character (doc.meta.characterId / the only character
- * layer) as the target of the look's character filters and as the anchor of 'behind' overlays;
- * only without one do layerFilters become filter "adjustment" layers over everything.
+ *  - overlays whose asset is already in the document (e.g. a template's own film scratches) and
+ *    adjustments whose filter is already an adjustment layer (the template's Contrast) are
+ *    skipped instead of being doubled; a vignette asset and a vignette adjustment count as the same.
+ * Each layer filter has a scope: 'character' filters (Roblox filters, a look's character
+ * treatment such as Crimson Film's gradient map + halftone) style the character; 'document'
+ * filters (glitch, RGB split, risograph…) style the whole image. Whole-document mode uses the
+ * document's character (doc.meta.characterId / the only character layer) as the target of the
+ * character-scope filters and of the effects, and as the anchor of 'behind' overlays; the other
+ * filters become filter "adjustment" layers over everything (all of them without a character).
  * A group target is redirected to the character inside it (placeholder / only pixel layer) so
  * the look's smart filters land somewhere useful.
  * The ids of filters/effects added to the target are tracked in `layer.meta.look`, so applying
  * another look (or the same one again) replaces the previous look instead of stacking. Character
- * styling has one owner at a time (src/looks/characterStyling.ts): a look that adds filters
- * replaces the Character Styler's and the template's treatment of the target. Missing
+ * styling has one owner at a time (src/looks/characterStyling.ts): a look that adds restyling
+ * filters (color maps, halftones, cel shading…) replaces the Character Styler's and the
+ * template's treatment of the target; other looks only replace filters/effects of the same type
+ * (no double glow). What a look replaced is kept in its meta and restored when it is removed. Missing
  * filter/effect/asset ids are skipped with a console warning; parts skipped because of the target
  * type are reported to the user.
  */
@@ -36,7 +42,7 @@ import { assetIdOfLayer, createAssetLayer } from '../assets/place';
 import { resolveParams } from '../filters/engine';
 import { uid } from '../core/ids';
 import { createOverlayMask, type OverlayMaskSpec } from './masks';
-import { adoptTemplateStylingDraft, stripCharacterStylingDraft } from './characterStyling';
+import { adoptTemplateStylingDraft, restoreCharacterStylingDraft, restylesCharacter, takeCharacterStylingDraft, type ReplacedStyling } from './characterStyling';
 import { prepareCutoutBake } from '../roblox/character/cutout';
 
 /** Key under `layer.meta` holding the look applied to that layer. */
@@ -46,6 +52,8 @@ export interface LookLayerMeta {
   lookId: string;
   filterIds: ID[];
   effectIds: ID[];
+  /** Template / Styler instances the look replaced (put back when the look is removed). */
+  replaced?: ReplacedStyling;
 }
 
 export type LookOverlay = NonNullable<LookDef['overlays']>[number];
@@ -60,9 +68,34 @@ export type OverlayPlacement = 'top' | 'behind';
 /** Overlay with module extensions (a mask confining it, e.g. clippings kept to the edges). */
 export type LookOverlayDef = LookOverlay & { mask?: OverlayMaskSpec; placement?: OverlayPlacement };
 
-/** LookDef as authored by this module (overlays may carry masks). Assignable to LookDef. */
+export type LookFilter = NonNullable<LookDef['layerFilters']>[number];
+
+/**
+ * What a look's layer filter styles: 'character' — the character (in whole-document mode it goes
+ * on the document's character); 'document' — the whole image (in whole-document mode it becomes a
+ * filter adjustment layer over everything). Default: 'character' for Roblox filters (they need a
+ * character's alpha), 'document' otherwise.
+ */
+export type LookFilterScope = 'character' | 'document';
+
+/** Layer filter with module extensions (its scope). */
+export type LookFilterDef = LookFilter & { scope?: LookFilterScope };
+
+export type LookAdjustment = NonNullable<LookDef['adjustments']>[number];
+
+/** Adjustment with module extensions (a mask confining it, e.g. captured by Save as Look). */
+export type LookAdjustmentDef = LookAdjustment & { mask?: OverlayMaskSpec };
+
+/** LookDef as authored by this module (overlays/adjustments may carry masks, filters a scope). Assignable to LookDef. */
 export interface ExtLookDef extends LookDef {
   overlays?: LookOverlayDef[];
+  layerFilters?: LookFilterDef[];
+  adjustments?: LookAdjustmentDef[];
+}
+
+/** Effective scope of a look filter whose FilterDef has `category`. */
+export function lookFilterScope(lf: LookFilterDef, category: string | undefined): LookFilterScope {
+  return lf.scope ?? (category === 'Roblox' ? 'character' : 'document');
 }
 
 /** Creates the raster layer for an overlay (swappable so previews can render at low resolution). */
@@ -79,8 +112,10 @@ export interface BuiltLook {
   groupLayers: Layer[];
   /** Overlays placed directly below the target (bottom → top); empty without a target. */
   behindLayers?: Layer[];
-  /** Names of overlays left out because their asset is already in the document. */
+  /** Names of overlays / adjustments left out because they are already in the document. */
   duplicates?: string[];
+  /** The target's filters restyle the character (they replace the template / Styler treatment). */
+  restyles?: boolean;
   /** Human readable list of parts that were skipped (missing ids, unsupported target…). */
   skipped: string[];
   /** Names of filters/effects dropped because the target can't hold them (shown to the user). */
@@ -90,8 +125,13 @@ export interface BuiltLook {
 export interface BuildLookOptions {
   /** Resolution factor of generated masks (previews use a low value). */
   maskScale?: number;
-  /** Skip overlays whose asset is already a layer of the document (default true). */
+  /** Skip overlays / adjustments already in the document (default true). */
   skipExisting?: boolean;
+  /**
+   * Whole-document mode with the document's character as `targetId`: only character-scope
+   * filters go on it; the others become filter adjustment layers.
+   */
+  documentWide?: boolean;
 }
 
 export interface TargetCaps {
@@ -207,12 +247,26 @@ export function documentCharacter(doc: Document): ID | null {
   return doc.layers[ids[0]]?.locks.all ? null : ids[0];
 }
 
-/** Asset ids already present as layers (outside look groups) — their overlays aren't doubled. */
-export function existingAssetIds(doc: Document): Set<string> {
+/** Look parts that do the same thing (a vignette asset and a vignette adjustment). */
+const EQUIVALENT_PARTS: Record<string, string> = { 'asset:vignette-overlay': 'vignette', 'filter:vignette': 'vignette' };
+
+/** Canonical key of an overlay ('asset') or adjustment ('filter') part, for duplicate checks. */
+export function lookPartKey(kind: 'asset' | 'filter', id: string): string {
+  const k = `${kind}:${id}`;
+  return EQUIVALENT_PARTS[k] ?? k;
+}
+
+/**
+ * Keys (lookPartKey) of the generated asset layers and adjustment layers visible in the document
+ * outside look groups — a look doesn't double them (e.g. a template's own scratches or Contrast).
+ */
+export function existingLookParts(doc: Document): Set<string> {
   const out = new Set<string>();
   for (const l of Object.values(doc.layers)) {
+    if (isInsideLookGroup(doc, l.id) || !isEffectivelyVisible(doc, l.id)) continue;
     const a = assetIdOfLayer(l);
-    if (a && l.visible && !isInsideLookGroup(doc, l.id)) out.add(a);
+    if (a) out.add(lookPartKey('asset', a));
+    else if (l.type === 'adjustment') out.add(lookPartKey('filter', l.adjustment.filterId));
   }
   return out;
 }
@@ -249,7 +303,7 @@ export function buildLook(
   const target = targetId ? (doc.layers[targetId] ?? null) : null;
   const caps = targetCaps(target);
   const out: BuiltLook = { lookId: look.id, lookName: look.name, filters: [], effects: [], groupLayers: [], behindLayers: [], duplicates: [], skipped: [], targetSkipped: [] };
-  const existing = opts.skipExisting === false ? new Set<string>() : existingAssetIds(doc);
+  const existing = opts.skipExisting === false ? new Set<string>() : existingLookParts(doc);
   const behind: Layer[] = [];
   const converted: Layer[] = [];
   const overlays: Layer[] = [];
@@ -263,22 +317,34 @@ export function buildLook(
     out.targetSkipped!.push(name);
   };
 
-  for (const lf of look.layerFilters ?? []) {
+  const duplicate = (name: string, what: string) => {
+    out.duplicates!.push(name);
+    out.skipped.push(`${what} (already in the document)`);
+  };
+  const documentWide = !!opts.documentWide && !!target;
+
+  for (const lf of (look as ExtLookDef).layerFilters ?? []) {
     const def = filters.get(lf.filterId);
     if (!def) {
       warn(`filter "${lf.filterId}" (not registered)`);
       continue;
     }
     const params = resolveParams(def, lf.params);
-    if (caps.filters) out.filters.push(makeFilterInstance(def.id, params));
-    else if (!target) {
+    const scope = lookFilterScope(lf, def.category);
+    if (caps.filters && (!documentWide || scope === 'character')) out.filters.push(makeFilterInstance(def.id, params));
+    else if (!target || documentWide) {
       if (def.category === 'Roblox') {
         targetSkip(def.name, `character filter "${def.id}" (needs a target layer)`);
+        continue;
+      }
+      if (existing.has(lookPartKey('filter', def.id))) {
+        duplicate(def.name, `filter "${def.id}"`);
         continue;
       }
       converted.push(makeAdjustmentLayer({ name: def.name, filterId: def.id, params }));
     } else targetSkip(def.name, `filter "${def.id}" (a ${target.type} layer can't hold smart filters)`);
   }
+  out.restyles = restylesCharacter(out.filters.map((f) => f.filterId));
 
   for (const le of look.layerEffects ?? []) {
     const def = effects.get(le.effectId);
@@ -294,9 +360,8 @@ export function buildLook(
   }
 
   for (const o of (look as ExtLookDef).overlays ?? []) {
-    if (existing.has(o.assetId)) {
-      out.duplicates!.push(o.name ?? o.assetId);
-      out.skipped.push(`overlay "${o.assetId}" (already in the document)`);
+    if (existing.has(lookPartKey('asset', o.assetId))) {
+      duplicate(o.name ?? o.assetId, `overlay "${o.assetId}"`);
       continue;
     }
     let layer: RasterLayer | null = null;
@@ -321,15 +386,23 @@ export function buildLook(
     else overlays.push(layer);
   }
 
-  for (const a of look.adjustments ?? []) {
+  for (const a of (look as ExtLookDef).adjustments ?? []) {
     const def = filters.get(a.filterId);
     if (!def) {
       warn(`adjustment "${a.filterId}" (not registered)`);
       continue;
     }
+    if (existing.has(lookPartKey('filter', def.id))) {
+      duplicate(a.name ?? def.name, `adjustment "${def.id}"`);
+      continue;
+    }
     const layer = makeAdjustmentLayer({ name: a.name ?? def.name, filterId: def.id, params: resolveParams(def, a.params) });
     if (a.blendMode) layer.blendMode = a.blendMode;
     if (a.opacity !== undefined) layer.opacity = a.opacity;
+    if (a.mask) {
+      const m = createOverlayMask(a.mask, doc.width, doc.height, opts.maskScale ?? 1);
+      if (m) layer.mask = m.mask;
+    }
     adjustments.push(layer);
   }
 
@@ -339,19 +412,24 @@ export function buildLook(
   return out;
 }
 
-/** Remove the tracked look filters/effects (and the look meta) from one layer of a draft. */
+/**
+ * Remove the tracked look filters/effects (and the look meta) from one layer of a draft, and put
+ * back the template / Styler treatment the look replaced.
+ */
 function stripLayerLook(d: Document, id: ID): boolean {
   const l = d.layers[id];
   const m = lookMetaOf(l);
   if (!l || !m) return false;
   const fids = new Set(m.filterIds);
   const eids = new Set(m.effectIds);
+  const replaced = m.replaced ? (JSON.parse(JSON.stringify(m.replaced)) as ReplacedStyling) : null;
   l.filters = l.filters.filter((f) => !fids.has(f.id));
   l.effects = l.effects.filter((e) => !eids.has(e.id));
   const meta = { ...l.meta };
   delete meta[LOOK_META_KEY];
   if (Object.keys(meta).length) l.meta = meta;
   else delete l.meta;
+  restoreCharacterStylingDraft(l, replaced);
   return true;
 }
 
@@ -403,12 +481,17 @@ export function insertLookDraft(d: Document, built: BuiltLook, targetId: ID | nu
   stripLookDraft(d, targetId);
   const target = targetId ? d.layers[targetId] : undefined;
   if (target && (built.filters.length || built.effects.length)) {
-    // One owner of character styling: a look with filters replaces the Styler's / template's
-    // treatment; a look that only adds effects replaces their effects of the same kind (no
-    // double glow).
+    // One owner of character styling: a look with restyling filters replaces the Styler's /
+    // template's treatment; other looks replace only their filters/effects of the same kind (no
+    // double glow or rim light). What was taken off comes back when the look is removed.
     adoptTemplateStylingDraft(target);
-    if (built.filters.length) stripCharacterStylingDraft(target, ['template', 'styler']);
-    else stripCharacterStylingDraft(target, ['template', 'styler'], { onlyEffectTypes: new Set(built.effects.map((e) => e.effectId)) });
+    const restyles = built.restyles ?? restylesCharacter(built.filters.map((f) => f.filterId));
+    const replaced = restyles
+      ? takeCharacterStylingDraft(target, ['template', 'styler'])
+      : takeCharacterStylingDraft(target, ['template', 'styler'], {
+          onlyFilterTypes: new Set(built.filters.map((f) => f.filterId)),
+          onlyEffectTypes: new Set(built.effects.map((e) => e.effectId)),
+        });
     target.filters = [...target.filters, ...built.filters];
     target.effects = [...target.effects, ...built.effects];
     const meta: LookLayerMeta = {
@@ -416,6 +499,7 @@ export function insertLookDraft(d: Document, built: BuiltLook, targetId: ID | nu
       filterIds: built.filters.map((f) => f.id),
       effectIds: built.effects.map((e) => e.id),
     };
+    if (replaced) meta.replaced = replaced;
     target.meta = { ...target.meta, [LOOK_META_KEY]: meta };
   }
   let topLayers = built.groupLayers;
@@ -530,7 +614,7 @@ export async function applyLook(lookId: string, targetLayerId: ID | null): Promi
     toast(blocked, 'warning', 3600);
     return;
   }
-  const built = buildLook(look, s.doc, targetId);
+  const built = buildLook(look, s.doc, targetId, undefined, { documentWide: !!character });
   const duplicates = built.duplicates ?? [];
   if (!built.filters.length && !built.effects.length && !built.groupLayers.length && !built.behindLayers?.length) {
     const why = describeTargetSkips(built, targetId ? s.doc.layers[targetId] : null);
@@ -551,6 +635,8 @@ export async function applyLook(lookId: string, targetLayerId: ID | null): Promi
     bake ? { patches: bake.patches } : undefined,
   );
   const where = target && !character ? ` to “${target.name}”` : ' to the whole document';
+  // In whole-document mode, name the character only when it received filters or effects.
+  const shownNote = character && !built.filters.length && !built.effects.length ? undefined : note;
   const skips = describeTargetSkips(built, target);
   const extra = [
     skips,
@@ -558,9 +644,9 @@ export async function applyLook(lookId: string, targetLayerId: ID | null): Promi
     bake ? 'the Remove Background mask was applied first' : '',
   ].filter(Boolean);
   toast(
-    `Applied look “${look.name}”${where}${note ? ` (${note})` : ''}.${extra.length ? ` ${extra.join('; ')}.` : ''}`,
+    `Applied look “${look.name}”${where}${shownNote ? ` (${shownNote})` : ''}.${extra.length ? ` ${extra.join('; ')}.` : ''}`,
     skips ? 'info' : 'success',
-    extra.length ? 5600 : note ? 3600 : 2600,
+    extra.length ? 5600 : shownNote ? 3600 : 2600,
   );
 }
 

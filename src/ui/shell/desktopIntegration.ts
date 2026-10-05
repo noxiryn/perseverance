@@ -69,11 +69,16 @@ export function installDesktopIntegration(): () => void {
       desktop.onCloseRequested(async () => {
         if (closing) return;
         closing = true;
+        let ok = false;
         try {
-          const ok = await confirmQuit();
-          desktop!.confirmClose(ok);
+          ok = await confirmQuit();
+        } catch (e) {
+          // Always answer the main process: a broken prompt must not leave the window unclosable.
+          console.error('[shell] close prompt failed', e);
+          ok = window.confirm('Perseverance could not show the unsaved-changes prompt. Quit anyway? Unsaved changes will be lost.');
         } finally {
           closing = false;
+          desktop!.confirmClose(ok);
         }
       }),
     );

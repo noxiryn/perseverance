@@ -3,6 +3,7 @@
  */
 import type { ParamDef, Point } from '../../core/types';
 import type { AssetDef } from '../../registry';
+import type { LightBackdropVariant } from './backdrop';
 
 export type PreviewBg = 'paper' | 'dark' | 'checker' | 'mid' | 'none';
 
@@ -18,6 +19,12 @@ export interface AssetMeta {
   isReady?: () => boolean;
   /** Make the asset ready (decode its source…). Must never reject. */
   prepare?: () => Promise<void>;
+  /**
+   * Light-only overlay (Screen…) with a dark-on-light version: placed over a light backdrop it is
+   * switched to Multiply with a dark shade of its color (see lib/backdrop.ts). Assets that depict
+   * light itself (glows, flares) leave this unset and only get a hint.
+   */
+  onLight?: LightBackdropVariant;
 }
 
 export const assetMeta = new Map<string, AssetMeta>();

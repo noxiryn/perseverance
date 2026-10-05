@@ -37,7 +37,9 @@ export function PsdExportDialog({ close }: { close: (r?: PsdExportOptions) => vo
       <div className="io-note">
         Layers, groups, names, opacity, fill, blend modes, visibility, clipping masks and layer masks are preserved. Solid and gradient fill
         layers stay editable fill layers; text and shape layers are exported as pixel layers (smart filters applied). Brightness/Contrast,
-        Levels, Curves, Exposure, Vibrance, Hue/Saturation, Invert, Posterize and Threshold stay editable adjustment layers.
+        Levels, Curves, Exposure, Vibrance, Hue/Saturation, Color Balance, Black &amp; White, Photo Filter, Channel Mixer, Gradient Map,
+        Selective Color, Invert, Posterize and Threshold stay editable adjustment layers; other adjustments (Duotone, Split Toning, Color
+        Lookup, Vignette…) are baked into pixel layers. The background colour becomes a bottom “Background Color” layer.
       </div>
     </Dialog>
   );

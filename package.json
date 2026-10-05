@@ -147,11 +147,17 @@
       "package.json"
     ],
     "asar": true,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "onlyLoadAppFromAsar": true
+    },
     "fileAssociations": [
       {
         "ext": "pgfx",
         "name": "Perseverance Project",
-        "description": "Perseverance GFX project",
+        "description": "Perseverance Project",
         "role": "Editor"
       }
     ],

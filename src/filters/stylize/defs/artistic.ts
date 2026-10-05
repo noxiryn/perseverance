@@ -192,9 +192,21 @@ export function kmeansPalette(lab: Float32Array, alpha: Uint8ClampedArray | null
  * so every material keeps its own light/mid/dark shades like a hand-cut poster.
  * Returns per-pixel labels (family·T + tone, 255 = transparent) and the label palette in OKLab.
  */
-export function cutoutQuantize(lab: Float32Array, alpha: Uint8ClampedArray | null, n: number, K: number, T: number): { lbl: Uint8Array; pal: Float32Array; count: number } {
+export function cutoutQuantize(
+  lab: Float32Array,
+  alpha: Uint8ClampedArray | null,
+  n: number,
+  K: number,
+  T: number,
+  colors?: Uint8ClampedArray,
+): { lbl: Uint8Array; pal: Float32Array; count: number } {
   const cent = kmeansPalette(lab, alpha, n, K, 10, 0.45);
   const group = new Uint8Array(n);
+  // `colors` (the RGBA bytes `lab` was computed from) enables a per-color cache of the nearest
+  // family / label searches: the result only depends on the color.
+  const CB = 15;
+  const ck = colors ? new Int32Array(1 << CB).fill(-1) : null;
+  const cv = colors ? new Uint8Array(1 << CB) : null;
   let pL = NaN,
     pA = NaN,
     pB = NaN,
@@ -210,6 +222,21 @@ export function cutoutQuantize(lab: Float32Array, alpha: Uint8ClampedArray | nul
     if (L === pL && A === pA && B === pB) {
       group[i] = pc; // same color as the last assigned pixel
       continue;
+    }
+    let rgb = -1,
+      slot = 0;
+    if (ck && cv && colors) {
+      rgb = colors[i * 4] | (colors[i * 4 + 1] << 8) | (colors[i * 4 + 2] << 16);
+      slot = Math.imul(rgb, -1640531535) >>> (32 - CB);
+      if (ck[slot] === rgb) {
+        const c = cv[slot];
+        group[i] = c;
+        pL = L;
+        pA = A;
+        pB = B;
+        pc = c;
+        continue;
+      }
     }
     let bc = 0,
       bd = Infinity;
@@ -228,6 +255,10 @@ export function cutoutQuantize(lab: Float32Array, alpha: Uint8ClampedArray | nul
     pA = A;
     pB = B;
     pc = bc;
+    if (ck && cv) {
+      ck[slot] = rgb;
+      cv[slot] = bc;
+    }
   }
   // tone centers per family (1-D k-means on lightness, quantile-initialized)
   const tones = new Float32Array(K * T);
@@ -264,6 +295,7 @@ export function cutoutQuantize(lab: Float32Array, alpha: Uint8ClampedArray | nul
   const count = K * T;
   const lbl = new Uint8Array(n);
   const acc = new Float64Array(count * 4);
+  if (ck) ck.fill(-1);
   for (let i = 0; i < n; i++) {
     const c = group[i];
     if (c === 255) {
@@ -271,16 +303,30 @@ export function cutoutQuantize(lab: Float32Array, alpha: Uint8ClampedArray | nul
       continue;
     }
     const L = lab[i * 3];
-    let bt = 0,
-      bd = Infinity;
-    for (let t = 0; t < T; t++) {
-      const d = Math.abs(L - tones[c * T + t]);
-      if (d < bd) {
-        bd = d;
-        bt = t;
+    let k: number;
+    let rgb = -1,
+      slot = 0;
+    if (ck && cv && colors) {
+      rgb = colors[i * 4] | (colors[i * 4 + 1] << 8) | (colors[i * 4 + 2] << 16);
+      slot = Math.imul(rgb, -1640531535) >>> (32 - CB);
+    }
+    if (ck && cv && ck[slot] === rgb) k = cv[slot];
+    else {
+      let bt = 0,
+        bd = Infinity;
+      for (let t = 0; t < T; t++) {
+        const d = Math.abs(L - tones[c * T + t]);
+        if (d < bd) {
+          bd = d;
+          bt = t;
+        }
+      }
+      k = c * T + bt;
+      if (ck && cv) {
+        ck[slot] = rgb;
+        cv[slot] = k;
       }
     }
-    const k = c * T + bt;
     lbl[i] = k;
     acc[k * 4] += L;
     acc[k * 4 + 1] += lab[i * 3 + 1];
@@ -345,27 +391,39 @@ function modeFilter(lbl: Uint8Array, w: number, h: number, K: number): Uint8Arra
   return out;
 }
 
-/** OKLab of every pixel (3 floats each); runs of one color reuse the previous result. */
+/**
+ * OKLab of every pixel (3 floats each). Runs of one color reuse the previous result and other
+ * repeated colors come from a small direct-mapped cache (rendered art has few distinct colors).
+ */
 function labOf(d: Uint8ClampedArray, n: number): Float32Array {
   const lab = new Float32Array(n * 3);
-  let pr = -1,
-    pg = -1,
-    pb = -1;
+  const CB = 15;
+  const keys = new Int32Array(1 << CB).fill(-1);
+  const vals = new Float32Array(3 << CB);
+  let prev = -1;
   for (let i = 0, j = 0; i < n; i++, j += 4) {
-    const r = d[j],
-      g = d[j + 1],
-      b = d[j + 2];
+    const rgb = d[j] | (d[j + 1] << 8) | (d[j + 2] << 16);
     const o = i * 3;
-    if (r === pr && g === pg && b === pb) {
+    if (rgb === prev) {
       lab[o] = lab[o - 3];
       lab[o + 1] = lab[o - 2];
       lab[o + 2] = lab[o - 1];
       continue;
     }
-    pr = r;
-    pg = g;
-    pb = b;
-    toOklab(r, g, b, lab, o);
+    prev = rgb;
+    const slot = Math.imul(rgb, -1640531535) >>> (32 - CB);
+    const so = slot * 3;
+    if (keys[slot] === rgb) {
+      lab[o] = vals[so];
+      lab[o + 1] = vals[so + 1];
+      lab[o + 2] = vals[so + 2];
+      continue;
+    }
+    toOklab(d[j], d[j + 1], d[j + 2], lab, o);
+    keys[slot] = rgb;
+    vals[so] = lab[o];
+    vals[so + 1] = lab[o + 1];
+    vals[so + 2] = lab[o + 2];
   }
   return lab;
 }
@@ -455,7 +513,7 @@ export const cutout: FilterDef = {
     if (simp >= 0.75) medianImage(work, simp, true, true);
     const wd = work.data;
     const lab = labOf(wd, n);
-    const q = cutoutQuantize(lab, data, n, K, T);
+    const q = cutoutQuantize(lab, data, n, K, T, wd);
     let lbl = q.lbl;
     // smooth region outlines (fewer jaggies/specks at lower fidelity)
     const passes = Math.round((1 - fid) * 4 * Math.max(0.5, s)) + (simp > 0 ? 1 : 0);

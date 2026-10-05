@@ -55,16 +55,23 @@ function median2D(src: Uint8Array, dst: Uint8Array, w: number, h: number, r: num
   }
 }
 
-/** 1D sliding median along lines; `stride` = step between samples, lines start at `starts`. */
-function median1D(src: Uint8Array, dst: Uint8Array, len: number, lines: number, lineStep: number, stride: number, r: number) {
+/**
+ * Sliding median along every row (clamp-to-edge), Huang's histogram: O(1) updates per step and a
+ * short walk of the median pointer. Columns are filtered as rows of the transposed plane, so
+ * every pass reads memory sequentially.
+ */
+function medianRows(src: Uint8Array, dst: Uint8Array, w: number, h: number, r: number) {
   const hist = new Int32Array(256);
   const n = 2 * r + 1;
   const half = n >> 1;
-  for (let l = 0; l < lines; l++) {
-    const base = l * lineStep;
-    const at = (i: number) => src[base + (i < 0 ? 0 : i >= len ? len - 1 : i) * stride];
+  for (let y = 0; y < h; y++) {
+    const base = y * w;
+    const last = base + w - 1;
     hist.fill(0);
-    for (let k = -r; k <= r; k++) hist[at(k)]++;
+    for (let k = -r; k <= r; k++) {
+      const q = base + k;
+      hist[src[q < base ? base : q > last ? last : q]]++;
+    }
     let med = 0,
       lt = 0;
     while (lt + hist[med] <= half) {
@@ -72,11 +79,13 @@ function median1D(src: Uint8Array, dst: Uint8Array, len: number, lines: number, 
       med++;
     }
     dst[base] = med;
-    for (let i = 1; i < len; i++) {
-      const vo = at(i - r - 1);
+    for (let i = 1; i < w; i++) {
+      const qo = base + i - r - 1,
+        qi = base + i + r;
+      const vo = src[qo < base ? base : qo];
       hist[vo]--;
       if (vo < med) lt--;
-      const vi = at(i + r);
+      const vi = src[qi > last ? last : qi];
       hist[vi]++;
       if (vi < med) lt++;
       while (lt > half) {
@@ -87,57 +96,7 @@ function median1D(src: Uint8Array, dst: Uint8Array, len: number, lines: number, 
         lt += hist[med];
         med++;
       }
-      dst[base + i * stride] = med;
-    }
-  }
-}
-
-/**
- * Sliding median along each row (clamp-to-edge) for small windows: the window is kept sorted and
- * updated by one removal + one insertion per step (O(r), no 256-bin histogram walk). Same values
- * as median1D.
- */
-function medianRowsSorted(src: Uint8Array, dst: Uint8Array, w: number, h: number, r: number) {
-  const n = 2 * r + 1;
-  const win = new Int32Array(n);
-  for (let y = 0; y < h; y++) {
-    const base = y * w;
-    const last = base + w - 1;
-    // initial window: taps -r..r clamped, sorted (insertion sort)
-    for (let k = 0; k < n; k++) {
-      const q = base + k - r;
-      const v = src[q < base ? base : q > last ? last : q];
-      let p = k;
-      while (p > 0 && win[p - 1] > v) {
-        win[p] = win[p - 1];
-        p--;
-      }
-      win[p] = v;
-    }
-    dst[base] = win[r];
-    for (let i = 1; i < w; i++) {
-      const qo = base + i - r - 1,
-        qi = base + i + r;
-      const vo = src[qo < base ? base : qo],
-        vi = src[qi > last ? last : qi];
-      if (vo !== vi) {
-        // remove vo, then insert vi (shifting the values in between)
-        let p = 0;
-        while (win[p] !== vo) p++;
-        if (vi > vo) {
-          while (p < n - 1 && win[p + 1] < vi) {
-            win[p] = win[p + 1];
-            p++;
-          }
-        } else {
-          while (p > 0 && win[p - 1] > vi) {
-            win[p] = win[p - 1];
-            p--;
-          }
-        }
-        win[p] = vi;
-      }
-      dst[base + i] = win[r];
+      dst[base + i] = med;
     }
   }
 }
@@ -169,18 +128,13 @@ export function medianChannel(src: Uint8Array, w: number, h: number, radius: num
     median2D(src, dst, w, h, r);
     return dst;
   }
+  // rows, then columns as rows of the transposed plane (sequential memory in both passes)
   const tmp = new Uint8Array(src.length);
-  if (r <= 12) {
-    // small windows: sorted-window medians; columns as rows of the transposed plane
-    medianRowsSorted(src, tmp, w, h, r); // rows
-    const t = new Uint8Array(src.length);
-    transposeBytes(tmp, t, w, h);
-    medianRowsSorted(t, tmp, h, w, r); // columns
-    transposeBytes(tmp, dst, h, w);
-    return dst;
-  }
-  median1D(src, tmp, w, h, w, 1, r); // rows
-  median1D(tmp, dst, h, w, 1, w, r); // columns
+  medianRows(src, tmp, w, h, r);
+  const t = new Uint8Array(src.length);
+  transposeBytes(tmp, t, w, h);
+  medianRows(t, tmp, h, w, r);
+  transposeBytes(tmp, dst, h, w);
   return dst;
 }
 

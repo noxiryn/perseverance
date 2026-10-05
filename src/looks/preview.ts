@@ -177,12 +177,12 @@ export function renderLookPreview(doc: Document, look: LookDef, targetId: ID | n
   if (look.apply) return null;
   const scale = Math.min(1, size / Math.max(doc.width, doc.height));
   const created: ID[] = [];
-  const { targetId: tid } = lookTargets(doc, targetId);
+  const { targetId: tid, character } = lookTargets(doc, targetId);
   // Generate overlays at ~2× the preview resolution for crisp downsampling.
   const genScale = Math.min(1, scale * 2);
   let built: ReturnType<typeof buildLook> | null = null;
   try {
-    built = buildLook(look, doc, tid, previewOverlayFactory(genScale, created), { maskScale: genScale });
+    built = buildLook(look, doc, tid, previewOverlayFactory(genScale, created), { maskScale: genScale, documentWide: !!character });
     const bl = built;
     if (!bl.filters.length && !bl.effects.length && !bl.behindLayers?.length) {
       // Target untouched: composite the look group over the cached base render.
