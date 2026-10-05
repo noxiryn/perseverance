@@ -639,7 +639,7 @@ const CATEGORY_ORDER: FilterCategory[] = [
 ];
 
 function addSmartFilterMenu(): MenuItem[] {
-  const all = filters.list();
+  const all = filters.list().filter((f) => !f.hidden);
   if (!all.length) return [{ label: 'No filters available', disabled: true }];
   const cats = CATEGORY_ORDER.filter((c) => all.some((f) => f.category === c));
   return cats.map((c) => ({

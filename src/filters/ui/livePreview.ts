@@ -126,6 +126,7 @@ const livePreviewDef: FilterDef = {
   id: LIVE_PREVIEW_FILTER_ID,
   name: 'Filter Preview',
   category: 'Other',
+  hidden: true,
   icon: Eye,
   description: 'Temporary on-canvas preview of the filter dialog.',
   params: [],

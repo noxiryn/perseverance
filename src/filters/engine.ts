@@ -108,5 +108,5 @@ export function applyFilterStack(src: HTMLCanvasElement, stack: FilterInstance[]
 
 /** Look up filters usable as adjustment layers. */
 export function adjustmentFilters(): FilterDef[] {
-  return filters.list().filter((f) => f.adjustment);
+  return filters.list().filter((f) => f.adjustment && !f.hidden);
 }

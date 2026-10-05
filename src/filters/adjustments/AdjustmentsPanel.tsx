@@ -19,7 +19,7 @@ import './adjustments.css';
 
 function useAdjustmentRows(): FilterDef[][] {
   const list = useRegistry(filters);
-  return useMemo(() => orderAdjustments(list.filter((f) => f.adjustment)), [list]);
+  return useMemo(() => orderAdjustments(list.filter((f) => f.adjustment && !f.hidden)), [list]);
 }
 
 function AddGrid({

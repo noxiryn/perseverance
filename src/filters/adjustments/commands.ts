@@ -78,7 +78,7 @@ let signature = '';
 
 /** (Re)register one command per adjustment filter for both menus. */
 export function syncAdjustmentCommands() {
-  const defs = filters.list().filter((f) => f.adjustment);
+  const defs = filters.list().filter((f) => f.adjustment && !f.hidden);
   const sig = defs.map((d) => `${d.id}:${d.name}:${d.category}`).join('|');
   if (sig === signature) return;
   signature = sig;

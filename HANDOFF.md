@@ -28,7 +28,7 @@ ARCHITECTURE.md §3 for each module's full feature list).
 | io (projects, export, PSD, clipboard, autosave, File/Edit/Image menus) | `src/io` | **done** |
 | type-shape (type tool, character panel, shapes + presets) | `src/tools/type`, `src/tools/shape` | **done** |
 | looks-templates (looks engine, templates, doc presets) | `src/looks`, `src/templates` | **done** |
-| fx-filters (creative filters, filter dialog, gallery) | `src/filters/stylize`, `src/filters/ui` | implementing |
+| fx-filters (creative filters, filter dialog, gallery) | `src/filters/stylize`, `src/filters/ui` | **done** |
 | assets (procedural asset library, Libraries panel) | `src/assets` | implementing |
 
 If a module wasn't marked done, re-run its review + fix pass: have an agent audit the module
@@ -60,6 +60,10 @@ starting point; don't rewrite modules from scratch.
    - Optional: FilterContext.contentRect so edge-sensitive filters (rim-light, toon) know the real layer box.
    - (done) viewport.fit accounts for rulers; Alt+wheel no longer focuses the menu bar; Dialog submits with the
      latest onSubmit after Enter blur-commit.
+   - (done) FilterDef.hidden honored by palette / Properties smart-filter menu / adjustments / gallery; Dialog Enter
+     on buttons/links/selects/search fields no longer submits.
+   - Optional: FilterContext layer bounds (or edge-repeat padding) so smart blurs match destructive results at edges.
+   - PERF: slow filters at 1080p (watercolor, ink-wash, screen-print, risograph ~1s) — consider a Web Worker.
    - (done) CommandDef.paletteHidden (edit.redoAlt hidden from the palette); ARCHITECTURE §5.3 Edit/Transform layout.
    - Optional: renderLayerToDoc option to skip fillOpacity (PSD export renders a copy with fill 1 today).
    - (done) NumberField `disabled` prop; (done) NumberField arrow keys keep the displayed text in sync.

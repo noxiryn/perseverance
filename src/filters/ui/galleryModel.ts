@@ -34,7 +34,7 @@ export function categoryRank(c: string): number {
  * Light filter, so it is kept.
  */
 export function isBrowsableFilter(f: FilterDef): boolean {
-  if (f.id === LIVE_PREVIEW_FILTER_ID) return false;
+  if (f.hidden || f.id === LIVE_PREVIEW_FILTER_ID) return false;
   if (!f.adjustment) return true;
   return f.category !== 'Adjustments' && f.category !== 'Color';
 }

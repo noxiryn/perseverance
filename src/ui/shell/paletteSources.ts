@@ -184,6 +184,7 @@ export function collectPaletteItems(): PaletteItem[] {
   }
 
   for (const f of filters.list()) {
+    if (f.hidden) continue;
     out.push({
       key: `filter:${f.id}`,
       kind: 'filter',

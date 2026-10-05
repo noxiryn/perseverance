@@ -22,6 +22,21 @@ function commitFocusedField(): boolean {
 }
 
 /**
+ * Enter on these elements does their own thing (activate a button/link, open a select, run a
+ * search, newline in a textarea) and must not submit the dialog. Mark any element (or ancestor)
+ * with data-enter-local to opt out as well.
+ */
+function enterBelongsToTarget(el: HTMLElement | null): boolean {
+  if (!el || !el.tagName) return false;
+  const tag = el.tagName;
+  if (tag === 'TEXTAREA' || tag === 'BUTTON' || tag === 'A' || tag === 'SELECT') return true;
+  if (tag === 'INPUT' && ['search', 'button', 'submit', 'reset', 'checkbox', 'radio', 'file'].includes((el as HTMLInputElement).type)) return true;
+  const role = el.getAttribute('role');
+  if (role && ['button', 'link', 'option', 'menuitem', 'tab', 'combobox', 'listbox'].includes(role)) return true;
+  return !!el.closest('[data-enter-local]');
+}
+
+/**
  * Standard dialog frame. Use inside a component opened with `openDialog(Component, props)`:
  *
  *   function MyDialog({ close }: { close: (r?: string) => void }) {
@@ -72,7 +87,7 @@ export function Dialog({
       if (e.key === 'Escape') {
         e.stopPropagation();
         onClose();
-      } else if (e.key === 'Enter' && onSubmit && (e.target as HTMLElement)?.tagName !== 'TEXTAREA') {
+      } else if (e.key === 'Enter' && onSubmit && !enterBelongsToTarget(e.target as HTMLElement | null)) {
         e.stopPropagation();
         e.preventDefault();
         // Let a focused NumberField/TextInput commit its typed text first (it commits on blur),

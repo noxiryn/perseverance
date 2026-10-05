@@ -176,6 +176,8 @@ export interface FilterDef {
   params: ParamDef[];
   /** Offer as an adjustment layer (Layer ▸ New Adjustment Layer) and in the Adjustments panel. */
   adjustment?: boolean;
+  /** Internal filter: keep registered but leave out of menus, palette, galleries and pickers. */
+  hidden?: boolean;
   /** Icon for menus/panels. */
   icon?: ComponentType<{ size?: number; strokeWidth?: number }>;
   /**
