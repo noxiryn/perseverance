@@ -227,7 +227,7 @@ const chains = defineAsset(
       P.color('color', 'Metal', '#9b9b9b'),
       P.num('count', 'Chains', 1, 6, 2),
       P.num('size', 'Link size', 12, 140, 46, { unit: 'px' }),
-      P.pct('sag', 'Sag', 0.35),
+      P.pct('sag', 'Sag', 0.55),
       P.select(
         'layout',
         'Layout',
@@ -245,7 +245,7 @@ const chains = defineAsset(
       const r = makeRand(num(p, 'seed', 29));
       const n = Math.max(1, Math.round(num(p, 'count', 2)));
       const link = num(p, 'size', 46) * u;
-      const sag = num(p, 'sag', 0.35);
+      const sag = num(p, 'sag', 0.55);
       const layout = str(p, 'layout', 'top');
       const metal = str(p, 'color', '#9b9b9b');
       const [c, ctx] = newCanvas(W, H);

@@ -116,7 +116,8 @@ export const gothicPaper = defineTemplate({
     const border = b.asset('torn-border', { color: '#0b0b0b', thickness: 34, roughness: 0.7, burn: 0.55, flecks: 0.6, seed: 11 }, { name: 'Torn Border' });
     b.later('place numeral', () => {
       const spots: [number, number][] = [];
-      for (const y of [470, 430, 510, 390, 550, 350, 590, 310, 630]) for (const x of [914, 944, 884, 960, 860]) spots.push([x, y]);
+      // x stays left of ~930 so the numeral never reaches the torn border band.
+      for (const y of [470, 430, 510, 390, 550, 350, 590, 310, 630]) for (const x of [912, 892, 930, 870]) spots.push([x, y]);
       b.placeTextInOpenSpace(numeral, spots, [tendrils, ch, border], 8);
     });
   },

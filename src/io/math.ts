@@ -167,6 +167,89 @@ export function layerTurnAbout(op: LayerTurn, t: Transform, lw: number, lh: numb
   return { ...layerTurnTransform(op, t), x: c.x - lw / 2, y: c.y - lh / 2 };
 }
 
+/** 2D affine as canvas setTransform(a, b, c, d, e, f) arguments: x' = a·x + c·y + e, y' = b·x + d·y + f. */
+export interface Affine2D {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+  e: number;
+  f: number;
+}
+
+/** Document-space affine of a layer turn about `pivot` (the same mapping as `turnPoint`). */
+export function turnAffine(op: LayerTurn, pivot: { x: number; y: number }): Affine2D {
+  const { x: px, y: py } = pivot;
+  switch (op) {
+    case 'flipH':
+      return { a: -1, b: 0, c: 0, d: 1, e: 2 * px, f: 0 };
+    case 'flipV':
+      return { a: 1, b: 0, c: 0, d: -1, e: 0, f: 2 * py };
+    case 'rotate90cw':
+      return { a: 0, b: 1, c: -1, d: 0, e: px + py, f: py - px };
+    case 'rotate90ccw':
+      return { a: 0, b: -1, c: 1, d: 0, e: px - py, f: px + py };
+    case 'rotate180':
+      return { a: -1, b: 0, c: 0, d: -1, e: 2 * px, f: 2 * py };
+  }
+}
+
+/**
+ * How a layer's local axes sit relative to the document axes: 'aligned' (rotation ≡ 0 mod 180°,
+ * no skew — local x runs along document x), 'swapped' (rotation ≡ 90 mod 180°, no skew — local x
+ * runs along document y), or 'oblique' (any other rotation, or skewed).
+ */
+export function axisAlignment(t: Transform): 'aligned' | 'swapped' | 'oblique' {
+  if (t.skewX && Math.abs(t.skewX) > 1e-6) return 'oblique';
+  const r = ((t.rotation % 180) + 180) % 180;
+  if (r < 1e-6 || 180 - r < 1e-6) return 'aligned';
+  if (Math.abs(r - 90) < 1e-6) return 'swapped';
+  return 'oblique';
+}
+
+const DEG = 180 / Math.PI;
+
+/**
+ * Exact transform of a layer after the document is scaled by (sx, sy) about the origin, for ANY
+ * rotation/skew/flip: the document-space linear map diag(sx, sy) · R(θ) · SkewX(k) · diag(scX, scY)
+ * is re-decomposed into the Transform model's R(θ') · SkewX(k') · diag(scX', scY') (a QR
+ * decomposition). The layer's local box (lw × lh) is unchanged — only the transform changes.
+ * A non-uniform scale of a rotated layer therefore stretches along the DOCUMENT axes (Photoshop
+ * behaviour) at the cost of introducing skew.
+ */
+export function scaleTransformExact(t: Transform, lw: number, lh: number, sx: number, sy: number): Transform {
+  const th = (t.rotation || 0) / DEG;
+  const cos = Math.cos(th);
+  const sin = Math.sin(th);
+  const tk = Math.tan((t.skewX || 0) / DEG);
+  // L = R · K · D (column-major: first column = image of local x axis).
+  const la = cos * t.scaleX;
+  const lb = sin * t.scaleX;
+  const lc = (cos * tk - sin) * t.scaleY;
+  const ld = (sin * tk + cos) * t.scaleY;
+  // A = S · L
+  const a = sx * la;
+  const b = sy * lb;
+  const c = sx * lc;
+  const d = sy * ld;
+  // First column = p · (cos θ', sin θ'); keep the sign of the original horizontal scale (flips).
+  const sign = t.scaleX < 0 ? -1 : 1;
+  const p = sign * Math.hypot(a, b);
+  const th2 = Math.atan2(sign * b, sign * a);
+  const c2 = Math.cos(th2);
+  const s2 = Math.sin(th2);
+  // Rᵀ · second column = (tan k' · q, q)
+  const q = -s2 * c + c2 * d;
+  const tk2 = Math.abs(q) < 1e-12 ? 0 : (c2 * c + s2 * d) / q;
+  const cx = (t.x + lw / 2) * sx;
+  const cy = (t.y + lh / 2) * sy;
+  const raw = Math.atan(tk2) * DEG;
+  const skew = Math.abs(raw) < 1e-9 ? 0 : raw;
+  const out: Transform = { ...t, x: cx - lw / 2, y: cy - lh / 2, rotation: normAngle(th2 * DEG), scaleX: p, scaleY: q };
+  if (skew || t.skewX !== undefined) out.skewX = skew;
+  return out;
+}
+
 /** Transform of a layer after the whole document is resampled by (sx, sy). */
 export function scaleTransform(t: Transform, lw: number, lh: number, sx: number, sy: number): Transform {
   const cx = (t.x + lw / 2) * sx;

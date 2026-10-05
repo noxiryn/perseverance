@@ -1,6 +1,7 @@
 /**
  * Libraries panel: Assets (procedural generators) / Shapes (vector presets) / My Assets (imports).
  */
+import { useEffect, useRef, useState } from 'react';
 import { assets } from '../../registry';
 import { SearchInput, Tabs } from '../../ui/controls';
 import { AssetGrid, CategoryChips, useFilteredAssets } from './AssetGrid';
@@ -17,7 +18,10 @@ const TABS: { value: LibraryTab; label: string }[] = [
   { value: 'mine', label: 'My Assets' },
 ];
 
-function AssetsTab() {
+/** Below this panel height the settings drawer covers the whole panel instead of its bottom. */
+const OVERLAY_BELOW = 520;
+
+function AssetsTab({ compact }: { compact: boolean }) {
   const category = useLibrary((s) => s.category);
   const query = useLibrary((s) => s.query);
   const setCategory = useLibrary((s) => s.setCategory);
@@ -42,8 +46,8 @@ function AssetsTab() {
         />
       </div>
       {selected && (
-        <div className="assets-drawer">
-          <AssetSettings key={selected.id} def={selected} onClose={() => select(null)} compactFooter />
+        <div className={`assets-drawer${compact ? ' overlay' : ''}`}>
+          <AssetSettings key={selected.id} def={selected} onClose={() => select(null)} compactFooter backButton={compact} />
         </div>
       )}
     </>
@@ -53,14 +57,23 @@ function AssetsTab() {
 export function LibrariesPanel() {
   const tab = useLibrary((s) => s.tab);
   const setTab = useLibrary((s) => s.setTab);
+  const root = useRef<HTMLDivElement>(null);
+  const [compact, setCompact] = useState(false);
+  useEffect(() => {
+    const el = root.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => setCompact(el.clientHeight < OVERLAY_BELOW));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   return (
-    <div className="assets-panel">
+    <div className="assets-panel" ref={root}>
       <div className="assets-head" style={{ borderBottom: 'none', paddingBottom: 6 }}>
         <div className="assets-tabs">
           <Tabs value={tab} tabs={TABS} onChange={setTab} />
         </div>
       </div>
-      {tab === 'assets' ? <AssetsTab /> : tab === 'shapes' ? <ShapesTab /> : <MyAssetsTab />}
+      {tab === 'assets' ? <AssetsTab compact={compact} /> : tab === 'shapes' ? <ShapesTab /> : <MyAssetsTab />}
     </div>
   );
 }

@@ -277,8 +277,8 @@ export class DocBuilder {
   }
 
   /**
-   * Move a text layer to the first candidate position (anchor = box center, doc px) whose box is
-   * clear of the given layers' pixels; falls back to the least covered candidate.
+   * Move a text layer to the first candidate position (anchor = box center, doc px) whose box
+   * (plus margin) is ≤1% covered by the given layers' pixels; else the least covered candidate.
    */
   placeTextInOpenSpace(text: TextLayer, candidates: [number, number][], avoid: (RasterLayer | null)[], margin = 10) {
     if (!candidates.length) return;
@@ -292,7 +292,7 @@ export class DocBuilder {
         best = [x, y];
         bestCov = cov;
       }
-      if (cov <= 0.002) break;
+      if (cov <= 0.01) break; // a margin graze is fine
     }
     text.transform = { ...text.transform, x: Math.round(best[0] - size.width / 2), y: Math.round(best[1] - size.height / 2) };
   }

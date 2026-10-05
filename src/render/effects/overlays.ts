@@ -22,7 +22,7 @@ export const colorOverlay = defineEffect(
       t.restore();
     },
   },
-  { reach: () => 0 },
+  { reach: () => 0, cacheable: false },
 );
 
 export const gradientOverlay = defineEffect(
@@ -56,7 +56,7 @@ export const gradientOverlay = defineEffect(
       t.restore();
     },
   },
-  { reach: () => 0 },
+  { reach: () => 0, cacheable: false },
 );
 
 /** Document-sized assets usable as overlay textures (live: assets register after this module). */

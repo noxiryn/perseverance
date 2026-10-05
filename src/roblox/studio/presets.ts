@@ -187,18 +187,21 @@ export const POSE_PRESETS: PosePreset[] = [
   {
     id: 'swordShoulder',
     name: 'Sword on Shoulder',
+    // Solved numerically: grip in front of the right shoulder, blade lying back over it (clear
+    // of the head and arm, hand not covering the face) — checked from the 3/4 and front cameras.
     joints: {
       root: [0, 15, 0],
       neck: [0, -12, 0],
-      rightShoulder: [-30, 0, -9],
-      rightElbow: [2, -80, 117],
-      rightWrist: [-15, 60, -1],
+      rightShoulder: [-17, -39, -4],
+      rightElbow: [-24, -39, 121],
+      rightWrist: [-24, 75, 19],
       leftShoulder: [0, 0, 8],
       leftElbow: [-10, 0, 0],
       rightHip: [0, 0, -4],
       leftHip: [0, 0, 6],
     },
-    r6: { joints: { rightShoulder: [-135, 0, -10], rightElbow: [0, 0, 0], rightWrist: [0, 0, 0] } },
+    // R6 arms are rigid: arm raised forward, the wrist turns the grip so the blade rests back over the shoulder.
+    r6: { joints: { rightShoulder: [-118, -40, 40], rightElbow: [0, 0, 0], rightWrist: [-48, 20, 0] } },
   },
   {
     id: 'crossedArms',

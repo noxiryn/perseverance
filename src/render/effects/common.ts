@@ -100,6 +100,11 @@ export interface EffectMeta {
    * document origin). Such effects disable reusing a layer's render when the layer is moved.
    */
   docAnchored?: boolean;
+  /**
+   * Whether the compositor may keep this effect's output to reuse it while OTHER effects of the
+   * layer are edited (default true). Cheap effects (plain fills) opt out to save memory.
+   */
+  cacheable?: boolean;
 }
 
 const metas = new Map<string, EffectMeta>();
@@ -122,6 +127,11 @@ export function effectStage(def: EffectDef, p: ParamValues): 'behind' | 'above' 
 export function effectTranslationSafe(id: string): boolean {
   const m = metas.get(id);
   return !!m && !m.docAnchored;
+}
+
+/** Whether an effect's output is worth keeping for reuse (see EffectMeta.cacheable). */
+export function effectCacheable(id: string): boolean {
+  return metas.get(id)?.cacheable !== false;
 }
 
 /** Whether an 'above' effect is clipped to the content alpha. */

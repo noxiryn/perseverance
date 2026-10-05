@@ -10,41 +10,31 @@ import { DEFAULT_LOCKS } from '../core/document';
 import { appVersion, type OpenedFile } from '../platform';
 import { useEditor } from '../state/editor';
 import { packContainer, PGFX_VERSION, unpackContainer, type ContainerBlob } from './container';
+import { encodeCached, PngCache } from './pngCache';
 import { APP_NAME, baseName, docBitmapIds, idle } from './util';
 
 /* ------------------------------------------------------------------ */
 /* Encoding                                                            */
 /* ------------------------------------------------------------------ */
 
-interface PngCacheEntry {
-  version: number;
-  width: number;
-  height: number;
-  data: ArrayBuffer;
-}
-
-/** PNG cache keyed by bitmap id + version: saves/autosaves only re-encode bitmaps that changed. */
-const pngCache = new Map<ID, PngCacheEntry>();
+/**
+ * Saves/autosaves only re-encode bitmaps that changed. Entries are bound to the exact canvas
+ * object, so an id reused by another project's bitmap never serves stale pixels (see pngCache.ts).
+ */
+const pngCache = new PngCache();
 
 async function encodeBitmap(id: ID): Promise<ContainerBlob | null> {
   const c = bitmaps.tryGet(id);
   if (!c) return null;
-  const version = bitmaps.version(id);
-  const hit = pngCache.get(id);
-  if (hit && hit.version === version && hit.width === c.width && hit.height === c.height) {
-    return { id, width: hit.width, height: hit.height, data: hit.data };
-  }
-  const blob = await canvasToBlob(c, 'image/png');
-  const data = await blob.arrayBuffer();
-  pngCache.set(id, { version, width: c.width, height: c.height, data });
-  return { id, width: c.width, height: c.height, data };
+  const r = await encodeCached(pngCache, id, c, bitmaps.version(id), async (cv) => (await canvasToBlob(cv, 'image/png')).arrayBuffer());
+  return { id, width: r.width, height: r.height, data: r.data };
 }
 
 /** Drop cached PNGs for bitmaps no open document references any more. */
 function prunePngCache() {
   const keep = new Set<ID>();
   for (const s of Object.values(useEditor.getState().sessions)) for (const id of docBitmapIds(s.doc)) keep.add(id);
-  for (const id of pngCache.keys()) if (!keep.has(id)) pngCache.delete(id);
+  pngCache.prune(keep);
 }
 
 /**
@@ -158,6 +148,8 @@ export async function decodeProject(buf: ArrayBuffer | Uint8Array): Promise<Docu
   for (const b of blobs) {
     const canvas = await decodePng(b.data, b.width, b.height);
     const id = bitmaps.has(b.id) ? uid('bmp_') : b.id;
+    // The id may have belonged to a bitmap of a closed project: its cached PNG is not ours.
+    pngCache.forget(id);
     bitmaps.add(canvas, id);
     remap.set(b.id, id);
   }

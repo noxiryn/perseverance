@@ -119,14 +119,10 @@ export function quickCreate(p: { name: string; width: number; height: number }) 
 }
 
 export async function openTemplate(t: TemplateDef) {
-  try {
-    const doc = await t.build();
-    useEditor.getState().openDocument(doc, { label: `New from “${t.name}”` });
-    toast(`Created “${doc.name}” from template`, 'success');
-  } catch (e) {
-    console.error(e);
-    toast(`Template “${t.name}” failed: ${(e as Error).message ?? e}`, 'error');
-  }
+  // The templates module opens the document with the placeholder character selected (so looks
+  // target it) and loads the template's fonts.
+  const { openTemplate: openFromTemplates } = await import('../../templates/open');
+  await openFromTemplates(t.id);
 }
 
 /* ------------------------------------------------------------------ */

@@ -53,8 +53,25 @@ describe('character styles', () => {
 
   it('prefers other modules filters when present, falling back otherwise', () => {
     const toon = styleById('toon-ink')!;
-    expect(buildStyle(toon, all, makeId).filters[0].filterId).toBe('cel-shade');
-    expect(buildStyle(toon, robloxOnly, makeId).filters[0].filterId).toBe('toon-roblox');
+    expect(buildStyle(toon, all, makeId).meta.filters.base.filterId).toBe('cel-shade');
+    expect(buildStyle(toon, robloxOnly, makeId).meta.filters.base.filterId).toBe('toon-roblox');
+  });
+
+  it('shades the face before posterizing, so the hair shadow is banded', () => {
+    for (const s of STYLES) {
+      const keys = s.filters.map((f) => f.key);
+      if (!keys.includes('face') || !keys.includes('base')) continue;
+      expect(keys.indexOf('face')).toBeLessThan(keys.indexOf('base'));
+    }
+  });
+
+  it('adds optional stages only when their filters exist', () => {
+    const comic = styleById('comic-halftone')!;
+    expect(buildStyle(comic, all, makeId).meta.filters.amber?.filterId).toBe('gradient-map');
+    expect(buildStyle(comic, robloxOnly, makeId).meta.filters.amber).toBeUndefined();
+    const crimson = styleById('crimson-rim')!;
+    expect(buildStyle(crimson, all, makeId).meta.filters.halftone?.filterId).toBe('halftone');
+    expect(buildStyle(crimson, robloxOnly, makeId).meta.filters.halftone).toBeUndefined();
   });
 
   it('replaces only what the styler added', () => {

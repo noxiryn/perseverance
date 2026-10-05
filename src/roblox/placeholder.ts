@@ -73,6 +73,61 @@ const POSES: Record<PlaceholderPose, PoseSpec> = {
   hero: { armL: 24, armR: 24, legL: 14, legR: 14, head: -5, cape: true, drop: 0.1 },
 };
 
+const SHOULDER_Y = 3.62;
+
+/**
+ * Horizontal reach (studs, from the torso center) of a pose: arms (incl. their extruded depth),
+ * the sword and the hair. Used to fit wide poses into narrow canvases without clipping.
+ */
+export function poseExtents(pose: PoseSpec): { left: number; right: number } {
+  const DX = 0.36; // oblique depth offset (to the right)
+  let left = 1.32,
+    right = 1.32 + DX; // head + hair
+  const arm = (pivotX: number, deg: number) => {
+    const a = (deg * Math.PI) / 180;
+    const c = Math.cos(a),
+      s = Math.sin(a);
+    for (const lx of [-0.5, 0.5])
+      for (const ly of [-0.38, 1.62]) {
+        const x = pivotX + lx * c - ly * s;
+        left = Math.max(left, -x);
+        right = Math.max(right, x + DX);
+      }
+  };
+  if (pose.crossed) {
+    arm(-1.5, 4);
+    arm(1.5, -4);
+  } else {
+    arm(-1.5, pose.armL);
+    arm(1.5, -pose.armR);
+  }
+  if (pose.sword && !pose.crossed) {
+    const a = (-pose.armR * Math.PI) / 180;
+    const hx = 1.5 - Math.sin(a) * 1.45;
+    const ba = Math.atan2(Math.cos(a), -Math.sin(a)) - 1.35;
+    const tipX = hx + Math.cos(ba) * 3.35;
+    const guard = Math.abs(Math.sin(ba)) * 0.62;
+    left = Math.max(left, -tipX, -(hx - guard));
+    right = Math.max(right, tipX, hx + guard);
+  }
+  if (pose.cape) {
+    left = Math.max(left, 1.6);
+    right = Math.max(right, 1.9);
+  }
+  return { left, right };
+}
+
+/** Polygon with positive (clockwise on screen) orientation — needed for one nonzero fill. */
+function clockwise(pts: Pt[]): Pt[] {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i],
+      q = pts[(i + 1) % pts.length];
+    a += p[0] * q[1] - q[0] * p[1];
+  }
+  return a < 0 ? pts.slice().reverse() : pts;
+}
+
 export function renderPlaceholderCharacter(opts: PlaceholderOptions): HTMLCanvasElement {
   const width = Math.max(1, Math.round(opts.width));
   const height = Math.max(1, Math.round(opts.height));
@@ -85,8 +140,11 @@ export function renderPlaceholderCharacter(opts: PlaceholderOptions): HTMLCanvas
   const hair = col(opts.hair, '#2a2833');
   const pose = POSES[opts.pose ?? 'idle'] ?? POSES.idle;
 
-  // Layout: studs → px. Design box ≈ 6.6 × 7.9 studs (room for raised arms / sword / hair).
-  const u = Math.min(width / 6.6, height / (pose.fit ?? 7.9));
+  // Layout: studs → px. Design box ≈ 6.6 × 7.9 studs (room for raised arms / sword / hair),
+  // widened per pose when raised arms or a weapon reach further (never clipped at the edges).
+  const ext = poseExtents(pose);
+  const margin = 0.14; // ink outline + anti-aliasing
+  const u = Math.min(width / 6.6, width / (2 * (ext.right - 0.2 + margin)), width / (2 * (ext.left + 0.2 + margin)), height / (pose.fit ?? 7.9));
   const cx = width / 2 - u * 0.2;
   const baseY = height - u * 0.35 + (pose.drop ?? 0) * u;
   const P = (x: number, y: number): Pt => [cx + x * u, baseY - y * u];
@@ -97,7 +155,18 @@ export function renderPlaceholderCharacter(opts: PlaceholderOptions): HTMLCanvas
   g.lineJoin = 'round';
 
   const seam = Math.max(0.6, u * 0.012);
+  // Flat silhouettes: every shape goes into ONE path filled once at the end, so adjacent parts
+  // never show anti-aliasing seams (all subpaths share one orientation for the nonzero rule).
+  const flatPath: Path2D | null = flat ? new Path2D() : null;
+  let pathTarget: Path2D | null = flatPath;
   const fillPoly = (pts: Pt[], color: string) => {
+    if (pathTarget) {
+      const cw = clockwise(pts);
+      pathTarget.moveTo(cw[0][0], cw[0][1]);
+      for (let i = 1; i < cw.length; i++) pathTarget.lineTo(cw[i][0], cw[i][1]);
+      pathTarget.closePath();
+      return;
+    }
     g.fillStyle = color;
     g.beginPath();
     g.moveTo(pts[0][0], pts[0][1]);
@@ -139,6 +208,11 @@ export function renderPlaceholderCharacter(opts: PlaceholderOptions): HTMLCanvas
 
   /** Rounded extruded block (classic head). */
   const roundBlock = (x: number, y: number, w: number, h: number, r: number, color: string) => {
+    if (pathTarget) {
+      // roundRect subpaths are clockwise like the normalized polygons.
+      for (let i = 4; i >= 0; i--) pathTarget.roundRect(x + (D[0] * i) / 4, y + (D[1] * i) / 4, w, h, r);
+      return;
+    }
     const t = tonesOf(color, flat);
     const steps = 14;
     g.fillStyle = t.side;
@@ -170,7 +244,7 @@ export function renderPlaceholderCharacter(opts: PlaceholderOptions): HTMLCanvas
     fillPoly([[top[0] - u * 1.05, top[1] + u * 0.2], [top[0] + u * 0.3, top[1] + u * 0.25], [top[0] + u * 0.1, top[1] + u * 3.75], [top[0] - u * 1.6, top[1] + u * 3.55]], t.front);
   }
 
-  const shoulderY = 3.62;
+  const shoulderY = SHOULDER_Y;
   const armL = () => block(P(-1.5, shoulderY), -u * 0.5, -u * 0.38, u, u * 2, pose.armL, shirt);
   const armR = () => block(P(1.5, shoulderY), -u * 0.5, -u * 0.38, u, u * 2, -pose.armR, shirt);
   // Hands (skin) at the arm ends for a bit of readability in shaded mode.
@@ -263,6 +337,9 @@ export function renderPlaceholderCharacter(opts: PlaceholderOptions): HTMLCanvas
   g.translate(hc[0], hc[1]);
   g.rotate(tilt);
   g.translate(-hc[0], -hc[1]);
+  // Flat mode: collect the head in its own path, added to the silhouette with the tilt applied.
+  const headPath: Path2D | null = flat ? new Path2D() : null;
+  pathTarget = headPath;
   const hx0 = hc[0] - headW / 2,
     hy0 = hc[1] - headH / 2 + u * 0.02;
   roundBlock(hx0, hy0, headW, headH, u * 0.3, skin);
@@ -327,8 +404,14 @@ export function renderPlaceholderCharacter(opts: PlaceholderOptions): HTMLCanvas
     g.stroke();
   }
   g.restore();
+  pathTarget = flatPath;
 
-  if (flat) return art;
+  if (flatPath) {
+    if (headPath) flatPath.addPath(headPath, new DOMMatrix().translate(hc[0], hc[1]).rotate((tilt * 180) / Math.PI).translate(-hc[0], -hc[1]));
+    g.fillStyle = sil;
+    g.fill(flatPath, 'nonzero');
+    return art;
+  }
 
   // Dark ink outline around the whole silhouette (posterized GFX look).
   const out = createCanvas(width, height);

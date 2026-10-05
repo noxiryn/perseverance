@@ -34,6 +34,7 @@ import { viewport } from '../../editor/viewport';
 import { openFilterDialog } from '../../filters/ui/filterDialog';
 import { placeAsset } from '../../assets/place';
 import { applyLook } from '../../looks/engine';
+import { currentTargetId } from '../../looks/store';
 import { ensureFont } from '../../fonts/loader';
 import { menuPathLabel, shortcutAlternatives } from './menuModel';
 import { bareLabel, filterNamesCoveredByCommands } from './paletteRank';
@@ -209,7 +210,7 @@ export function collectPaletteItems(): PaletteItem[] {
       keywords: [l.id, l.category, l.description ?? ''].join(' '),
       run: () => {
         if (!requireDoc(`the “${l.name}” look`)) return;
-        return applyLook(l.id, activeSession()?.activeLayerId ?? null);
+        return applyLook(l.id, currentTargetId());
       },
     });
   }

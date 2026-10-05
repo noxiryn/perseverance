@@ -57,6 +57,7 @@ import {
   type Sides,
 } from './surface';
 import {
+  effectCacheable,
   effectClips,
   effectExtent,
   effectStage,
@@ -128,8 +129,17 @@ export interface LayerRender {
    * the region: the true content extent, tighter than `extent` (text padding, empty bitmap areas).
    */
   tight?: PxRect | null;
+  /** @internal Outputs of cacheable effects, reusable by renders with the same csig. */
+  fx?: FxEntry[];
   /** @internal Translation reuse. */
   move?: MoveInfo;
+}
+
+/** A cached effect output: its pieces in composite order (behind pieces, or above pieces). */
+interface FxEntry {
+  key: string;
+  region: PxRect;
+  pieces: BehindPiece[];
 }
 
 /** Per-call render context. */
@@ -170,6 +180,7 @@ export const renderStats = {
   layerHits: 0,
   translateHits: 0,
   contentReuse: 0,
+  fxReuse: 0,
   fieldHits: 0,
   fieldComputes: 0,
   docRenders: 0,
@@ -447,11 +458,12 @@ export function layerGeometry(l: Layer, s: number): { m: DOMMatrix; local: Rect;
 /* ================================================================== */
 
 /**
- * Fields are computed ~25% deeper (and that much wider) than asked: dragging a stroke/bevel size
- * up reuses them for a while instead of recomputing the distance transform every frame.
+ * Fields are computed ~25% deeper (at least 2 px; and that much wider) than asked: dragging a
+ * stroke/bevel size up reuses them for a while instead of recomputing the distance transform
+ * every frame, while small strokes stay cheap (the transform's cost grows with the depth).
  */
 export function fieldBucket(maxDist: number): number {
-  return Math.ceil((maxDist * 1.25 + 2) / 4) * 4;
+  return Math.ceil(maxDist + Math.max(2, maxDist * 0.25));
 }
 
 function subArray<T extends Float32Array | Uint8Array>(src: T, sr: PxRect, r: PxRect, make: (n: number) => T): T {
@@ -625,6 +637,7 @@ function shiftRender(r: LayerRender, dx: number, dy: number, csig: string | unde
     extent: r.extent && shiftRect(r.extent, dx, dy),
     fields: r.fields?.map((f) => ({ ...f, rect: shiftRect(f.rect, dx, dy), src: shiftRect(f.src, dx, dy) })),
     tight: r.tight && shiftRect(r.tight, dx, dy),
+    fx: r.fx?.map((f) => ({ ...f, region: shiftRect(f.region, dx, dy) })),
   };
 }
 
@@ -634,6 +647,7 @@ function renderResources(r: LayerRender | null): Resource[] {
   const out: Resource[] = [];
   for (const c of [r.core, r.shape, ...r.behind.map((b) => b.canvas)]) if (c && !borrowed.has(c)) out.push(c);
   if (r.fields) for (const f of r.fields) out.push(f.data);
+  if (r.fx) for (const f of r.fx) for (const pc of f.pieces) out.push(pc.canvas);
   return out;
 }
 
@@ -714,6 +728,7 @@ function groupExtent(rc: RC, g: GroupLayer): PxRect | null {
 interface Reuse {
   C: HTMLCanvasElement | null;
   fields: FieldEntry[];
+  fx: FxEntry[];
   /** Opaque content bounds known from the previous render (undefined = unknown). */
   tight: PxRect | null | undefined;
 }
@@ -723,18 +738,38 @@ function reuseContent(prevs: (LayerRender | null)[], csig: string, region: PxRec
   for (const p of prevs) {
     if (!p || p.csig !== csig) continue;
     const fields = p.fields ?? [];
+    const fx = p.fx ?? [];
     const tight = p.tight;
-    if (!p.shape) return { C: null, fields, tight };
+    if (!p.shape) return { C: null, fields, fx, tight };
     // Every content pixel the new canvas (and its smart filters' footprint) needs must be in
     // the previous canvas (known opaque bounds lie inside it by construction).
     const need = tight !== undefined ? null : intersectRect(extent, expandRect(region, fpad));
-    if (need && !containsRect(p.region, need)) return { C: null, fields, tight };
-    if (sameRect(p.region, region) && !borrowed.has(p.shape)) return { C: p.shape, fields, tight };
+    if (need && !containsRect(p.region, need)) return { C: null, fields, fx, tight };
+    if (sameRect(p.region, region) && !borrowed.has(p.shape)) return { C: p.shape, fields, fx, tight };
     const C = fresh(region.w, region.h);
     ctx2d(C).drawImage(p.shape, p.region.x - region.x, p.region.y - region.y);
-    return { C, fields, tight };
+    return { C, fields, fx, tight };
   }
-  return { C: null, fields: [], tight: undefined };
+  return { C: null, fields: [], fx: [], tight: undefined };
+}
+
+/** Cache key of an effect instance's output (content identity is checked separately). */
+function fxKey(def: EffectDef, params: Record<string, unknown>, knock: boolean, clips: boolean): string {
+  let p: string;
+  try {
+    p = JSON.stringify(params);
+  } catch {
+    p = String(Math.random());
+  }
+  return `${def.id}|${knock ? 'k' : ''}${clips ? 'c' : ''}|${p}`;
+}
+
+/** A canvas positioned at `from` redrawn into a fresh canvas positioned at `to` (output px). */
+function moveCanvas(c: HTMLCanvasElement, from: PxRect, to: PxRect): HTMLCanvasElement {
+  if (sameRect(from, to)) return c;
+  const out = fresh(to.w, to.h);
+  ctx2d(out).drawImage(c, from.x - to.x, from.y - to.y);
+  return out;
 }
 
 function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRender | null)[]): LayerRender | null {
@@ -905,11 +940,37 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
     k.drawImage(C, 0, 0);
     k.globalCompositeOperation = 'source-over';
   };
+  const fxOut: FxEntry[] = [];
+  const contentRect = (fieldsP.tight === undefined ? extent : fieldsP.tight) ?? null;
   for (const e of sorted) {
     const op = compositeOp((typeof e.params.blendMode === 'string' ? e.params.blendMode : 'normal') as Parameters<typeof compositeOp>[0]);
     const isBehind = e.stage === 'behind';
     const clips = !isBehind && effectClips(e.def, e.params);
-    const target = isBehind ? fresh(region.w, region.h) : acquire(region.w, region.h);
+    const cacheable = effectCacheable(e.def.id);
+    const key = cacheable ? fxKey(e.def, e.params, knock && isBehind, clips) : '';
+    // Reuse this effect's previous output (same content, same params) when it is complete in
+    // the new region: only the edited effect of a layer re-renders.
+    if (cacheable) {
+      const need = contentRect ? intersectRect(expandSides(contentRect, effectExtent(e.def, e.params, s)), region) : null;
+      const hit = reuse.fx.find((f) => f.key === key && (sameRect(f.region, region) || !need || containsRect(f.region, need)));
+      if (hit) {
+        const pieces = hit.pieces.map((pc) => ({ canvas: moveCanvas(pc.canvas, hit.region, region), op: pc.op }));
+        fxOut.push({ key, region, pieces });
+        renderStats.fxReuse++;
+        for (const pc of pieces) {
+          if (isBehind) behind.push(pc);
+          else {
+            kctx.globalCompositeOperation = pc.op;
+            kctx.drawImage(pc.canvas, 0, 0);
+            kctx.globalCompositeOperation = 'source-over';
+          }
+        }
+        continue;
+      }
+    }
+    const recorded: BehindPiece[] = [];
+    // Cacheable above-stage outputs are kept (fresh canvases); others use pooled scratch.
+    const target = isBehind || cacheable ? fresh(region.w, region.h) : acquire(region.w, region.h);
     const args: EffectArgsExt = {
       content: C,
       params: e.params,
@@ -920,17 +981,19 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
       region: { x: region.x, y: region.y, bounds: effectBounds, paintBox },
       fields: fieldsP,
       addPiece: (piece, pop) => {
+        // Pieces belong to the effect (often pooled): keep copies.
+        const copy = fresh(region.w, region.h);
+        ctx2d(copy).drawImage(piece, 0, 0);
         if (isBehind) {
-          const copy = fresh(region.w, region.h);
-          ctx2d(copy).drawImage(piece, 0, 0);
           if (knock) knockOut(copy);
           behind.push({ canvas: copy, op: pop });
         } else {
-          if (clips) clipTo(piece);
+          if (clips) clipTo(copy);
           kctx.globalCompositeOperation = pop;
-          kctx.drawImage(piece, 0, 0);
+          kctx.drawImage(copy, 0, 0);
           kctx.globalCompositeOperation = 'source-over';
         }
+        recorded.push({ canvas: copy, op: pop });
       },
     };
     try {
@@ -946,10 +1009,25 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
       kctx.globalCompositeOperation = op;
       kctx.drawImage(target, 0, 0);
       kctx.globalCompositeOperation = 'source-over';
-      release(target);
+      if (!cacheable) release(target);
+    }
+    if (cacheable) {
+      recorded.push({ canvas: target, op });
+      fxOut.push({ key, region, pieces: recorded });
     }
   }
-  return { region, core, shape: C, behind, bounds: layoutBox, csig, extent, fields: fieldsP.entries.length ? fieldsP.entries : undefined, tight: fieldsP.tight };
+  return {
+    region,
+    core,
+    shape: C,
+    behind,
+    bounds: layoutBox,
+    csig,
+    extent,
+    fields: fieldsP.entries.length ? fieldsP.entries : undefined,
+    fx: fxOut.length ? fxOut : undefined,
+    tight: fieldsP.tight,
+  };
 }
 
 /* ================================================================== */

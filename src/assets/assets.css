@@ -134,15 +134,18 @@
 .assets-thumb {
   position: relative;
   aspect-ratio: 4 / 3;
-  display: grid;
-  place-items: center;
+  min-height: 0;
   background: #0f0f0f;
   overflow: hidden;
 }
 .assets-thumb.square {
   aspect-ratio: 1;
 }
+/* absolutely centered: percentage max sizes then resolve against the aspect-ratio box */
 .assets-thumb canvas {
+  position: absolute;
+  inset: 0;
+  margin: auto;
   max-width: 100%;
   max-height: 100%;
   display: block;
@@ -180,16 +183,19 @@
 
 /* ---------- shapes ---------- */
 .assets-shape {
+  position: relative;
   aspect-ratio: 1;
-  display: grid;
-  place-items: center;
-  padding: 12px;
+  min-height: 0;
+  overflow: hidden;
   color: var(--text);
   background: #151515;
 }
+/* absolutely placed so tall/wide viewBoxes never stretch the card */
 .assets-shape svg {
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  inset: 12px;
+  width: calc(100% - 24px);
+  height: calc(100% - 24px);
   overflow: visible;
 }
 .assets-card:hover .assets-shape {
@@ -207,6 +213,25 @@
   background: var(--bg-panel);
   box-shadow: 0 -8px 18px rgba(0, 0, 0, 0.35);
   animation: assets-slide 0.14s ease-out;
+}
+/* short panels (docked in the top slot): the settings page covers the whole panel */
+.assets-drawer.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  max-height: none;
+  min-height: 0;
+  border-top: none;
+  box-shadow: none;
+  animation: assets-fade 0.12s ease-out;
+}
+.assets-drawer.overlay .assets-drawer-head {
+  padding-left: 2px;
+}
+@keyframes assets-fade {
+  from {
+    opacity: 0;
+  }
 }
 @keyframes assets-slide {
   from {
@@ -271,7 +296,7 @@
 .assets-preview canvas {
   display: block;
   max-width: 100%;
-  max-height: 220px;
+  max-height: min(220px, 30vh);
 }
 .assets-preview.busy::after {
   content: '';

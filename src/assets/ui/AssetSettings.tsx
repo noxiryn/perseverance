@@ -3,7 +3,7 @@
  * Used by the Libraries panel drawer and the Place Asset dialog.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Dices, ImagePlus, RotateCcw, X } from 'lucide-react';
+import { ChevronLeft, Dices, ImagePlus, RotateCcw, X } from 'lucide-react';
 import type { ParamValues } from '../../core/types';
 import type { AssetDef } from '../../registry';
 import { resolveParams } from '../../filters/engine';
@@ -46,7 +46,20 @@ export function LivePreview({ def, params, max = 260 }: { def: AssetDef; params:
   return <div ref={host} className={`assets-preview${busy ? ' busy' : ''}`} />;
 }
 
-export function AssetSettings({ def, onClose, onPlaced, compactFooter }: { def: AssetDef; onClose?: () => void; onPlaced?: () => void; compactFooter?: boolean }) {
+export function AssetSettings({
+  def,
+  onClose,
+  onPlaced,
+  compactFooter,
+  backButton,
+}: {
+  def: AssetDef;
+  onClose?: () => void;
+  onPlaced?: () => void;
+  compactFooter?: boolean;
+  /** Show a "back to the library" chevron instead of the close cross (full-panel overlay mode). */
+  backButton?: boolean;
+}) {
   const st = useLibrary((s) => s.settings[def.id]);
   const setParams = useLibrary((s) => s.setParams);
   const setLayerOpts = useLibrary((s) => s.setLayerOpts);
@@ -65,6 +78,7 @@ export function AssetSettings({ def, onClose, onPlaced, compactFooter }: { def: 
   return (
     <>
       <div className="assets-drawer-head">
+        {backButton && onClose && <IconButton icon={ChevronLeft} size="sm" title="Back to the library" onClick={onClose} />}
         <div className="assets-drawer-title">
           {def.name}
           <span className="assets-drawer-sub">{def.sizing === 'document' ? 'Canvas-size' : `${def.sizing.width}×${def.sizing.height}`}</span>
@@ -78,7 +92,7 @@ export function AssetSettings({ def, onClose, onPlaced, compactFooter }: { def: 
           />
         )}
         <IconButton icon={RotateCcw} size="sm" title="Reset to defaults" onClick={() => reset(def.id)} />
-        {onClose && <IconButton icon={X} size="sm" title="Close" onClick={onClose} />}
+        {onClose && !backButton && <IconButton icon={X} size="sm" title="Close" onClick={onClose} />}
       </div>
       <div className="assets-drawer-body">
         <LivePreview def={def} params={values} />

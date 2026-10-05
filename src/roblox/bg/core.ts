@@ -186,31 +186,36 @@ export function computeKeepMask(img: PixelBuffer, params: BgParams, palette = pa
   const contiguous = params.mode === 'auto' ? true : params.contiguous;
   let reach: Uint8Array | null = null;
   if (contiguous) {
-    reach = new Uint8Array(n);
+    // Flood fill from every border pixel through pixels below the limit (inlined: no per-pixel
+    // closures — this runs over millions of pixels).
+    const R = (reach = new Uint8Array(n));
     const queue = new Int32Array(n);
     let head = 0,
       tail = 0;
-    const push = (i: number) => {
-      if (!reach![i] && D[i] < limit) {
-        reach![i] = 1;
-        queue[tail++] = i;
-      }
-    };
     for (let x = 0; x < w; x++) {
-      push(x);
-      push((h - 1) * w + x);
+      const a = x,
+        b = (h - 1) * w + x;
+      if (!R[a] && D[a] < limit) (R[a] = 1), (queue[tail++] = a);
+      if (!R[b] && D[b] < limit) (R[b] = 1), (queue[tail++] = b);
     }
     for (let y = 0; y < h; y++) {
-      push(y * w);
-      push(y * w + w - 1);
+      const a = y * w,
+        b = y * w + w - 1;
+      if (!R[a] && D[a] < limit) (R[a] = 1), (queue[tail++] = a);
+      if (!R[b] && D[b] < limit) (R[b] = 1), (queue[tail++] = b);
     }
+    const last = n - w;
     while (head < tail) {
       const i = queue[head++];
       const x = i % w;
-      if (x > 0) push(i - 1);
-      if (x < w - 1) push(i + 1);
-      if (i >= w) push(i - w);
-      if (i < n - w) push(i + w);
+      let j = i - 1;
+      if (x > 0 && !R[j] && D[j] < limit) (R[j] = 1), (queue[tail++] = j);
+      j = i + 1;
+      if (x < w - 1 && !R[j] && D[j] < limit) (R[j] = 1), (queue[tail++] = j);
+      j = i - w;
+      if (i >= w && !R[j] && D[j] < limit) (R[j] = 1), (queue[tail++] = j);
+      j = i + w;
+      if (i < last && !R[j] && D[j] < limit) (R[j] = 1), (queue[tail++] = j);
     }
   }
   const maskF = new Float32Array(n);

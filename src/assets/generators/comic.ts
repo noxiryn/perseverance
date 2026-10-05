@@ -441,7 +441,7 @@ const mangaScreentone = defineAsset(
       P.num('size', 'Pitch', 2, 40, 7, { step: 0.5, unit: 'px' }),
       P.angle('angle', 'Angle', 45),
       P.color('color', 'Ink', '#111111'),
-      P.select('gradient', 'Gradation', RAMPS, 'uniform'),
+      P.select('gradient', 'Gradation', RAMPS, 'bottom'),
       P.seed(103),
     ],
     generate(p, { width: W, height: H }) {
@@ -449,9 +449,10 @@ const mangaScreentone = defineAsset(
       const r = makeRand(num(p, 'seed', 103));
       const pattern = str(p, 'pattern', 'dots');
       const tone = num(p, 'tone', 0.35);
-      const pitch = Math.max(1.5, num(p, 'size', 7) * u);
+      // never finer than ~2.6px: sub-pixel screens only alias into moire (thumbnails, small docs)
+      const pitch = Math.max(2.6, num(p, 'size', 7) * u);
       const ang = (num(p, 'angle', 45) * Math.PI) / 180;
-      const grad = str(p, 'gradient', 'uniform');
+      const grad = str(p, 'gradient', 'bottom');
       const aspect = W / H;
       const toneAt = (x: number, y: number) => (grad === 'uniform' ? tone : tone * rampTone(grad, x / W, y / H, 0.95, aspect) * 1.6);
       const [c, ctx] = newCanvas(W, H);

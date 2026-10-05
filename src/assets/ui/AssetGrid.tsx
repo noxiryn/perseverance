@@ -53,7 +53,19 @@ export function CategoryChips({
   );
 }
 
-function AssetCard({ def, selected, onSelect, onActivate }: { def: AssetDef; selected: boolean; onSelect: () => void; onActivate: () => void }) {
+function AssetCard({
+  def,
+  selected,
+  onSelect,
+  onActivate,
+  thumbSize,
+}: {
+  def: AssetDef;
+  selected: boolean;
+  onSelect: () => void;
+  onActivate: () => void;
+  thumbSize: number;
+}) {
   const thumb = useRef<HTMLCanvasElement | null>(null);
   const settings = useLibrary((s) => s.settings[def.id]);
   return (
@@ -65,7 +77,7 @@ function AssetCard({ def, selected, onSelect, onActivate }: { def: AssetDef; sel
       onClick={onSelect}
       onDoubleClick={onActivate}
     >
-      <AssetThumb assetId={def.id} badge={def.sizing === 'document' ? undefined : 'Sticker'} onCanvas={(c) => (thumb.current = c)} />
+      <AssetThumb assetId={def.id} size={thumbSize} badge={def.sizing === 'document' ? undefined : 'Sticker'} onCanvas={(c) => (thumb.current = c)} />
       <div className="assets-card-name">{def.name}</div>
     </div>
   );
@@ -100,7 +112,14 @@ export function AssetGrid({
   const cards = (items: AssetDef[]) => (
     <div className={`assets-grid${large ? ' large' : ''}`}>
       {items.map((d) => (
-        <AssetCard key={d.id} def={d} selected={selectedId === d.id} onSelect={() => onSelect(d.id)} onActivate={() => activate(d.id)} />
+        <AssetCard
+          key={d.id}
+          def={d}
+          thumbSize={large ? 200 : 128}
+          selected={selectedId === d.id}
+          onSelect={() => onSelect(d.id)}
+          onActivate={() => activate(d.id)}
+        />
       ))}
     </div>
   );

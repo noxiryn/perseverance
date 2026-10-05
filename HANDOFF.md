@@ -27,7 +27,7 @@ ARCHITECTURE.md §3 for each module's full feature list).
 | roblox (Pose Studio, remove bg, styler, safe zones, preview) | `src/roblox` | in review |
 | io (projects, export, PSD, clipboard, autosave, File/Edit/Image menus) | `src/io` | in review |
 | type-shape (type tool, character panel, shapes + presets) | `src/tools/type`, `src/tools/shape` | **done** |
-| looks-templates (looks engine, templates, doc presets) | `src/looks`, `src/templates` | in review |
+| looks-templates (looks engine, templates, doc presets) | `src/looks`, `src/templates` | **done** |
 | fx-filters (creative filters, filter dialog, gallery) | `src/filters/stylize`, `src/filters/ui` | implementing |
 | assets (procedural asset library, Libraries panel) | `src/assets` | implementing |
 
@@ -51,6 +51,8 @@ starting point; don't rewrite modules from scratch.
      openFilterDialog (adjustments currently uses its own AdjustmentDialog for those 5).
    - renderer: export `renderLayerParts(doc, layer)` (behind-effects + core separately; engine.ts has an internal
      `renderLayer`) so layers-panels' Rasterize Layer Style is exact for non-Normal blend layers.
+   - (done) shell start screen / palette open templates via openTemplate(id) from src/templates (character
+     selected); palette looks use currentTargetId().
    - (done) NumberField `disabled` prop; (done) NumberField arrow keys keep the displayed text in sync.
    - renderer: export `warpPoint`/`isWarpActive`/`ITALIC_SKEW` from compositor.ts (type tool imports warpMath.ts directly).
    - viewport move tool: call `editTextLayer(layerId, {at})` from src/tools/type on double-click of a text layer
