@@ -9,6 +9,7 @@ import { Move } from 'lucide-react';
 import type { Document, ID, Layer, Point, Rect, Transform } from '../../core/types';
 import type { ToolDef, ToolPointerEvent } from '../../registry';
 import { insertLayerDraft, isEffectivelyVisible, isTransformable } from '../../core/document';
+import { pointInPolygon } from '../../core/geometry';
 import { viewport } from '../../editor/viewport';
 import { activeSession, toolOptions, useEditor } from '../../state/editor';
 import { useUI } from '../../state/ui';
@@ -241,7 +242,13 @@ function startDuplicate(d: MoveDrag) {
   const s = activeSession();
   if (!s) return;
   const doc = s.doc;
-  const clones: { layers: Layer[]; rootId: ID; above: ID }[] = d.selection.map((id) => ({ ...cloneLayerTree(doc, id), above: id }));
+  const clones: { layers: Layer[]; rootId: ID; above: ID }[] = d.selection.map((id) => {
+    const c = cloneLayerTree(doc, id);
+    // Same naming as Layer ▸ Duplicate Layer: "<name> copy".
+    const root = c.layers.find((l) => l.id === c.rootId);
+    if (root) root.name = `${doc.layers[id]?.name ?? root.name} copy`;
+    return { ...c, above: id };
+  });
   useEditor.getState().preview((draft) => {
     for (const c of clones) {
       for (const l of c.layers) if (l.id !== c.rootId) draft.layers[l.id] = l;
@@ -360,8 +367,43 @@ function onPointerUp() {
 
 function onDoubleClick(e: ToolPointerEvent) {
   const ses = activeTransform();
-  if (!ses) return;
-  if (ses.hitTest({ x: e.screenX, y: e.screenY }).kind === 'inside') commitTransform();
+  if (ses) {
+    if (ses.hitTest({ x: e.screenX, y: e.screenY }).kind === 'inside') commitTransform();
+    return;
+  }
+  // Double-clicking a text layer edits it on the canvas (switches to the Type tool).
+  const s = activeSession();
+  if (!s) return;
+  const id = textLayerAt(s.doc, e.docX, e.docY, s.activeLayerId);
+  if (!id) return;
+  const at = { x: e.docX, y: e.docY };
+  // Imported lazily: the type module itself imports this module.
+  import('../../tools/type')
+    .then((m) => {
+      const edit = (m as { editTextLayer?: (layerId: string, opts?: { at?: Point }) => unknown }).editTextLayer;
+      if (typeof edit === 'function') edit(id, { at });
+    })
+    .catch((err) => console.error('[move] could not start text editing', err));
+}
+
+/**
+ * Text layer a double-click at (x, y) should edit: the layer under the pointer when it is text,
+ * else the active text layer whose box contains the point, else the topmost visible, unlocked
+ * text layer whose box contains it and that sits above the hit layer.
+ */
+function textLayerAt(doc: Document, x: number, y: number, activeId: ID | null): ID | null {
+  const hit = pickLayer(doc, x, y);
+  const editable = (l: Layer | undefined): l is Layer => !!l && l.type === 'text' && !l.locks.all && isEffectivelyVisible(doc, l.id);
+  if (hit && editable(doc.layers[hit])) return hit;
+  const inBox = (l: Layer) => isTransformable(l) && pointInPolygon({ x, y }, layerCorners(l));
+  const a = activeId ? doc.layers[activeId] : undefined;
+  if (editable(a) && inBox(a)) return a.id;
+  for (const id of layersTopDown(doc)) {
+    if (id === hit) break;
+    const l = doc.layers[id];
+    if (editable(l) && inBox(l)) return id;
+  }
+  return null;
 }
 
 let lastHover = 0;
