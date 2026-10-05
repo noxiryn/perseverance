@@ -3,7 +3,16 @@ import { bitmaps } from '../core/bitmaps';
 import { createDocument, insertLayerDraft, makeRasterLayer } from '../core/document';
 import type { DialogEntry } from './ui';
 import { useUI } from './ui';
-import { BITMAP_GC_GRACE_MS, HISTORY_LIMIT, cancelBitmapGc, gcBitmaps, referencedBitmaps, requestBitmapGc, useEditor } from './editor';
+import {
+  BITMAP_GC_GRACE_MS,
+  HISTORY_LIMIT,
+  cancelBitmapGc,
+  gcBitmaps,
+  referencedBitmaps,
+  requestBitmapGc,
+  savedIndexOf,
+  useEditor,
+} from './editor';
 
 /** A bitmap without pixels (jsdom has no 2D context; the store only needs the canvas object). */
 const newBitmap = () => bitmaps.add(document.createElement('canvas'));
@@ -164,5 +173,117 @@ describe('bitmap garbage collection', () => {
       if (l.type === 'raster') l.bitmapId = temp;
     });
     expect(referencedBitmaps(useEditor.getState().sessions).has(temp)).toBe(true);
+  });
+});
+
+describe('saved state (dirty flag)', () => {
+  beforeEach(() => {
+    closeAll();
+    cancelBitmapGc();
+  });
+  afterEach(() => {
+    closeAll();
+    cancelBitmapGc();
+  });
+
+  const session = (id: string) => useEditor.getState().sessions[id];
+  const current = (id: string) => {
+    const s = session(id);
+    return { entryId: s.history.entries[s.history.index].id, doc: s.history.entries[s.history.index].doc };
+  };
+  const setOpacity = (layerId: string, v: number, coalesce = true) =>
+    useEditor.getState().commit(
+      'Opacity',
+      (d) => {
+        d.layers[layerId].opacity = v;
+      },
+      coalesce ? { coalesce: true } : undefined,
+    );
+
+  it('coalesces repeated edits into one step while unsaved', () => {
+    const a = openDocWithLayer();
+    setOpacity(a.layerId, 0.9);
+    setOpacity(a.layerId, 0.8);
+    expect(session(a.docId).history.entries.map((e) => e.label)).toEqual(['Open', 'Opacity']);
+  });
+
+  it('never coalesces into the saved step: the edit gets its own step and the tab turns dirty', () => {
+    const a = openDocWithLayer();
+    setOpacity(a.layerId, 0.9);
+    useEditor.getState().markSaved(a.docId);
+    expect(session(a.docId).dirty).toBe(false);
+    setOpacity(a.layerId, 0.8); // e.g. the next arrow-key nudge within the coalescing window
+    const s = session(a.docId);
+    expect(s.dirty).toBe(true);
+    expect(s.history.entries).toHaveLength(3);
+    expect(s.history.entries[s.savedIndex].doc.layers[a.layerId].opacity).toBe(0.9);
+    // Undo returns to exactly the saved state.
+    useEditor.getState().undo();
+    expect(session(a.docId).dirty).toBe(false);
+    // Further edits coalesce again (into the new, unsaved step).
+    useEditor.getState().redo();
+    setOpacity(a.layerId, 0.7);
+    expect(session(a.docId).history.entries).toHaveLength(3);
+  });
+
+  it('marks a save done only if the step still holds the document that was written', () => {
+    const a = openDocWithLayer();
+    setOpacity(a.layerId, 0.9);
+    const written = current(a.docId); // what an async save encoded
+    setOpacity(a.layerId, 0.3); // coalesced into the same step during the encode
+    expect(current(a.docId).entryId).toBe(written.entryId);
+    useEditor.getState().markSaved(a.docId, written);
+    expect(session(a.docId).dirty).toBe(true);
+    expect(session(a.docId).savedIndex).toBe(-1);
+    // Without a concurrent edit the same call marks the tab clean.
+    useEditor.getState().markSaved(a.docId, current(a.docId));
+    expect(session(a.docId).dirty).toBe(false);
+  });
+
+  it('keeps the tab dirty when the saved step was undone during the save', () => {
+    const a = openDocWithLayer();
+    setOpacity(a.layerId, 0.9, false);
+    const written = current(a.docId);
+    useEditor.getState().undo();
+    useEditor.getState().markSaved(a.docId, written);
+    expect(session(a.docId).savedIndex).toBe(1);
+    expect(session(a.docId).dirty).toBe(true);
+    useEditor.getState().redo();
+    expect(session(a.docId).dirty).toBe(false);
+  });
+
+  it('forgets a saved step in a discarded redo branch', () => {
+    const a = openDocWithLayer();
+    setOpacity(a.layerId, 0.9, false);
+    useEditor.getState().markSaved(a.docId); // saved at index 1
+    useEditor.getState().undo();
+    // A different edit lands at the saved step's old index — it is not the saved state.
+    useEditor.getState().updateLayer(a.layerId, { visible: false }, 'Hide');
+    const s = session(a.docId);
+    expect(s.history.index).toBe(1);
+    expect(s.savedIndex).toBe(-1);
+    expect(s.dirty).toBe(true);
+  });
+
+  it('stays dirty when the saved step is trimmed off the front of the history', () => {
+    const a = openDocWithLayer();
+    useEditor.getState().markSaved(a.docId); // saved at index 0
+    for (let i = 0; i <= HISTORY_LIMIT; i++) setOpacity(a.layerId, (i % 50) / 100, false);
+    const s = session(a.docId);
+    expect(s.history.entries).toHaveLength(HISTORY_LIMIT);
+    expect(s.savedIndex).toBe(-1);
+    expect(s.dirty).toBe(true);
+    // Undoing all the way back never reaches a "clean" state.
+    useEditor.getState().jumpToHistory(0);
+    expect(session(a.docId).dirty).toBe(true);
+  });
+
+  it('savedIndexOf matches step id and document identity', () => {
+    const a = openDocWithLayer();
+    setOpacity(a.layerId, 0.9, false);
+    const entries = session(a.docId).history.entries;
+    expect(savedIndexOf(entries, { entryId: entries[1].id, doc: entries[1].doc })).toBe(1);
+    expect(savedIndexOf(entries, { entryId: entries[1].id, doc: entries[0].doc })).toBe(-1);
+    expect(savedIndexOf(entries, { entryId: 'h_gone', doc: entries[1].doc })).toBe(-1);
   });
 });

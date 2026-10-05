@@ -2,7 +2,9 @@
  * Remove Background dialog: live preview on a checkerboard (computed on a downscaled working copy),
  * Auto / Color key / Green screen modes, tolerance + softness, feather, shrink edge, spill
  * decontamination, and output as deleted pixels (default, trims the layer to the character) or a
- * layer mask. Warns when parts of the subject would end up semi-transparent.
+ * layer mask. Warns when parts of the subject would end up semi-transparent or removed, or when the
+ * border shows no clear background. Auto mode's border colors come from the full-size layer (as
+ * Apply), and the preview runs with the layer-to-preview scale, so preview and result agree.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Eraser, Pipette, Scissors } from 'lucide-react';
@@ -14,7 +16,7 @@ import { createCanvas, ctx2d, ctxRead } from '../../core/canvas';
 import type { RasterLayer } from '../../core/types';
 import '../roblox.css';
 import { ColorRow, Group, Hint, Seg, SliderRow } from '../studio/ui';
-import { DEFAULT_BG_PARAMS, GREEN_PRESET, PARTIAL_INTERIOR_WARN, applyMask, cutoutStats, paletteFor, removeBackground, type BgMode, type BgParams } from './core';
+import { DEFAULT_BG_PARAMS, GREEN_PRESET, analyzeBorder, applyMask, cutoutStats, cutoutWarnings, removeBackground, type BgMode, type BgParams, type BorderAnalysis, type CutoutWarning } from './core';
 import { applyRemoveBackground, type BgOutput } from './apply';
 import { rgbToHexString } from '../pixels';
 
@@ -36,6 +38,19 @@ let lastOutput: BgOutput = 'delete';
 interface Working {
   img: ImageData;
   scale: number;
+}
+
+/**
+ * Border analysis of the FULL-size layer (what Apply uses), so the downscaled preview keys out the
+ * same colors — border runs and their shares can differ on a small copy.
+ */
+function fullBorderAnalysis(layer: RasterLayer): BorderAnalysis | null {
+  if (!bitmaps.has(layer.bitmapId)) return null;
+  try {
+    return analyzeBorder(bitmaps.read(layer.bitmapId, { x: 0, y: 0, width: layer.width, height: layer.height }));
+  } catch {
+    return null;
+  }
 }
 
 function makeWorking(layer: RasterLayer): Working | null {
@@ -62,8 +77,14 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
   const [output, setOutput] = useState<BgOutput>(lastOutput);
   const [view, setView] = useState<View>('result');
   const [picking, setPicking] = useState(false);
-  const [stats, setStats] = useState<{ removed: number; partialInterior: number; palette: string[] } | null>(null);
+  const [stats, setStats] = useState<{ removed: number; partialInterior: number; warnings: CutoutWarning[] } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Auto mode's border colors, found once on the full-size layer (computed on first use).
+  const borderRef = useRef<BorderAnalysis | null | undefined>(undefined);
+  const fullBorder = useCallback(() => {
+    if (borderRef.current === undefined) borderRef.current = layer ? fullBorderAnalysis(layer) : null;
+    return borderRef.current;
+  }, [layer]);
 
   const set = (patch: Partial<BgParams>) => setParams((p) => ({ ...p, ...patch }));
 
@@ -76,11 +97,15 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
       const { img, scale } = working;
       const copy = new ImageData(new Uint8ClampedArray(img.data), img.width, img.height);
       const scaled: BgParams = { ...params, feather: params.feather * scale, shrink: params.shrink * scale };
-      const { mask, palette } = removeBackground(copy, scaled);
+      const border = params.mode === 'auto' ? fullBorder() : null;
+      // Same colors and per-pixel limits as the full-size Apply (scale), so preview = result.
+      const res = removeBackground(copy, scaled, { scale, palette: border?.palette });
+      const mask = res.mask;
       const out = new ImageData(img.width, img.height);
       const o = out.data;
       const d = copy.data;
-      const quality = cutoutStats(img, mask);
+      // Quality from the mask before feather/shrink: a soft edge is not a semi-transparent subject.
+      const quality = cutoutStats(img, mask, res.raw);
       for (let i = 0, q = 0; i < mask.length; i++, q += 4) {
         const m = mask[i];
         if (view === 'mask') {
@@ -103,10 +128,10 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
       c.width = img.width;
       c.height = img.height;
       ctx2d(c).putImageData(out, 0, 0);
-      setStats({ removed: quality.removed, partialInterior: quality.partialInterior, palette: palette.map((p) => rgbToHexString(p[0], p[1], p[2])) });
+      setStats({ removed: quality.removed, partialInterior: quality.partialInterior, warnings: cutoutWarnings(quality, res.enclosedRemoved, border) });
     }, 40);
     return () => window.clearTimeout(t);
-  }, [working, params, view]);
+  }, [working, params, view, fullBorder]);
 
   const pickAt = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!working || (!picking && params.mode !== 'color')) return;
@@ -139,7 +164,9 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
     );
   }
 
-  const autoPalette = params.mode === 'auto' && stats ? stats.palette : params.mode === 'auto' ? paletteFor(working.img, params).map((p) => rgbToHexString(p[0], p[1], p[2])) : [];
+  const border = params.mode === 'auto' ? fullBorder() : null;
+  const autoPalette = border ? border.palette.map((p) => rgbToHexString(p[0], p[1], p[2])) : [];
+  const warnings = stats?.warnings ?? [];
 
   return (
     <Dialog
@@ -208,10 +235,26 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
             )}
             <SliderRow label="Tolerance" value={params.tolerance} min={0} max={100} step={1} onChange={(tolerance) => set({ tolerance })} hint="How different a color may be and still count as background" />
             <SliderRow label="Softness" value={params.softness} min={0} max={60} step={1} onChange={(softness) => set({ softness })} hint="Partial transparency band along the cut" />
-            {stats && stats.partialInterior > PARTIAL_INTERIOR_WARN && (
+            {stats && warnings.includes('semi-transparent') && (
               <div className="roblox-bg-warn" role="status">
                 ⚠ {Math.round(stats.partialInterior * 100)}% of the subject would be semi-transparent — lower Tolerance or Softness
                 {params.mode === 'auto' ? ', or pick the background color with Color key' : ''}. Check the Mask view (white = kept).
+              </div>
+            )}
+            {warnings.includes('subject-removed') && (
+              <div className="roblox-bg-warn" role="status">
+                ⚠ Areas inside the character would be removed (colors close to the background) — lower Tolerance, or pick the background color with Color key. Check the Overlay view (red = removed).
+              </div>
+            )}
+            {stats && stats.removed >= 0.999 && (
+              <div className="roblox-bg-warn" role="status">
+                ⚠ Everything would be removed — lower Tolerance{params.mode === 'auto' ? '' : ' or pick another color'}.
+              </div>
+            )}
+            {stats && stats.removed <= 0.001 && <Hint>Nothing would be removed — raise Tolerance, or click the background in the preview to key out its color.</Hint>}
+            {warnings.includes('cluttered-border') && (
+              <div className="roblox-bg-warn" role="status">
+                ⚠ The image edges show no clear background, so Auto mode had to guess its colors. Check the result, or pick the background color with Color key.
               </div>
             )}
             {params.mode !== 'auto' && (

@@ -73,7 +73,7 @@ calls except the optional Roblox avatar fetch.
 | `src/filters/engine.ts` | `compositeOp(blendMode)`, `defaultParams`, `resolveParams`, `makeFilterContext`, `runFilter`, `applyFilterInstanceToCanvas`, `applyFilterStack`, `adjustmentFilters()` |
 | `src/fonts/loader.ts` | `ensureFont(family, weight, style)`, `isFontReady`, `ensureDocumentFonts` |
 | `src/platform/index.ts` | `isDesktop`, `desktop`, `openFiles`, `saveFile`, `writeFile`, `openExternal`, `setWindowTitle`, `fileNameOf`, `extOf`, `isMac`, `isAccessDenied(e)` (desktop: `readFile`/`writeFile` only accept paths the user chose via dialogs / opened from the OS — see `electron/main.cjs`; other paths reject with `ENOTGRANTED`) |
-| `src/ui/controls` | `Button`, `IconButton`, `Checkbox`, `Select`, `NumberField` (scrubbable), `Slider`, `Field`, `Tabs`, `Section`, `SearchInput`, `TextInput`, `ColorSwatch`, `ColorPicker`, `ColorField`, `GradientPreview`, `GradientEditor`, `GradientField`, `gradientToCss`, `CurvesEditor`, `curveLUT`, `IDENTITY_CURVES`, `ParamEditor`, `AngleDial`, `FontSelect`, `Popover`, `showContextMenu`, `showMenuAt`, `MenuItem`, `MenuHost`, `Dialog`, `DialogHost` |
+| `src/ui/controls` | `Button`, `IconButton`, `Checkbox`, `Select`, `NumberField` (scrubbable), `Slider`, `Field`, `Tabs`, `Section`, `SearchInput`, `ChipRow` (one scrolling row of filter chips), `TextInput`, `ColorSwatch`, `ColorPicker` (`variant="panel"`: fluid, sized field), `ColorField`, `GradientPreview`, `GradientEditor`, `GradientField`, `gradientToCss`, `CurvesEditor`, `curveLUT`, `IDENTITY_CURVES`, `ParamEditor`, `AngleDial`, `FontSelect`, `Popover`, `showContextMenu`, `showMenuAt`, `MenuItem`, `MenuHost`, `Dialog`, `DialogHost` |
 | `src/ui/shortcuts.ts` | `matchShortcut(e, 'Ctrl+Shift+N')`, `formatShortcut`, `parseShortcut`, `isTypingTarget(e.target)`, `eventKey(e)` |
 
 ### Cross-module contracts (stub files exist; the owner replaces the body, keeps the signature)
@@ -133,9 +133,14 @@ Each module owns its directory. Only touch files you own (plus adding new files 
 The diagram is the reference UI. The shipped default workspace (`DEFAULT_WORKSPACE`, src/state/ui.ts)
 gives the content-heavy browsers more room: top group Libraries | Looks, middle Swatches | Color | Navigator,
 bottom Layers | Properties | History. On short windows (dock < ~700px tall) a fresh/reset workspace opens with
-the middle group collapsed (`fitLayoutToHeight`, src/ui/shell/workspaces.ts), expanded groups never shrink
-below 190px (the group column scrolls instead), and saved layouts migrate via `LAYOUT_VERSION` /
-`LEGACY_PRESETS` (untouched copies of an old preset adopt the new one; customized ones are kept).
+the middle group collapsed (`fitLayoutToHeight`, src/ui/shell/workspaces.ts), which also gives the group holding
+Layers a ~260px body (≈4 rows) when the dock allows; expanding a collapsed group when the three can't each get a
+220px body collapses another one (accordion: middle first, then top, never the one just opened —
+`collapseForExpanded`). Expanded groups never shrink below 190px (the group column scrolls instead), and saved
+layouts migrate via `LAYOUT_VERSION` / `LEGACY_PRESETS` (untouched copies of an old preset — also ones fitted to
+the window — adopt the new one; customized ones are kept). Panels are built to work in a 160px body: Looks has a
+compact header (toggle + target, search, one scrolling `ChipRow`), Color sizes its field to the room left and
+hides it (sliders stay) when short.
 
 Colors: app bg `#121212`, canvas area `#141414` with a subtle dot grid (`--canvas-dot`), panels
 `#1a1a1a`, borders `#2a2a2a`, text `#d6d6d6`, dim `#9a9a9a`, muted `#858585` (`--text-muted`: secondary info text; `--text-faint` `#6a6a6a` is for disabled controls only), accent violet `#8b7cf6` used

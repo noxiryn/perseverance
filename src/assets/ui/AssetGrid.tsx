@@ -11,6 +11,10 @@ import { startDrag } from '../lib/dnd';
 import { placeAssetWhenReady, prepareAsset } from '../place';
 import { AssetThumb } from './AssetThumb';
 import { matchesQuery, useLibrary } from './store';
+import { createPlaceGuard } from './clickGuard';
+
+/** One guard for every tile: a double-click on a tile places it once, not twice. */
+const placeGuard = createPlaceGuard();
 
 /** Registered assets grouped by category in library order (optionally filtered). */
 export function useFilteredAssets(category: string, query: string): { all: AssetDef[]; list: AssetDef[]; categories: { name: string; count: number }[] } {
@@ -138,7 +142,14 @@ function AssetCard({
       }
       draggable
       onDragStart={(e) => startDrag(e, { kind: 'asset', id: def.id, params: settings?.params, blendMode: settings?.blendMode, opacity: settings?.opacity }, thumb.current)}
-      onClick={clickPlaces ? onActivate : onSelect}
+      onClick={
+        clickPlaces
+          ? (e) => {
+              if (placeGuard(def.id, e.detail, performance.now())) onActivate();
+            }
+          : onSelect
+      }
+      // With single-click placing, the double-click's second click is ignored (see placeGuard).
       onDoubleClick={clickPlaces ? undefined : onActivate}
       onContextMenu={
         clickPlaces

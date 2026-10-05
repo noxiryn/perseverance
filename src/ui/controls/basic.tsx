@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ButtonHTMLAttributes, type ComponentType, type ReactNode } from 'react';
-import { ChevronDown, ChevronRight, Search, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState, type ButtonHTMLAttributes, type ComponentType, type ReactNode, type WheelEvent as ReactWheelEvent } from 'react';
+import { ChevronDown, ChevronLeft, ChevronRight, Search, X } from 'lucide-react';
 
 type IconType = ComponentType<{ size?: number; strokeWidth?: number }>;
 
@@ -157,6 +157,7 @@ export function NumberField({
   displayScale = 1,
   scrubLabel,
   disabled,
+  autoFocus,
 }: {
   value: number;
   /** Called continuously (typing commit / scrubbing). */
@@ -175,6 +176,11 @@ export function NumberField({
   scrubLabel?: ReactNode;
   /** Read-only, dimmed, no scrubbing. */
   disabled?: boolean;
+  /**
+   * Take the focus when its dialog opens (number fields are otherwise skipped by the dialog's
+   * initial focus, so arrow keys / digits can't change a value the user didn't pick).
+   */
+  autoFocus?: boolean;
 }) {
   const shown = value * displayScale;
   const [text, setText] = useState(fmt(shown, step));
@@ -243,6 +249,7 @@ export function NumberField({
         <input
           value={text}
           disabled={disabled}
+          data-autofocus={autoFocus ? '' : undefined}
           onFocus={(e) => {
             focused.current = true;
             e.target.select();
@@ -427,6 +434,87 @@ export function SearchInput({
       {value && (
         <button className="ui-icon-btn sm" onClick={() => onChange('')} title="Clear">
           <X size={11} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- ChipRow ---------------- */
+
+/**
+ * Filter chips in one horizontally scrolling row (for narrow dock panels): the vertical mouse wheel
+ * scrolls it sideways, edge arrows page through it, the sides with more chips fade out, and the
+ * active chip is kept in view.
+ */
+export function ChipRow<T extends string>({
+  items,
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  items: { value: T; label: string; title?: string }[];
+  value: T;
+  onChange: (v: T) => void;
+  ariaLabel?: string;
+}) {
+  const row = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState({ left: false, right: false });
+  const measure = useCallback(() => {
+    const el = row.current;
+    if (!el) return;
+    const left = el.scrollLeft > 1;
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+    setEdges((e) => (e.left === left && e.right === right ? e : { left, right }));
+  }, []);
+  useEffect(() => {
+    const el = row.current;
+    if (!el) return;
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [measure, items.length]);
+  useEffect(() => {
+    const el = row.current;
+    const chip = el?.querySelector<HTMLElement>('.ui-chip.active');
+    if (!el || !chip) return;
+    const pad = 26;
+    if (chip.offsetLeft - pad < el.scrollLeft) el.scrollLeft = Math.max(0, chip.offsetLeft - pad);
+    else if (chip.offsetLeft + chip.offsetWidth + pad > el.scrollLeft + el.clientWidth) el.scrollLeft = chip.offsetLeft + chip.offsetWidth + pad - el.clientWidth;
+    measure();
+  }, [value, measure]);
+  const page = (dir: 1 | -1) => row.current?.scrollBy({ left: dir * Math.max(80, row.current.clientWidth * 0.7), behavior: 'smooth' });
+  const onWheel = (e: ReactWheelEvent) => {
+    const el = row.current;
+    if (!el || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return; // trackpads scroll sideways natively
+    el.scrollLeft += e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  };
+  return (
+    <div className={`ui-chips-wrap${edges.left ? ' fade-l' : ''}${edges.right ? ' fade-r' : ''}`} onWheel={onWheel}>
+      <div ref={row} className="ui-chips" role="tablist" aria-label={ariaLabel} onScroll={measure}>
+        {items.map((c) => (
+          <button
+            key={c.value}
+            role="tab"
+            aria-selected={value === c.value}
+            className={`ui-chip${value === c.value ? ' active' : ''}`}
+            title={c.title}
+            onClick={() => onChange(c.value)}
+          >
+            {c.label}
+          </button>
+        ))}
+      </div>
+      {edges.left && (
+        <button className="ui-chips-arrow left" title="Scroll left" tabIndex={-1} onClick={() => page(-1)}>
+          <ChevronLeft size={12} strokeWidth={1.8} />
+        </button>
+      )}
+      {edges.right && (
+        <button className="ui-chips-arrow right" title="More" tabIndex={-1} onClick={() => page(1)}>
+          <ChevronRight size={12} strokeWidth={1.8} />
         </button>
       )}
     </div>

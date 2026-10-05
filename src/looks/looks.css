@@ -10,12 +10,13 @@
 .looks-head {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   padding: 6px 8px 4px;
+  min-width: 0;
 }
 
 .looks-seg {
-  flex: 1;
+  flex: none;
   display: flex;
   background: var(--bg-input);
   border: 1px solid var(--border);
@@ -25,7 +26,8 @@
   min-width: 0;
 }
 .looks-seg button {
-  flex: 1;
+  flex: none;
+  padding: 0 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -50,32 +52,29 @@
   box-shadow: inset 0 -1px 0 var(--accent);
 }
 
+/* Where the look goes (layer name / Whole document), next to the toggle; the note is in the tooltip. */
 .looks-target {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 0 9px 4px;
+  flex: 1;
   min-width: 0;
-}
-.looks-target-label {
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text);
+  cursor: default;
 }
 .looks-target-name {
-  color: var(--text);
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.looks-target-name em {
-  font-style: normal;
+.looks-target-icon {
+  flex: none;
 }
-.looks-target-name em.warn {
+.looks-target-icon.warn {
   color: var(--warning);
 }
-.looks-target-name em.info {
+.looks-target-icon.info {
   color: var(--text-dim);
 }
 
@@ -83,32 +82,17 @@
   display: flex;
   flex-direction: column;
   gap: 5px;
-  padding: 2px 8px 6px;
+  padding: 0 8px 6px;
   border-bottom: 1px solid var(--divider);
 }
-.looks-cats {
+.looks-search {
   display: flex;
-  flex-wrap: wrap;
-  gap: 3px;
+  align-items: center;
+  gap: 4px;
 }
-.looks-cat {
-  height: 18px;
-  padding: 0 7px;
-  border-radius: 9px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-dim);
-  font-size: var(--fs-xs);
-  cursor: pointer;
-}
-.looks-cat:hover {
-  color: var(--text);
-  border-color: var(--border-strong);
-}
-.looks-cat.active {
-  color: var(--text-strong);
-  border-color: var(--accent);
-  background: var(--accent-soft);
+.looks-search .ui-search {
+  flex: 1;
+  min-width: 0;
 }
 
 .looks-empty {
@@ -243,9 +227,9 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 6px;
+  padding: 2px 6px;
   border-top: 1px solid var(--divider);
-  min-height: 30px;
+  min-height: 28px;
 }
 .looks-count {
   margin-left: auto;

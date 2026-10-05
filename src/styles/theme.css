@@ -640,6 +640,76 @@ input.ui-input {
   border-color: var(--accent);
 }
 
+/* ChipRow: one horizontally scrolling row of filter chips */
+.ui-chips-wrap {
+  position: relative;
+  min-width: 0;
+}
+.ui-chips {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ui-chips::-webkit-scrollbar {
+  display: none;
+}
+.ui-chips-wrap.fade-r .ui-chips {
+  mask-image: linear-gradient(90deg, #000 calc(100% - 40px), transparent calc(100% - 6px));
+}
+.ui-chips-wrap.fade-l .ui-chips {
+  mask-image: linear-gradient(90deg, transparent 6px, #000 40px);
+}
+.ui-chips-wrap.fade-l.fade-r .ui-chips {
+  mask-image: linear-gradient(90deg, transparent 6px, #000 40px, #000 calc(100% - 40px), transparent calc(100% - 6px));
+}
+.ui-chip {
+  flex: none;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ui-chip:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.ui-chip.active {
+  color: var(--text-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.ui-chips-arrow {
+  position: absolute;
+  top: 0;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  cursor: pointer;
+  z-index: 1;
+}
+.ui-chips-arrow:hover {
+  color: var(--text-strong);
+  border-color: var(--border-strong);
+}
+.ui-chips-arrow.left {
+  left: 0;
+}
+.ui-chips-arrow.right {
+  right: 0;
+}
+
 .ui-gradient-bar {
   position: relative;
   height: 18px;

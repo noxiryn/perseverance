@@ -186,11 +186,17 @@
   display: flex;
   flex-direction: column;
 }
+/* Chips, field, tabs and sliders: the part that stays visible (the field shrinks or hides to fit). */
+.fc-color-main {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+}
 .fc-chips2 {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 10px 6px;
+  padding: 8px 10px 4px;
 }
 .fc-chips2-stack {
   position: relative;
@@ -261,18 +267,22 @@
 .fc-color-picker {
   display: flex;
   justify-content: center;
-  padding: 2px 10px 6px;
+  padding: 0 10px 6px;
 }
 .fc-color-tabs {
-  padding: 2px 10px 4px;
+  padding: 4px 10px 2px;
   border-top: 1px solid var(--divider);
-  padding-top: 6px;
 }
 .fc-color-channels {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 4px 10px 10px;
+  gap: 3px;
+  padding: 3px 10px 8px;
+}
+.fc-recent {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
 }
 .fc-ch {
   display: grid;

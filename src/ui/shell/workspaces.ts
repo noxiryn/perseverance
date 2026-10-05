@@ -5,8 +5,12 @@
  *   { version, activeId, layouts: { [workspaceId]: WorkspaceLayout }, dockWidth }
  * Each workspace remembers its customized layout (tab moves, sizes, collapsed groups) until
  * "Reset Workspace". When a preset changes (new LAYOUT_VERSION), saved copies the user never
- * customized (same tabs and sizes as the old preset) are dropped so the new preset applies;
- * customized ones are kept as they are.
+ * customized (same tabs and sizes as the old preset, or as the old preset fitted to the window)
+ * are dropped so the new preset applies; customized ones are kept as they are.
+ *
+ * Short docks: a fresh layout is fitted to the window (fitLayoutToHeight: secondary groups start
+ * collapsed, the Layers group keeps ~4 rows), and expanding a collapsed group collapses another one
+ * when the three can't all get a usable height (accordion, see collapseForExpanded).
  */
 import { DEFAULT_WORKSPACE, useUI, type DockGroupState, type WorkspaceLayout } from '../../state/ui';
 import { useShell } from './shellStore';
@@ -22,14 +26,15 @@ const g = (slot: DockGroupState['slot'], tabs: string[], size: number, active = 
   collapsed,
 });
 
-/** Bump when a preset changes; add the old preset to LEGACY_PRESETS. */
-export const LAYOUT_VERSION = 2;
+/** Bump when a preset (or how fresh layouts are fitted) changes; add the old presets to LEGACY_PRESETS. */
+export const LAYOUT_VERSION = 3;
 
 export const WORKSPACE_PRESETS: WorkspaceLayout[] = [
   DEFAULT_WORKSPACE,
   {
-    // Browsing assets and looks first: Libraries/Looks get a tall group (≈520px at 1600×960),
+    // Browsing assets and looks first: Libraries/Looks get a tall group (≈560px at 1600×960),
     // Adjustments/Effects/Navigator wait collapsed in the middle (click a tab to open them).
+    // On shorter windows the fitted layout moves height to Layers so it keeps ~4 rows.
     id: 'gfx',
     name: 'GFX Artist',
     groups: [
@@ -75,7 +80,10 @@ export function workspacePreset(id: string): WorkspaceLayout | undefined {
   return WORKSPACE_PRESETS.find((w) => w.id === id);
 }
 
-/** Presets as shipped before LAYOUT_VERSION 2 (cramped Libraries/Looks), for migration. */
+/**
+ * Presets as shipped in older LAYOUT_VERSIONs, for migration: 1 = cramped Libraries/Looks;
+ * 2 = today's presets, fitted without the Layers rebalance (GFX Artist left Layers ~2 rows at 1366×768).
+ */
 export const LEGACY_PRESETS: Record<number, WorkspaceLayout[]> = {
   1: [
     {
@@ -109,6 +117,38 @@ export const LEGACY_PRESETS: Record<number, WorkspaceLayout[]> = {
       strip: ['navigator', 'swatches', 'color', 'character', 'fonts', 'brushes'],
     },
   ],
+  2: [
+    {
+      id: 'essentials',
+      name: 'Essentials',
+      groups: [g('top', ['libraries', 'looks'], 1.6), g('middle', ['swatches', 'color', 'navigator'], 0.8), g('bottom', ['layers', 'properties', 'history'], 1.4)],
+      strip: ['adjustments', 'effects', 'character', 'brushes', 'fonts', 'roblox'],
+    },
+    {
+      id: 'gfx',
+      name: 'GFX Artist',
+      groups: [g('top', ['libraries', 'looks'], 2.2), g('middle', ['adjustments', 'effects', 'navigator'], 0.8, 'adjustments', true), g('bottom', ['layers', 'properties', 'history'], 1.1)],
+      strip: ['swatches', 'color', 'character', 'brushes', 'fonts', 'roblox'],
+    },
+    {
+      id: 'roblox',
+      name: 'Roblox',
+      groups: [g('top', ['roblox', 'libraries'], 1.5), g('middle', ['looks', 'effects', 'adjustments'], 1.2), g('bottom', ['layers', 'properties', 'history'], 1.3)],
+      strip: ['navigator', 'swatches', 'color', 'character', 'fonts', 'brushes'],
+    },
+    {
+      id: 'typography',
+      name: 'Typography',
+      groups: [g('top', ['character', 'fonts'], 1.35), g('middle', ['effects', 'swatches', 'color'], 0.9), g('bottom', ['layers', 'properties', 'history'], 1.3)],
+      strip: ['navigator', 'libraries', 'looks', 'adjustments', 'brushes', 'roblox'],
+    },
+    {
+      id: 'painting',
+      name: 'Painting',
+      groups: [g('top', ['color', 'swatches'], 1), g('middle', ['brushes', 'navigator'], 1.1), g('bottom', ['layers', 'history', 'properties'], 1.3)],
+      strip: ['libraries', 'looks', 'adjustments', 'effects', 'character', 'fonts', 'roblox'],
+    },
+  ],
 };
 
 /**
@@ -131,15 +171,16 @@ export function isUncustomized(saved: WorkspaceLayout, preset: WorkspaceLayout):
 
 /**
  * Migrate saved layouts from an older LAYOUT_VERSION: uncustomized copies of a preset that has
- * changed since are dropped (the new preset is used); everything else is kept.
+ * changed since are dropped (the new preset is used); everything else is kept. `dockHeight` (the
+ * current window's) also recognizes copies that were fitted to the window when they were created.
  */
-export function migrateLayouts(layouts: Record<string, WorkspaceLayout>, fromVersion: number): Record<string, WorkspaceLayout> {
+export function migrateLayouts(layouts: Record<string, WorkspaceLayout>, fromVersion: number, dockHeight = 0): Record<string, WorkspaceLayout> {
   const out: Record<string, WorkspaceLayout> = {};
   for (const [id, layout] of Object.entries(layouts)) {
     let drop = false;
     for (let v = Math.max(1, fromVersion); v < LAYOUT_VERSION; v++) {
       const old = LEGACY_PRESETS[v]?.find((p) => p.id === id);
-      if (old && isUncustomized(layout, old)) drop = true;
+      if (old && (isUncustomized(layout, old) || (dockHeight > 0 && isUncustomized(layout, fitLayoutToHeight(old, dockHeight))))) drop = true;
     }
     if (!drop) out[id] = layout;
   }
@@ -185,7 +226,7 @@ interface Persisted {
 }
 
 /** Parse + sanitize + migrate the stored workspace state (pure; exported for tests). */
-export function parsePersisted(raw: string | null): Persisted | null {
+export function parsePersisted(raw: string | null, dockHeight = 0): Persisted | null {
   if (!raw) return null;
   try {
     const v = JSON.parse(raw) as Partial<Persisted>;
@@ -198,7 +239,7 @@ export function parsePersisted(raw: string | null): Persisted | null {
       }
     }
     const version = typeof v.version === 'number' && Number.isFinite(v.version) ? v.version : 1;
-    if (version < LAYOUT_VERSION) layouts = migrateLayouts(layouts, version);
+    if (version < LAYOUT_VERSION) layouts = migrateLayouts(layouts, version, dockHeight);
     return {
       version: LAYOUT_VERSION,
       activeId: typeof v.activeId === 'string' ? v.activeId : DEFAULT_WORKSPACE.id,
@@ -212,7 +253,7 @@ export function parsePersisted(raw: string | null): Persisted | null {
 
 function readPersisted(): Persisted | null {
   try {
-    return parsePersisted(localStorage.getItem(WORKSPACE_STORAGE_KEY));
+    return parsePersisted(localStorage.getItem(WORKSPACE_STORAGE_KEY), currentDockHeight());
   } catch {
     return null;
   }
@@ -235,37 +276,106 @@ function writePersisted() {
 /** Header height of a dock group and the body height below which a group feels cramped (CSS px). */
 const GROUP_HEAD_H = 30;
 const COMFORT_BODY_H = 220;
+/** Splitter between two shown groups (CSS px, see .shell-splitter). */
+const SPLITTER_H = 5;
+/**
+ * Body the group holding the Layers panel keeps in a fitted layout when the dock allows it: its
+ * header rows (filter, blend/opacity, locks, buttons ≈ 126px) plus about four 32px layer rows.
+ */
+export const LAYERS_MIN_BODY = 260;
 /** Collapse order when space is short: the middle group holds the secondary panels in every preset. */
 const COLLAPSE_ORDER: DockGroupState['slot'][] = ['middle', 'top', 'bottom'];
+
+const shownGroups = (l: WorkspaceLayout) => l.groups.filter((gr) => gr.tabs.length);
+const openGroups = (l: WorkspaceLayout) => shownGroups(l).filter((gr) => !gr.collapsed);
+
+/** Height the expanded groups share (heads included): the dock minus splitters and collapsed heads. */
+function openSpace(l: WorkspaceLayout, dockHeight: number): number {
+  const shown = shownGroups(l);
+  const collapsed = shown.length - openGroups(l).length;
+  return dockHeight - Math.max(0, shown.length - 1) * SPLITTER_H - collapsed * GROUP_HEAD_H;
+}
+
+/** True when every expanded group of `l` gets at least a comfortable body in a dock this tall. */
+export function layoutFits(l: WorkspaceLayout, dockHeight: number): boolean {
+  const open = openGroups(l).length;
+  return open === 0 || openSpace(l, dockHeight) / open - GROUP_HEAD_H >= COMFORT_BODY_H;
+}
+
+/** Collapse groups (in COLLAPSE_ORDER, skipping `keep`) until the rest fit; never below two expanded. */
+function collapseToFit(l: WorkspaceLayout, dockHeight: number, keep: ReadonlySet<string> = new Set()): boolean {
+  let changed = false;
+  for (const slot of COLLAPSE_ORDER) {
+    if (layoutFits(l, dockHeight) || openGroups(l).length <= 2) break;
+    if (keep.has(slot)) continue;
+    const gr = l.groups.find((x) => x.slot === slot && x.tabs.length && !x.collapsed);
+    if (gr) {
+      gr.collapsed = true;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
+ * Give the group holding Layers at least LAYERS_MIN_BODY (when the other expanded groups can keep a
+ * comfortable body): its size grows, the others shrink proportionally, the total stays the same.
+ * E.g. GFX Artist (Libraries 2.2 : Layers 1.1) at 1366×768 would leave Layers under two rows.
+ */
+function keepLayersRoom(l: WorkspaceLayout, dockHeight: number) {
+  const open = openGroups(l);
+  const lg = open.find((gr) => gr.tabs.includes('layers'));
+  if (!lg || open.length < 2) return;
+  const avail = openSpace(l, dockHeight);
+  const sum = open.reduce((a, gr) => a + gr.size, 0);
+  const have = (avail * lg.size) / sum;
+  const target = Math.min(GROUP_HEAD_H + LAYERS_MIN_BODY, avail - (open.length - 1) * (GROUP_HEAD_H + COMFORT_BODY_H));
+  if (!(target > have + 0.5)) return;
+  const newSize = (sum * target) / avail;
+  const scale = (sum - newSize) / (sum - lg.size);
+  const round = (x: number) => Math.round(x * 1000) / 1000;
+  for (const gr of open) gr.size = round(gr === lg ? newSize : gr.size * scale);
+}
 
 /**
  * A fresh copy of `preset` for a dock `dockHeight` CSS px tall: when the expanded groups can't each
  * get a comfortable body, groups are collapsed to their header (middle first, never below two
  * expanded groups) so the rest get real height — e.g. Essentials at 1366×768 opens with
  * Swatches/Color/Navigator collapsed and Libraries/Looks + Layers tall. The user expands a
- * collapsed group by clicking one of its tabs.
+ * collapsed group by clicking one of its tabs. Then the Layers group gets room for ~4 rows.
  */
 export function fitLayoutToHeight(preset: WorkspaceLayout, dockHeight: number): WorkspaceLayout {
   const layout = cloneLayout(preset);
   if (!Number.isFinite(dockHeight) || dockHeight <= 0) return layout;
-  const shown = layout.groups.filter((gr) => gr.tabs.length);
-  const splitters = Math.max(0, shown.length - 1) * 5;
-  const openCount = () => shown.filter((gr) => !gr.collapsed).length;
-  const comfortable = () => {
-    const open = openCount();
-    return open === 0 || (dockHeight - splitters - shown.length * GROUP_HEAD_H) / open >= COMFORT_BODY_H;
-  };
-  for (const slot of COLLAPSE_ORDER) {
-    if (comfortable() || openCount() <= 2) break;
-    const gr = shown.find((x) => x.slot === slot && !x.collapsed);
-    if (gr) gr.collapsed = true;
-  }
+  collapseToFit(layout, dockHeight);
+  keepLayersRoom(layout, dockHeight);
   return layout;
 }
 
-/** Estimated dock height for the current window (CSS px): window minus title + options bars. */
+/**
+ * Accordion for short docks: when a change expanded a collapsed group (tab click, Window menu,
+ * Expand button, a tab dropped onto it) and the expanded groups no longer each get a comfortable
+ * body, collapse another group (middle first, then top; never the one just opened) so the panel
+ * the user asked for gets real height instead of everything shrinking to slivers. Returns the
+ * adjusted layout, or null when nothing needs to change (also for workspace switches).
+ */
+export function collapseForExpanded(prev: WorkspaceLayout, next: WorkspaceLayout, dockHeight: number): WorkspaceLayout | null {
+  if (prev.id !== next.id || !Number.isFinite(dockHeight) || dockHeight <= 0) return null;
+  const opened = new Set<string>();
+  for (const gr of openGroups(next)) {
+    const before = prev.groups.find((x) => x.slot === gr.slot);
+    if (!before || before.collapsed || !before.tabs.length) opened.add(gr.slot);
+  }
+  if (!opened.size || layoutFits(next, dockHeight)) return null;
+  const layout = cloneLayout(next);
+  return collapseToFit(layout, dockHeight, opened) ? layout : null;
+}
+
+/** Dock height for the current window (CSS px): measured when the dock is shown, else estimated (window minus title + options bars). */
 function currentDockHeight(): number {
   if (typeof window === 'undefined') return 0;
+  const groups = typeof document !== 'undefined' ? document.querySelector<HTMLElement>('.shell-dock-groups') : null;
+  if (groups && groups.clientHeight > 0) return groups.clientHeight;
   return window.innerHeight / cssZoom() - 66;
 }
 
@@ -315,6 +425,11 @@ export function initWorkspacePersistence() {
     useUI.getState().setWorkspace(freshLayout(DEFAULT_WORKSPACE));
   }
   useUI.subscribe((s, prev) => {
+    if (s.workspace !== prev.workspace) {
+      const fitted = collapseForExpanded(prev.workspace, s.workspace, currentDockHeight());
+      // Re-entrant update: this subscriber runs again with the fitted layout (which opens nothing).
+      if (fitted) return void useUI.setState({ workspace: fitted });
+    }
     if (s.workspace !== prev.workspace || s.dockWidth !== prev.dockWidth) {
       persisted.activeId = s.workspace.id;
       persisted.layouts[s.workspace.id] = cloneLayout(s.workspace);

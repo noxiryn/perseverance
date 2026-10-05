@@ -50,12 +50,9 @@ export function gradientMapPixels(img: Pixels, gradient: Gradient, reverse: bool
       t8[k * 3 + 1] = lut[k * 4 + 1];
       t8[k * 3 + 2] = lut[k * 4 + 2];
     }
-    const u = readWords(img);
-    for (let q = 0, n = u.length; q < n; q++) {
-      const p = u[q];
-      if (p >>> 24 === 0) continue;
-      const k = (((p & 255) * 306 + ((p >> 8) & 255) * 601 + ((p >> 16) & 255) * 117) >> 8) * 3;
-      const i = q << 2;
+    for (let i = 0, n = d.length; i < n; i += 4) {
+      if (d[i + 3] === 0) continue;
+      const k = ((d[i] * 306 + d[i + 1] * 601 + d[i + 2] * 117) >> 8) * 3;
       d[i] = t8[k];
       d[i + 1] = t8[k + 1];
       d[i + 2] = t8[k + 2];
@@ -233,18 +230,12 @@ export function splitToningPixels(img: Pixels, p: ParamValues): Pixels {
   if (amount === 0) return img;
   const t = splitToningTable(str(p, 'shadowColor', '#1d6f8a'), str(p, 'highlightColor', '#f2a03d'), num(p, 'balance', 0), amount);
   const d = img.data;
-  const u = readWords(img);
-  for (let q = 0, n = u.length; q < n; q++) {
-    const p = u[q];
-    if (p >>> 24 === 0) continue;
-    const r = p & 255,
-      g = (p >> 8) & 255,
-      b = (p >> 16) & 255;
-    const k = ((r * 77 + g * 150 + b * 29 + 128) >> 8) * 3;
-    const i = q << 2;
-    d[i] = r + t[k];
-    d[i + 1] = g + t[k + 1];
-    d[i + 2] = b + t[k + 2];
+  for (let i = 0, n = d.length; i < n; i += 4) {
+    if (d[i + 3] === 0) continue;
+    const k = ((d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29 + 128) >> 8) * 3;
+    d[i] += t[k];
+    d[i + 1] += t[k + 1];
+    d[i + 2] += t[k + 2];
   }
   return img;
 }

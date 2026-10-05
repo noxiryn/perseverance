@@ -59,7 +59,7 @@ export function drawClamped(ctx: CanvasRenderingContext2D, img: HTMLCanvasElemen
  * Processed mask alpha for a region of output pixels at render `scale`. Returns a canvas of the
  * region's size (alpha = visibility, color white). Cached per mask bitmap/version/settings/region.
  */
-export function maskAlpha(mask: LayerMask, scale: number, region: PxRect, docW: number, docH: number): HTMLCanvasElement | null {
+export function maskAlpha(mask: LayerMask, scale: number, region: PxRect, docW: number, docH: number, opts?: { cachedOnly?: boolean }): HTMLCanvasElement | null {
   const bmp = bitmaps.tryGet(mask.bitmapId);
   if (!bmp) return null;
   const feather = Math.max(0, Number(mask.feather) || 0) * scale;
@@ -69,6 +69,8 @@ export function maskAlpha(mask: LayerMask, scale: number, region: PxRect, docW: 
   const sig = `${bitmaps.version(mask.bitmapId)}|${mask.inverted ? 1 : 0}|${density.toFixed(4)}|${feather.toFixed(3)}|${region.x},${region.y},${region.w},${region.h}|${docW}x${docH}`;
   const hit = slots.get<HTMLCanvasElement>(key, sig);
   if (hit) return hit;
+  // Only a cached result is wanted (the caller has a cheaper fallback).
+  if (opts?.cachedOnly) return null;
 
   const m = sigma > 0.05 ? Math.ceil(sigma * 3) + 1 : 0;
   const W = region.w + 2 * m;

@@ -21,11 +21,17 @@ export interface DigitChain {
   scope: string;
 }
 
-/** Digit of a key event ('0'…'9', main row or numpad), or null. */
+/**
+ * Digit of a key event ('0'…'9'), or null. The produced character wins (main row, numpad with
+ * NumLock on, other layouts); the physical main-row code is only a fallback so Shift+digit (key '#',
+ * '%'…) still sets Fill. Numpad keys that don't produce a digit (NumLock off: End, PageDown, Home,
+ * Insert…) are navigation keys, not digits.
+ */
 export function digitOf(e: Pick<KeyboardEvent, 'code' | 'key'>): string | null {
-  const m = /^(?:Digit|Numpad)([0-9])$/.exec(e.code ?? '');
-  if (m) return m[1];
-  return /^[0-9]$/.test(e.key ?? '') ? e.key : null;
+  const key = e.key ?? '';
+  if (/^[0-9]$/.test(key)) return key;
+  const m = /^Digit([0-9])$/.exec(e.code ?? '');
+  return m ? m[1] : null;
 }
 
 /**

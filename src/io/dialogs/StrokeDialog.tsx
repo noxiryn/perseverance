@@ -49,7 +49,7 @@ export function StrokeDialog({ close }: { close: (r?: StrokeSpec) => void }) {
     >
       <div className="io-form-grid">
         <span className="ui-label">Width</span>
-        <NumberField value={spec.width} min={1} max={250} unit="px" width={90} onChange={(v) => set('width', Math.round(v))} />
+        <NumberField value={spec.width} min={1} max={250} unit="px" width={90} onChange={(v) => set('width', Math.round(v))} autoFocus />
         <span className="ui-label">Color</span>
         <ColorField value={spec.color} onChange={(c) => set('color', c)} alpha showHex />
         <span className="ui-label">Location</span>

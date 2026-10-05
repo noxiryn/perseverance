@@ -8,7 +8,7 @@ import { createCanvas, ctx2d } from '../core/canvas';
 import { transformMatrix } from '../core/geometry';
 import { getLayerSize } from '../render/compositor';
 import { ensureDocumentFonts } from '../fonts/loader';
-import { activeSession, useEditor } from '../state/editor';
+import { activeSession, useEditor, type SavedState } from '../state/editor';
 import { toast } from '../state/ui';
 import { viewport } from '../editor/viewport';
 
@@ -178,15 +178,9 @@ export function renameDocSilently(docId: ID, name: string) {
   });
 }
 
-/** Mark the history entry `entryId` as the saved state (safe when edits happened during an async save). */
-export function markSavedAt(docId: ID, entryId: string) {
-  useEditor.setState((st) => {
-    const s = st.sessions[docId];
-    if (!s) return {};
-    const idx = s.history.entries.findIndex((e) => e.id === entryId);
-    const savedIndex = idx >= 0 ? idx : -1;
-    return { sessions: { ...st.sessions, [docId]: { ...s, savedIndex, dirty: savedIndex !== s.history.index } } };
-  });
+/** Mark the state a save wrote as saved (safe when edits happened during the async save; see SavedState). */
+export function markSavedAt(docId: ID, state: SavedState) {
+  useEditor.getState().markSaved(docId, state);
 }
 
 /** Mark a session as having unsaved changes (e.g. a recovered document). */

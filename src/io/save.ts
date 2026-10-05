@@ -41,8 +41,10 @@ export async function saveDocument(docId?: ID, opts: { saveAs?: boolean } = {}):
   // Save exactly the state that will be marked as saved: the current history step. (A live
   // preview — a drag or Free Transform not committed yet — is not part of it.) encodeProject
   // snapshots its pixels synchronously, so undo/redo or edits during the encode can't mix states.
-  const entryId = currentEntryId(s);
+  // The step is identified by its id AND its document: an edit coalesced into the same step during
+  // the encode (slider scrub, nudge) changes the document but not the id — then the tab stays dirty.
   const committed = s.history.entries[s.history.index]?.doc ?? s.doc;
+  const saved = { entryId: currentEntryId(s), doc: committed };
   try {
     const data = await encodeProject(committed);
     if (!opts.saveAs && s.filePath && isDesktop) {
@@ -58,7 +60,7 @@ export async function saveDocument(docId?: ID, opts: { saveAs?: boolean } = {}):
         written = false;
       }
       if (written) {
-        markSavedAt(id, entryId);
+        markSavedAt(id, saved);
         addRecentFile(s.filePath);
         void removeRecovery(id);
         toast(`Saved “${fileNameOf(s.filePath)}”`, 'success');
@@ -68,12 +70,13 @@ export async function saveDocument(docId?: ID, opts: { saveAs?: boolean } = {}):
     const defaultPath = s.filePath && isDesktop ? s.filePath : `${safeFileName(committed.name)}.pgfx`;
     const result = await saveFile({ title: 'Save As', defaultPath, filters: PROJECT_FILTERS, data });
     if (!result) return false; // cancelled
+    if (isDesktop) useEditor.getState().setFilePath(id, result, false);
+    // Before the silent rename: it gives every step a renamed copy of its document.
+    markSavedAt(id, saved);
     if (isDesktop) {
-      useEditor.getState().setFilePath(id, result, false);
       renameDocSilently(id, baseName(fileNameOf(result)));
       addRecentFile(result);
     }
-    markSavedAt(id, entryId);
     void removeRecovery(id);
     toast(isDesktop ? `Saved “${fileNameOf(result)}”` : `Downloaded “${result}”`, 'success');
     return true;

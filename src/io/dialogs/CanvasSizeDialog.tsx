@@ -114,6 +114,7 @@ export function CanvasSizeDialog({ close, doc }: { close: (r?: CanvasSizeResult)
       <div className="io-form-grid">
         <span className="ui-label">{relative ? 'Width (+/−)' : 'Width'}</span>
         <NumberField
+          autoFocus
           value={toShown(w, doc.width)}
           unit={unit}
           step={unit === 'px' ? 1 : 0.1}

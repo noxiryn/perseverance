@@ -163,7 +163,12 @@ export function ReplaceDialog({ close, layerId, mode }: ReplaceDialogProps & { c
           Your image is fitted into this layer’s box (aspect kept{character ? ', feet on the same spot' : ', centered'}){layer.transform.scaleX < 0 ? ', mirrored like it' : ''}
           {kept.length ? ` and keeps ${kept.length > 1 ? `${kept.slice(0, -1).join(', ')} and ${kept[kept.length - 1]}` : kept[0]}` : ''}. Undo with Ctrl+Z.
         </div>
-        <Checkbox checked={cutout} onChange={setCutout} label="Remove the background automatically (when the image has one)" />
+        <Checkbox
+          checked={cutout}
+          onChange={setCutout}
+          label="Remove the background automatically (when the image has one)"
+          title="Skipped when the automatic cut-out looks unreliable for the image (busy background, subject colors close to the background) — then use Roblox ▸ Remove Background… with its preview."
+        />
         <div className="roblox-replace-actions">
           <Button variant="primary" icon={ImageUp} disabled={busy} onClick={() => void pickFile()}>
             Choose Image…

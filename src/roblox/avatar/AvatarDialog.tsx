@@ -71,7 +71,8 @@ export function AvatarDialog({ close }: { close: (r?: unknown) => void }) {
         }
       }
       if (!activeDoc()) newTransparentDocument(`${result.name} Avatar`, 1024, 1024);
-      await placeImageBlob(result.blob, label);
+      // (the placeholder case was handled above — place as a new layer without asking again)
+      await placeImageBlob(result.blob, label, { claim: false });
       close(true);
     } catch (err) {
       console.error('Placing avatar failed', err);

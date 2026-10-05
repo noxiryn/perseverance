@@ -85,23 +85,43 @@ export function readWords(img: Pixels): Int32Array {
 }
 
 /**
- * Direct-mapped cache of per-color results (rgb → resulting rgb, both packed r | g << 8 | b << 16)
- * for the costlier adjustments whose output only depends on the pixel's color. Rendered
- * thumbnails reuse few colors (≈ 90k distinct colors in a 1080p render → ~95% hits), so most
- * pixels become one lookup. Usage (inline in the pixel loop, see color.ts): slot =
- * imul(rgb, 0x9e3779b1) >>> CACHE_SHIFT; on a miss, count it and switch the cache off when, after
- * CACHE_PROBE misses, there were fewer hits than misses (noisy images: plain computation, almost
- * no overhead). The arrays are pooled (adjustments run synchronously, never nested) and cleared
- * per call.
+ * Persistent per-color result memo for the costlier adjustments whose output only depends on the
+ * pixel's color (rgb → resulting rgb, both packed r | g << 8 | b << 16). Direct mapped, 2¹⁸
+ * slots (slot = imul(rgb, 0x9e3779b1) >>> MEMO_SHIFT), so a rendered thumbnail's ≈ 90k distinct
+ * colors mostly fit. A memo belongs to one filter + parameter set (`sig`) and survives between
+ * calls: re-rendering an unchanged adjustment layer (live painting below it, thumbnails, region
+ * updates) is almost only lookups; a parameter change starts a fresh memo. The few most recent
+ * memos are kept (LRU), so several adjustment layers don't evict each other.
  */
-export const CACHE_BITS = 16;
-export const CACHE_SHIFT = 32 - CACHE_BITS;
-export const CACHE_PROBE = 16384;
-let cachePool: { keys: Int32Array; vals: Int32Array } | null = null;
-export function colorCache(): { keys: Int32Array; vals: Int32Array } {
-  if (!cachePool) cachePool = { keys: new Int32Array(1 << CACHE_BITS), vals: new Int32Array(1 << CACHE_BITS) };
-  cachePool.keys.fill(-1);
-  return cachePool;
+export const MEMO_BITS = 18;
+export const MEMO_SHIFT = 32 - MEMO_BITS;
+const MEMO_MAX = 4;
+export interface ColorMemo {
+  sig: string;
+  /** rgb of the color cached in each slot (−1 = empty) */
+  keys: Int32Array;
+  /** its result */
+  vals: Int32Array;
+}
+const memos: ColorMemo[] = [];
+export function colorMemo(sig: string): ColorMemo {
+  for (let k = 0; k < memos.length; k++) {
+    const m = memos[k];
+    if (m.sig !== sig) continue;
+    if (k > 0) {
+      memos.splice(k, 1);
+      memos.unshift(m);
+    }
+    return m;
+  }
+  let m: ColorMemo;
+  if (memos.length >= MEMO_MAX) {
+    m = memos.pop()!;
+    m.sig = sig;
+    m.keys.fill(-1);
+  } else m = { sig, keys: new Int32Array(1 << MEMO_BITS).fill(-1), vals: new Int32Array(1 << MEMO_BITS) };
+  memos.unshift(m);
+  return m;
 }
 
 /** A LUT as plain bytes, rounded/clamped exactly like a byte store of each entry. */

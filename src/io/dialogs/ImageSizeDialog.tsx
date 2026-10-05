@@ -88,6 +88,7 @@ export function ImageSizeDialog({ close, doc }: { close: (r?: ImageSizeResult) =
       <div className="io-form-grid" style={{ gridTemplateColumns: '96px 1fr auto' }}>
         <span className="ui-label">Width</span>
         <NumberField
+          autoFocus
           value={shown(w, doc.width)}
           min={unit === 'px' ? 1 : 0.1}
           step={unit === 'px' ? 1 : 0.1}

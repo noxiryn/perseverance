@@ -3,12 +3,12 @@
  * ColorPicker, HSB / RGB channel sliders with live tracks, HEX tab, harmonies (clickable) and
  * WCAG contrast against white/black.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ArrowLeftRight, Copy, RotateCcw, SquarePlus } from 'lucide-react';
 import { hsvToRgb, parseColor, rgbToHsl, rgbToHsv, toHex } from '../core/color';
 import { useEditor } from '../state/editor';
 import { toast } from '../state/ui';
-import { ColorPicker, IconButton, NumberField, Section, Select, Tabs, showContextMenu } from '../ui/controls';
+import { ColorPicker, ColorSwatch, IconButton, NumberField, Section, Select, Tabs, showContextMenu } from '../ui/controls';
 import { contrastRatio, describeColor, harmony, HARMONIES, normalizeHex, opaqueHex, wcagLevel, type HarmonyKind } from './colorMath';
 import { MY_SWATCHES_ID, useUserPalettes } from './userPalettes';
 import './presets.css';
@@ -37,6 +37,22 @@ function writeLS(k: string, v: string) {
 
 /** Shared edit target so the toolbar fg/bg and this panel agree within a session. */
 let lastTarget: Target = 'primary';
+
+/** Color field height limits (px) and the gap above it inside the picker. */
+const FIELD_MIN = 48;
+const FIELD_MAX = 180;
+const PICKER_CHROME = 6 + 12 + 6; // gap, hue strip, wrapper padding
+
+/**
+ * Height of the color field for a panel `panelH` px tall whose other always-visible rows (chips,
+ * tabs, channel sliders, picker chrome) take `rest` px: it fills the room up to FIELD_MAX, and is
+ * left out (0 — field and hue strip hidden, the sliders do the job) when less than FIELD_MIN is
+ * left, so the sliders never scroll out of a short dock group.
+ */
+export function colorFieldHeight(panelH: number, rest: number): number {
+  const room = Math.floor(panelH - rest - PICKER_CHROME);
+  return room >= FIELD_MIN ? Math.min(FIELD_MAX, room) : 0;
+}
 
 function hsvHex(h: number, s: number, v: number) {
   const [r, g, b] = hsvToRgb(h, s, v);
@@ -212,80 +228,127 @@ export function ColorPanel() {
 
   const rgb = parseColor(color);
   const [h, s, v] = hsv;
+  const recent = useEditor((st) => st.recentColors);
+
+  /* Fit the color field to the panel height (dock group / flyout) so the sliders stay visible. */
+  const rootRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLDivElement>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const [fieldH, setFieldH] = useState(150);
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const main = mainRef.current;
+    if (!root || !main) return;
+    let raf = 0;
+    const fit = () => {
+      const picker = pickerRef.current;
+      const rest = main.offsetHeight - (picker?.offsetHeight ?? 0);
+      const next = colorFieldHeight(root.clientHeight, rest);
+      setFieldH((cur) => (Math.abs(cur - next) > 1 ? next : cur));
+    };
+    fit();
+    if (typeof ResizeObserver === 'undefined') return;
+    // Deferred to the next frame: resizing inside the observer callback would loop.
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(fit);
+    });
+    ro.observe(root);
+    ro.observe(main);
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  }, []);
 
   return (
-    <div className="fc-color">
-      <ColorChips primary={primary} secondary={secondary} target={target} onTarget={setTarget} />
+    <div className="fc-color" ref={rootRef}>
+      {/* Always-visible part: chips, color field (sized to fit), mode tabs, channel sliders. */}
+      <div className="fc-color-main" ref={mainRef}>
+        <ColorChips primary={primary} secondary={secondary} target={target} onTarget={setTarget} />
 
-      <div className="fc-color-picker">
-        <ColorPicker value={color} onChange={emitHex} onCommit={(c) => commit(c)} />
-      </div>
-
-      <div className="fc-color-tabs">
-        <Tabs
-          value={mode}
-          onChange={setMode}
-          tabs={[
-            { value: 'hsb', label: 'HSB' },
-            { value: 'rgb', label: 'RGB' },
-            { value: 'hex', label: 'HEX' },
-          ]}
-        />
-      </div>
-
-      <div className="fc-color-channels">
-        {mode === 'hsb' && (
-          <>
-            <ChannelSlider
-              label="H"
-              value={Math.round(h)}
-              max={360}
-              unit="°"
-              track="linear-gradient(to right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)"
-              onChange={(x) => emitHsv(x, s, v)}
-              onCommit={() => commit()}
-            />
-            <ChannelSlider
-              label="S"
-              value={Math.round(s * 100)}
-              max={100}
-              unit="%"
-              track={`linear-gradient(to right, ${hsvHex(h, 0, v)}, ${hsvHex(h, 1, v)})`}
-              onChange={(x) => emitHsv(h, x / 100, v)}
-              onCommit={() => commit()}
-            />
-            <ChannelSlider
-              label="B"
-              value={Math.round(v * 100)}
-              max={100}
-              unit="%"
-              track={`linear-gradient(to right, #000, ${hsvHex(h, s, 1)})`}
-              onChange={(x) => emitHsv(h, s, x / 100)}
-              onCommit={() => commit()}
-            />
-          </>
+        {fieldH > 0 && (
+          <div className="fc-color-picker" ref={pickerRef}>
+            <ColorPicker value={color} onChange={emitHex} onCommit={(c) => commit(c)} variant="panel" svHeight={fieldH} />
+          </div>
         )}
-        {mode === 'rgb' && (
-          <>
-            {(['r', 'g', 'b'] as const).map((ch) => {
-              const lo = { ...rgb, [ch]: 0 };
-              const hi = { ...rgb, [ch]: 255 };
-              return (
-                <ChannelSlider
-                  key={ch}
-                  label={ch.toUpperCase()}
-                  value={Math.round(rgb[ch])}
-                  max={255}
-                  track={`linear-gradient(to right, ${toHex(lo)}, ${toHex(hi)})`}
-                  onChange={(x) => emitHex(toHex({ ...rgb, a: 1, [ch]: x }))}
-                  onCommit={() => commit()}
-                />
-              );
-            })}
-          </>
-        )}
-        {mode === 'hex' && <HexTab color={color} onColor={(c) => (emitHex(c), commit(c))} />}
+
+        <div className="fc-color-tabs">
+          <Tabs
+            value={mode}
+            onChange={setMode}
+            tabs={[
+              { value: 'hsb', label: 'HSB' },
+              { value: 'rgb', label: 'RGB' },
+              { value: 'hex', label: 'HEX' },
+            ]}
+          />
+        </div>
+
+        <div className="fc-color-channels">
+          {mode === 'hsb' && (
+            <>
+              <ChannelSlider
+                label="H"
+                value={Math.round(h)}
+                max={360}
+                unit="°"
+                track="linear-gradient(to right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)"
+                onChange={(x) => emitHsv(x, s, v)}
+                onCommit={() => commit()}
+              />
+              <ChannelSlider
+                label="S"
+                value={Math.round(s * 100)}
+                max={100}
+                unit="%"
+                track={`linear-gradient(to right, ${hsvHex(h, 0, v)}, ${hsvHex(h, 1, v)})`}
+                onChange={(x) => emitHsv(h, x / 100, v)}
+                onCommit={() => commit()}
+              />
+              <ChannelSlider
+                label="B"
+                value={Math.round(v * 100)}
+                max={100}
+                unit="%"
+                track={`linear-gradient(to right, #000, ${hsvHex(h, s, 1)})`}
+                onChange={(x) => emitHsv(h, s, x / 100)}
+                onCommit={() => commit()}
+              />
+            </>
+          )}
+          {mode === 'rgb' && (
+            <>
+              {(['r', 'g', 'b'] as const).map((ch) => {
+                const lo = { ...rgb, [ch]: 0 };
+                const hi = { ...rgb, [ch]: 255 };
+                return (
+                  <ChannelSlider
+                    key={ch}
+                    label={ch.toUpperCase()}
+                    value={Math.round(rgb[ch])}
+                    max={255}
+                    track={`linear-gradient(to right, ${toHex(lo)}, ${toHex(hi)})`}
+                    onChange={(x) => emitHex(toHex({ ...rgb, a: 1, [ch]: x }))}
+                    onCommit={() => commit()}
+                  />
+                );
+              })}
+            </>
+          )}
+          {mode === 'hex' && <HexTab color={color} onColor={(c) => (emitHex(c), commit(c))} />}
+        </div>
       </div>
+
+      {recent.length > 0 && (
+        <Section title="Recent">
+          <div className="fc-recent">
+            {recent.slice(0, 16).map((c) => (
+              <ColorSwatch key={c} color={c} size={16} title={`${c} — click: edit color`} onClick={() => (emitHex(c), commit(c))} />
+            ))}
+          </div>
+        </Section>
+      )}
 
       <Section
         title="Harmonies"

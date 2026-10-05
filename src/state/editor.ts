@@ -60,7 +60,13 @@ export interface EditorState {
   closeDocument(id: ID): void;
   setActiveDoc(id: ID): void;
   setFilePath(id: ID, path: string | null, markSaved?: boolean): void;
-  markSaved(id?: ID): void;
+  /**
+   * Mark a document as saved. Without `at`, the current history step is the saved state. With `at`
+   * (the step and document a save actually wrote), that step becomes the saved state only if it
+   * still holds exactly that document — a later edit coalesced into it, or the step having been
+   * dropped, leaves the tab dirty.
+   */
+  markSaved(id?: ID, at?: SavedState): void;
 
   /* ---- history ---- */
   commit(label: string, recipe?: Recipe, opts?: CommitOptions): void;
@@ -93,6 +99,22 @@ export interface EditorState {
   swapColors(): void;
   resetColors(): void;
   pushRecentColor(c: string): void;
+}
+
+/** A document state a save wrote: the history step it was taken from and that step's document. */
+export interface SavedState {
+  entryId: string;
+  doc: Document;
+}
+
+/**
+ * History index of the state a save wrote, or -1 when no step holds it any more. Entry ids alone are
+ * not enough: a coalescing edit (nudge, slider scrub) replaces a step's document but keeps its id.
+ * (Pixel edits never coalesce, so id + document identifies the pixels too.)
+ */
+export function savedIndexOf(entries: readonly HistoryEntry[], at: SavedState): number {
+  const idx = entries.findIndex((e) => e.id === at.entryId);
+  return idx >= 0 && entries[idx].doc === at.doc ? idx : -1;
 }
 
 function newEntry(label: string, doc: Document, patches?: BitmapPatch[]): HistoryEntry {
@@ -312,12 +334,13 @@ export const useEditor = create<EditorState>()((set, get) => {
       });
     },
 
-    markSaved(id) {
+    markSaved(id, at) {
       const docId = id ?? get().activeDocId;
       if (!docId) return;
       const s = get().sessions[docId];
       if (!s) return;
-      set({ sessions: { ...get().sessions, [docId]: { ...s, dirty: false, savedIndex: s.history.index } } });
+      const savedIndex = at ? savedIndexOf(s.history.entries, at) : s.history.index;
+      set({ sessions: { ...get().sessions, [docId]: { ...s, savedIndex, dirty: savedIndex !== s.history.index } } });
     },
 
     commit(label, recipe, opts = {}) {
@@ -338,9 +361,12 @@ export const useEditor = create<EditorState>()((set, get) => {
       // idle pass, after a short guard: the gesture may still be reading its pixels.)
       const dropped: HistoryEntry[] = s.history.entries.slice(s.history.index + 1);
       const last = entries[entries.length - 1];
+      // Never coalesce into the saved step: the file holds that step's state, so changing it in place
+      // would leave the tab clean with the change missing from the file.
       if (
         opts.coalesce &&
         entries.length > 1 &&
+        s.savedIndex !== s.history.index &&
         last.label === label &&
         Date.now() - last.timestamp < 1000 &&
         !last.patches?.length &&
@@ -351,12 +377,14 @@ export const useEditor = create<EditorState>()((set, get) => {
       } else {
         entries.push(newEntry(label, doc, opts.patches));
       }
-      let savedIndex = s.savedIndex;
+      // A saved step in the discarded redo branch is gone: no step matches the file any more (a new
+      // step pushed at its old index must not count as saved).
+      let savedIndex = s.savedIndex > s.history.index ? -1 : s.savedIndex;
       if (entries.length > HISTORY_LIMIT) {
         const drop = entries.length - HISTORY_LIMIT;
         dropped.push(...entries.slice(0, drop));
         entries = entries.slice(drop);
-        savedIndex -= drop;
+        savedIndex = savedIndex >= drop ? savedIndex - drop : -1;
       }
       const index = entries.length - 1;
       const next: DocSession = {

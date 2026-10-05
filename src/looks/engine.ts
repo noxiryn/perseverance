@@ -12,7 +12,9 @@
  *    adjustments → adjustment layers; both live in a pass-through group "Look: <name>" at the top
  *    of the document (meta {lookId, lookLayerIds}). Atmosphere overlays marked
  *    `placement: 'behind'` (smoke, rays, fog, bokeh…) go into a second look group directly BELOW
- *    the target instead, so the character stands in front of them (as in the templates).
+ *    the target instead, so the character stands in front of them (as in the templates) — unless
+ *    the target still has an opaque background (never cut out) or is a fill layer, which would
+ *    hide them: then they stay on top and the toast says why.
  *  - overlays whose asset is already in the document (e.g. a template's own film scratches) and
  *    adjustments whose filter is already an adjustment layer (the template's Contrast) are
  *    skipped instead of being doubled; a vignette asset and a vignette adjustment count as the same.
@@ -43,7 +45,7 @@ import { resolveParams } from '../filters/engine';
 import { uid } from '../core/ids';
 import { createOverlayMask, type OverlayMaskSpec } from './masks';
 import { adoptTemplateStylingDraft, restoreCharacterStylingDraft, restylesCharacter, takeCharacterStylingDraft, type ReplacedStyling } from './characterStyling';
-import { prepareCutoutBake } from '../roblox/character/cutout';
+import { cutoutState, prepareCutoutBake } from '../roblox/character/cutout';
 
 /** Key under `layer.meta` holding the look applied to that layer. */
 export const LOOK_META_KEY = 'look';
@@ -112,6 +114,11 @@ export interface BuiltLook {
   groupLayers: Layer[];
   /** Overlays placed directly below the target (bottom → top); empty without a target. */
   behindLayers?: Layer[];
+  /**
+   * Names of 'behind' overlays kept in the top group because the target still shows an opaque
+   * background (a screenshot that was never cut out would hide them completely).
+   */
+  behindOnTop?: string[];
   /** Names of overlays / adjustments left out because they are already in the document. */
   duplicates?: string[];
   /** The target's filters restyle the character (they replace the template / Styler treatment). */
@@ -132,6 +139,16 @@ export interface BuildLookOptions {
    * filters go on it; the others become filter adjustment layers.
    */
   documentWide?: boolean;
+  /**
+   * Whether a target layer still shows an opaque background that would hide overlays placed
+   * behind it (default: a raster layer whose pixels were never cut out, see cutoutState).
+   */
+  hidesBehind?: (layer: Layer) => boolean;
+}
+
+/** Default `hidesBehind`: a fill layer, or a raster layer with an opaque, unmasked background. */
+export function targetHidesBehind(layer: Layer): boolean {
+  return layer.type === 'fill' || (layer.type === 'raster' && cutoutState(layer) === 'background');
 }
 
 export interface TargetCaps {
@@ -302,7 +319,7 @@ export function buildLook(
 ): BuiltLook {
   const target = targetId ? (doc.layers[targetId] ?? null) : null;
   const caps = targetCaps(target);
-  const out: BuiltLook = { lookId: look.id, lookName: look.name, filters: [], effects: [], groupLayers: [], behindLayers: [], duplicates: [], skipped: [], targetSkipped: [] };
+  const out: BuiltLook = { lookId: look.id, lookName: look.name, filters: [], effects: [], groupLayers: [], behindLayers: [], behindOnTop: [], duplicates: [], skipped: [], targetSkipped: [] };
   const existing = opts.skipExisting === false ? new Set<string>() : existingLookParts(doc);
   const behind: Layer[] = [];
   const converted: Layer[] = [];
@@ -359,6 +376,7 @@ export function buildLook(
     out.effects.push({ id: uid('lfx_'), effectId: def.id, enabled: true, params: resolveParams(def, le.params) });
   }
 
+  let hidden: boolean | undefined;
   for (const o of (look as ExtLookDef).overlays ?? []) {
     if (existing.has(lookPartKey('asset', o.assetId))) {
       duplicate(o.name ?? o.assetId, `overlay "${o.assetId}"`);
@@ -381,9 +399,13 @@ export function buildLook(
       const m = createOverlayMask(o.mask, doc.width, doc.height, opts.maskScale ?? 1);
       if (m) layer.mask = m.mask;
     }
-    // Behind a canvas-covering fill layer the atmosphere would be hidden: keep it on top then.
-    if (o.placement === 'behind' && target && target.type !== 'fill') behind.push(layer);
-    else overlays.push(layer);
+    // Behind a fill layer or a target that still has its opaque background (never cut out) the
+    // atmosphere would be hidden completely: keep it on top then.
+    if (o.placement === 'behind' && target) {
+      hidden ??= (opts.hidesBehind ?? targetHidesBehind)(target);
+      if (!hidden) behind.push(layer);
+      else (overlays.push(layer), out.behindOnTop!.push(layer.name));
+    } else overlays.push(layer);
   }
 
   for (const a of (look as ExtLookDef).adjustments ?? []) {
@@ -564,11 +586,11 @@ export function resolveTarget(doc: Document, requested: ID | null): ResolvedTarg
     const ch = characterInGroup(doc, requested);
     const c = ch ? doc.layers[ch] : null;
     if (c) {
-      if (c.locks.all) return { targetId: ch, blocked: `“${c.name}” is locked. Unlock it or switch the Looks target to Whole document.` };
+      if (c.locks.all) return { targetId: ch, blocked: `“${c.name}” is locked. Unlock it or switch the Looks target to Document.` };
       return { targetId: ch, note: `inside group “${l.name}”` };
     }
   }
-  if (l.locks.all) return { targetId: requested, blocked: `“${l.name}” is locked. Unlock it or switch the Looks target to Whole document.` };
+  if (l.locks.all) return { targetId: requested, blocked: `“${l.name}” is locked. Unlock it or switch the Looks target to Document.` };
   return { targetId: requested };
 }
 
@@ -584,7 +606,7 @@ export function describeTargetSkips(built: BuiltLook, target: Layer | null | und
   if (!names.length) return '';
   const list = listNames(names);
   const many = new Set(names).size > 1;
-  if (!target) return `${list} ${many ? 'need' : 'needs'} a layer: choose “Active layer” and select your character to include ${many ? 'them' : 'it'}`;
+  if (!target) return `${list} ${many ? 'need' : 'needs'} a layer: choose “Layer” in Looks and select your character to include ${many ? 'them' : 'it'}`;
   if (target.type === 'group') return `${list} skipped: groups can’t hold smart filters — select the character layer itself`;
   return `${list} skipped: a ${target.type} layer can’t hold ${many ? 'them' : 'it'}`;
 }
@@ -642,6 +664,9 @@ export async function applyLook(lookId: string, targetLayerId: ID | null): Promi
     skips,
     duplicates.length ? `${listNames(duplicates)} ${duplicates.length > 1 ? 'were' : 'was'} already in the document (not doubled)` : '',
     bake ? 'the Remove Background mask was applied first' : '',
+    built.behindOnTop?.length && target
+      ? `${listNames(built.behindOnTop)} went on top: “${target.name}” still has its background (remove it with Roblox ▸ Remove Background… to put atmosphere behind the character)`
+      : '',
   ].filter(Boolean);
   toast(
     `Applied look “${look.name}”${where}${shownNote ? ` (${shownNote})` : ''}.${extra.length ? ` ${extra.join('; ')}.` : ''}`,

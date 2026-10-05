@@ -1755,14 +1755,18 @@ body.shell-resizing-row .shell-splitter.active::after {
   flex-direction: column;
   gap: 24px;
 }
+/* The actions move to their own row when the brand would get narrower than its 300px basis
+   (narrow canvas area: small windows, wide dock, UI scale), instead of squeezing the tagline. */
 .shell-start-hero {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 18px;
+  column-gap: 18px;
+  row-gap: 16px;
 }
 .shell-start-brand {
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 300px;
+  min-width: 200px;
 }
 .shell-start-brand h1 {
   margin: 0;
@@ -1780,8 +1784,10 @@ body.shell-resizing-row .shell-splitter.active::after {
 }
 .shell-start-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  flex: none;
+  flex: 0 1 auto;
+  max-width: 100%;
 }
 .ui-btn.shell-start-btn {
   height: 32px;

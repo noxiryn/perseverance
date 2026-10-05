@@ -2,8 +2,9 @@
  * Help ▸ "Make your first Roblox thumbnail" — interactive step-by-step guide.
  *
  * Running a step's action closes the guide so the user can do the step; reopening it (title-bar
- * lightbulb, Help menu, start screen) resumes at the next step. The current step is remembered in
- * localStorage; "Done" starts over next time.
+ * lightbulb, Help menu) resumes at the next step. The current step is remembered in localStorage;
+ * "Done" starts over next time. With no document open, a remembered step that needs a canvas starts
+ * over at step 1, and the start screen's "Make a Roblox thumbnail" always starts at step 1.
  */
 import { useState, type ComponentType } from 'react';
 import {
@@ -27,7 +28,7 @@ import {
 import { Button, Dialog } from '../../controls';
 import { commands, runCommand } from '../../../registry';
 import { useEditor } from '../../../state/editor';
-import { toast } from '../../../state/ui';
+import { openDialog, toast, useUI } from '../../../state/ui';
 import { createBlankDocument } from '../documents';
 import { revealPanel } from '../workspaces';
 import { Keys } from '../Keys';
@@ -48,6 +49,8 @@ interface Step {
   tip?: { text: string; keys?: string };
   /** First action is the primary one. */
   actions?: StepAction[];
+  /** Only makes sense with a canvas open (resuming here without a document starts over). */
+  needsDoc?: boolean;
 }
 
 const has = (id: string) => commands.has(id);
@@ -81,6 +84,7 @@ export const TIPS_STEPS: Step[] = [
   },
   {
     title: 'Cut out & style the character',
+    needsDoc: true,
     icon: Scissors,
     body: 'Render or screenshot on a solid backdrop? Remove Background cuts it out (auto, color key or green screen). Then the Character Styler adds rim light, toon shading, an outline and a top shade in one place.',
     actions: [
@@ -90,18 +94,21 @@ export const TIPS_STEPS: Step[] = [
   },
   {
     title: 'Build the background',
+    needsDoc: true,
     icon: ImageIcon,
     body: 'Use the Libraries panel for smoke, sunburst rays, paper textures, newspaper clippings and torn borders. Every asset is procedural — tweak its parameters any time from the Properties panel.',
     actions: [{ label: 'Show Libraries', icon: ImageIcon, run: () => showPanel('libraries') }],
   },
   {
     title: 'Give it a look',
+    needsDoc: true,
     icon: Sparkles,
     body: 'One-click Looks combine gradient maps, halftone, grain and overlays into a cohesive style — Crimson Film, Noir Newspaper, Sunburst Halftone, Gothic Paper and more. Select your character layer first to stylize it.',
     actions: [{ label: 'Show Looks', icon: Sparkles, run: () => showPanel('looks') }],
   },
   {
     title: 'Add a bold title',
+    needsDoc: true,
     icon: Type,
     body: 'Press T and click on the canvas. Condensed fonts like Anton or Bebas Neue read well at small sizes; blackletter fonts give the gothic poster vibe. Add a stroke or drop shadow from the Effects panel.',
     tip: { text: 'Type tool', keys: 'T' },
@@ -109,6 +116,7 @@ export const TIPS_STEPS: Step[] = [
   },
   {
     title: 'Check it at real size',
+    needsDoc: true,
     icon: Eye,
     body: 'Thumbnails are often seen tiny. Preview your design on mock Roblox game cards (dark and light) and turn on safe zones so important details are not cropped.',
     actions: [
@@ -125,6 +133,7 @@ export const TIPS_STEPS: Step[] = [
   },
   {
     title: 'Organize & export',
+    needsDoc: true,
     icon: Download,
     body: 'Keep layers named and grouped (Ctrl+G) so you can reuse the file. Export a PNG at 1920×1080 with File ▸ Export As, and save the .pgfx project to edit later.',
     tip: { text: 'Export As', keys: 'Alt+Shift+Ctrl+W' },
@@ -145,12 +154,25 @@ export function stepAfterAction(i: number, count: number): number {
   return Math.min(i + 1, count - 1);
 }
 
-function readStep(): number {
+/**
+ * Step the guide opens at: the remembered one, except that a step needing a canvas starts over
+ * when no document is open (there is nothing to cut out, style or export yet), and `restart`
+ * (start screen) always begins at the first step.
+ */
+export function initialStep(raw: unknown, steps: readonly { needsDoc?: boolean }[], hasDoc: boolean, restart = false): number {
+  if (restart) return 0;
+  const saved = resumeStep(raw, steps.length);
+  return !hasDoc && steps[saved]?.needsDoc ? 0 : saved;
+}
+
+function readStep(restart: boolean): number {
+  let raw: string | null = null;
   try {
-    return resumeStep(localStorage.getItem(TIPS_STEP_KEY), TIPS_STEPS.length);
+    raw = localStorage.getItem(TIPS_STEP_KEY);
   } catch {
-    return 0;
+    /* storage unavailable */
   }
+  return initialStep(raw, TIPS_STEPS, needDoc(), restart);
 }
 
 function writeStep(i: number) {
@@ -161,8 +183,18 @@ function writeStep(i: number) {
   }
 }
 
-export function TipsDialog({ close }: { close: (r?: unknown) => void }) {
-  const [i, setIState] = useState(readStep);
+/** Open the guide once (re-opening while it is open does nothing). `restart` begins at step 1. */
+export function openTipsGuide(opts: { restart?: boolean } = {}) {
+  if (useUI.getState().dialogs.some((d) => d.component === (TipsDialog as unknown))) return;
+  void openDialog(TipsDialog, { restart: !!opts.restart });
+}
+
+export function TipsDialog({ close, restart = false }: { close: (r?: unknown) => void; restart?: boolean }) {
+  const [i, setIState] = useState(() => {
+    const n = readStep(restart);
+    if (restart) writeStep(n);
+    return n;
+  });
   const setI = (n: number) => {
     setIState(n);
     writeStep(n);

@@ -54,16 +54,25 @@ export function focusableIn(root: HTMLElement): HTMLElement[] {
 
 /**
  * Where focus goes when a dialog opens: an element that already took focus itself (autoFocus),
- * then an explicit [data-autofocus], the first text field, the primary footer button, any
- * focusable element, and finally the dialog frame itself.
+ * then an explicit [data-autofocus], the first text field, the enabled primary footer button, and
+ * otherwise the dialog frame itself. Number fields (NumberField, type=number)
+ * don't count as text fields here: focused, ArrowUp/Down and digits would change a value the user
+ * never picked (a Pose Studio joint angle, a filter amount). A dialog whose main input is a number
+ * opts in with `<NumberField autoFocus>` (data-autofocus).
  */
+export function isNumberEntry(el: Element): boolean {
+  return !!el.closest('.ui-num') || (el instanceof HTMLInputElement && el.type === 'number');
+}
+
 function initialFocusTarget(root: HTMLElement): HTMLElement {
-  const pick = (sel: string) => [...root.querySelectorAll<HTMLElement>(sel)].find((el) => el.tabIndex >= 0 && isShown(el));
+  const pick = (sel: string, skip?: (el: HTMLElement) => boolean) =>
+    [...root.querySelectorAll<HTMLElement>(sel)].find((el) => el.tabIndex >= 0 && isShown(el) && !skip?.(el));
   return (
     pick('[data-autofocus], [autofocus]') ??
-    pick(TEXT_ENTRY) ??
+    pick(TEXT_ENTRY, isNumberEntry) ??
     pick('.ui-dialog-foot .ui-btn.primary:not([disabled])') ??
-    focusableIn(root).find((el) => !el.closest('.ui-dialog-head')) ??
+    // Otherwise the frame itself (Escape / Enter work, Tab enters the controls): not an arbitrary
+    // control such as a camera-angle button or a dropdown that keys would operate by accident.
     root
   );
 }
@@ -82,8 +91,8 @@ const inFloatingUi = (el: Element | null) => !!el?.closest('.ui-popover, .ui-men
  * Enter first blurs a focused text field so its typed value is committed before onSubmit runs.
  * A click on the backdrop calls onClose too (unless the dialog was opened with closeOnBackdrop:false).
  *
- * Focus: on open, focus moves into the dialog (an autoFocus element, else the first text field,
- * else the primary button, else the frame); Tab / Shift+Tab wrap inside the topmost dialog so
+ * Focus: on open, focus moves into the dialog (an autoFocus element, else the first text field —
+ * number fields only with `autoFocus` — else the primary button, else the frame); Tab / Shift+Tab wrap inside the topmost dialog so
  * nothing behind the backdrop can be reached; on close, focus returns to where it was.
  */
 export function Dialog({

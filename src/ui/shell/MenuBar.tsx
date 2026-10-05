@@ -155,6 +155,26 @@ export function placeMenu(
   return { left, top, maxHeight: Math.max(40, viewport.height - top - MENU_MARGIN) };
 }
 
+/**
+ * Scroll a menu item into its (scrollable) menu, keeping the menu padding visible around it. Used for
+ * keyboard navigation of tall menus that scroll; hover never scrolls (the pointer is already on it).
+ */
+export function revealMenuItem(el: HTMLElement) {
+  const menu = el.offsetParent instanceof HTMLElement ? el.offsetParent : el.parentElement;
+  if (!menu || menu.scrollHeight <= menu.clientHeight + 1) return;
+  const next = menuScrollFor(menu.scrollTop, menu.clientHeight, el.offsetTop, el.offsetHeight);
+  if (next !== menu.scrollTop) menu.scrollTop = next;
+}
+
+/** scrollTop that brings [itemTop, itemTop+itemHeight] fully into view with the least movement. */
+export function menuScrollFor(scrollTop: number, viewH: number, itemTop: number, itemH: number, pad = 4): number {
+  const top = itemTop - pad;
+  const bottom = itemTop + itemH + pad;
+  if (top < scrollTop) return Math.max(0, top);
+  if (bottom > scrollTop + viewH) return Math.max(0, bottom - viewH);
+  return scrollTop;
+}
+
 function MenuLevel({ rows, x, y, flipX, hl, openChild, level, onHover, onActivate, itemRef, guard }: LevelProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number; maxHeight?: number; ready: boolean }>({ left: x, top: y, ready: false });
@@ -238,6 +258,8 @@ function MenuDropdown({ rows, anchor, keyboard, onClose, onNavigate }: DropdownP
   const [, force] = useState(0);
   const forced = useRef('');
   const guard = useRef<PointerGuard>({ openedAt: performance.now(), armed: null }).current;
+  /** Set by keyboard navigation: reveal the new highlight once it has rendered. */
+  const revealHl = useRef(false);
 
   const levelRows = useCallback(
     (level: number): Row[] | null => {
@@ -297,6 +319,8 @@ function MenuDropdown({ rows, anchor, keyboard, onClose, onNavigate }: DropdownP
       const handled = () => {
         e.preventDefault();
         e.stopPropagation();
+        // Tab is swallowed without moving the highlight; everything else may move it.
+        if (e.key !== 'Tab') revealHl.current = true;
       };
       switch (e.key) {
         case 'ArrowDown':
@@ -378,6 +402,15 @@ function MenuDropdown({ rows, anchor, keyboard, onClose, onNavigate }: DropdownP
       }
     } else items.current.delete(k);
   }, []);
+
+  // Keyboard moves in a tall (scrolling) menu: keep the highlighted item visible.
+  useLayoutEffect(() => {
+    if (!revealHl.current) return;
+    revealHl.current = false;
+    const depth = path.length - 1;
+    const el = items.current.get(`${depth}:${path[depth]}`);
+    if (el) revealMenuItem(el);
+  });
 
   // Submenu positions depend on item elements; re-render once after they mount.
   const pathKey = path.join(',');

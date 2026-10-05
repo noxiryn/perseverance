@@ -1,7 +1,8 @@
 /**
  * Character workflow entry points: Roblox ▸ Replace Character…, Layer ▸ Replace Contents…,
  * Layer ▸ Trim Transparent Pixels, the "replace the selected character" offer when an image is
- * dropped on the window, and the Character section of the Properties panel.
+ * dropped on the window — and when File ▸ Place Image… or Edit ▸ Paste brings one in while a
+ * template placeholder is selected — and the Character section of the Properties panel.
  */
 import { Crop, ImagePlus, Replace, Scissors } from 'lucide-react';
 import type { CommandDef } from '../../registry';
@@ -12,7 +13,9 @@ import { toast } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
 import { Button, showContextMenu } from '../../ui/controls';
 import { registerFileDropHandler } from '../../ui/shell/dropHooks';
+import { askChoice } from '../../ui/shell/dialogs/ChoiceDialog';
 import { openFile } from '../../io/open';
+import { registerPlacedImageHandler } from '../../io/placeHooks';
 import { requireDoc } from '../util';
 import { trimRasterLayer } from './cutout';
 import { IMAGE_FILE_EXTS, characterTarget, contentsTarget, decodeImageFile, imageBaseName, isCharacterLayer, isPlaceholder, replaceLayerContents } from './replace';
@@ -159,6 +162,31 @@ registerFileDropHandler({
       { label: 'Add as New Layer', icon: ImagePlus, run: () => void place() },
     ]);
     return true;
+  },
+});
+
+/* ---------------- Place Image / Paste with the placeholder selected ---------------- */
+
+registerPlacedImageHandler({
+  id: 'roblox.replacePlaceholder',
+  claim: async ({ canvas, name, source }) => {
+    const s = activeSession();
+    const target = s ? contentsTarget(s.doc, s.activeLayerId) : null;
+    if (!target || !isPlaceholder(target) || target.locks.all || target.locks.pixels) return false;
+    const what = source === 'paste' ? 'the pasted image' : `“${name}”`;
+    const choice = await askChoice({
+      title: 'Replace the placeholder character?',
+      message: `Use ${what} as your character in place of “${target.name}”?`,
+      detail: 'Replacing keeps the template’s spot, size, smart filters and effects (Ctrl+Z undoes it). Add as New Layer places the image above the placeholder, which stays visible.',
+      icon: Replace,
+      choices: [
+        { value: 'layer', label: 'Add as New Layer' },
+        { value: 'replace', label: 'Replace Placeholder Character', variant: 'primary' },
+      ],
+    });
+    if (choice === 'replace') return replaceLayerContents(target.id, canvas, { name: source === 'paste' ? undefined : name, cutout: autoCutoutPref() });
+    // 'layer' → placed as usual; dismissed (Esc) → nothing is placed.
+    return choice !== 'layer';
   },
 });
 

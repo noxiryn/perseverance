@@ -12,6 +12,7 @@ import { toast, useUI } from '../state/ui';
 import { viewport } from '../editor/viewport';
 import { isTypingTarget } from '../ui/shortcuts';
 import { placeCanvas } from './open';
+import { claimPlacedImage } from './placeHooks';
 import { drawDocCanvasOnMask, drawDocCanvasOnRaster, pixelTarget, selectionClippedFill, selectionRect } from './pixels';
 import { baseName, rasterToDocCanvas, requireSession } from './util';
 
@@ -26,6 +27,8 @@ interface ClipData {
   systemWritten: boolean;
   /** Tiny color signature used to recognize our own image when reading the system clipboard back. */
   fingerprint: Uint8ClampedArray;
+  /** Document the pixels were copied from. */
+  docId: string;
 }
 
 let clip: ClipData | null = null;
@@ -121,7 +124,7 @@ export function copy(merged = false): boolean {
   if (!s) return false;
   const src = copySource(s, merged);
   if (!src) return false;
-  clip = { ...src, time: Date.now(), systemWritten: false, fingerprint: fingerprintOf(src.canvas) };
+  clip = { ...src, time: Date.now(), systemWritten: false, fingerprint: fingerprintOf(src.canvas), docId: s.doc.id };
   void writeSystemClipboard(src.canvas);
   toast(`Copied ${src.canvas.width}×${src.canvas.height} px${merged ? ' (merged)' : ''}`, 'success', 1800);
   return true;
@@ -249,14 +252,16 @@ async function readSystemImage(): Promise<Blob | null> {
 /**
  * Paste an image that came from the system clipboard (another app) as a new layer, centered at
  * 1:1 like Photoshop — never resampled (a screenshot pasted into a same-sized thumbnail fills it).
+ * A placed-image handler may take it instead (e.g. to replace a selected template placeholder).
  */
-function pasteExternal(external: HTMLCanvasElement, name = 'Pasted Image') {
+async function pasteExternal(external: HTMLCanvasElement, name = 'Pasted Image') {
   const s = activeSession();
   if (!s) {
     placeCanvas(external, name, { label: 'Paste', quiet: true });
     toast('Pasted into a new document', 'success', 2200);
     return;
   }
+  if (await claimPlacedImage({ canvas: external, name, source: 'paste' })) return;
   const at = { x: Math.round((s.doc.width - external.width) / 2), y: Math.round((s.doc.height - external.height) / 2) };
   placeCanvas(external, nextLayerName(s.doc), { at, label: 'Paste', quiet: true });
   const larger = external.width > s.doc.width || external.height > s.doc.height;
@@ -267,8 +272,11 @@ function pasteExternal(external: HTMLCanvasElement, name = 'Pasted Image') {
   );
 }
 
-/** Paste the internal clipboard (centered, or at its original position). */
-function pasteInternal(data: ClipData, inPlace: boolean) {
+/**
+ * Paste the internal clipboard (centered, or at its original position). Pixels copied from
+ * another document may be taken by a placed-image handler (like an image from another app).
+ */
+async function pasteInternal(data: ClipData, inPlace: boolean) {
   const s = activeSession();
   const canvas = createCanvas(data.canvas.width, data.canvas.height);
   ctx2d(canvas).drawImage(data.canvas, 0, 0);
@@ -277,6 +285,7 @@ function pasteInternal(data: ClipData, inPlace: boolean) {
     toast('Pasted into a new document', 'success', 1800);
     return;
   }
+  if (!inPlace && data.docId !== s.doc.id && (await claimPlacedImage({ canvas, name: 'Pasted Image', source: 'paste' }))) return;
   const at = inPlace
     ? { x: data.x, y: data.y }
     : { x: Math.round((s.doc.width - canvas.width) / 2), y: Math.round((s.doc.height - canvas.height) / 2) };
@@ -318,7 +327,7 @@ export async function paste(inPlace = false) {
     toast('The clipboard has no image. Copy pixels or an image first.', 'info');
     return;
   }
-  pasteInternal(clip, inPlace);
+  return pasteInternal(clip, inPlace);
 }
 
 /** Window 'paste' events (OS menu / clipboard managers) with images → place them as layers. */
@@ -338,12 +347,12 @@ export function installPasteListener() {
       const name = file.name && file.name !== 'image.png' ? baseName(file.name) : 'Pasted Image';
       void decode(file).then((external) => {
         if (!external) return void toast('The pasted image could not be read.', 'error');
-        if (preferSystem(external, clip)) pasteExternal(external, name);
-        else if (clip) pasteInternal(clip, false);
+        if (preferSystem(external, clip)) void pasteExternal(external, name);
+        else if (clip) void pasteInternal(clip, false);
       });
     } else if (clip && activeSession() && !e.clipboardData?.types.includes('text/plain')) {
       e.preventDefault();
-      pasteInternal(clip, false);
+      void pasteInternal(clip, false);
     }
   });
 }

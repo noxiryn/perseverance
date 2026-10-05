@@ -5,7 +5,19 @@ import {
   GREEN_PRESET,
   GREEN_SPILL_BAND,
   PARTIAL_INTERIOR_WARN,
+  ENCLOSED_REMOVED_WARN,
+  GRADIENT_RATE,
+  GRADIENT_SLACK,
+  GRADIENT_STEP,
+  GRADIENT_WINDOW,
+  GRADIENT_WINDOW_SLACK,
+  analyzeBorder,
   applyMask,
+  autoCutout,
+  backgroundDistance,
+  cutoutWarnings,
+  floodBackground,
+  keepMaskDetailed,
   colorDistance,
   computeKeepMask,
   cutoutStats,
@@ -325,5 +337,199 @@ describe('cleanup helpers', () => {
     const mask = new Uint8ClampedArray(w * h);
     for (let y = 5; y < 25; y++) for (let x = 5; x < 25; x++) mask[y * w + x] = 128;
     expect(cutoutStats(img, mask).partialInterior).toBeGreaterThan(PARTIAL_INTERIOR_WARN);
+  });
+});
+
+/**
+ * Roblox Studio screenshot whose character is cut off by the bottom edge of the frame (a dropped
+ * 1080p screenshot, an avatar render cropped at the knees): sky gradient, green baseplate with
+ * stripes, a black-outlined character with dark pants down to the bottom edge, black hair and a
+ * flat brown shirt. Proportions follow the frame, so any resolution shows the same picture.
+ */
+function cutOffShot(w: number, h: number) {
+  const img = makeBuffer(w, h, [0, 0, 0, 255]);
+  const d = img.data;
+  const horizon = Math.round(h * 0.72);
+  const set = (x: number, y: number, c: readonly number[]) => {
+    const q = (y * w + x) * 4;
+    d[q] = c[0];
+    d[q + 1] = c[1];
+    d[q + 2] = c[2];
+    d[q + 3] = 255;
+  };
+  const stripe = Math.max(8, Math.round(w / 32));
+  const seam = [100, 134, 72],
+    grass = [110, 145, 80];
+  for (let y = 0; y < h; y++) {
+    const t = y / horizon;
+    const sky = [Math.round(92 + 120 * t), Math.round(160 + 70 * t), Math.round(230 + 18 * t)];
+    for (let x = 0; x < w; x++) set(x, y, y < horizon ? sky : x % stripe < 2 ? seam : grass);
+  }
+  const box = (x0: number, y0: number, x1: number, y1: number, c: readonly number[]) => {
+    for (let y = Math.max(0, Math.round(y0 * h)); y < Math.min(h, Math.round(y1 * h)); y++) for (let x = Math.round(x0 * w); x < Math.round(x1 * w); x++) set(x, y, c);
+  };
+  const outline = Math.max(2, Math.round(w / 400));
+  const o = outline / w,
+    oy = outline / h;
+  const black = [12, 12, 12];
+  // pants (two legs, 16% of the width) down to the bottom edge, shirt, head, hair
+  box(0.42 - o, 0.62 - oy, 0.58 + o, 1, black);
+  box(0.42, 0.62, 0.58, 1, [38, 39, 38]);
+  box(0.4 - o, 0.3 - oy, 0.6 + o, 0.62, black);
+  box(0.4, 0.3, 0.6, 0.62, [122, 58, 32]);
+  box(0.45 - o, 0.14 - oy, 0.55 + o, 0.3, black);
+  box(0.45, 0.2, 0.55, 0.3, [234, 190, 150]);
+  box(0.45, 0.14, 0.55, 0.2, [24, 24, 24]);
+  const at = (fx: number, fy: number) => Math.min(h - 1, Math.round(fy * h)) * w + Math.round(fx * w);
+  return { img, w, h, pants: at(0.5, 0.95), pantsEdge: at(0.43, 0.999), hair: at(0.5, 0.17), shirt: at(0.5, 0.45), face: at(0.5, 0.25), outline: at(0.4 - o / 2, 0.45), sky: at(0.1, 0.1), lowSky: at(0.2, 0.7), ground: at(0.1, 0.9) };
+}
+
+describe('auto mode with a subject cut off by the frame', () => {
+  for (const [w, h] of [
+    [1280, 720],
+    [1728, 972],
+    [1920, 1080],
+    [3840, 2160],
+  ] as const) {
+    it(`keeps the pants, hair, outline and shirt at ${w}×${h}`, () => {
+      const s = cutOffShot(w, h);
+      const border = analyzeBorder(s.img);
+      expect(border.confident).toBe(true);
+      // The pants run on the bottom edge is not a background color.
+      for (const p of border.palette) expect(colorDistance(p[0], p[1], p[2], 38, 39, 38)).toBeGreaterThan(20);
+      expect(border.excluded).toBeGreaterThan(0.03);
+      const res = keepMaskDetailed(s.img, { ...DEFAULT_BG_PARAMS, ...noEdges });
+      for (const k of ['pants', 'pantsEdge', 'hair', 'shirt', 'face', 'outline'] as const) expect([k, res.mask[s[k]]]).toEqual([k, 255]);
+      for (const k of ['sky', 'lowSky', 'ground'] as const) expect([k, res.mask[s[k]]]).toEqual([k, 0]);
+      expect(res.enclosedRemoved).toBeLessThan(ENCLOSED_REMOVED_WARN);
+    }, 60000);
+  }
+
+  it('the automatic cut-out removes the background of a clean screenshot', () => {
+    const s = cutOffShot(640, 360);
+    const res = autoCutout(s.img);
+    expect(res).toEqual({ outcome: 'removed', warnings: [] });
+    expect(s.img.data[s.sky * 4 + 3]).toBe(0);
+    expect(s.img.data[s.pants * 4 + 3]).toBe(255);
+  });
+});
+
+describe('border analysis', () => {
+  it('a uniform border is one confident color', () => {
+    const a = analyzeBorder(makeBuffer(80, 60, [200, 40, 40, 255]));
+    expect(a.palette).toHaveLength(1);
+    expect(a.confident).toBe(true);
+    expect(a.excluded).toBe(0);
+  });
+
+  it('keeps a smooth gradient in one run and samples its shades', () => {
+    const w = 300,
+      h = 200;
+    const img = makeBuffer(w, h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) img.data.set([60 + y, 120 + y / 2, 240, 255], (y * w + x) * 4);
+    const a = analyzeBorder(img);
+    expect(a.confident).toBe(true);
+    expect(a.excluded).toBe(0);
+    // dark top and light bottom shades are both background colors
+    expect(Math.min(...a.palette.map((p) => colorDistance(p[0], p[1], p[2], 60, 120, 240)))).toBeLessThan(6);
+    expect(Math.min(...a.palette.map((p) => colorDistance(p[0], p[1], p[2], 259, 219.5, 240)))).toBeLessThan(6);
+  });
+
+  it('a run turning a corner is background even when short; one in the middle of a side is not', () => {
+    const w = 200,
+      h = 100;
+    const img = makeBuffer(w, h, [230, 230, 230, 255]);
+    // red patch in the bottom-left corner (turns the corner), blue patch mid-top (one side)
+    for (let y = 85; y < h; y++) for (let x = 0; x < 20; x++) img.data.set([200, 30, 30, 255], (y * w + x) * 4);
+    for (let y = 0; y < 15; y++) for (let x = 80; x < 120; x++) img.data.set([30, 30, 200, 255], (y * w + x) * 4);
+    const a = analyzeBorder(img);
+    const has = (r: number, g: number, b: number) => a.palette.some((p) => colorDistance(p[0], p[1], p[2], r, g, b) < 5);
+    expect(has(230, 230, 230)).toBe(true);
+    expect(has(200, 30, 30)).toBe(true);
+    expect(has(30, 30, 200)).toBe(false);
+  });
+
+  it('a cluttered border is not confident', () => {
+    const w = 120,
+      h = 90;
+    const img = makeBuffer(w, h);
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 255;
+    for (let i = 0; i < w * h; i++) img.data.set([rnd(), rnd(), rnd(), 255], i * 4);
+    expect(analyzeBorder(img).confident).toBe(false);
+    expect(autoCutout(img).outcome).toBe('unsure');
+  });
+});
+
+describe('gradient following', () => {
+  /** A color at background distance `dist` from `bg` (bisection along a fixed direction). */
+  function colorAt(bg: [number, number, number], dist: number): [number, number, number] {
+    const dir = [-1, -0.55, -0.15];
+    let lo = 0,
+      hi = 200;
+    for (let k = 0; k < 40; k++) {
+      const t = (lo + hi) / 2;
+      const c = bg.map((v, i) => v + dir[i] * t);
+      if (colorDistance(c[0], c[1], c[2], ...bg) < dist) lo = t;
+      else hi = t;
+    }
+    return bg.map((v, i) => v + dir[i] * lo) as [number, number, number];
+  }
+
+  /**
+   * Flat backdrop; inside it a gentle fog gradient (just above the tolerance, legit background)
+   * that reaches a flat "shirt" (within the gradient cap) through a short ramp far from the
+   * plainly flooded background — where the distance-based allowance alone would let it in.
+   */
+  function fogAndShirt() {
+    const w = 480,
+      h = 360;
+    const bg: [number, number, number] = [163, 205, 240];
+    const img = makeBuffer(w, h, [...bg, 255]);
+    const put = (x: number, y: number, dist: number) => {
+      const c = colorAt(bg, dist);
+      img.data.set([Math.round(c[0]), Math.round(c[1]), Math.round(c[2]), 255], (y * w + x) * 4);
+    };
+    for (let y = 40; y < 330; y++) {
+      for (let x = 40; x < 440; x++) {
+        const inShirt = x >= 260 && x < 420 && y >= 120 && y < 300;
+        if (!inShirt) put(x, y, Math.min(11.5, 9 + ((x - 40) / 160) * 2.5));
+        else put(x, y, x < 266 ? 11.5 + ((x - 259) / 7) * 6.5 : 18);
+      }
+    }
+    return { img, w, h, fog: 200 * w + 230, shirt: 210 * w + 340 };
+  }
+
+  it('follows a gentle fog but does not enter a flat area through a short ramp', () => {
+    const { img, w, shirt, fog } = fogAndShirt();
+    const params = { ...DEFAULT_BG_PARAMS, ...noEdges };
+    const D = backgroundDistance(img, params, [[163, 205, 240]]);
+    const tol = params.tolerance;
+    const base = { step: GRADIENT_STEP, cap: tol + params.softness + 8, rate: GRADIENT_RATE, slack: GRADIENT_SLACK };
+    // Without the local check the distance allowance lets the flood into the shirt…
+    expect(floodBackground(img, D, tol, base)[shirt]).toBe(2);
+    // …with it, the fog is still followed and the shirt stays.
+    const R = floodBackground(img, D, tol, { ...base, window: GRADIENT_WINDOW, windowSlack: GRADIENT_WINDOW_SLACK });
+    expect(R[fog]).toBe(2);
+    expect(R[shirt]).toBe(0);
+    const mask = computeKeepMask(img, params);
+    expect(at(mask, w, shirt % w, Math.floor(shirt / w))).toBe(255);
+    expect(at(mask, w, fog % w, Math.floor(fog / w))).toBe(0);
+  });
+});
+
+describe('cut-out warnings', () => {
+  it('feather and shrink alone never make the subject look semi-transparent', () => {
+    const { img } = studioShot();
+    for (const feather of [3, 6, 10]) {
+      const res = keepMaskDetailed(img, { ...DEFAULT_BG_PARAMS, feather, shrink: 2, decontaminate: 0 });
+      expect(cutoutStats(img, res.mask, res.raw).partialInterior).toBe(0);
+    }
+  });
+
+  it('lists what makes a cut-out unreliable', () => {
+    expect(cutoutWarnings({ partialInterior: 0 }, 0, { confident: true })).toEqual([]);
+    expect(cutoutWarnings({ partialInterior: PARTIAL_INTERIOR_WARN + 0.01 }, ENCLOSED_REMOVED_WARN + 0.01, { confident: false })).toEqual(['cluttered-border', 'subject-removed', 'semi-transparent']);
+    expect(cutoutWarnings({ partialInterior: 0 }, 0, null)).toEqual([]);
   });
 });

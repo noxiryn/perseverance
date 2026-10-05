@@ -5,6 +5,7 @@
  *   npx vite --port 5321 &
  *   node scripts/dirty-rect-check.mjs --url http://localhost:5321/ [--gpu] [--only a,b] [--frames 24] [--every 3]
  *        [--no-e2e | --e2e-only]
+ *   node scripts/dirty-rect-check.mjs --url http://localhost:5321/ --bench [--gpu] [--bench-frames 90]
  *
  * Part 1 (renderer): for each scenario a document is built, rendered (warming every cache and the
  * live composite), then strokes are painted frame by frame straight into layer / mask bitmaps
@@ -25,6 +26,14 @@
  * through SwiftShader) mid-stroke frames may be approximate (GPU blurs / resampling of crops are
  * not bit-exact), so only the settled results must pass; mid-stroke maxima are reported.
  * Exit code 1 when a required comparison fails.
+ *
+ * --bench (performance, no correctness checks): the real brush tool at 200 px, driven by pointer
+ * events through the viewport at fit zoom, on the demo's "Red Glow" (full-canvas raster under the
+ * demo's adjustment layers), on its "Roblox Character" (layer effects, inside a group) and on a
+ * one-layer 1920×1080 document. Reports the main-thread work per pointermove (the pointer handler
+ * plus the animation-frame callbacks it causes: paint, composite, screen redraw) — mean, median,
+ * p90, max — and, after the stroke, the longest main-thread task within 1.5 s (the settle of
+ * approximate GPU work, if any). Works against older trees too (for before/after numbers).
  */
 import { chromium } from 'playwright-core';
 
@@ -50,7 +59,10 @@ const opts = {
 async function rendererPart(opts) {
   const C = await import('/src/render/compositor.ts');
   const DEMO = await import('/src/dev/demo.ts');
+  const PROBE = await import('/src/render/backendProbe.ts');
   const { bitmaps, documentUtils: D } = window.__app;
+  // Normally probed at idle time; run it now so every scenario sees the final answer.
+  const cropExact = PROBE.probeBackendNow();
   const settle = () => (C.settleRenderCaches ? C.settleRenderCaches() : false);
 
   function rng(seed) {
@@ -95,6 +107,7 @@ async function rendererPart(opts) {
     return over ? { max, over, at } : { max };
   }
   const worst = (p, q) => (!p || q.max > p.max ? q : p);
+  const worstOf = (p, q) => (!p ? q : !q ? p : q.max > p.max ? q : p);
 
   /** Copy of a document with new document and layer ids (same bitmaps): renders from scratch. */
   let cloneSeq = 0;
@@ -207,7 +220,7 @@ async function rendererPart(opts) {
     };
   }
 
-  const statKeys = ['regionUpdates', 'liveRegionRenders', 'liveFullRenders', 'docRegionRenders', 'layerRenders', 'approxUpdates', 'inexactUpdates'];
+  const statKeys = ['regionUpdates', 'liveRegionRenders', 'liveFullRenders', 'docRegionRenders', 'layerRenders', 'approxUpdates', 'inexactUpdates', 'settles'];
   const statSnap = () => {
     const info = C.renderCacheInfo();
     return Object.fromEntries(statKeys.map((k) => [k, info[k] ?? 0]));
@@ -215,7 +228,7 @@ async function rendererPart(opts) {
 
   async function scenario(name, build, so = {}) {
     if (opts.only && !opts.only.includes(name)) return null;
-    const doc = build();
+    let doc = build();
     const list = typeof so.strokes === 'function' ? so.strokes(doc) : so.strokes ?? [{}];
     const strokes = list.map((s, i) => {
       const target = s.target ?? doc.__paint;
@@ -227,6 +240,14 @@ async function rendererPart(opts) {
     C.renderDocumentLive(doc);
     C.renderDocument(doc);
     C.renderDocument(doc, { scale });
+    // A structure change that keeps some layer objects (e.g. Canvas Size: fill layers and groups
+    // stay as they are), compared right away, before any stroke.
+    let mutated = null;
+    if (so.mutate) {
+      doc = so.mutate(doc);
+      const ref1 = premul(C.renderDocument(cloneDoc(doc)));
+      mutated = worstOf(worstOf(diff(premul(C.renderDocumentLive(doc).canvas), ref1), diff(premul(C.renderDocument(doc)), ref1)), diff(premul(C.renderDocument(doc, { scale })), premul(C.renderDocument(cloneDoc(doc), { scale }))));
+    }
     const s0 = statSnap();
     const frames = so.frames ?? opts.frames;
     let liveMs = 0,
@@ -260,6 +281,7 @@ async function rendererPart(opts) {
     for (const k of statKeys) stats[k] = s1[k] - s0[k];
     return {
       name,
+      ...(mutated ? { mutated } : {}),
       frame: frame ?? { max: 0 },
       live: diff(live, ref),
       shared: diff(shared, ref),
@@ -451,6 +473,23 @@ async function rendererPart(opts) {
     addAdj(d, 'vignette', { amount: 0.5 });
     return d;
   });
+  /** Canvas Size-like change: new document size, rasters moved (new objects), fills/groups kept. */
+  const resizeDoc = (dw, dh, dx, dy) => (d) => {
+    const layers = { ...d.layers };
+    for (const [id, l] of Object.entries(layers)) if (l.type === 'raster' || l.type === 'text') layers[id] = { ...l, transform: { ...l.transform, x: l.transform.x + dx, y: l.transform.y + dy } };
+    return { ...d, width: d.width + dw, height: d.height + dh, layers };
+  };
+  const resizeBuild = () => {
+    const d = doc0();
+    D.insertLayerDraft(d, D.makeFillLayer({ fill: { type: 'gradient', gradient: { kind: 'radial', angle: 0, scale: 1, stops: [{ offset: 0, color: '#f0e0a0' }, { offset: 1, color: '#402060' }] } } }), { parentId: null });
+    const g = addGroup(d, { blendMode: 'normal' });
+    D.insertLayerDraft(d, D.makeFillLayer({ fill: { type: 'gradient', gradient: { kind: 'linear', angle: 60, scale: 1, stops: [{ offset: 0, color: 'rgba(255,0,0,0.6)' }, { offset: 1, color: 'rgba(0,0,255,0)' }] } } }), { parentId: g.id });
+    d.__paint = addRaster(d, { w: 700, h: 500, transform: { x: 200, y: 120 }, mask: { feather: 6 }, props: { effects: [fx('drop-shadow', { distance: 10, size: 14 })] } }).bitmapId;
+    addAdj(d, 'vignette', { amount: 0.5 });
+    return d;
+  };
+  await run('doc-resize', resizeBuild, { mutate: resizeDoc(240, 120, 120, 60), frames: 12 });
+  await run('doc-resize-1px', resizeBuild, { mutate: resizeDoc(1, 1, 0, 0), frames: 6 });
   await run('demo', () => {
     const d = DEMO.buildDemoDocument(1920, 1080);
     const ls = Object.values(d.layers);
@@ -458,7 +497,7 @@ async function rendererPart(opts) {
     d.__char = ls.find((l) => l.name === 'Roblox Character').bitmapId;
     return d;
   }, { strokes: (d) => [{ target: d.__glow, size: 100 }, { target: d.__char, erase: true }], frames: 20 });
-  return results;
+  return { rows: results, cropExact };
 }
 
 /** End-to-end through the real paint tools and the viewport (demo document). */
@@ -540,17 +579,19 @@ async function e2ePart(opts) {
       return [x0 + (x1 - x0) * t, y0 + (y1 - y0) * t + Math.sin(t * 9) * wobble];
     });
   /** Screen right after the stroke and after the settle delay vs a forced full re-render. */
-  async function check(label) {
+  async function check(label, afterSettle) {
     await frames(3);
     const now = screen();
     await sleep(900); // settle delay (approximate GPU work is re-rendered exactly)
     await frames(3);
     const settled = screen();
+    // Extra comparisons on the settled state (before the caches are dropped below).
+    const extra = afterSettle ? afterSettle() : [];
     C.invalidateRenderCache();
     VP.requestRender();
     await frames(4);
     const full = screen();
-    return { label, now: cmp(now, full), settled: cmp(settled, full) };
+    return { label, now: cmp(now, full), settled: [cmp(settled, full), ...extra].reduce((a, b) => (b.max > a.max ? b : a)) };
   }
   const results = [];
   const views = [
@@ -600,6 +641,190 @@ async function e2ePart(opts) {
   st().setToolOption('eraser', 'size', 90);
   await stroke(path(600, 600, 1200, 400, 25));
   results.push(await check('fit: eraser on Red Glow'));
+
+  // Canvas Size keeps fill layers and groups as they are (only the document size changes): their
+  // renders for the old size must not be reused — by the viewport nor by renderDocument (export).
+  const IO = await import('/src/io/imageOps.ts');
+  let cloneN = 0;
+  const cloneDoc = (d) => {
+    const suf = `~e2e${++cloneN}`;
+    const map = (id) => id + suf;
+    const layers = {};
+    for (const [id, l] of Object.entries(d.layers)) {
+      const c = structuredClone(l);
+      c.id = map(id);
+      if (Array.isArray(c.childIds)) c.childIds = c.childIds.map(map);
+      layers[map(id)] = c;
+    }
+    return { ...d, id: d.id + suf, layers, rootIds: d.rootIds.map(map) };
+  };
+  const pixels = (c) => {
+    grab.width = c.width;
+    grab.height = c.height;
+    const g2 = grab.getContext('2d', { willReadFrequently: true });
+    g2.clearRect(0, 0, c.width, c.height);
+    g2.drawImage(c, 0, 0);
+    return g2.getImageData(0, 0, c.width, c.height).data;
+  };
+  /** Viewport check plus renderDocument (full and 1/4 scale) vs a from-scratch render of a clone. */
+  const checkDoc = (label) =>
+    check(label, () => {
+      const d = doc();
+      return [cmp(pixels(C.renderDocument(d)), pixels(C.renderDocument(cloneDoc(d)))), cmp(pixels(C.renderDocument(d, { scale: 0.25 })), pixels(C.renderDocument(cloneDoc(d), { scale: 0.25 })))];
+    });
+  st().setTool('brush');
+  st().setPrimaryColor('#3355ff');
+  C.renderDocument(doc(), { scale: 0.25 });
+  IO.canvasSize(doc().width + 480, doc().height + 320, 4, '#ffffff');
+  st().setView({ zoom: 0, panX: 0, panY: 0 });
+  results.push(await checkDoc('canvas size +480x320 (centered)'));
+  st().undo();
+  results.push(await checkDoc('canvas size: undo'));
+  st().redo();
+  results.push(await checkDoc('canvas size: redo'));
+  st().setActiveLayer(glow.id);
+  await stroke(path(500, 400, 1500, 900, 25));
+  results.push(await checkDoc('canvas size: brush after resize'));
+  st().undo();
+  st().undo();
+  IO.canvasSize(doc().width - 1, doc().height - 1, 0, null);
+  results.push(await checkDoc('canvas size -1px (top-left)'));
+  st().undo();
+  results.push(await checkDoc('canvas size -1px: undo'));
+  return results;
+}
+
+/** Brush frame-time benchmark through the real paint tools and viewport (see --bench). */
+async function benchPart(opts) {
+  const app = window.__app;
+  const { useEditor, bitmaps, documentUtils: D } = app;
+  const st = () => useEditor.getState();
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const origRaf = window.requestAnimationFrame.bind(window);
+  const nextFrame = () => new Promise((r) => origRaf(() => r()));
+  let C = null;
+  try {
+    C = await import('/src/render/compositor.ts');
+  } catch {
+    C = null;
+  }
+  const info = () => (C && C.renderCacheInfo ? C.renderCacheInfo() : {});
+  const longTasks = [];
+  try {
+    new PerformanceObserver((l) => {
+      for (const e of l.getEntries()) longTasks.push({ t: e.startTime, d: e.duration });
+    }).observe({ type: 'longtask', buffered: false });
+  } catch {
+    /* no longtask support */
+  }
+  const stats = (a) => {
+    const s = [...a].sort((p, q) => p - q);
+    const mean = s.reduce((p, q) => p + q, 0) / Math.max(1, s.length);
+    const at = (f) => s[Math.min(s.length - 1, Math.floor(s.length * f))] ?? 0;
+    return { mean: +mean.toFixed(1), p50: +at(0.5).toFixed(1), p90: +at(0.9).toFixed(1), max: +(s[s.length - 1] ?? 0).toFixed(1) };
+  };
+
+  function open1080() {
+    const doc = D.createDocument({ name: 'Bench 1080p', width: 1920, height: 1080, background: '#ffffff' });
+    const c = document.createElement('canvas');
+    c.width = 1920;
+    c.height = 1080;
+    const g = c.getContext('2d');
+    g.fillStyle = '#3366aa';
+    g.fillRect(200, 150, 1500, 800);
+    const l = D.makeRasterLayer({ name: 'Paint', bitmapId: bitmaps.add(c), width: 1920, height: 1080 });
+    D.insertLayerDraft(doc, l, { parentId: null });
+    return st().openDocument(doc, { label: 'Bench' });
+  }
+  let demoId = null;
+  const cases = [
+    { name: 'demo: Red Glow (raster under adjustments)', open: () => demoId ?? (demoId = app.openDemoDocument()), layer: 'Red Glow' },
+    { name: 'demo: Roblox Character (effects, in group)', open: () => demoId ?? (demoId = app.openDemoDocument()), layer: 'Roblox Character' },
+    { name: '1080p: one raster layer', open: open1080, layer: 'Paint' },
+  ];
+  const results = [];
+  for (const cs of cases) {
+    const docId = cs.open();
+    if (st().activeDocId !== docId) st().setActiveDoc(docId);
+    await sleep(800);
+    const doc = st().sessions[docId].doc;
+    const layer = Object.values(doc.layers).find((l) => l.name === cs.layer);
+    st().setActiveLayer(layer.id);
+    st().setEditTarget?.('content');
+    st().setTool('brush');
+    st().setToolOption('brush', 'size', 200);
+    st().setToolOption('brush', 'hardness', 0.8);
+    st().setToolOption('brush', 'smoothing', 0);
+    st().setPrimaryColor('#22cc44');
+    st().setView({ zoom: 0, panX: 0, panY: 0 });
+    for (let i = 0; i < 6; i++) await nextFrame();
+    await sleep(1500); // idle: the backend probe runs, caches settle
+    const ov = document.querySelector('.viewport-overlay');
+    const v = st().sessions[docId].view;
+    const box = ov.getBoundingClientRect();
+    const z = v.zoom;
+    const toClient = (x, y) => ({ clientX: box.left + box.width / 2 + v.panX - (doc.width * z) / 2 + x * z, clientY: box.top + box.height / 2 + v.panY - (doc.height * z) / 2 + y * z });
+    const fire = (type, x, y, buttons) => ov.dispatchEvent(new PointerEvent(type, { ...toClient(x, y), button: 0, buttons, pointerId: 1, pointerType: 'mouse', bubbles: true, cancelable: true }));
+    // Zig-zag over the layer's content.
+    let b = { x: 300, y: 250, width: 1300, height: 600 };
+    if (C && C.getLayerBounds) {
+      const lb = C.getLayerBounds(doc, layer.id);
+      if (lb && lb.width < doc.width * 0.9) b = { x: lb.x + lb.width * 0.2, y: lb.y + lb.height * 0.15, width: lb.width * 0.6, height: lb.height * 0.7 };
+    }
+    let work = 0;
+    window.requestAnimationFrame = (cb) =>
+      origRaf((t) => {
+        const s0 = performance.now();
+        try {
+          cb(t);
+        } finally {
+          work += performance.now() - s0;
+        }
+      });
+    const i0 = info();
+    const per = [];
+    let x = b.x,
+      y = b.y,
+      dir = 1;
+    try {
+      fire('pointerdown', x, y, 1);
+      await nextFrame();
+      await nextFrame();
+      for (let i = 0; i < opts.benchFrames; i++) {
+        x += 18 * dir;
+        if (x > b.x + b.width || x < b.x) {
+          dir = -dir;
+          y = y + 50 > b.y + b.height ? b.y : y + 50;
+        }
+        work = 0;
+        const t0 = performance.now();
+        fire('pointermove', x, y, 1);
+        const handler = performance.now() - t0;
+        await nextFrame();
+        per.push(handler + work);
+      }
+      longTasks.length = 0;
+      const tUp = performance.now();
+      fire('pointerup', x, y, 0);
+      for (let i = 0; i < 3; i++) await nextFrame();
+      await sleep(1500);
+      const after = longTasks.filter((e) => e.t >= tUp);
+      const i1 = info();
+      results.push({
+        name: cs.name,
+        frames: per.length,
+        work: stats(per.slice(5)),
+        settleTask: after.length ? +Math.max(...after.map((e) => e.d)).toFixed(0) : 0,
+        settles: (i1.settles ?? 0) - (i0.settles ?? 0),
+        regionUpdates: (i1.regionUpdates ?? 0) - (i0.regionUpdates ?? 0),
+        cropExact: i1.cropExact,
+      });
+    } finally {
+      window.requestAnimationFrame = origRaf;
+    }
+    st().undo();
+    await sleep(300);
+  }
   return results;
 }
 
@@ -627,20 +852,47 @@ try {
   await page.waitForTimeout(800);
 
   console.log(`dirty-rect check — ${gpu ? 'GPU (accelerated canvas)' : 'software canvas'}`);
-  const rows = args['e2e-only'] === 'true' ? [] : await page.evaluate(rendererPart, opts);
+  if (args.bench === 'true') {
+    const res = await page.evaluate(benchPart, { benchFrames: Number(args['bench-frames'] ?? 90) });
+    console.log('\nbrush 200 px, fit zoom: main-thread ms per pointermove (handler + frame)   mean   p50    p90    max    settle task  settles  region updates');
+    for (const r of res)
+      console.log(
+        `  ${r.name.padEnd(68)}${String(r.work.mean).padEnd(7)}${String(r.work.p50).padEnd(7)}${String(r.work.p90).padEnd(7)}${String(r.work.max).padEnd(7)}${(r.settleTask ? `${r.settleTask} ms` : '-').padEnd(13)}${String(r.settles ?? '-').padEnd(9)}${r.regionUpdates ?? '-'}`,
+      );
+    if (res[0]?.cropExact !== undefined) console.log(`  (canvas backend crop-exact: ${res[0].cropExact})`);
+    await browser.close();
+    const realB = errors.filter((e) => !/Failed to load resource/.test(e));
+    if (realB.length) console.log('\nPAGE ERRORS:\n' + realB.slice(0, 20).join('\n'));
+    process.exit(realB.length ? 1 : 0);
+  }
+  const part1 = args['e2e-only'] === 'true' ? { rows: [], cropExact: null } : await page.evaluate(rendererPart, opts);
+  const rows = part1.rows;
+  if (part1.cropExact !== null) {
+    console.log(`canvas backend: ${part1.cropExact ? 'crop-exact (region work is exact, nothing to settle)' : 'not crop-exact (GPU: approximate live work is settled)'}`);
+    // The software canvas must be detected as exact (else every stroke would be settled for nothing).
+    if (!gpu && !part1.cropExact) {
+      console.log('✗ software canvas not detected as crop-exact');
+      failed = true;
+    }
+  }
   const fmt = (d) => (d ? (d.max <= 1 ? `ok(${d.max})` : `FAIL max ${d.max} ×${d.over ?? '?'}`) : '-');
-  console.log('\nscenario                      frame*      live        shared      small       settled     ms/frame  region/full renders, approx (inexact) updates');
+  console.log('\nscenario                      frame*      live        shared      small       settled     ms/frame  region/full renders, approx (inexact) updates, settles');
   for (const r of rows) {
     if (r.error) {
       console.log(`${r.name.padEnd(30)}ERROR ${r.error.split('\n')[0]}`);
       failed = true;
       continue;
     }
-    const strict = [r.live, r.shared, r.small, r.frame];
-    const pass = ok(r.settled.live) && ok(r.settled.shared) && ok(r.refVsFull) && (gpu || r.stats.inexactUpdates > 0 || strict.every(ok));
+    // renderDocument (shared, small) is exact on every backend at all times: only live composites
+    // may hold approximate pixels, and only on GPU canvases or for inexact work (shared fields).
+    const live = [r.live, r.frame];
+    const softApprox = !gpu && r.stats.approxUpdates > r.stats.inexactUpdates;
+    const pass =
+      ok(r.settled.live) && ok(r.settled.shared) && ok(r.refVsFull) && ok(r.shared) && ok(r.small) && (!r.mutated || ok(r.mutated)) && !softApprox && (gpu || r.stats.inexactUpdates > 0 || live.every(ok));
+    if (softApprox) console.log(`✗ ${r.name}: ${r.stats.approxUpdates - r.stats.inexactUpdates} approximate update(s) on the software canvas`);
     if (!pass) failed = true;
     console.log(
-      `${(pass ? '  ' : '✗ ') + r.name.padEnd(28)}${fmt(r.frame).padEnd(12)}${fmt(r.live).padEnd(12)}${fmt(r.shared).padEnd(12)}${fmt(r.small).padEnd(12)}${fmt(worstOf(r.settled.live, r.settled.shared)).padEnd(12)}${String(r.msPerFrame).padEnd(10)}${r.stats.regionUpdates}/${r.stats.layerRenders}, ${r.stats.approxUpdates} (${r.stats.inexactUpdates})`,
+      `${(pass ? '  ' : '✗ ') + r.name.padEnd(28)}${(r.mutated && !ok(r.mutated) ? `RESIZE ${fmt(r.mutated)} ` : '') + fmt(r.frame).padEnd(12)}${fmt(r.live).padEnd(12)}${fmt(r.shared).padEnd(12)}${fmt(r.small).padEnd(12)}${fmt(worstOf(r.settled.live, r.settled.shared)).padEnd(12)}${String(r.msPerFrame).padEnd(10)}${r.stats.regionUpdates}/${r.stats.layerRenders}, ${r.stats.approxUpdates} (${r.stats.inexactUpdates}), ${r.stats.settles}`,
     );
   }
   console.log('* frame = worst per-frame mismatch of the live composite vs a from-scratch render of a document clone');

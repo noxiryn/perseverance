@@ -10,6 +10,8 @@ import { maskLUT, maskValue } from './mask';
 import { alignedOrigin } from './text';
 import { coverRect, expandRect, intersectRect, unionRect } from './surface';
 import { buildGrid, warpImage } from './meshWarp';
+import { geometrySig, makeRC, structSig } from './engine';
+import { createDocument, insertLayerDraft, makeFillLayer, makeGroupLayer } from '../core/document';
 
 describe('mesh warp', () => {
   /** Opaque w×h image whose red channel encodes x and green encodes y. */
@@ -395,5 +397,48 @@ describe('caches & masks & rects', () => {
     expect(expandRect({ x: 0, y: 0, w: 2, h: 2 }, 1.2)).toEqual({ x: -2, y: -2, w: 6, h: 6 });
     expect(intersectRect({ x: 0, y: 0, w: 2, h: 2 }, { x: 3, y: 0, w: 2, h: 2 })).toBeNull();
     expect(unionRect({ x: 0, y: 0, w: 2, h: 2 }, { x: 3, y: 1, w: 2, h: 2 })).toEqual({ x: 0, y: 0, w: 5, h: 3 });
+  });
+});
+
+describe('render structure signatures (live-painting region reuse)', () => {
+  // Region reuse treats equal structure signatures + unchanged bitmap versions as "nothing
+  // changed": the render geometry must be part of them, or Canvas Size / Crop / Trim (which keep
+  // fill layers and groups as they are) would reuse renders made for the old document size.
+  function docWithFills() {
+    const doc = createDocument({ name: 'S', width: 400, height: 300, background: '#fff' });
+    const grad = makeFillLayer({ fill: { type: 'gradient', gradient: { kind: 'linear', angle: 30, scale: 1, stops: [{ offset: 0, color: '#000' }, { offset: 1, color: '#fff' }] } } as never });
+    insertLayerDraft(doc, grad, { parentId: null });
+    const g = makeGroupLayer({ name: 'G' });
+    g.blendMode = 'normal';
+    insertLayerDraft(doc, g, { parentId: null });
+    const inner = makeFillLayer({ fill: { type: 'solid', color: '#c33' } });
+    insertLayerDraft(doc, inner, { parentId: g.id });
+    return { doc, grad, g };
+  }
+
+  it('changes with the document size even when the layer objects are unchanged', () => {
+    const { doc, grad, g } = docWithFills();
+    const a = makeRC(doc, 1);
+    const resized = { ...doc, width: 520, height: 360 };
+    const b = makeRC(resized, 1);
+    expect(structSig(b, grad)).not.toBe(structSig(a, grad));
+    expect(structSig(b, g)).not.toBe(structSig(a, g));
+    expect(geometrySig(b)).not.toBe(geometrySig(a));
+  });
+
+  it('changes with the document size at reduced scales where the output size rounds the same', () => {
+    const { doc, grad } = docWithFills();
+    // 400 → 401 px at 1/4 scale: both round to a 100 px wide output.
+    const a = makeRC(doc, 0.25);
+    const b = makeRC({ ...doc, width: 401 }, 0.25);
+    expect(b.W).toBe(a.W);
+    expect(structSig(b, grad)).not.toBe(structSig(a, grad));
+  });
+
+  it('is stable for the same document and scale (region reuse stays possible)', () => {
+    const { doc, grad, g } = docWithFills();
+    expect(structSig(makeRC(doc, 1), grad)).toBe(structSig(makeRC(doc, 1), grad));
+    expect(structSig(makeRC(doc, 1), g)).toBe(structSig(makeRC(doc, 1), g));
+    expect(structSig(makeRC(doc, 0.5), grad)).not.toBe(structSig(makeRC(doc, 1), grad));
   });
 });

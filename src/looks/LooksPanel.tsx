@@ -1,9 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { BookmarkPlus, Check, Eraser, Eye, EyeOff, FilePlus2, Layers, Image as ImageIcon, Loader2, Pencil, Trash2 } from 'lucide-react';
+import { BookmarkPlus, Check, Eraser, Eye, EyeOff, FilePlus2, Info, Layers, Image as ImageIcon, Loader2, Pencil, Trash2, TriangleAlert } from 'lucide-react';
 import type { Document, ID, Layer } from '../core/types';
 import { commands, looks, runCommand, useRegistry, type LookDef } from '../registry';
 import { useActiveDoc, useEditor } from '../state/editor';
-import { Button, IconButton, SearchInput, showContextMenu } from '../ui/controls';
+import { Button, ChipRow, IconButton, SearchInput, showContextMenu } from '../ui/controls';
 import { applyLook, currentLookId, hasLook, lookTargets, lookTouchesTarget, removeLook, type LookTargets } from './engine';
 import { clearLookPreviewBases, contentSignature, renderLookPreviewURL } from './preview';
 import { IdleQueue, isPointerDown, nextPaint } from './shared';
@@ -294,45 +294,56 @@ export function LooksPanel() {
     [busy, requested],
   );
 
+  const targetName = targetLayer && !resolved.character ? targetLayer.name : 'Whole document';
+  const targetTitle = `Target: ${targetName}${resolved.note ? ` — ${resolved.note}` : ''}`;
+  const chipItems = useMemo(() => categories.map((c) => ({ value: c, label: c })), [categories]);
+
+  // Compact header (≈88px) so a short dock group still shows cards: toggle + target on one row,
+  // search + preview toggle on the next, categories in one horizontally scrolling chip row.
   return (
     <div className="looks-panel">
       <div className="looks-head">
         <div className="looks-seg" role="tablist" aria-label="Apply looks to">
-          <button className={target === 'layer' ? 'active' : ''} onClick={() => setTarget('layer')} title="Filters and effects go on the active layer">
-            <Layers size={12} /> Active layer
+          <button
+            role="tab"
+            aria-selected={target === 'layer'}
+            className={target === 'layer' ? 'active' : ''}
+            onClick={() => setTarget('layer')}
+            title="Active layer — filters and effects go on the active layer"
+          >
+            <Layers size={12} /> Layer
           </button>
-          <button className={target === 'doc' ? 'active' : ''} onClick={() => setTarget('doc')} title="Grades and textures go into look groups; character filters go on the document’s character (when it has one)">
-            <ImageIcon size={12} /> Whole document
+          <button
+            role="tab"
+            aria-selected={target === 'doc'}
+            className={target === 'doc' ? 'active' : ''}
+            onClick={() => setTarget('doc')}
+            title="Whole document — grades and textures go into look groups; character filters go on the document’s character (when it has one)"
+          >
+            <ImageIcon size={12} /> Document
           </button>
         </div>
-        <IconButton
-          icon={previews ? Eye : EyeOff}
-          size="sm"
-          active={previews}
-          title={previews ? 'Hide live previews' : 'Show live previews'}
-          onClick={() => setPreviews(!previews)}
-        />
+        {doc ? (
+          <div className="looks-target" title={targetTitle} aria-label={targetTitle}>
+            <span className="looks-target-name">{targetName}</span>
+            {resolved.note &&
+              (targetLayer ? <Info size={12} className="looks-target-icon info" aria-hidden /> : <TriangleAlert size={12} className="looks-target-icon warn" aria-hidden />)}
+          </div>
+        ) : null}
       </div>
 
-      {doc ? (
-        <div className="looks-target" title={`${targetLayer && !resolved.character ? targetLayer.name : 'Whole document'}${resolved.note ? ` — ${resolved.note}` : ''}`}>
-          <span className="looks-target-label">Target</span>
-          <span className="looks-target-name">
-            {targetLayer && !resolved.character ? targetLayer.name : 'Whole document'}
-            {resolved.note && <em className={targetLayer ? 'info' : 'warn'}> — {resolved.note}</em>}
-          </span>
-        </div>
-      ) : null}
-
       <div className="looks-filters">
-        <SearchInput value={query} onChange={setQuery} placeholder="Search looks" />
-        <div className="looks-cats">
-          {categories.map((c) => (
-            <button key={c} className={`looks-cat${category === c ? ' active' : ''}`} onClick={() => setCategory(c)}>
-              {c}
-            </button>
-          ))}
+        <div className="looks-search">
+          <SearchInput value={query} onChange={setQuery} placeholder={`Search ${all.length} looks`} />
+          <IconButton
+            icon={previews ? Eye : EyeOff}
+            size="sm"
+            active={previews}
+            title={previews ? 'Hide live previews' : 'Show live previews'}
+            onClick={() => setPreviews(!previews)}
+          />
         </div>
+        <ChipRow items={chipItems} value={categories.includes(category) ? category : 'All'} onChange={setCategory} ariaLabel="Look categories" />
       </div>
 
       {!doc && (

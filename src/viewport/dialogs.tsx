@@ -61,7 +61,7 @@ export function AmountDialog({ close, title, label, initial, min, max, step = 1,
           <span className="ui-label">{label}</span>
           {/* The slider covers the useful range; the field accepts the full range (e.g. 1000 px feather). */}
           <Slider value={Math.min(value, sliderMax)} min={min} max={sliderMax} step={step} showNumber={false} onChange={set} width={150} />
-          <NumberField value={value} min={min} max={max} step={step} unit={unit} width={72} onChange={set} />
+          <NumberField value={value} min={min} max={max} step={step} unit={unit} width={72} onChange={set} autoFocus />
         </div>
         {note && <div className="viewport-dlg-note">{note}</div>}
       </div>
@@ -123,6 +123,7 @@ export function NewGuideDialog({ close }: { close: (r?: NewGuideResult) => void 
         <div className="viewport-dlg-row">
           <span className="ui-label">Position</span>
           <NumberField
+            autoFocus
             value={value}
             min={-100000}
             max={100000}

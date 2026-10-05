@@ -11,7 +11,7 @@ import { openDialog, toast, useUI } from '../../state/ui';
 import { AboutDialog } from './dialogs/AboutDialog';
 import { PreferencesDialog } from './dialogs/PreferencesDialog';
 import { ShortcutsDialog } from './dialogs/ShortcutsDialog';
-import { TipsDialog } from './dialogs/TipsDialog';
+import { openTipsGuide } from './dialogs/TipsDialog';
 import { applyWorkspace, isPanelVisible, resetWorkspace, revealPanel, WORKSPACE_PRESETS } from './workspaces';
 
 type DialogComponent = ComponentType<{ close: (result?: unknown) => void }>;
@@ -131,7 +131,7 @@ export function registerShellCommands() {
       order: 1,
       icon: Lightbulb,
       keywords: ['tutorial', 'guide', 'tips', 'getting started', 'learn'],
-      run: singleton(TipsDialog),
+      run: () => openTipsGuide(),
     },
     {
       id: 'help.about',

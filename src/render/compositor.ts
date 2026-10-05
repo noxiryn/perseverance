@@ -23,6 +23,7 @@ import {
   effectsSidesOf,
   filterPad,
   flattenRender,
+  geometrySig,
   lastLayerText,
   layerGeometry,
   layerSig,
@@ -35,6 +36,7 @@ import {
   type RC,
 } from './engine';
 import { maskValue } from './mask';
+import { cropExactBackend, scheduleBackendProbe } from './backendProbe';
 import { fillWithPaint as paintFill } from './paint';
 import { renderShapeContent } from './shapes';
 import { invalidateTextLayout, layoutTextProps, renderTextContent, requestTextFont, resetTextCaches, type LocalContent, type TextLayout } from './text';
@@ -118,20 +120,35 @@ export function renderDocumentLive(doc: Document, opts: LiveRenderOptions = {}):
 }
 
 /**
- * Called after approximate incremental work (GPU blurs / resampling of crops during live
- * painting) was dropped so the next render is exact: displays should re-render. Returns the
- * unsubscriber.
+ * Called after approximate incremental work of LIVE composites (renderDocumentLive on GPU
+ * canvases: blurs / resampling of crops during live painting) was dropped, so the next live
+ * render re-composites that area exactly: displays should re-render. Returns the unsubscriber.
+ * Every other render (renderDocument, renderLayerToDoc, thumbnails…) is always exact.
  */
 export function onRenderSettle(fn: () => void): () => void {
   return onSettle(fn);
 }
 
 /**
- * Re-render approximate incremental work exactly now instead of after the idle delay (tests,
- * exports). Returns whether anything was approximate.
+ * Settle approximate live-composite work now instead of after the idle delay (tests). Returns
+ * whether anything was approximate. Not needed before exports: renderDocument is always exact.
  */
 export function settleRenderCaches(): boolean {
   return settleApproximations();
+}
+
+/**
+ * Whether this canvas backend draws crops / clipped regions exactly like whole surfaces (the
+ * software canvas does, GPU canvases usually not). Probed once at idle time (false until then);
+ * call early to schedule the probe. Partial redraws are exact when true.
+ */
+export function canvasCropExact(): boolean {
+  return cropExactBackend();
+}
+
+/** Schedule the canvas backend probe (see canvasCropExact) for the next idle time. */
+export function probeCanvasBackend(): void {
+  scheduleBackendProbe();
 }
 
 /**
@@ -376,7 +393,7 @@ export function renderThumbnail(doc: Document, layerId: ID | null, size: number)
   const rc = makeRC(doc, s);
   if (!l) return fresh(rc.W, rc.H);
   const key = `T|${layerId}|${Math.round(size)}`;
-  const sig = `${layerSig(rc, l)}|${rc.W}x${rc.H}`;
+  const sig = `${layerSig(rc, l)}|${geometrySig(rc)}`;
   const hit = slots.get<HTMLCanvasElement>(key, sig);
   if (hit) return hit;
   const out = fresh(rc.W, rc.H);
@@ -441,5 +458,5 @@ export function invalidateRenderCache(layerId?: ID) {
 
 /** Cache statistics (debugging / performance checks). */
 export function renderCacheInfo() {
-  return { slots: slots.size, slotPixels: slots.pixels, assets: renderCache.size, assetPixels: renderCache.pixels, settlePending: settlePending(), ...renderStats };
+  return { slots: slots.size, slotPixels: slots.pixels, assets: renderCache.size, assetPixels: renderCache.pixels, settlePending: settlePending(), cropExact: cropExactBackend(), ...renderStats };
 }

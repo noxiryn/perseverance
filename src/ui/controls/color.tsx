@@ -75,18 +75,27 @@ function useDrag(onMove: (x: number, y: number, rect: DOMRect) => void, onEnd?: 
 /**
  * HSV color picker: saturation/value square, hue strip, optional alpha strip, hex input,
  * screen eyedropper (EyeDropper API), recent colors and the active palette.
+ *
+ * `variant="panel"` (Color panel): fills its container's width, the square is `svHeight` px tall
+ * (0 hides square and hue strip — the panel's sliders take over on short docks), and the hex row,
+ * recent colors and palette are left out (the panel has its own HEX tab and Recent section).
  */
 export function ColorPicker({
   value,
   onChange,
   onCommit,
   alpha = false,
+  variant = 'popover',
+  svHeight = 150,
 }: {
   value: string;
   onChange: (c: string) => void;
   onCommit?: (c: string) => void;
   alpha?: boolean;
+  variant?: 'popover' | 'panel';
+  svHeight?: number;
 }) {
+  const panel = variant === 'panel';
   const [hsva, setHsva] = useState<HSVA>(() => toHSVA(value));
   const last = useRef(value);
   const recent = useEditor((s) => s.recentColors);
@@ -142,13 +151,16 @@ export function ColorPicker({
 
   const activePalette = pals[0];
 
+  if (panel && svHeight <= 0) return null;
+
   return (
-    <div style={{ width: 232, display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <div className={panel ? 'ui-cp ui-cp-panel' : 'ui-cp'} style={{ width: panel ? '100%' : 232, display: 'flex', flexDirection: 'column', gap: panel ? 6 : 8 }}>
       <div
+        className="ui-cp-sv"
         onPointerDown={svDrag}
         style={{
           position: 'relative',
-          height: 150,
+          height: panel ? svHeight : 150,
           borderRadius: 4,
           cursor: 'crosshair',
           background: `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, ${hueColor})`,
@@ -192,33 +204,35 @@ export function ColorPicker({
           <Thumb x={hsva.a} />
         </div>
       )}
-      <div className="ui-row">
-        <ColorSwatch color={current} size={26} />
-        <input
-          className="ui-input"
-          style={{ flex: 1, fontFamily: 'var(--font-mono)' }}
-          value={hex}
-          onChange={(e) => setHex(e.target.value)}
-          onKeyDown={(e) => {
-            e.stopPropagation();
-            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-          }}
-          onBlur={() => {
-            const v = hex.startsWith('#') ? hex : `#${hex}`;
-            if (/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(v)) {
-              update(toHSVA(v));
-              pushRecent(v);
-              onCommit?.(v);
-            } else setHex(current);
-          }}
-        />
-        {'EyeDropper' in window && (
-          <button className="ui-icon-btn" title="Pick color from screen" onClick={pickScreen}>
-            <Pipette size={14} />
-          </button>
-        )}
-      </div>
-      {recent.length > 0 && (
+      {!panel && (
+        <div className="ui-row">
+          <ColorSwatch color={current} size={26} />
+          <input
+            className="ui-input"
+            style={{ flex: 1, fontFamily: 'var(--font-mono)' }}
+            value={hex}
+            onChange={(e) => setHex(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+            onBlur={() => {
+              const v = hex.startsWith('#') ? hex : `#${hex}`;
+              if (/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(v)) {
+                update(toHSVA(v));
+                pushRecent(v);
+                onCommit?.(v);
+              } else setHex(current);
+            }}
+          />
+          {'EyeDropper' in window && (
+            <button className="ui-icon-btn" title="Pick color from screen" onClick={pickScreen}>
+              <Pipette size={14} />
+            </button>
+          )}
+        </div>
+      )}
+      {!panel && recent.length > 0 && (
         <div>
           <div className="ui-label" style={{ marginBottom: 4 }}>
             Recent
@@ -238,7 +252,7 @@ export function ColorPicker({
           </div>
         </div>
       )}
-      {activePalette && (
+      {!panel && activePalette && (
         <div>
           <div className="ui-label" style={{ marginBottom: 4 }}>
             {activePalette.name}

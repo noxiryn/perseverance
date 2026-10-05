@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { produce } from 'immer';
 import type { Document, Layer, RasterLayer } from '../core/types';
-import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeFilterInstance, makeGroupLayer, makeRasterLayer, makeTextLayer } from '../core/document';
+import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeFillLayer, makeFilterInstance, makeGroupLayer, makeRasterLayer, makeTextLayer } from '../core/document';
 import { effects, filters, type LookDef } from '../registry';
 import { bitmaps } from '../core/bitmaps';
 import { contentSignature } from './preview';
@@ -24,6 +24,7 @@ import {
   resolveTarget,
   stripLookDraft,
   targetCaps,
+  targetHidesBehind,
   type ExtLookDef,
   type OverlayFactory,
 } from './engine';
@@ -452,6 +453,32 @@ describe('look overlay placement', () => {
     });
     const shadeId = clipped.rootIds[clipped.rootIds.indexOf(charId) + 1];
     expect(behindInsertionPoint(clipped as Document, shadeId)).toEqual({ parentId: null, index: clipped.rootIds.indexOf(charId) });
+  });
+
+  it('keeps behind-overlays on top when the target still has its opaque background', () => {
+    const { doc, charId } = docWithBackground();
+    const built = buildLook(ATMOS, doc, charId, fakeOverlay, { hidesBehind: () => true });
+    expect(built.behindLayers).toEqual([]);
+    expect(built.groupLayers.map((l) => l.name)).toEqual(['Smoke', 'Scratches']);
+    expect(built.behindOnTop).toEqual(['Smoke']);
+    const out = produce(doc, (d) => {
+      insertLookDraft(d, built, charId);
+    });
+    expect(lookGroups(out)).toHaveLength(1);
+    expect(out.rootIds[out.rootIds.length - 1]).toBe(lookGroups(out)[0].id);
+  });
+
+  it('only fill layers and never-cut-out pixel layers hide what is behind them', () => {
+    const fill = makeFillLayer({ fill: { type: 'solid', color: '#000000' } });
+    expect(targetHidesBehind(fill)).toBe(true);
+    // a pixel layer whose bitmap isn't loaded / is transparent around the subject
+    expect(targetHidesBehind(makeRasterLayer({ name: 'cut', bitmapId: 'bm_missing', width: 10, height: 10 }))).toBe(false);
+    // a Remove Background mask hides the background, so atmosphere behind it shows
+    const masked = makeRasterLayer({ name: 'masked', bitmapId: 'bm_missing', width: 10, height: 10 });
+    masked.mask = { bitmapId: 'bm_mask', enabled: true, density: 1, feather: 0, inverted: false };
+    masked.meta = { cutoutMask: 'bm_mask' };
+    expect(targetHidesBehind(masked)).toBe(false);
+    expect(targetHidesBehind(makeTextLayer({ name: 'Title' }))).toBe(false);
   });
 
   it('skips overlays whose asset is already in the document', () => {

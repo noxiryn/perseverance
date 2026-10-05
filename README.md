@@ -79,9 +79,11 @@ Projects save as **`.pgfx`** files that open in any copy of Perseverance:
 
 ### Making a Roblox thumbnail in a minute
 1. **File → New from Template…** and pick a style (or **File → New** → *Roblox Thumbnail*).
-2. Swap in your character: with the template's placeholder selected, drop your render on the canvas and pick
-   **Replace Placeholder Character** — or use **Roblox → Replace Character…** (file or clipboard). Your render
-   takes the placeholder's spot, size, filters and effects; an opaque background is removed automatically.
+2. Swap in your character: with the template's placeholder selected, drop your render on the canvas (or bring
+   it in with **File → Place Image…** / **Edit → Paste**) and pick **Replace Placeholder Character** — or use
+   **Roblox → Replace Character…** (file or clipboard). Your render takes the placeholder's spot, size, filters
+   and effects; an opaque background is removed automatically when that can be done reliably (otherwise the
+   toast points you to **Roblox → Remove Background…**).
    No render yet? **Roblox → Pose Studio…** or **Roblox → Fetch Roblox Avatar…** fill the placeholder too.
 3. Starting from a blank canvas instead? Drop the render, run **Roblox → Remove Background…**, then choose a
    style in the **Character Styler** panel (Roblox → Character Styler).

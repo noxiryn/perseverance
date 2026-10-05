@@ -17,7 +17,7 @@ import { viewport } from '../../editor/viewport';
 import { resampleCanvas } from '../../io/open';
 import { characterInGroup } from '../../looks/engine';
 import { adoptTemplateStylingDraft } from '../../looks/characterStyling';
-import { DEFAULT_BG_PARAMS, applyMask, removeBackground } from '../bg/core';
+import { autoCutout, type AutoCutoutOutcome } from '../bg/core';
 import { alphaBounds } from '../pixels';
 import { canvasHasOpaqueBorder, clearMaskDraft, hasRemoveBgMask } from './cutout';
 import { fitIntoBox, fitIntoBoxAtScale, type FitAlign } from './fit';
@@ -83,7 +83,13 @@ export function imageBaseName(name: string): string {
   return (dot > 0 ? base.slice(0, dot) : base).trim();
 }
 
-export type CutoutOutcome = 'removed' | 'not-needed' | 'not-found' | 'off';
+/**
+ * What happened to the background of an incoming image: 'removed'; 'not-needed' (already
+ * transparent); 'not-found' (nothing or everything would be removed); 'unsure' (the automatic
+ * cut-out looked unreliable — e.g. it would eat into the subject — so the image was left as is);
+ * 'off' (not requested).
+ */
+export type CutoutOutcome = AutoCutoutOutcome | 'not-needed' | 'off';
 
 export interface PreparedImage {
   canvas: HTMLCanvasElement;
@@ -109,16 +115,8 @@ export function prepareReplacement(src: HTMLCanvasElement, opts: { cutout: boole
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
   let cutout: CutoutOutcome = opts.cutout ? 'not-needed' : 'off';
   if (opts.cutout && canvasHasOpaqueBorder(canvas)) {
-    const work = new ImageData(new Uint8ClampedArray(img.data), img.width, img.height);
-    const { mask } = removeBackground(work, DEFAULT_BG_PARAMS);
-    let kept = 0;
-    for (let i = 0; i < mask.length; i++) if (mask[i] > 127) kept++;
-    const share = kept / mask.length;
-    if (share > 0.02 && share < 0.98) {
-      applyMask(work, mask);
-      img.data.set(work.data);
-      cutout = 'removed';
-    } else cutout = 'not-found';
+    // Auto mode with the default settings, applied in place only when the result can be trusted.
+    cutout = autoCutout(img).outcome;
   }
   const b = alphaBounds(img, 0);
   if (!b) return { canvas, cutout };
@@ -227,7 +225,10 @@ export function replaceLayerContents(layerId: ID, src: HTMLCanvasElement, opts: 
       ? ' Background removed automatically (Ctrl+Z undoes it all).'
       : prepared.cutout === 'not-found'
         ? ' No clear background found — use Roblox ▸ Remove Background… to cut it out.'
-        : '';
-  toast(`Replaced “${layer.name}”${wasPlaceholder ? ` with “${newName}”` : ''}${keptText}.${cut}`, prepared.cutout === 'not-found' ? 'info' : 'success', cut ? 5200 : 3200);
+        : prepared.cutout === 'unsure'
+          ? ' The background was left in place: removing it automatically looked unreliable for this image — use Roblox ▸ Remove Background… to cut it out with a preview.'
+          : '';
+  const notice = prepared.cutout === 'not-found' || prepared.cutout === 'unsure';
+  toast(`Replaced “${layer.name}”${wasPlaceholder ? ` with “${newName}”` : ''}${keptText}.${cut}`, notice ? 'info' : 'success', notice ? 6400 : cut ? 5200 : 3200);
   return true;
 }

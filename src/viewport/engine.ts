@@ -11,7 +11,7 @@ import { bitmaps } from '../core/bitmaps';
 import { rectUnion } from '../core/geometry';
 import { installViewport, viewport } from '../editor/viewport';
 import { tools, viewOverlays, type ToolDef, type ToolPointerEvent } from '../registry';
-import { onRenderSettle, renderDocumentLive } from '../render/compositor';
+import { canvasCropExact, onRenderSettle, probeCanvasBackend, renderDocumentLive } from '../render/compositor';
 import { activeSession, useEditor } from '../state/editor';
 import { useUI } from '../state/ui';
 import { isTypingTarget } from '../ui/shortcuts';
@@ -172,6 +172,8 @@ export class ViewportEngine {
     );
     // Approximate incremental work (GPU canvases) was dropped: re-render it exactly.
     this.disposers.push(onRenderSettle(() => this.requestRender()));
+    // Find out early (at idle time) whether partial work is exact on this canvas backend.
+    probeCanvasBackend();
     this.disposers.push(tools.subscribe(() => this.requestOverlay()));
     this.disposers.push(viewOverlays.subscribe(() => this.requestOverlay()));
     this.disposers.push(
@@ -532,6 +534,8 @@ export class ViewportEngine {
    * canvas, so the screen always ends up showing a from-scratch draw shortly after a stroke.
    */
   private armSettle() {
+    // Exact backend (software canvas): clipped draws already match full draws.
+    if (canvasCropExact()) return;
     if (this.settleTimer) clearTimeout(this.settleTimer);
     this.settleTimer = window.setTimeout(() => {
       this.settleTimer = 0;

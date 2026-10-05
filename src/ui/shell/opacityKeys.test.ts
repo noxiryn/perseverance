@@ -36,6 +36,22 @@ describe('digitOf', () => {
     expect(digitOf({ code: 'KeyA', key: 'a' })).toBeNull();
     expect(digitOf({ code: '', key: '7' })).toBe('7');
   });
+
+  it('ignores numpad keys that are navigation keys (NumLock off)', () => {
+    expect(digitOf({ code: 'Numpad1', key: 'End' })).toBeNull();
+    expect(digitOf({ code: 'Numpad3', key: 'PageDown' })).toBeNull();
+    expect(digitOf({ code: 'Numpad7', key: 'Home' })).toBeNull();
+    expect(digitOf({ code: 'Numpad9', key: 'PageUp' })).toBeNull();
+    expect(digitOf({ code: 'Numpad0', key: 'Insert' })).toBeNull();
+    expect(digitOf({ code: 'Numpad5', key: 'Clear' })).toBeNull();
+    expect(digitOf({ code: 'Numpad5', key: '5' })).toBe('5');
+  });
+
+  it('prefers the produced digit over the physical key', () => {
+    expect(digitOf({ code: 'Digit2', key: '2' })).toBe('2');
+    // AZERTY: the unshifted number-row key types "é" — still the 2 key.
+    expect(digitOf({ code: 'Digit2', key: 'é' })).toBe('2');
+  });
 });
 
 describe('digitOpacity', () => {

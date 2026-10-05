@@ -3,9 +3,9 @@
  * (pref 'autosaveMinutes', default 2, 0 = off) into IndexedDB 'perseverance-recovery'. Entries are
  * removed when the document is saved or closed. On startup leftover entries are offered for recovery.
  */
-import type { Document, ID } from '../core/types';
+import type { DocSession, Document, ID } from '../core/types';
 import { renderThumbnail } from '../render/compositor';
-import { useEditor } from '../state/editor';
+import { savedIndexOf, useEditor, type SavedState } from '../state/editor';
 import { openDialog, toast } from '../state/ui';
 import { encodeProject, decodeProject } from './project';
 import { currentEntryId, idle, markDirty, readJSON, readPref, writeJSON } from './util';
@@ -105,8 +105,15 @@ export async function removeRecovery(id: ID): Promise<void> {
 /** Doc ids with an entry in IndexedDB (written this session). */
 const stored = new Set<ID>();
 const lastRun = new Map<ID, number>();
-const lastEntry = new Map<ID, string>();
+/** The state last written per document: step id + document (a coalesced edit keeps the id). */
+const lastEntry = new Map<ID, SavedState>();
 let running = false;
+
+/** True when the session's current step is exactly the state last written to its recovery entry. */
+function alreadyWritten(id: ID, s: DocSession): boolean {
+  const w = lastEntry.get(id);
+  return !!w && savedIndexOf(s.history.entries, w) === s.history.index;
+}
 
 export function autosaveMinutes(): number {
   const v = readPref<number>('autosaveMinutes', 2);
@@ -125,16 +132,15 @@ async function autosaveTick(force = false) {
       if (!s) continue;
       if (!lastRun.has(id)) lastRun.set(id, now);
       if (!s.dirty) continue;
-      if (lastEntry.get(id) === currentEntryId(s)) continue;
+      if (alreadyWritten(id, s)) continue;
       if (!force && now - (lastRun.get(id) ?? now) < minutes * 60000) continue;
       await idle(1000);
       // Re-read after yielding and snapshot synchronously: the recovery entry, its thumbnail and
       // its pixels all describe the same (committed) history step.
       const live = useEditor.getState().sessions[id];
-      if (!live || !live.dirty) continue;
-      const entry = currentEntryId(live);
-      if (lastEntry.get(id) === entry) continue;
+      if (!live || !live.dirty || alreadyWritten(id, live)) continue;
       const doc = live.history.entries[live.history.index]?.doc ?? live.doc;
+      const written: SavedState = { entryId: currentEntryId(live), doc };
       const thumb = thumbnailOf(doc);
       const data = await encodeProject(doc, { background: true });
       // The document may have been saved or closed while encoding.
@@ -151,7 +157,7 @@ async function autosaveTick(force = false) {
         filePath: live.filePath,
       });
       lastRun.set(id, Date.now());
-      lastEntry.set(id, entry);
+      lastEntry.set(id, written);
     }
     await trimEntries();
   } catch (e) {

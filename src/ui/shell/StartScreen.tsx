@@ -26,6 +26,7 @@ import { isDesktop } from '../../platform';
 import { useEditor } from '../../state/editor';
 import { useUI } from '../../state/ui';
 import { cancelPendingTemplatePreviews, pauseTemplatePreviews, useTemplatePreview } from '../../templates/previews';
+import { openTipsGuide } from './dialogs/TipsDialog';
 import { Keys } from './Keys';
 import { LogoLarge } from './Logo';
 import { BUILTIN_QUICK_PRESETS, createBlankDocument, openRecent, openTemplate, readRecent, removeRecent, timeAgo, type RecentEntry } from './documents';
@@ -251,7 +252,7 @@ export function StartScreen() {
               <Keys shortcut="Ctrl+O" />
             </button>
             {has('help.tips') && (
-              <button className="ui-btn shell-start-btn" onClick={() => runCommand('help.tips')} title="Step-by-step guide: canvas, character, background, look, title, export">
+              <button className="ui-btn shell-start-btn" onClick={() => openTipsGuide({ restart: true })} title="Step-by-step guide: canvas, character, background, look, title, export">
                 <Sparkles size={14} strokeWidth={1.8} /> Make a Roblox thumbnail
               </button>
             )}
@@ -374,7 +375,7 @@ export function StartScreen() {
                 </li>
               ))}
             </ul>
-            <button className="shell-start-link" onClick={() => runCommand('help.tips')}>
+            <button className="shell-start-link" onClick={() => openTipsGuide({ restart: true })}>
               <Sparkles size={12} /> Make your first Roblox thumbnail <ArrowRight size={12} />
             </button>
           </Section>

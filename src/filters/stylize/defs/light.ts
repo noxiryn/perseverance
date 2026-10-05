@@ -72,7 +72,6 @@ export const vignette: FilterDef = {
   apply(img, p, ctx) {
     const amount = clamp(num(p.amount, 0.5), 0, 1);
     if (amount <= 0) return img;
-    const { width: w, height: h, data } = img;
     const s = sc(ctx);
     const col = rgb(p.color, '#000000');
     const c = pt(p.center);
@@ -85,100 +84,28 @@ export const vignette: FilterDef = {
       roundness: num(p.roundness, 0),
       feather: num(p.feather, 0.5),
     };
-    // The falloff only depends on the geometry → cached; amount / color edits only re-blend.
-    const { rows, rowOf } = vignetteFalloff(w, h, ctx.offsetX, ctx.offsetY, s, shape);
-    const kT = amount / 65535;
-    const c0 = col[0],
-      c1 = col[1],
-      c2 = col[2];
-    const u = pixelWords(img);
-    if (u) {
-      vignetteWords(u, w, h, rows, rowOf, amount, c0, c1, c2);
-      return img;
-    }
-    for (let y = 0; y < h; y++) {
-      const mo = rowOf[y] * w;
-      for (let x = 0, j = y * w * 4; x < w; x++, j += 4) {
-        const q = rows[mo + x];
-        if (q === 0 || data[j + 3] === 0) continue;
-        const t = q === 65535 ? amount : q * kT;
-        if (t <= 0.0005) continue;
-        data[j] += (c0 - data[j]) * t;
-        data[j + 1] += (c1 - data[j + 1]) * t;
-        data[j + 2] += (c2 - data[j + 2]) * t;
-      }
-    }
+    vignetteBlend(img, ctx.offsetX, ctx.offsetY, s, shape, amount, col[0], col[1], col[2]);
     return img;
   },
 };
 
 /**
- * The vignette blend on little-endian pixel words, in fixed point: T = t·2¹⁶ (t = q/65535 ·
- * amount) and out = v + (c − v)·T/2¹⁶ rounded half to even like a byte store — integer math only,
- * within a rounding step of the float mix (exact when t has ≤ 16 fractional bits, e.g. amount
- * 0.5 in the fully darkened corners).
+ * Blend the vignette color over a w×h image placed at (ox, oy) (doc px) with preview scale s —
+ * same values as evaluating the shape per pixel, at a fraction of the cost and without any
+ * full-size buffer or cache (so region updates and full renders cost the same per pixel):
+ *  - columns: |u| (and u² / u^pw) once per distinct column (columns mirrored around the center share it);
+ *  - rows: the strength of the distinct columns once per row, shared with the mirrored row
+ *    (same |v|), as v² / v^pw plus a column term; the root (sqrt, or the superellipse power for
+ *    negative roundness) only runs in the feather band, the inner / outer parts are decided in
+ *    the squared space;
+ *  - the blend reads whole pixel words and rounds half to even like a byte store.
  */
-function vignetteWords(u: Int32Array, w: number, h: number, rows: Uint16Array, rowOf: Int32Array, amount: number, c0: number, c1: number, c2: number) {
-  const kq = (amount * 65536) / 65535;
-  const tMin = 0.0005 * 65536; // same cut-off as t ≤ 0.0005
-  for (let y = 0; y < h; y++) {
-    const mo = rowOf[y] * w - y * w;
-    for (let i = y * w, e = i + w; i < e; i++) {
-      const q = rows[i + mo];
-      if (q === 0) continue;
-      const px = u[i];
-      if (px >>> 24 === 0) continue;
-      const T = (q * kq + 0.5) | 0;
-      if (T <= tMin) continue;
-      // round half up, then back to even on exact ties: branch-free
-      let x = (c0 - (px & 255)) * T;
-      let r = (px & 255) + ((x + 32768) >> 16);
-      r -= ((((x & 65535) ^ 32768) - 1) >>> 31) & r & 1;
-      x = (c1 - ((px >> 8) & 255)) * T;
-      let g = ((px >> 8) & 255) + ((x + 32768) >> 16);
-      g -= ((((x & 65535) ^ 32768) - 1) >>> 31) & g & 1;
-      x = (c2 - ((px >> 16) & 255)) * T;
-      let b = ((px >> 16) & 255) + ((x + 32768) >> 16);
-      b -= ((((x & 65535) ^ 32768) - 1) >>> 31) & b & 1;
-      u[i] = (px & -16777216) | (b << 16) | (g << 8) | r;
-    }
-  }
-}
-
-/** Vignette strength per pixel, stored once per distinct row (rows mirrored around the center share one). */
-export interface VignetteFalloff {
-  /** Strength 0..65535 (≙ 0..1) of each distinct row, `w` values per row. */
-  rows: Uint16Array;
-  /** Distinct row used by image row y. */
-  rowOf: Int32Array;
-}
-
-/** Last few falloff maps (one per vignette geometry). */
-const falloffCache: { key: string; f: VignetteFalloff }[] = [];
-
-/**
- * Vignette strength for every pixel of a w×h image placed at (ox, oy) (doc px) with the given
- * preview scale. The shape is mirror-symmetric around the center, so each distinct row offset
- * and each distinct column offset is evaluated once (≈ ¼ of the pixels) and mirrored rows are
- * stored once; only the feather band needs the root (sqrt, or the superellipse power for negative
- * roundness).
- */
-export function vignetteFalloff(w: number, h: number, ox: number, oy: number, s: number, o: VignetteShape): VignetteFalloff {
-  const key = [w, h, ox, oy, s, o.docW, o.docH, o.cx, o.cy, o.size, o.roundness, o.feather].join(',');
-  for (let k = 0; k < falloffCache.length; k++) {
-    if (falloffCache[k].key === key) {
-      const hit = falloffCache[k];
-      if (k > 0) {
-        falloffCache.splice(k, 1);
-        falloffCache.unshift(hit);
-      }
-      return hit.f;
-    }
-  }
+function vignetteBlend(img: Img, ox: number, oy: number, s: number, o: VignetteShape, amount: number, c0: number, c1: number, c2: number) {
+  const { width: w, height: h } = img;
+  if (w < 1 || h < 1) return;
   const P = vignettePrep(o);
   const inv = 1 / s;
-  // distinct |u| values: columns mirrored around the center share one evaluation (u is a float32,
-  // like the per-column table of the per-pixel evaluation)
+  // distinct |u| values (float32, like the per-column table of the per-pixel evaluation)
   const colIdx = new Int32Array(w);
   const uniq: number[] = [];
   const seen = new Map<number, number>();
@@ -192,61 +119,100 @@ export function vignetteFalloff(w: number, h: number, ox: number, oy: number, s:
     }
     colIdx[x] = k;
   }
-  // distinct |v| values per row
-  const rowOf = new Int32Array(h);
-  const vs: number[] = [];
-  const seenV = new Map<number, number>();
-  for (let y = 0; y < h; y++) {
-    const v = Math.abs(oy + (y + 0.5) * inv - o.cy) * P.iry;
-    let k = seenV.get(v);
-    if (k === undefined) {
-      k = vs.length;
-      vs.push(v);
-      seenV.set(v, k);
-    }
-    rowOf[y] = k;
-  }
   const nu = uniq.length;
   const round = P.rnd < 0;
   const pw = P.pw;
-  // per distinct column: u² (or u^pw)
   const UP = new Float64Array(nu);
   for (let k = 0; k < nu; k++) UP[k] = round ? Math.pow(uniq[k], pw) : uniq[k] * uniq[k];
   const e0 = P.e0,
-    e1 = P.e1,
-    span = e1 - e0;
-  // thresholds in the same (squared / powered) space: inside e0 → 0, beyond e1 → 1
-  const lo = e0 <= 0 ? -1 : round ? Math.pow(e0, pw) : e0 * e0;
-  const hi = round ? Math.pow(e1, pw) : e1 * e1;
-  const invPw = 1 / pw;
-  const rowVals = new Uint16Array(nu);
-  const rows = new Uint16Array(vs.length * w);
-  for (let r = 0; r < vs.length; r++) {
-    const v = vs[r];
-    const vp = round ? Math.pow(v, pw) : v * v;
-    for (let k = 0; k < nu; k++) {
-      const sum = UP[k] + vp;
-      let q: number;
-      if (sum <= lo) q = 0;
-      else if (sum >= hi) q = 65535;
-      else {
-        const d = round ? Math.pow(sum, invPw) : Math.sqrt(sum);
-        if (d <= e0) q = 0;
-        else if (d >= e1) q = 65535;
-        else {
-          const t = (d - e0) / span;
-          q = Math.round(t * t * (3 - 2 * t) * 65535);
-        }
-      }
-      rowVals[k] = q;
+    e1 = P.e1;
+  // thresholds in the squared / powered space with a safety margin (decided exactly in between)
+  const lo = e0 <= 0 ? -1 : (round ? Math.pow(e0, pw) : e0 * e0) * (1 - 1e-9);
+  const hi = (round ? Math.pow(e1, pw) : e1 * e1) * (1 + 1e-9);
+  const T = new Float64Array(nu);
+  const u = (globalThis as any).__VB ? null : pixelWords(img);
+  const done = new Uint8Array(h);
+  // image rows y and m − y have the same |v| when the center row is on a pixel center or edge
+  const mirror = Math.round(2 * ((o.cy - oy) * s - 0.5));
+  for (let y = 0; y < h; y++) {
+    if (done[y]) continue;
+    const v = Math.abs(oy + (y + 0.5) * inv - o.cy) * P.iry;
+    if (!vignetteRow(T, UP, nu, round ? Math.pow(v, pw) : v * v, round, pw, lo, hi, e0, e1, amount)) continue; // nothing to blend
+    if (u) vignetteRowWords(u, y * w, w, colIdx, T, c0, c1, c2);
+    else vignetteRowBytes(img.data, y * w, w, colIdx, T, c0, c1, c2);
+    const ym = mirror - y;
+    if (ym > y && ym < h && Math.abs(oy + (ym + 0.5) * inv - o.cy) * P.iry === v) {
+      done[ym] = 1;
+      if (u) vignetteRowWords(u, ym * w, w, colIdx, T, c0, c1, c2);
+      else vignetteRowBytes(img.data, ym * w, w, colIdx, T, c0, c1, c2);
     }
-    const row = r * w;
-    for (let x = 0; x < w; x++) rows[row + x] = rowVals[colIdx[x]];
   }
-  const f = { rows, rowOf };
-  falloffCache.unshift({ key, f });
-  if (falloffCache.length > 3) falloffCache.length = 3;
-  return f;
+}
+
+/**
+ * Vignette strength × amount of each distinct column for one row (vp = v² or v^pw) into T.
+ * Returns false when the whole row stays below the blend cut-off (t ≤ 0.0005).
+ */
+function vignetteRow(T: Float64Array, UP: Float64Array, nu: number, vp: number, round: boolean, pw: number, lo: number, hi: number, e0: number, e1: number, amount: number): boolean {
+  const span = e1 - e0;
+  const invPw = 1 / pw;
+  let any = false;
+  for (let k = 0; k < nu; k++) {
+    const sum = UP[k] + vp;
+    let t: number;
+    if (sum <= lo) t = 0;
+    else if (sum >= hi) t = amount;
+    else {
+      const d = round ? Math.pow(sum, invPw) : Math.sqrt(sum);
+      if (d <= e0) t = 0;
+      else if (d >= e1) t = amount;
+      else {
+        const f = (d - e0) / span;
+        t = f * f * (3 - 2 * f) * amount;
+      }
+    }
+    T[k] = t;
+    if (t > 0.0005) any = true;
+  }
+  return any;
+}
+
+/**
+ * Blend one row of little-endian pixel words: v + (c − v)·t per channel (the float mix of the
+ * byte version), rounded half to even like a byte store. Transparent pixels and t ≤ 0.0005 are skipped.
+ */
+function vignetteRowWords(u: Int32Array, i0: number, w: number, colIdx: Int32Array, T: Float64Array, c0: number, c1: number, c2: number) {
+  for (let x = 0, i = i0; x < w; x++, i++) {
+    const t = T[colIdx[x]];
+    if (t <= 0.0005) continue;
+    const px = u[i];
+    if (px >>> 24 === 0) continue;
+    const r0 = px & 255,
+      g0 = (px >> 8) & 255,
+      b0 = (px >> 16) & 255;
+    const r = r0 + (c0 - r0) * t,
+      g = g0 + (c1 - g0) * t,
+      b = b0 + (c2 - b0) * t;
+    // the mix stays within [min(v, c), max(v, c)] ⊂ [0, 255]: round only
+    let ri = (r + 0.5) | 0,
+      gi = (g + 0.5) | 0,
+      bi = (b + 0.5) | 0;
+    if (ri - r === 0.5) ri &= ~1;
+    if (gi - g === 0.5) gi &= ~1;
+    if (bi - b === 0.5) bi &= ~1;
+    u[i] = (px & -16777216) | (bi << 16) | (gi << 8) | ri;
+  }
+}
+
+/** Byte-wise vignetteRowWords (big-endian hosts / unaligned buffers). */
+function vignetteRowBytes(d: Uint8ClampedArray, i0: number, w: number, colIdx: Int32Array, T: Float64Array, c0: number, c1: number, c2: number) {
+  for (let x = 0, j = i0 * 4; x < w; x++, j += 4) {
+    const t = T[colIdx[x]];
+    if (t <= 0.0005 || d[j + 3] === 0) continue;
+    d[j] += (c0 - d[j]) * t;
+    d[j + 1] += (c1 - d[j + 1]) * t;
+    d[j + 2] += (c2 - d[j + 2]) * t;
+  }
 }
 
 /* ------------------------------------------------------------------ */

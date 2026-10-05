@@ -17,6 +17,7 @@ import { isPgfx } from './container';
 import { loadProject } from './project';
 import { addRecentFile } from './recent';
 import { baseName } from './util';
+import { claimPlacedImage } from './placeHooks';
 
 export const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
 
@@ -146,8 +147,11 @@ export function placeCanvas(
   return layer.id;
 }
 
-/** Place image data (clipboard / drag-drop blob) into the active document as a new layer. */
-export async function placeImageBlob(blob: Blob, name = 'Pasted Image'): Promise<void> {
+/**
+ * Place image data (File ▸ Place Image…, avatar images) into the active document as a new layer —
+ * unless a placed-image handler claims it (e.g. to replace a selected template placeholder).
+ */
+export async function placeImageBlob(blob: Blob, name = 'Pasted Image', opts: { claim?: boolean } = {}): Promise<void> {
   let canvas: HTMLCanvasElement;
   try {
     canvas = await blobToCanvas(blob);
@@ -162,5 +166,6 @@ export async function placeImageBlob(blob: Blob, name = 'Pasted Image'): Promise
     toast(`Opened ${clean} as a new document`, 'success');
     return;
   }
+  if (opts.claim !== false && (await claimPlacedImage({ canvas, name: clean, source: 'place' }))) return;
   placeCanvas(canvas, clean);
 }
