@@ -92,6 +92,31 @@ starting point; don't rewrite modules from scratch.
   nsis --x64 --publish never`, with embedded asar integrity), not a release artifact. README: sharing
   leads with sending the Setup .exe itself.
 
+## Layer effects like Photoshop (src/render/engine.ts runEffects, src/render/clip.ts)
+- Interior (clipped) above-stage effects — colour/gradient/pattern overlay, inner shadow/glow, satin,
+  inside stroke, inner bevel — only recolour the content and never add coverage: a red colour overlay
+  on a 50%-alpha pixel gives [255,0,0,128] (it used to give [212,42,42,192]). With fill f and an effect
+  of alpha e, a pixel of content alpha σ ends at σ·(e + f·(1 − e)).
+- How: those effects composite onto the NORMALIZED core — the content's colour made opaque inside its
+  shape (CPU readback over the content bounds; alpha 255/0, so no rounding), drawn at fill opacity —
+  with their own operation, and σ is applied back once with destination-in. Interior pixels (σ = 1)
+  are bit-identical to the previous renderer; only soft edges and semi-transparent content change.
+- Unclipped effects (centre stroke, emboss) still draw on the core itself and reach beyond the
+  content. A clipped effect after one of them splits the core at the shape on the CPU (`splitAtShape`):
+  the part inside is normalized, the part beyond is added back unchanged.
+- Cached effect outputs (FxEntry) are now the unclipped outputs; reuse (one effect edited) matches a
+  fresh render exactly. Every step is per pixel, so region updates (updateRenderRegion) match full
+  renders, on GPU canvases too (`fx-interior-soft` is exact mid-stroke there).
+- Cost: one readback of the content per layer render that has clipped above effects (templates and
+  the demo use behind effects only; the paint benchmarks are unaffected). Of the 23 templates only
+  `tpl-badge-emblem` changes (inner shadow on an anti-aliased disc: its edge ring, ≤ 20 levels).
+- Checks: `scripts/smoke.mjs` render checks (colour overlay on 50% content: opacity, multiply, 0% and
+  50% fill; centre stroke reaching beyond the content around clipped effects; the clip-stack cases);
+  dirty-rect scenarios `fx-interior-soft`, `fx-split`, `clipped-fill`, `clipped-mixed`; unit tests
+  `src/render/clip.test.ts`. `fx-split` (emboss + two strokes) differs mid-stroke by up to 254 levels
+  on ~2.5k px exactly like the previous renderer: several effects share distance fields there (work
+  marked inexact, settled to an exact render).
+
 ## Desktop hardening (electron/, checked with scripts/electron-desktop-check.mjs — 52 checks)
 - Security: sandbox + contextIsolation, no Node in the renderer, IPC sender-frame + type checks.
   Desktop bridge file grants: `readFile`/`writeFile` only accept user-chosen paths (persisted in

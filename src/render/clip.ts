@@ -13,8 +13,8 @@
  * Base pieces (see LayerRender): `shape` = the base's content (smart filters + mask) at full
  * alpha, `core` = what the base itself draws (content at fill opacity + above-stage effects).
  *   - Coverage A = max(α_shape, α_core): normally α_shape (α_core only exceeds it where an
- *     above-stage effect reaches beyond the content — a centered stroke, an emboss — or adds
- *     coverage over soft edges).
+ *     above-stage effect reaches beyond the content: a centered stroke, an emboss; clipped
+ *     effects never add coverage, see splitAtShape).
  *   - Normalized base = core / A: the core's straight colour with alpha α_core / A — opaque inside
  *     the content at 100% fill; the fill opacity where the base is drawn at a lower fill (clipped
  *     layers still show at 0% fill, like Photoshop).
@@ -77,4 +77,45 @@ export function opaqueWhereCovered(src: Uint8ClampedArray, coverage: Uint8Clampe
     out[i - 1] = src[i - 1];
     out[i] = 255;
   }
+}
+
+/*
+ * Layer effects use the same idea (runEffects in ./engine.ts): clipped above-stage effects
+ * (overlays, inner shadow / glow, satin, inside stroke, inner bevel) composite onto the layer's
+ * NORMALIZED core — the core divided by the content's alpha σ: the content's colour, opaque
+ * inside its shape at 100% fill (at the fill opacity below that) — with their own blend mode, and
+ * σ is applied back with destination-in. At a pixel of alpha σ an effect of alpha e therefore
+ * ends at alpha σ·(e + fill·(1 − e)) ≤ σ: it recolours the content and never adds coverage, like
+ * Photoshop. Unclipped effects (centre stroke, emboss) draw on the core itself and may reach
+ * beyond the content; a clipped effect after one of them works on the part of the core inside the
+ * shape (splitAtShape) and the rest is added back unchanged.
+ */
+
+/**
+ * Split layer-effect core pixels at the content's shape, in place. `core` is the core's RGBA with
+ * straight alpha (ImageData.data); it becomes the normalized part inside the shape: the same
+ * colour with alpha round(255·min(α_core, α_shape) / α_shape) (0,0,0,0 where the shape is empty).
+ * `ext` (RGBA, same length, written entirely) gets the part beyond the shape: the same colour
+ * with alpha α_core − min(α_core, α_shape) (0,0,0,0 elsewhere). `shape` is the content's RGBA
+ * (only alpha is used). Returns whether any pixel has a part beyond the shape.
+ */
+export function splitAtShape(core: Uint8ClampedArray, shape: Uint8ClampedArray, ext: Uint8ClampedArray): boolean {
+  const n = Math.min(core.length, shape.length, ext.length);
+  let beyond = false;
+  for (let i = 3; i < n; i += 4) {
+    const ak = core[i];
+    const as = shape[i];
+    if (ak > as) {
+      ext[i - 3] = core[i - 3];
+      ext[i - 2] = core[i - 2];
+      ext[i - 1] = core[i - 1];
+      ext[i] = ak - as;
+      beyond = true;
+    } else ext[i - 3] = ext[i - 2] = ext[i - 1] = ext[i] = 0;
+    if (ak === 0 || as === 0) {
+      core[i - 3] = core[i - 2] = core[i - 1] = 0;
+      core[i] = 0;
+    } else core[i] = ak >= as ? 255 : Math.round((255 * ak) / as);
+  }
+  return beyond;
 }

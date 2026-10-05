@@ -5,7 +5,8 @@
  * px × render scale), cropped to the layer's padded region:
  *   - `shape`: the layer content with smart filters and mask applied, full alpha (used for
  *     clipping masks, above-effect clipping and hit testing),
- *   - `core`: content at fill opacity + above-stage effects (clipped to the content alpha),
+ *   - `core`: content at fill opacity + above-stage effects (clipped ones only recolour the
+ *     content, never adding coverage, like Photoshop: see runEffects / ./clip.ts),
  *   - `behind`: behind-stage effects, each composited with its own blend mode.
  * The accumulator then draws behind pieces and the core with the layer opacity/blend mode.
  *
@@ -33,7 +34,7 @@ import { applyFilterStack, compositeOp, makeFilterContext, resolveParams, runFil
 import { cacheGeneration, objId, slots, type Resource } from './cache';
 import { edgeDistance } from './distance';
 import { applyMask, lerpInto, maskAlpha } from './mask';
-import { coreExceedsShape, normalizeClipBase, opaqueWhereCovered } from './clip';
+import { coreExceedsShape, normalizeClipBase, opaqueWhereCovered, splitAtShape } from './clip';
 import { cropExactBackend } from './backendProbe';
 import { alignGrid, alignRect, changesSince, effectInfluence, effectUsesFields, fieldBucket, filtersLocal, isPixelExact, mapDirtyRect, type ChangeEntry } from './region';
 import { fillWithPaint } from './paint';
@@ -116,7 +117,7 @@ interface MoveInfo {
 export interface LayerRender {
   /** Canvas placement in output px. */
   region: PxRect;
-  /** Content at fill opacity + above effects. */
+  /** Content at fill opacity + above effects (no more coverage than the content, except unclipped ones). */
   core: HTMLCanvasElement | null;
   /** Masked + filtered content at full alpha. */
   shape: HTMLCanvasElement | null;
@@ -1530,14 +1531,105 @@ function runEffects(
     k.drawImage(C, 0, 0);
     k.globalCompositeOperation = 'source-over';
   };
-  const clipTo = (c: HTMLCanvasElement) => {
-    const k = ctx2d(c);
-    k.globalCompositeOperation = 'destination-in';
-    k.drawImage(C, 0, 0);
-    k.globalCompositeOperation = 'source-over';
-  };
   const fxOut: FxEntry[] = [];
   const contentRect = (fieldsP.tight === undefined ? extent : fieldsP.tight) ?? null;
+
+  // Above-stage effects. Clipped ones only recolour the content, like Photoshop (see ./clip.ts):
+  // they composite onto the NORMALIZED core (core / content alpha σ) with their own operation,
+  // and σ is applied back when leaving that space (destination-in C). Unclipped ones (centre
+  // stroke, emboss) draw on the core itself and may reach beyond the content. Effect outputs stay
+  // unclipped (cached FxEntry pieces too); every step is per pixel, so crops (updateRenderRegion)
+  // match full renders.
+  let norm = false;
+  /** An unclipped effect drew on the core (it may cover more than the content). */
+  let beyond = false;
+  /** While normalized after an unclipped effect: the part of the core beyond the content. */
+  let outside: HTMLCanvasElement | null = null;
+  // Where σ can be non-zero (canvas px): the content's pixels are read back there only.
+  const cr = contentRect && intersectRect(contentRect, region);
+  const readRect: PxRect | null = cr ? { x: cr.x - region.x, y: cr.y - region.y, w: cr.w, h: cr.h } : null;
+  const enterNorm = (): boolean => {
+    // Pixels are read (CPU readbacks: exact, unlike an un-premultiply by canvas ops on a GPU
+    // canvas) before anything is modified.
+    let K: ImageData | null = null;
+    let X: ImageData | null = null;
+    try {
+      if (!beyond) {
+        // The core is the content at fill opacity: the content's colour made opaque inside its
+        // shape (alpha 255 or 0), drawn at fill opacity.
+        if (readRect && fill > 0) {
+          K = readImage(C, readRect);
+          opaqueWhereCovered(K.data, K.data, K.data);
+        }
+      } else if (readRect) {
+        // An unclipped effect drew on the core: the part inside the shape is normalized, the
+        // rest (X) is kept aside and added back when leaving.
+        K = readImage(core, readRect);
+        X = new ImageData(readRect.w, readRect.h);
+        splitAtShape(K.data, readImage(C, readRect).data, X.data);
+      }
+    } catch (err) {
+      warnOnce('effect readback failed', err);
+      return false;
+    }
+    if (beyond) {
+      // Outside readRect the shape is empty: all of the core is beyond it there.
+      outside = acquire(core.width, core.height);
+      const o = ctx2d(outside);
+      o.drawImage(core, 0, 0);
+      if (X && readRect) o.putImageData(X, readRect.x, readRect.y);
+    }
+    kctx.clearRect(0, 0, core.width, core.height);
+    if (K && readRect) {
+      if (beyond || fill >= 0.999) kctx.putImageData(K, readRect.x, readRect.y);
+      else {
+        const T = acquire(readRect.w, readRect.h);
+        ctx2d(T).putImageData(K, 0, 0);
+        kctx.globalAlpha = fill;
+        kctx.drawImage(T, readRect.x, readRect.y);
+        kctx.globalAlpha = 1;
+        release(T);
+      }
+    }
+    norm = true;
+    return true;
+  };
+  const leaveNorm = () => {
+    kctx.globalCompositeOperation = 'destination-in';
+    kctx.drawImage(C, 0, 0);
+    if (outside) {
+      kctx.globalCompositeOperation = 'lighter';
+      kctx.drawImage(outside, 0, 0);
+      release(outside);
+      outside = null;
+    }
+    kctx.globalCompositeOperation = 'source-over';
+    norm = false;
+  };
+  /** Composite an above-stage effect piece (unclipped output) onto the core. */
+  const drawAbove = (c: HTMLCanvasElement, op: GlobalCompositeOperation, clips: boolean) => {
+    if (clips && !norm && !enterNorm()) {
+      // No readback: clipped to the content instead (adds coverage over soft edges).
+      const T = acquire(c.width, c.height);
+      const t = ctx2d(T);
+      t.drawImage(c, 0, 0);
+      t.globalCompositeOperation = 'destination-in';
+      t.drawImage(C, 0, 0);
+      kctx.globalCompositeOperation = op;
+      kctx.drawImage(T, 0, 0);
+      kctx.globalCompositeOperation = 'source-over';
+      release(T);
+      beyond = true;
+      return;
+    }
+    if (!clips) {
+      if (norm) leaveNorm();
+      beyond = true;
+    }
+    kctx.globalCompositeOperation = op;
+    kctx.drawImage(c, 0, 0);
+    kctx.globalCompositeOperation = 'source-over';
+  };
   for (const e of sorted) {
     const op = compositeOp((typeof e.params.blendMode === 'string' ? e.params.blendMode : 'normal') as Parameters<typeof compositeOp>[0]);
     const isBehind = e.stage === 'behind';
@@ -1555,11 +1647,7 @@ function runEffects(
         renderStats.fxReuse++;
         for (const pc of pieces) {
           if (isBehind) behind.push(pc);
-          else {
-            kctx.globalCompositeOperation = pc.op;
-            kctx.drawImage(pc.canvas, 0, 0);
-            kctx.globalCompositeOperation = 'source-over';
-          }
+          else drawAbove(pc.canvas, pc.op, clips);
         }
         continue;
       }
@@ -1583,12 +1671,7 @@ function runEffects(
         if (isBehind) {
           if (knock) knockOut(copy);
           behind.push({ canvas: copy, op: pop });
-        } else {
-          if (clips) clipTo(copy);
-          kctx.globalCompositeOperation = pop;
-          kctx.drawImage(copy, 0, 0);
-          kctx.globalCompositeOperation = 'source-over';
-        }
+        } else drawAbove(copy, pop, clips);
         recorded.push({ canvas: copy, op: pop });
       },
     };
@@ -1601,10 +1684,7 @@ function runEffects(
       if (knock) knockOut(target);
       behind.push({ canvas: target, op });
     } else {
-      if (clips) clipTo(target);
-      kctx.globalCompositeOperation = op;
-      kctx.drawImage(target, 0, 0);
-      kctx.globalCompositeOperation = 'source-over';
+      drawAbove(target, op, clips);
       if (!cacheable) release(target);
     }
     if (cacheable) {
@@ -1612,6 +1692,7 @@ function runEffects(
       fxOut.push({ key, region, pieces: recorded });
     }
   }
+  if (norm) leaveNorm();
   return {
     core,
     behind,
@@ -1863,11 +1944,13 @@ function markClipStale(rc: RC, l: Layer, p: LayerRender, abs: PxRect) {
 /** Pixels of `src` over `r` (straight alpha), read through a CPU scratch canvas (see applyAdjustment). */
 function readImage(src: HTMLCanvasElement, r: PxRect): ImageData {
   const T = acquire(r.w, r.h, { read: true });
-  const k = ctx2d(T, { willReadFrequently: true });
-  k.drawImage(src, -r.x, -r.y);
-  const img = k.getImageData(0, 0, r.w, r.h);
-  release(T);
-  return img;
+  try {
+    const k = ctx2d(T, { willReadFrequently: true });
+    k.drawImage(src, -r.x, -r.y);
+    return k.getImageData(0, 0, r.w, r.h);
+  } finally {
+    release(T);
+  }
 }
 
 /**
