@@ -13,6 +13,7 @@
       "Bash(mkdir:*)",
       "Bash(pkill:*)",
       "Bash(wineboot:*)"
+      "Bash(git merge:*)"
     ]
   }
 }
