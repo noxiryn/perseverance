@@ -12,7 +12,7 @@
       "Bash(find:*)",
       "Bash(mkdir:*)",
       "Bash(pkill:*)",
-      "Bash(wineboot:*)"
+      "Bash(wineboot:*)",
       "Bash(git merge:*)"
     ]
   }
