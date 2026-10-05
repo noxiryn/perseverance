@@ -98,8 +98,8 @@ const grungePaper = defineAsset(
       const edges = num(p, 'edges', 0.6);
       const [c, ctx] = newCanvas(W, H);
       paintPaper(ctx, W, H, u, tone, seed, { mottle: 1, grain: num(p, 'grain', 0.7), fibers: 0.6, specks: 0.8 });
-      // stains + burnt edges, computed on a reduced grid
-      const { fw, fh, s } = fieldDims(W, H, 140_000);
+      // stains + burnt edges, computed on a reduced grid (soft features: upscaling hides it)
+      const { fw, fh, s } = fieldDims(W, H, 80_000);
       const up = s * u;
       const f = noiseField(fw, fh, up, { seed: seed + 1, freq: 1.7, octaves: 5, warp: 0.7 });
       const f2 = noiseField(fw, fh, up, { seed: seed + 2, freq: 2.4, octaves: 4 });

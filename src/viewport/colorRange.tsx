@@ -20,7 +20,9 @@ import type { SelectionMode } from '../editor/selection';
 import { viewport } from '../editor/viewport';
 import { renderDocument } from '../render/compositor';
 import { activeDoc, toolOptions, useEditor } from '../state/editor';
-import { openDialog, toast } from '../state/ui';
+import { openDialog, toast, useUI } from '../state/ui';
+import { isTypingTarget } from '../ui/shortcuts';
+import { settleTransform } from './transform/controller';
 import { Button, Checkbox, Dialog, IconButton, Select, Slider } from '../ui/controls';
 import { colorRangeWeights, type ColorRangeParams, type ColorRangePreset } from './math/colorRange';
 import { averageColor, hexToRgb, rgbToHex } from './math/color';
@@ -317,7 +319,8 @@ export async function openColorRange() {
     return;
   }
   if (useColorRange.getState().open) return;
-  source = buildSource(doc);
+  settleTransform();
+  source = buildSource(activeDoc() ?? doc);
   if (!source) {
     toast('Could not read the image for Color Range.', 'error');
     return;
@@ -564,26 +567,63 @@ function ThumbFooter() {
   );
 }
 
-/** Close on Escape, commit on Enter (capture phase so global shortcuts don't fire). */
-function useKeys(active: boolean) {
+/** Another piece of UI that owns Enter/Escape is open (dialog, command palette, menu, popover). */
+function otherUiOwnsKeys(panel: HTMLElement | null): boolean {
+  const ui = useUI.getState();
+  if (ui.dialogs.length > 0 || ui.commandPaletteOpen) return true;
+  for (const el of document.querySelectorAll('[role="menu"], [role="dialog"], .ui-menu, .ui-popover')) {
+    if (!panel?.contains(el)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether a key event is aimed at the Color Range panel: it comes from inside the panel, or focus
+ * rests on the canvas / nothing in particular. Keys typed into other UI (a layer rename field,
+ * the command palette, a dialog, a menu…) are left alone.
+ */
+export function keyTargetsPanel(e: KeyboardEvent, panel: HTMLElement | null): boolean {
+  if (e.defaultPrevented || e.isComposing) return false;
+  const t = e.target instanceof Node ? e.target : null;
+  if (panel && t && panel.contains(t)) return !otherUiOwnsKeys(panel);
+  if (otherUiOwnsKeys(panel)) return false;
+  const ae = document.activeElement;
+  if (!ae || ae === document.body || ae === document.documentElement) return true;
+  if (isTypingTarget(ae)) return false;
+  const vp = viewport.element();
+  return !!vp && vp.contains(ae);
+}
+
+/**
+ * Escape cancels and Enter commits while the panel is open. Capture phase, so the panel (which
+ * floats over the canvas) wins over canvas tool shortcuts — but only for keys aimed at it.
+ */
+function useKeys(active: boolean, panelRef: React.RefObject<HTMLDivElement | null>) {
   useEffect(() => {
     if (!active) return;
     const key = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' && e.key !== 'Enter') return;
+      const panel = panelRef.current;
+      if (!keyTargetsPanel(e, panel)) return;
       const t = e.target as HTMLElement | null;
       if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
         closeColorRange(false);
-      } else if (e.key === 'Enter' && t?.tagName !== 'TEXTAREA') {
-        e.preventDefault();
-        e.stopPropagation();
-        (document.activeElement as HTMLElement | null)?.blur?.();
-        closeColorRange(true);
+        return;
       }
+      // Enter on a focused button inside the panel activates that button (e.g. Cancel).
+      if (t && panel?.contains(t) && (t.tagName === 'BUTTON' || t.tagName === 'TEXTAREA')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // Commit a value typed into a field (fuzziness) before applying.
+      const ae = document.activeElement as HTMLElement | null;
+      if (ae && panel?.contains(ae)) ae.blur();
+      closeColorRange(true);
     };
     window.addEventListener('keydown', key, true);
     return () => window.removeEventListener('keydown', key, true);
-  }, [active]);
+  }, [active, panelRef]);
 }
 
 /** Floating, draggable, non-modal panel rendered inside the viewport. */
@@ -591,7 +631,7 @@ export function ColorRangePanel() {
   const open = useColorRange((s) => s.open && s.host === 'panel');
   const pos = useColorRange((s) => s.pos);
   const ref = useRef<HTMLDivElement>(null);
-  useKeys(open);
+  useKeys(open, ref);
 
   // Keep the panel inside the viewport when it (or the viewport) resizes.
   useEffect(() => {
