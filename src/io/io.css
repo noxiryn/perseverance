@@ -4,7 +4,7 @@
   color: var(--text-dim);
 }
 .io-faint {
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 .io-error {
   color: var(--danger);
@@ -12,7 +12,7 @@
 }
 .io-count {
   margin-left: auto;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
 }
 .io-checker {
@@ -30,15 +30,21 @@
 .io-form-label {
   font-size: var(--fs-sm);
   color: var(--text-dim);
-  margin: 10px 0 4px;
+  margin: 12px 0 4px;
 }
 .io-form-label:first-child {
   margin-top: 0;
 }
+/* A row of fields is one field group: same 12px gap above it as a single label. */
 .io-form-row2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+  margin-top: 12px;
+}
+.io-form-row2:first-child,
+.io-form-label + .io-form-row2 {
+  margin-top: 0;
 }
 .io-form-grid {
   display: grid;
@@ -158,7 +164,7 @@
   text-overflow: ellipsis;
 }
 .io-preset-size {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   margin-top: 1px;
 }
@@ -208,6 +214,25 @@
 .io-orient-btn:disabled {
   opacity: 0.45;
   cursor: default;
+}
+/* Square documents: a state chip styled like the active orientation button. */
+.io-orient-chip {
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--text-strong);
+  font-size: var(--fs-sm);
+}
+.io-orient-chip .glyph {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--accent-strong);
+  border-radius: 1px;
 }
 .io-newdoc-preset-name {
   color: var(--text-strong);
@@ -335,7 +360,7 @@
 }
 .io-chip small {
   display: block;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
 }
 .io-chip:hover {
@@ -435,7 +460,7 @@
   color: var(--text-strong);
 }
 .io-recover-item .io-recover-meta {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   margin-top: 2px;
 }

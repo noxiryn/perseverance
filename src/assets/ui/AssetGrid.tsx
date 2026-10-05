@@ -3,7 +3,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { WheelEvent as ReactWheelEvent } from 'react';
-import { ChevronLeft, ChevronRight, Search } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Search, SlidersHorizontal } from 'lucide-react';
 import type { AssetDef } from '../../registry';
 import { assets, useRegistry } from '../../registry';
 import { CATEGORY_ORDER } from '../catalog';
@@ -115,26 +115,57 @@ function AssetCard({
   onSelect,
   onActivate,
   thumbSize,
+  clickPlaces,
 }: {
   def: AssetDef;
   selected: boolean;
   onSelect: () => void;
   onActivate: () => void;
   thumbSize: number;
+  /** Single click places (Libraries panel); settings open from the gear or a right-click. */
+  clickPlaces?: boolean;
 }) {
   const thumb = useRef<HTMLCanvasElement | null>(null);
   const settings = useLibrary((s) => s.settings[def.id]);
+  const tweaked = !!settings && (Object.keys(settings.params ?? {}).length > 0 || settings.blendMode !== undefined || settings.opacity !== undefined);
   return (
     <div
       className={`assets-card${selected ? ' selected' : ''}`}
-      title={`${def.name} — click for settings, double-click to place, or drag onto the canvas`}
+      title={
+        clickPlaces
+          ? `${def.name} — click to place${tweaked ? ' (with your settings)' : ''} · right-click or ⚙ for settings · or drag onto the canvas`
+          : `${def.name} — click for settings, double-click to place, or drag onto the canvas`
+      }
       draggable
       onDragStart={(e) => startDrag(e, { kind: 'asset', id: def.id, params: settings?.params, blendMode: settings?.blendMode, opacity: settings?.opacity }, thumb.current)}
-      onClick={onSelect}
-      onDoubleClick={onActivate}
+      onClick={clickPlaces ? onActivate : onSelect}
+      onDoubleClick={clickPlaces ? undefined : onActivate}
+      onContextMenu={
+        clickPlaces
+          ? (e) => {
+              e.preventDefault();
+              onSelect();
+            }
+          : undefined
+      }
       onPointerEnter={() => void prepareAsset(def.id)}
     >
       <AssetThumb assetId={def.id} size={thumbSize} badge={def.sizing === 'document' ? undefined : 'Sticker'} onCanvas={(c) => (thumb.current = c)} />
+      {clickPlaces && (
+        <button
+          type="button"
+          className={`assets-card-gear${tweaked ? ' tweaked' : ''}`}
+          title={`${def.name} settings…`}
+          aria-label={`${def.name} settings`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelect();
+          }}
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          <SlidersHorizontal size={12} strokeWidth={1.8} />
+        </button>
+      )}
       <div className="assets-card-name">{def.name}</div>
     </div>
   );
@@ -148,6 +179,7 @@ export function AssetGrid({
   onSelect,
   onActivate,
   emptyText,
+  clickPlaces,
 }: {
   list: AssetDef[];
   grouped?: boolean;
@@ -156,9 +188,16 @@ export function AssetGrid({
   onSelect: (id: string) => void;
   onActivate?: (id: string) => void;
   emptyText?: string;
+  /** Single click places the asset (with the settings tweaked for it); the gear / right-click opens them. */
+  clickPlaces?: boolean;
 }) {
-  // double-click = quick place with the asset's defaults
-  const activate = onActivate ?? ((id: string) => void placeAssetWhenReady(id));
+  // quick place with the settings the user tweaked for this asset (or its defaults)
+  const activate =
+    onActivate ??
+    ((id: string) => {
+      const st = useLibrary.getState().settings[id];
+      void placeAssetWhenReady(id, st?.params, { blendMode: st?.blendMode, opacity: st?.opacity });
+    });
   if (!list.length)
     return (
       <div className="assets-empty">
@@ -176,6 +215,7 @@ export function AssetGrid({
           selected={selectedId === d.id}
           onSelect={() => onSelect(d.id)}
           onActivate={() => activate(d.id)}
+          clickPlaces={clickPlaces}
         />
       ))}
     </div>

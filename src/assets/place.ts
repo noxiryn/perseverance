@@ -17,6 +17,11 @@ import { toast } from '../state/ui';
 import { viewport } from '../editor/viewport';
 import { assetMeta } from './lib/params';
 import { assetFontsReady, loadAssetFonts } from './lib/fonts';
+import { adaptToBackdrop, meanLuminance } from './lib/backdrop';
+import { renderThumbnail } from '../render/compositor';
+import { ctxRead } from '../core/canvas';
+import { parseColor } from '../core/color';
+import type { Document } from '../core/types';
 
 export interface AssetLayerOptions {
   name?: string;
@@ -144,6 +149,18 @@ export function placeAsset(assetId: string, params?: ParamValues, opts: AssetLay
     toast('That asset is no longer available', 'warning');
     return null;
   }
+  // Light-only blends (Screen…) can't show on a light canvas: place dark-on-light instead.
+  const blend = opts.blendMode ?? def.defaultBlendMode ?? 'normal';
+  const size = assetLayerSize(def, doc.width, doc.height, opts);
+  const box =
+    def.sizing === 'document'
+      ? { x: 0, y: 0, width: doc.width, height: doc.height }
+      : { x: opts.x ?? (doc.width - size.width) / 2, y: opts.y ?? (doc.height - size.height) / 2, width: size.width, height: size.height };
+  const adapt = blend === (def.defaultBlendMode ?? 'normal') ? adaptToBackdrop(def, resolveParams(def, params), blend, backdropLuminance(doc, box)) : null;
+  if (adapt?.changed) {
+    params = adapt.params;
+    opts = { ...opts, blendMode: adapt.blendMode };
+  }
   let layer: RasterLayer | null = null;
   try {
     layer = createAssetLayer(assetId, params, doc.width, doc.height, opts);
@@ -155,7 +172,31 @@ export function placeAsset(assetId: string, params?: ParamValues, opts: AssetLay
   if (!layer) return null;
   const id = useEditor.getState().addLayer(layer, { label: `Place ${layer.name}` });
   viewport.requestRender();
+  const blendName = blend.replace(/(^|-)(\w)/g, (_m, sep: string, c: string) => (sep ? ' ' : '') + c.toUpperCase());
+  if (adapt?.changed)
+    toast(`“${def.name}” uses ${blendName} by default, which can't show on a light background — placed in Multiply with a darker color (switch the layer back to ${blendName} on dark backgrounds).`, 'info', 5200);
+  else if (adapt?.invisible) toast(`“${def.name}” is in ${blendName} mode, which doesn't show on a light background — try Multiply or a darker color.`, 'info', 4600);
   return id;
+}
+
+/** Mean luminance (0..1) of the current composite inside a doc-space box (low-res render), or null. */
+function backdropLuminance(doc: Document, box: { x: number; y: number; width: number; height: number }): number | null {
+  try {
+    const thumb = renderThumbnail(doc, null, 96);
+    const sx = thumb.width / doc.width,
+      sy = thumb.height / doc.height;
+    const x0 = Math.max(0, Math.floor(box.x * sx)),
+      y0 = Math.max(0, Math.floor(box.y * sy));
+    const x1 = Math.min(thumb.width, Math.ceil((box.x + box.width) * sx)),
+      y1 = Math.min(thumb.height, Math.ceil((box.y + box.height) * sy));
+    if (x1 <= x0 || y1 <= y0) return null;
+    // Transparent areas show the document background color (exports) — or nothing: count as dark.
+    const bg = doc.background ? parseColor(doc.background) : null;
+    const fallback = bg ? (0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b) / 255 : 0;
+    return meanLuminance(ctxRead(thumb).getImageData(x0, y0, x1 - x0, y1 - y0).data, fallback);
+  } catch {
+    return null;
+  }
 }
 
 /**

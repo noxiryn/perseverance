@@ -78,10 +78,16 @@ starting point; don't rewrite modules from scratch.
    - renderer: export `warpPoint`/`isWarpActive`/`ITALIC_SKEW` from compositor.ts (type tool imports warpMath.ts directly).
    - viewport move tool: call `editTextLayer(layerId, {at})` from src/tools/type on double-click of a text layer
      (type module currently uses a window-level dblclick fallback).
-   - PERF (paint/viewport/renderer/bitmaps): dirty-rect fast path for live painting — `bitmaps.touch(id, rect?)`
-     (or `viewport.requestRender(docRect?)`) + cache composites below/above the active layer during a stroke, so a
-     brush frame re-blends only the stroke region (today every frame re-composites the whole doc: ~30-200 ms).
-     Paint already computes per-frame dirty rects in CompositeSession.flush / PixelSession.flush.
+   - (done) PERF dirty-rect fast path for live painting: paint passes each frame's dirty rect to
+     `bitmaps.touch(id, rect)` (`dirtySince(id, v)`); the renderer updates the painted layer's cached render in place
+     over that region (transform/mask/smart filters/effects reach), re-blends only that document region (layers below
+     from a tiled cache, adjustments above over the region) into the live composite (`renderDocumentLive`, `since`/`seq`),
+     and the viewport redraws only that screen area. Work that is inexact on GPU canvases (blurs/resampling of crops,
+     several effects sharing distance fields) is re-rendered exactly ~350 ms after painting stops (`onRenderSettle`).
+     200px brush, SwiftShader: 1-layer 1080p ≈50 → ≈5 ms/frame, demo ≈150 → ≈8-11 ms/frame.
+     Check: `node scripts/dirty-rect-check.mjs --url http://localhost:<port>/ [--gpu]` (incremental vs from-scratch).
+   - Optional follow-ups: exports could call `settleRenderCaches()` first (only matters within ~350 ms of a stroke on
+     a GPU canvas); panels' thumbnails could also re-render on `onRenderSettle`.
    - macOS: Edit-menu roles intercept Cmd+C/V — canvas copy/paste on mac should also listen to DOM copy/paste events.
 3. **End-to-end smoke test**: `npx vite --port 5300 &` then `node scripts/smoke.mjs --url http://localhost:5300`
    (exercises templates, every command, tool and panel; screenshots in `screenshots-tmp/`).

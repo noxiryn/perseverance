@@ -1,6 +1,7 @@
 /**
  * Perseverance project files (.pgfx): encode the active document + every bitmap it references
- * into the binary container (see container.ts), and load them back into new sessions.
+ * (+ the user-added fonts its text uses) into the binary container (see container.ts), and load
+ * them back into new sessions.
  */
 import type { Document, ID, Layer, LayerBase } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
@@ -9,8 +10,9 @@ import { uid } from '../core/ids';
 import { DEFAULT_LOCKS } from '../core/document';
 import { appVersion, type OpenedFile } from '../platform';
 import { useEditor } from '../state/editor';
-import { packContainer, PGFX_VERSION, unpackContainer, type ContainerBlob } from './container';
-import { encodeCached, PngCache } from './pngCache';
+import { packContainer, PGFX_VERSION, unpackContainer, type ContainerFont } from './container';
+import { PngCache, startEncodes, type SnapshotItem } from './pngCache';
+import { embeddableFonts, registerProjectFonts, reportProjectFonts } from './projectFonts';
 import { APP_NAME, baseName, docBitmapIds, idle } from './util';
 
 /* ------------------------------------------------------------------ */
@@ -23,12 +25,7 @@ import { APP_NAME, baseName, docBitmapIds, idle } from './util';
  */
 const pngCache = new PngCache();
 
-async function encodeBitmap(id: ID): Promise<ContainerBlob | null> {
-  const c = bitmaps.tryGet(id);
-  if (!c) return null;
-  const r = await encodeCached(pngCache, id, c, bitmaps.version(id), async (cv) => (await canvasToBlob(cv, 'image/png')).arrayBuffer());
-  return { id, width: r.width, height: r.height, data: r.data };
-}
+const encodePng = async (c: HTMLCanvasElement) => (await canvasToBlob(c, 'image/png')).arrayBuffer();
 
 /** Drop cached PNGs for bitmaps no open document references any more. */
 function prunePngCache() {
@@ -38,21 +35,34 @@ function prunePngCache() {
 }
 
 /**
- * Encode a document as a .pgfx container. Bitmaps are encoded asynchronously one by one;
- * with `background: true` the work yields to idle time between bitmaps (autosave).
+ * Encode a document as a .pgfx container.
+ *
+ * The file is a snapshot of ONE state: the document JSON is immutable, and the pixels of every
+ * bitmap it references are captured synchronously when this is called — cached PNGs for unchanged
+ * bitmaps, and the other encodes are started before the first await (canvas.toBlob copies the
+ * pixels at call time; see startEncodes). Edits, undo/redo or bitmap GC while the PNGs encode
+ * (which takes seconds for big documents) can therefore never leak into the file. Callers must
+ * pass the document state they will mark as saved, and call this synchronously after reading it.
+ *
+ * `background: true` (autosave, templates) yields to idle time before packing and does not embed
+ * fonts (recovery files and templates stay on this machine, which has the fonts).
  */
 export async function encodeProject(doc: Document, opts: { background?: boolean } = {}): Promise<ArrayBuffer> {
-  const blobs: ContainerBlob[] = [];
+  // ---- synchronous snapshot (no await above this line) ----
+  const savedAt = new Date().toISOString();
+  const items: SnapshotItem<HTMLCanvasElement>[] = [];
   for (const id of docBitmapIds(doc)) {
-    if (opts.background) await idle();
-    const b = await encodeBitmap(id);
-    if (b) blobs.push(b);
+    const canvas = bitmaps.tryGet(id);
+    if (canvas) items.push({ id, canvas, version: bitmaps.version(id) });
   }
+  const jobs = startEncodes(pngCache, items, encodePng);
+  // ---- asynchronous part: works only on the snapshot ----
+  const fontsP: Promise<ContainerFont[]> = opts.background ? Promise.resolve([]) : embeddableFonts(doc);
+  const blobs = await Promise.all(jobs.map(async (j) => ({ id: j.id, width: j.width, height: j.height, data: await j.data })));
+  const embedded = await fontsP;
   prunePngCache();
-  return packContainer(
-    { version: PGFX_VERSION, app: `${APP_NAME} ${appVersion}`, savedAt: new Date().toISOString(), document: doc },
-    blobs,
-  );
+  if (opts.background) await idle();
+  return packContainer({ version: PGFX_VERSION, app: `${APP_NAME} ${appVersion}`, savedAt, document: doc }, blobs, embedded);
 }
 
 /* ------------------------------------------------------------------ */
@@ -142,8 +152,18 @@ async function decodePng(data: Uint8Array, w: number, h: number): Promise<HTMLCa
  * Bitmap ids that already exist in the store (e.g. the same file opened twice) are remapped.
  */
 export async function decodeProject(buf: ArrayBuffer | Uint8Array): Promise<Document> {
-  const { header, blobs } = unpackContainer(buf);
+  return (await decodeProjectWithFonts(buf)).doc;
+}
+
+/**
+ * decodeProject that also registers the fonts embedded in the file which this machine lacks
+ * (for the session) and returns their families.
+ */
+export async function decodeProjectWithFonts(buf: ArrayBuffer | Uint8Array): Promise<{ doc: Document; embeddedFonts: string[] }> {
+  const { header, blobs, fonts } = unpackContainer(buf);
   const doc = sanitizeDocument(header.document);
+  // Before the document opens, so its text renders with the right faces from the first frame.
+  const embeddedFonts = await registerProjectFonts(fonts);
   const remap = new Map<ID, ID>();
   for (const b of blobs) {
     const canvas = await decodePng(b.data, b.width, b.height);
@@ -168,13 +188,15 @@ export async function decodeProject(buf: ArrayBuffer | Uint8Array): Promise<Docu
   if (doc.selection) doc.selection = { ...doc.selection, bitmapId: fix(doc.selection.bitmapId, doc.width, doc.height) };
   // A document with the same id may already be open (same file opened twice).
   if (useEditor.getState().sessions[doc.id]) doc.id = uid('doc_');
-  return doc;
+  return { doc, embeddedFonts };
 }
 
 /** Open a .pgfx file as a new document session. */
 export async function loadProject(file: OpenedFile): Promise<Document> {
-  const doc = await decodeProject(file.data);
+  const { doc, embeddedFonts } = await decodeProjectWithFonts(file.data);
   if (!doc.name || doc.name === 'Untitled') doc.name = baseName(file.name);
   useEditor.getState().openDocument(doc, { filePath: file.path, label: 'Open' });
+  // Missing / embedded font notes (never blocks or fails the open).
+  void reportProjectFonts(doc, embeddedFonts).catch(() => undefined);
   return doc;
 }

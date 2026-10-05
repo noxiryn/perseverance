@@ -180,8 +180,46 @@ export function absorbForeignCommit(prev: EditorState): boolean {
 }
 
 /**
+ * The user switched to another document while a Free Transform / Transform Selection was live:
+ * apply it to its own document (one "Free Transform" step there, like the type tool commits text
+ * on a switch) instead of silently dropping the work. The session's document is made active for
+ * the commit and the user's choice is restored right after. Returns true when a step was added.
+ */
+export function commitTransformInOwnDoc(): boolean {
+  const ses = activeTransform();
+  if (!ses) return false;
+  const st = useEditor.getState();
+  const own = st.sessions[ses.docId];
+  if (!own) {
+    abandonTransform(); // its document was closed
+    return false;
+  }
+  const cur = own.history.entries[own.history.index];
+  if (cur?.id !== ses.baseEntryId || cur.doc !== ses.baseDoc) {
+    // Its history moved too (e.g. undo before switching): nothing consistent to apply.
+    abandonTransform(ses.docId);
+    return false;
+  }
+  const back = st.activeDocId;
+  let committed = false;
+  rebasing = true; // keep the lifecycle watchdog out while we hop documents
+  try {
+    if (back !== ses.docId) useEditor.getState().setActiveDoc(ses.docId);
+    const { prevTool } = uninstall();
+    committed = ses.commit();
+    restoreTool(prevTool);
+  } finally {
+    const now = useEditor.getState();
+    if (back && back !== ses.docId && now.sessions[back]) now.setActiveDoc(back);
+    rebasing = false;
+  }
+  if (committed) toast(`${ses.label} applied to “${own.doc.name}”.`, 'info');
+  return committed;
+}
+
+/**
  * Drop the session without touching the document (the history moved underneath it, e.g. undo,
- * or the user switched documents). If the doc still carries the live preview, revert it.
+ * or its document was closed). If the doc still carries the live preview, revert it.
  */
 export function abandonTransform(revertDocId?: string) {
   const { ses } = uninstall();

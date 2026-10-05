@@ -2,9 +2,14 @@
  * Character Styler panel (id 'roblox'): one-click character styles (smart filters + effects
  * tracked in layer.meta.styler), friendly sliders bound to their params (live preview +
  * coalesced commits) and quick buttons for the Roblox tools.
+ *
+ * Character styling has one owner at a time (see src/looks/characterStyling.ts): a style
+ * replaces the treatment a template authored and a look's filters on the layer, and "Reset
+ * styling" removes all of them. Styles need a real cut-out — a Remove Background mask is applied
+ * automatically (one undo step), other background-hiding masks get a one-click "Apply Mask".
  */
 import { useMemo } from 'react';
-import { Box, CloudDownload, Eraser, Gamepad2, ImagePlus, PersonStanding, RotateCcw, Scissors, SquareDashed, Monitor } from 'lucide-react';
+import { Box, CloudDownload, Eraser, Gamepad2, ImagePlus, PersonStanding, Replace, RotateCcw, Scissors, SquareDashed, Monitor } from 'lucide-react';
 import { ColorField, Field, IconButton, Slider } from '../../ui/controls';
 import { effects, filters, runCommand, useRegistry } from '../../registry';
 import { useActiveDoc, useActiveLayer, useEditor } from '../../state/editor';
@@ -13,9 +18,11 @@ import { resolveParams } from '../../filters/engine';
 import { uid } from '../../core/ids';
 import type { Layer, ParamValue } from '../../core/types';
 import { viewport } from '../../editor/viewport';
-import { bitmaps } from '../../core/bitmaps';
+import { applyMask as applyLayerMask } from '../../panels/layerOps';
+import { adoptTemplateStylingDraft, hasCharacterStyling, stripCharacterStylingDraft, stylingOwnersOn } from '../../looks/characterStyling';
 import '../roblox.css';
 import { STYLES, applyBuiltStyleDraft, buildStyle, readStylerMeta, resolveControls, setControlDraft, styleById, type ResolvedControl, type StyleDef } from './styles';
+import { cutoutState, hasRemoveBgMask, prepareCutoutBake } from '../character/cutout';
 
 const STYLABLE = new Set(['raster', 'text', 'shape']);
 
@@ -23,39 +30,44 @@ function availability() {
   return { hasFilter: (id: string) => filters.has(id), hasEffect: (id: string) => effects.has(id) };
 }
 
-/** Apply (or clear with null) a styler style on a layer — one undo step. */
+/**
+ * Apply a styler style on a layer — or, with null, reset the layer's character styling (the
+ * styler's, the template's and a look's filters/effects). One undo step.
+ */
 export function applyStyle(layerId: string, style: StyleDef | null) {
   const st = useEditor.getState();
   const s = st.activeDocId ? st.sessions[st.activeDocId] : null;
   const layer = s?.doc.layers[layerId];
-  if (!layer || !STYLABLE.has(layer.type)) return;
+  if (!s || !layer || !STYLABLE.has(layer.type)) return;
+  if (layer.locks.all) {
+    toast(`“${layer.name}” is locked — unlock it to change its style.`, 'warning');
+    return;
+  }
   const built = style ? buildStyle(style, availability(), uid) : null;
   if (style && built && !built.filters.length && !built.effects.length) {
     toast(`The filters used by “${style.name}” are not available.`, 'warning');
     return;
   }
-  st.commit(style ? `Style: ${style.name}` : 'Clear Character Style', (d) => {
-    const l = d.layers[layerId];
-    if (l) applyBuiltStyleDraft(l, built);
-  });
+  // Smart filters run before the layer mask: bake a Remove Background mask first so the style
+  // follows the character instead of the hidden background.
+  const bake = style ? prepareCutoutBake(s.doc, layer) : null;
+  const replaced = stylingOwnersOn(layer).filter((o) => o !== 'styler');
+  st.commit(
+    style ? `Style: ${style.name}` : 'Reset Character Styling',
+    (d) => {
+      const l = d.layers[layerId];
+      if (!l) return;
+      bake?.apply(l);
+      adoptTemplateStylingDraft(l);
+      stripCharacterStylingDraft(l, ['template', 'look']);
+      applyBuiltStyleDraft(l, built);
+    },
+    bake ? { patches: bake.patches } : undefined,
+  );
   viewport.requestRender();
-}
-
-/**
- * True when a pixel layer still has an opaque background (its border is fully opaque and no
- * mask hides it): the styles' face shadow, rims and outlines need a cut-out character.
- */
-function hasOpaqueBackground(layer: Layer): boolean {
-  if (layer.type !== 'raster' || (layer.mask && layer.mask.enabled !== false) || !bitmaps.has(layer.bitmapId)) return false;
-  const c = bitmaps.get(layer.bitmapId);
-  const w = c.width,
-    h = c.height;
-  const pts: [number, number][] = [[0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1], [w >> 1, 0], [0, h >> 1], [w - 1, h >> 1], [w >> 1, h - 1]];
-  try {
-    return pts.every(([x, y]) => bitmaps.read(layer.bitmapId, { x, y, width: 1, height: 1 }).data[3] === 255);
-  } catch {
-    return false;
-  }
+  if (bake) toast(`Applied the Remove Background mask so “${style!.name}” follows your character (Ctrl+Z undoes both).`, 'info', 4200);
+  else if (style && replaced.length)
+    toast(`“${style.name}” replaced the ${replaced.map((o) => (o === 'template' ? 'template’s' : 'look’s')).join(' and ')} character filters.`, 'info', 3200);
 }
 
 function QuickButton({ icon: Icon, label, onClick, active, title }: { icon: typeof Box; label: string; onClick: () => void; active?: boolean; title?: string }) {
@@ -120,7 +132,9 @@ export function StylerPanel() {
   const meta = stylable ? readStylerMeta(layer) : null;
   const style = styleById(meta?.style);
   const controls = useMemo(() => (layer && style ? resolveControls(style, layer) : []), [layer, style]);
-  const opaqueBg = useMemo(() => (layer && stylable ? hasOpaqueBackground(layer) : false), [layer, stylable]);
+  const cut = useMemo(() => (layer && stylable ? cutoutState(layer) : 'cut'), [layer, stylable]);
+  const styled = !!layer && stylable && hasCharacterStyling(layer);
+  const placeholder = !!layer && layer.type === 'raster' && layer.meta?.placeholder === true;
   const avail = useMemo(() => {
     void filterList;
     void effectList;
@@ -131,20 +145,20 @@ export function StylerPanel() {
   return (
     <div className="roblox-styler">
       <div className="roblox-styler-quick">
-        <QuickButton icon={Scissors} label="Remove BG" onClick={() => runCommand('roblox.removeBackground')} title="Remove the background of the active layer" />
+        <QuickButton icon={Scissors} label="Remove Background" onClick={() => runCommand('roblox.removeBackground')} title="Remove Background… — cut the active layer's character out" />
         <QuickButton icon={PersonStanding} label="Pose Studio" onClick={() => runCommand('roblox.poseStudio')} title="Pose and render a 3D Roblox character" />
-        <QuickButton icon={Box} label="Import Model" onClick={() => runCommand('roblox.importModel')} title="Render an .obj/.glb/.fbx exported from Roblox Studio" />
-        <QuickButton icon={CloudDownload} label="Fetch Avatar" onClick={() => runCommand('roblox.fetchAvatar')} title="Download a player's avatar render by username" />
-        <QuickButton icon={Gamepad2} label="Preview" onClick={() => runCommand('roblox.preview')} title="See your icon/thumbnail in mock game cards" />
-        <QuickButton icon={SquareDashed} label="Safe Zones" active={safeZones} onClick={() => runCommand('roblox.safeZones')} title="Show icon/thumbnail safe areas on the canvas" />
+        <QuickButton icon={Box} label="Import 3D Model" onClick={() => runCommand('roblox.importModel')} title="Import 3D Model… — render an .obj/.glb/.fbx exported from Roblox Studio" />
+        <QuickButton icon={CloudDownload} label="Fetch Roblox Avatar" onClick={() => runCommand('roblox.fetchAvatar')} title="Fetch Roblox Avatar… — download a player's avatar render by username" />
+        <QuickButton icon={Gamepad2} label="Roblox Preview" onClick={() => runCommand('roblox.preview')} title="Roblox Preview… — see your icon/thumbnail in mock game cards" />
+        <QuickButton icon={SquareDashed} label="Roblox Safe Zones" active={safeZones} onClick={() => runCommand('roblox.safeZones')} title="Roblox Safe Zones — show icon/thumbnail safe areas on the canvas" />
       </div>
 
       {!doc ? (
         <div className="roblox-styler-empty">
           <div>No document open.</div>
           <div className="roblox-styler-quick" style={{ gridTemplateColumns: '1fr 1fr', border: 'none', padding: 0 }}>
-            <QuickButton icon={ImagePlus} label="New Icon" onClick={() => runCommand('roblox.newIcon')} title="512×512 game icon" />
-            <QuickButton icon={Monitor} label="New Thumbnail" onClick={() => runCommand('roblox.newThumbnail')} title="1920×1080 thumbnail" />
+            <QuickButton icon={ImagePlus} label="New Roblox Icon" onClick={() => runCommand('roblox.newIcon')} title="New Roblox Icon (512×512)" />
+            <QuickButton icon={Monitor} label="New Roblox Thumbnail" onClick={() => runCommand('roblox.newThumbnail')} title="New Roblox Thumbnail (1920×1080)" />
           </div>
         </div>
       ) : !layer ? (
@@ -159,14 +173,28 @@ export function StylerPanel() {
             <span className="name" title={layer.name}>
               {layer.name}
             </span>
-            {style && (
-              <>
-                <IconButton size="sm" icon={RotateCcw} title={`Reset “${style.name}” to its defaults`} onClick={() => applyStyle(layer.id, style)} />
-                <IconButton size="sm" icon={Eraser} title="Remove the character style" onClick={() => applyStyle(layer.id, null)} />
-              </>
+            {style && <IconButton size="sm" icon={RotateCcw} title={`Reset “${style.name}” to its defaults`} onClick={() => applyStyle(layer.id, style)} />}
+            {styled && (
+              <IconButton
+                size="sm"
+                icon={Eraser}
+                title="Reset styling — remove the character filters and effects added by the styler, a look or the template (your own stay)"
+                onClick={() => applyStyle(layer.id, null)}
+              />
+            )}
+            {layer.type === 'raster' && (
+              <IconButton size="sm" icon={Replace} title="Replace Character… — swap in your own render, keeping position, filters and effects" onClick={() => runCommand('roblox.replaceCharacter')} />
             )}
           </div>
-          {opaqueBg && (
+          {placeholder && (
+            <div className="roblox-styler-note">
+              <span>This is the template’s stand-in character. Swap in your own render — it keeps this spot, size, filters and effects.</span>
+              <button type="button" className="roblox-link" onClick={() => runCommand('roblox.replaceCharacter')}>
+                Replace Character…
+              </button>
+            </div>
+          )}
+          {cut === 'background' && !placeholder && (
             <div className="roblox-styler-warn">
               <span>This layer still has its background — the face shadow, rims and outlines follow the whole picture.</span>
               <button type="button" className="roblox-link" onClick={() => runCommand('roblox.removeBackground')}>
@@ -174,6 +202,19 @@ export function StylerPanel() {
               </button>
             </div>
           )}
+          {cut === 'masked' &&
+            (hasRemoveBgMask(layer) ? (
+              <div className="roblox-styler-note">
+                <span>The background is hidden by your Remove Background mask. Picking a style applies the mask first, so the style follows your character.</span>
+              </div>
+            ) : (
+              <div className="roblox-styler-warn">
+                <span>A layer mask hides this layer’s background, but styles are computed before the mask — rims and outlines would follow the hidden background.</span>
+                <button type="button" className="roblox-link" onClick={() => applyLayerMask()}>
+                  Apply Mask
+                </button>
+              </div>
+            ))}
           <div className="roblox-styler-grid">
             {STYLES.map((s) => {
               const ok = avail(s);
@@ -203,7 +244,7 @@ export function StylerPanel() {
           ) : (
             <div className="roblox-styler-controls">
               <div className="roblox-hint">
-                Pick a style to turn your character into a toon, comic, noir, crimson, gothic or neon look. Switching styles replaces only what the styler added.
+                Pick a style to turn your character into a toon, comic, noir, crimson, gothic or neon look. A style replaces the template’s or a look’s character filters; filters you added yourself stay.
               </div>
             </div>
           )}

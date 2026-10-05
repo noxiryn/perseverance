@@ -2,7 +2,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { CloudDownload, ExternalLink, ImagePlus } from 'lucide-react';
 import { Button, Dialog, Field, TextInput } from '../../ui/controls';
-import { activeDoc } from '../../state/editor';
+import { activeDoc, activeSession } from '../../state/editor';
+import { blobToCanvas } from '../../core/canvas';
+import { contentsTarget, isPlaceholder, replaceLayerContents } from '../character/replace';
 import { openDialog, toast } from '../../state/ui';
 import { openExternal } from '../../platform';
 import { placeImageBlob } from '../../io/open';
@@ -57,8 +59,19 @@ export function AvatarDialog({ close }: { close: (r?: unknown) => void }) {
   const place = async () => {
     if (!result) return;
     try {
+      const label = `${result.displayName} (${AVATAR_KINDS.find((k) => k.value === kind)?.label ?? 'Avatar'})`;
+      // A template's placeholder is selected: the avatar takes its place (and its styling).
+      const s = activeSession();
+      const target = s ? contentsTarget(s.doc, s.activeLayerId) : null;
+      if (target && isPlaceholder(target)) {
+        const canvas = await blobToCanvas(result.blob);
+        if (replaceLayerContents(target.id, canvas, { name: label, cutout: false })) {
+          close(true);
+          return;
+        }
+      }
       if (!activeDoc()) newTransparentDocument(`${result.name} Avatar`, 1024, 1024);
-      await placeImageBlob(result.blob, `${result.displayName} (${AVATAR_KINDS.find((k) => k.value === kind)?.label ?? 'Avatar'})`);
+      await placeImageBlob(result.blob, label);
       close(true);
     } catch (err) {
       console.error('Placing avatar failed', err);

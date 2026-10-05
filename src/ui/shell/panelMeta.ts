@@ -35,7 +35,7 @@ const FALLBACK: Record<string, { title: string; icon: Icon }> = {
   character: { title: 'Character', icon: Type },
   brushes: { title: 'Brushes', icon: Brush },
   fonts: { title: 'Fonts', icon: CaseSensitive },
-  roblox: { title: 'Roblox', icon: Box },
+  roblox: { title: 'Character Styler', icon: Box },
 };
 
 const cap = (s: string) => s.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());

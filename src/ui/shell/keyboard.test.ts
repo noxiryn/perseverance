@@ -72,6 +72,7 @@ describe('focusKind', () => {
     expect(focusKind(document.createElement('textarea'))).toBe('text');
     expect(focusKind(box)).toBe('control');
     expect(focusKind(range)).toBe('control');
+    expect(focusKind(document.createElement('select'))).toBe('control');
     expect(focusKind(document.createElement('div'))).toBeNull();
     expect(focusKind(null)).toBeNull();
   });
@@ -141,6 +142,27 @@ describe('tool shortcuts', () => {
     key(' ');
     expect(useEditor.getState().activeTool).toBe('brush');
     box.remove();
+  });
+
+  it('keeps tool letters and Ctrl shortcuts working while a select has focus, leaving arrows to it', () => {
+    const sel = document.createElement('select');
+    for (const v of ['normal', 'multiply', 'screen']) {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = v;
+      sel.appendChild(o);
+    }
+    document.body.appendChild(sel);
+    sel.focus();
+    // The handled letter is preventDefault-ed, so the select's type-to-search can't change its value.
+    const e = key('b');
+    expect(useEditor.getState().activeTool).toBe('brush');
+    expect(e.defaultPrevented).toBe(true);
+    key('s', { ctrlKey: true });
+    expect(ran).toEqual(['save']);
+    const arrow = key('ArrowDown');
+    expect(arrow.defaultPrevented).toBe(false);
+    sel.remove();
   });
 
   it('gives the active tool the first chance', () => {

@@ -125,13 +125,22 @@ export function screenPlane(
     cellLo = 1,
     cellHi = 1;
   const cellX = new Float32Array(Math.max(1, ne));
+  // the x halves of the rotation per column (same products as per pixel)
+  const XC = new Float64Array(w),
+    XS = new Float64Array(w);
+  for (let x = 0; x < w; x++) {
+    const gx = x + 0.5 + p.ax;
+    XC[x] = gx * cs;
+    XS[x] = -gx * sn;
+  }
   for (let y = 0; y < h; y++) {
     const gy = y + 0.5 + p.ay;
+    const ys = gy * sn,
+      yc = gy * cs;
     const o0 = y * w;
     for (let x = 0; x < w; x++) {
-      const gx = x + 0.5 + p.ax;
-      const u = (gx * cs + gy * sn) * invS;
-      const v = (-gx * sn + gy * cs) * invS;
+      const u = (XC[x] + ys) * invS;
+      const v = (XS[x] + yc) * invS;
       const iu = Math.floor(u),
         iv = Math.floor(v);
       const o = o0 + x;

@@ -121,7 +121,7 @@
   pointer-events: none;
 }
 .shell-canvas-fallback-msg {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   background: rgba(20, 20, 20, 0.85);
   border: 1px solid var(--border);
@@ -278,7 +278,7 @@ body.shell-resizing-row * {
   border-radius: var(--radius);
   border: 1px solid #262626;
   background: #1a1a1a;
-  color: var(--text-faint);
+  color: var(--text-muted);
   cursor: text;
   font-size: var(--fs-sm);
 }
@@ -390,7 +390,7 @@ body.shell-resizing-row * {
 }
 .shell-menu-shortcut {
   padding-left: 28px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
 }
 .shell-menu-item.hl .shell-menu-shortcut {
@@ -410,7 +410,7 @@ body.shell-resizing-row * {
 }
 .shell-menu-empty {
   padding: 6px 10px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
 }
 
@@ -594,7 +594,7 @@ body.shell-resizing-row * {
   font-size: var(--fs);
 }
 .shell-tool-flyout-key {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
 }
 .shell-tool-flyout-item:hover .shell-tool-flyout-key {
@@ -806,7 +806,7 @@ body.shell-resizing-row * {
 }
 .shell-tab-mode {
   font-size: 9.5px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   letter-spacing: 0.02em;
   flex: none;
 }
@@ -1015,7 +1015,7 @@ body.shell-resizing-row * {
   display: inline-block;
 }
 .shell-status-cursor .dim {
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 .shell-status-cursor svg {
   color: var(--text-faint);
@@ -1201,10 +1201,21 @@ body.shell-resizing-col .shell-dock-resize {
   background: linear-gradient(90deg, transparent 2px, var(--accent) 2px, var(--accent) 3px, transparent 3px);
 }
 
+/* Scrolls only when the window is too short for every expanded group's minimum height. */
+.shell-dock-groups {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
 .shell-group {
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  /* Keep in sync with GROUP_MIN_H in Dock.tsx: 30px header + a usable 160px body. */
+  min-height: 190px;
   background: var(--bg-panel);
   overflow: hidden;
 }
@@ -1235,6 +1246,19 @@ body.shell-resizing-col .shell-dock-resize {
 }
 .shell-group-tabs::-webkit-scrollbar {
   display: none;
+}
+/* Hidden tabs on either side: fade the edge so the overflow is visible. */
+.shell-group-tabs.fade-l {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 18px);
+  mask-image: linear-gradient(90deg, transparent, #000 18px);
+}
+.shell-group-tabs.fade-r {
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+}
+.shell-group-tabs.fade-l.fade-r {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 18px, #000 calc(100% - 18px), transparent);
 }
 .shell-group-tab {
   height: 21px;
@@ -1326,7 +1350,7 @@ body.shell-resizing-row .shell-splitter.active::after {
   min-height: 40px;
   display: grid;
   place-items: center;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   padding: 16px;
   text-align: center;
@@ -1341,7 +1365,7 @@ body.shell-resizing-row .shell-splitter.active::after {
   justify-content: center;
   gap: 6px;
   padding: 18px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   text-align: center;
 }
 .shell-panel-placeholder-title {
@@ -1357,6 +1381,8 @@ body.shell-resizing-row .shell-splitter.active::after {
   position: absolute;
   left: -326px;
   width: 320px;
+  /* Height follows the panel's content (max-height is set inline to the room above the status bar). */
+  min-height: 180px;
   z-index: 60;
   display: flex;
   flex-direction: column;
@@ -1421,7 +1447,7 @@ body.shell-resizing-row .shell-splitter.active::after {
   font-weight: 600;
 }
 .shell-error-msg {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   max-width: 260px;
   overflow-wrap: anywhere;
@@ -1584,7 +1610,7 @@ body.shell-resizing-row .shell-splitter.active::after {
   color: var(--text-strong);
 }
 .shell-pal-chip-n {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
 }
@@ -1603,7 +1629,7 @@ body.shell-resizing-row .shell-splitter.active::after {
   font-weight: 600;
   letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 .shell-pal-row {
   height: 32px;
@@ -1652,7 +1678,7 @@ body.shell-resizing-row .shell-splitter.active::after {
   font-weight: 600;
 }
 .shell-pal-sub {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   white-space: nowrap;
   overflow: hidden;
@@ -1673,7 +1699,7 @@ body.shell-resizing-row .shell-splitter.active::after {
 .shell-pal-empty {
   padding: 28px 12px;
   text-align: center;
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 .shell-pal-foot {
   flex: none;
@@ -1684,7 +1710,7 @@ body.shell-resizing-row .shell-splitter.active::after {
   padding: 0 12px;
   border-top: 1px solid #262626;
   background: #191919;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
 }
 .shell-pal-foot > span {
@@ -1724,10 +1750,10 @@ body.shell-resizing-row .shell-splitter.active::after {
   position: relative;
   max-width: 1040px;
   margin: 0 auto;
-  padding: 44px 40px 48px;
+  padding: 32px 40px 44px;
   display: flex;
   flex-direction: column;
-  gap: 30px;
+  gap: 24px;
 }
 .shell-start-hero {
   display: flex;
@@ -1810,13 +1836,13 @@ body.shell-resizing-row .shell-splitter.active::after {
   padding: 14px;
   border: 1px dashed #2a2a2a;
   border-radius: var(--radius-lg);
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
 }
 
 .shell-quick {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 10px;
 }
 .shell-quick-card {
@@ -1859,17 +1885,6 @@ body.shell-resizing-row .shell-splitter.active::after {
   border: 1px solid rgba(139, 124, 246, 0.45);
   color: var(--accent-strong);
 }
-.shell-quick-frame.dashed {
-  width: 40px;
-  height: 40px;
-  background: transparent;
-  border: 1px dashed #4a4a4a;
-  color: var(--text-dim);
-}
-.shell-quick-card:hover .shell-quick-frame.dashed {
-  border-color: var(--accent);
-  color: var(--accent-strong);
-}
 .shell-quick-meta {
   display: flex;
   flex-direction: column;
@@ -1891,10 +1906,17 @@ body.shell-resizing-row .shell-splitter.active::after {
 }
 .shell-quick-desc {
   font-size: var(--fs-sm);
-  color: var(--text-faint);
-  white-space: nowrap;
+  color: var(--text-muted);
+  line-height: 1.3;
+  /* Two lines, then an ellipsis (the full text is in the card's tooltip). */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
+}
+.shell-char-frame {
+  width: 40px;
+  height: 40px;
 }
 
 .shell-tpls {
@@ -1926,45 +1948,52 @@ body.shell-resizing-row .shell-splitter.active::after {
 }
 .shell-tpl-art {
   position: relative;
-  aspect-ratio: 16 / 10;
-  display: grid;
-  place-items: center;
+  /* One fixed 16:9 box for every card so names line up; templates are letterboxed inside. */
+  aspect-ratio: 16 / 9;
   background-color: #0f0f0f;
   background-image: radial-gradient(circle, #222 1px, transparent 1.2px);
   background-size: 9px 9px;
 }
-.shell-tpl-frame {
-  position: relative;
-  max-width: 86%;
-  max-height: 86%;
-  border-radius: 3px;
-  overflow: hidden;
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+.shell-tpl-stage {
+  position: absolute;
+  inset: 8px 10px;
   display: grid;
   place-items: center;
 }
-.shell-tpl-dots {
-  position: absolute;
-  inset: 0;
-  background-image: radial-gradient(circle, rgba(0, 0, 0, 0.28) 0.9px, transparent 1.3px);
-  background-size: 4px 4px;
-  mix-blend-mode: multiply;
-}
-.shell-tpl-vignette {
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(ellipse at center, transparent 45%, rgba(0, 0, 0, 0.55));
-}
-.shell-tpl-glyph {
+.shell-tpl-frame {
   position: relative;
-  padding: 0 8%;
-  text-align: center;
-  font-family: 'Anton', 'Bebas Neue', 'Oswald', var(--font-ui);
-  font-size: 15px;
-  line-height: 1.05;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 3px;
+  overflow: hidden;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+}
+.shell-tpl-frame img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  animation: shell-tpl-fade 220ms ease-out;
+}
+@keyframes shell-tpl-fade {
+  from {
+    opacity: 0;
+  }
+}
+.shell-tpl-shimmer {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, 0.1) 50%, transparent 70%);
+  background-size: 220% 100%;
+  animation: shell-tpl-shimmer 1.4s linear infinite;
+}
+@keyframes shell-tpl-shimmer {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
 }
 .shell-tpl-busy {
   position: absolute;
@@ -1992,7 +2021,7 @@ body.shell-resizing-row .shell-splitter.active::after {
 }
 .shell-tpl-size {
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 
 .shell-start-bottom {
@@ -2041,7 +2070,7 @@ body.shell-resizing-row .shell-splitter.active::after {
   flex: 1;
   min-width: 0;
   font-size: var(--fs-sm);
-  color: var(--text-faint);
+  color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2050,7 +2079,7 @@ body.shell-resizing-row .shell-splitter.active::after {
 }
 .shell-recent-time {
   font-size: var(--fs-sm);
-  color: var(--text-faint);
+  color: var(--text-muted);
   flex: none;
 }
 .shell-recent-x {
@@ -2188,14 +2217,14 @@ body.shell-resizing-row .shell-splitter.active::after {
   border-top: 1px solid #222;
 }
 .shell-about-credit span:first-child {
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 .shell-about-credit span:last-child {
   color: var(--text);
 }
 .shell-about-copy {
   margin-top: 8px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
 }
 
@@ -2209,7 +2238,7 @@ body.shell-resizing-row .shell-splitter.active::after {
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--text-muted);
   padding: 14px 0 6px;
   border-bottom: 1px solid #242424;
 }
@@ -2236,7 +2265,7 @@ body.shell-resizing-row .shell-splitter.active::after {
 }
 .shell-pref-hint {
   font-size: var(--fs-sm);
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 .shell-pref-control {
   flex: none;
@@ -2288,7 +2317,7 @@ body.shell-resizing-row .shell-splitter.active::after {
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--text-muted);
   padding: 4px 0 6px;
   border-bottom: 1px solid #262626;
   margin-bottom: 2px;
@@ -2312,7 +2341,7 @@ body.shell-resizing-row .shell-splitter.active::after {
   min-width: 0;
 }
 .shell-sc-path {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   white-space: nowrap;
   overflow: hidden;
@@ -2327,7 +2356,7 @@ body.shell-resizing-row .shell-splitter.active::after {
   flex: none;
 }
 .shell-sc-none {
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 
 /* tips */
@@ -2429,8 +2458,20 @@ body.shell-resizing-row .shell-splitter.active::after {
   font-size: var(--fs-sm);
   margin-bottom: 6px;
 }
+.shell-tips-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.shell-tips-hint {
+  margin-top: auto;
+  padding-top: 10px;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
 .shell-tips-count {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   align-self: center;
 }

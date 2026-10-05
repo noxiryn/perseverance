@@ -275,7 +275,7 @@ function renderOverlay(ctx: CanvasRenderingContext2D) {
 
 export const typeTool: ToolDef = {
   id: TYPE_TOOL_ID,
-  name: 'Type Tool',
+  name: 'Type',
   shortcut: 'T',
   icon: Type,
   group: 'type',

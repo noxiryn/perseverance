@@ -10,11 +10,20 @@
  *  - layerEffects → layer style entries appended to the target (any layer but adjustments).
  *  - overlays → generated asset layers (optionally confined by a mask, see ExtLookDef),
  *    adjustments → adjustment layers; both live in a pass-through group "Look: <name>" at the top
- *    of the document (meta {lookId, lookLayerIds}).
+ *    of the document (meta {lookId, lookLayerIds}). Atmosphere overlays marked
+ *    `placement: 'behind'` (smoke, rays, fog, bokeh…) go into a second look group directly BELOW
+ *    the target instead, so the character stands in front of them (as in the templates).
+ *  - overlays whose asset is already in the document (e.g. a template's own film scratches) are
+ *    skipped instead of being doubled.
+ * Whole-document mode uses the document's character (doc.meta.characterId / the only character
+ * layer) as the target of the look's character filters and as the anchor of 'behind' overlays;
+ * only without one do layerFilters become filter "adjustment" layers over everything.
  * A group target is redirected to the character inside it (placeholder / only pixel layer) so
  * the look's smart filters land somewhere useful.
  * The ids of filters/effects added to the target are tracked in `layer.meta.look`, so applying
- * another look (or the same one again) replaces the previous look instead of stacking. Missing
+ * another look (or the same one again) replaces the previous look instead of stacking. Character
+ * styling has one owner at a time (src/looks/characterStyling.ts): a look that adds filters
+ * replaces the Character Styler's and the template's treatment of the target. Missing
  * filter/effect/asset ids are skipped with a console warning; parts skipped because of the target
  * type are reported to the user.
  */
@@ -22,11 +31,13 @@ import type { Document, FilterInstance, GroupLayer, ID, Layer, LayerEffect, Rast
 import { effects, filters, looks, type LookDef } from '../registry';
 import { toast } from '../state/ui';
 import { activeSession, useEditor } from '../state/editor';
-import { flattenIds, insertLayerDraft, makeAdjustmentLayer, makeFilterInstance, makeGroupLayer, parentOf, removeLayerDraft, siblingsOf } from '../core/document';
-import { createAssetLayer } from '../assets/place';
+import { flattenIds, insertLayerDraft, isEffectivelyVisible, makeAdjustmentLayer, makeFilterInstance, makeGroupLayer, parentOf, removeLayerDraft, siblingsOf } from '../core/document';
+import { assetIdOfLayer, createAssetLayer } from '../assets/place';
 import { resolveParams } from '../filters/engine';
 import { uid } from '../core/ids';
 import { createOverlayMask, type OverlayMaskSpec } from './masks';
+import { adoptTemplateStylingDraft, stripCharacterStylingDraft } from './characterStyling';
+import { prepareCutoutBake } from '../roblox/character/cutout';
 
 /** Key under `layer.meta` holding the look applied to that layer. */
 export const LOOK_META_KEY = 'look';
@@ -39,8 +50,15 @@ export interface LookLayerMeta {
 
 export type LookOverlay = NonNullable<LookDef['overlays']>[number];
 
+/**
+ * Where an overlay goes: 'top' (default) — in the look group above everything (textures, grain,
+ * vignettes, borders); 'behind' — atmosphere that would cover the subject (smoke, rays, fog,
+ * bokeh, backdrops) goes directly below the target layer when there is one.
+ */
+export type OverlayPlacement = 'top' | 'behind';
+
 /** Overlay with module extensions (a mask confining it, e.g. clippings kept to the edges). */
-export type LookOverlayDef = LookOverlay & { mask?: OverlayMaskSpec };
+export type LookOverlayDef = LookOverlay & { mask?: OverlayMaskSpec; placement?: OverlayPlacement };
 
 /** LookDef as authored by this module (overlays may carry masks). Assignable to LookDef. */
 export interface ExtLookDef extends LookDef {
@@ -59,6 +77,10 @@ export interface BuiltLook {
   effects: LayerEffect[];
   /** Children of the look group, bottom → top. */
   groupLayers: Layer[];
+  /** Overlays placed directly below the target (bottom → top); empty without a target. */
+  behindLayers?: Layer[];
+  /** Names of overlays left out because their asset is already in the document. */
+  duplicates?: string[];
   /** Human readable list of parts that were skipped (missing ids, unsupported target…). */
   skipped: string[];
   /** Names of filters/effects dropped because the target can't hold them (shown to the user). */
@@ -68,6 +90,8 @@ export interface BuiltLook {
 export interface BuildLookOptions {
   /** Resolution factor of generated masks (previews use a low value). */
   maskScale?: number;
+  /** Skip overlays whose asset is already a layer of the document (default true). */
+  skipExisting?: boolean;
 }
 
 export interface TargetCaps {
@@ -156,6 +180,58 @@ export function characterInGroup(doc: Document, groupId: ID): ID | null {
   return rasters.length === 1 ? rasters[0] : null;
 }
 
+const isCharacterTagged = (l: Layer | undefined) => {
+  const m = l?.meta;
+  if (!m || l.type !== 'raster') return false;
+  const roblox = m.roblox as { kind?: unknown } | undefined;
+  return m.kind === 'character' || m.placeholder === true || roblox?.kind === 'character';
+};
+
+/** Visible character layers of a document (tagged or recorded), bottom → top. */
+export function documentCharacters(doc: Document): ID[] {
+  const recorded = typeof doc.meta?.characterId === 'string' ? (doc.meta.characterId as string) : null;
+  return flattenIds(doc).filter((id) => {
+    const l = doc.layers[id];
+    if (!l || l.type !== 'raster' || isInsideLookGroup(doc, id) || !isEffectivelyVisible(doc, id)) return false;
+    return id === recorded || isCharacterTagged(l);
+  });
+}
+
+/**
+ * The layer a whole-document look styles as "the character": the document's only character
+ * layer (null when there is none, several, or it is locked).
+ */
+export function documentCharacter(doc: Document): ID | null {
+  const ids = documentCharacters(doc);
+  if (ids.length !== 1) return null;
+  return doc.layers[ids[0]]?.locks.all ? null : ids[0];
+}
+
+/** Asset ids already present as layers (outside look groups) — their overlays aren't doubled. */
+export function existingAssetIds(doc: Document): Set<string> {
+  const out = new Set<string>();
+  for (const l of Object.values(doc.layers)) {
+    const a = assetIdOfLayer(l);
+    if (a && l.visible && !isInsideLookGroup(doc, l.id)) out.add(a);
+  }
+  return out;
+}
+
+/**
+ * Where the 'behind' look group goes for a subject: directly below it in its parent list, or
+ * below the base of its clipping group when the subject is clipped (inserting between a clipped
+ * layer and its base would break the clip).
+ */
+export function behindInsertionPoint(d: Document, subjectId: ID): { parentId: ID | null; index: number } | null {
+  if (!d.layers[subjectId]) return null;
+  const parentId = parentOf(d, subjectId) ?? null;
+  const list = siblingsOf(d, subjectId);
+  let index = list.indexOf(subjectId);
+  if (index < 0) return null;
+  while (index > 0 && d.layers[list[index]]?.clipped) index--;
+  return { parentId, index };
+}
+
 const defaultOverlayFactory: OverlayFactory = (o, w, h) =>
   createAssetLayer(o.assetId, o.params, w, h, { name: o.name, blendMode: o.blendMode, opacity: o.opacity });
 
@@ -172,7 +248,9 @@ export function buildLook(
 ): BuiltLook {
   const target = targetId ? (doc.layers[targetId] ?? null) : null;
   const caps = targetCaps(target);
-  const out: BuiltLook = { lookId: look.id, lookName: look.name, filters: [], effects: [], groupLayers: [], skipped: [], targetSkipped: [] };
+  const out: BuiltLook = { lookId: look.id, lookName: look.name, filters: [], effects: [], groupLayers: [], behindLayers: [], duplicates: [], skipped: [], targetSkipped: [] };
+  const existing = opts.skipExisting === false ? new Set<string>() : existingAssetIds(doc);
+  const behind: Layer[] = [];
   const converted: Layer[] = [];
   const overlays: Layer[] = [];
   const adjustments: Layer[] = [];
@@ -216,6 +294,11 @@ export function buildLook(
   }
 
   for (const o of (look as ExtLookDef).overlays ?? []) {
+    if (existing.has(o.assetId)) {
+      out.duplicates!.push(o.name ?? o.assetId);
+      out.skipped.push(`overlay "${o.assetId}" (already in the document)`);
+      continue;
+    }
     let layer: RasterLayer | null = null;
     try {
       layer = makeOverlay(o, doc.width, doc.height);
@@ -233,7 +316,9 @@ export function buildLook(
       const m = createOverlayMask(o.mask, doc.width, doc.height, opts.maskScale ?? 1);
       if (m) layer.mask = m.mask;
     }
-    overlays.push(layer);
+    // Behind a canvas-covering fill layer the atmosphere would be hidden: keep it on top then.
+    if (o.placement === 'behind' && target && target.type !== 'fill') behind.push(layer);
+    else overlays.push(layer);
   }
 
   for (const a of look.adjustments ?? []) {
@@ -250,6 +335,7 @@ export function buildLook(
 
   // Filters first, then textures/overlays, then the color grade on top so it unifies everything.
   out.groupLayers = [...converted, ...overlays, ...adjustments];
+  out.behindLayers = behind;
   return out;
 }
 
@@ -317,6 +403,12 @@ export function insertLookDraft(d: Document, built: BuiltLook, targetId: ID | nu
   stripLookDraft(d, targetId);
   const target = targetId ? d.layers[targetId] : undefined;
   if (target && (built.filters.length || built.effects.length)) {
+    // One owner of character styling: a look with filters replaces the Styler's / template's
+    // treatment; a look that only adds effects replaces their effects of the same kind (no
+    // double glow).
+    adoptTemplateStylingDraft(target);
+    if (built.filters.length) stripCharacterStylingDraft(target, ['template', 'styler']);
+    else stripCharacterStylingDraft(target, ['template', 'styler'], { onlyEffectTypes: new Set(built.effects.map((e) => e.effectId)) });
     target.filters = [...target.filters, ...built.filters];
     target.effects = [...target.effects, ...built.effects];
     const meta: LookLayerMeta = {
@@ -326,13 +418,47 @@ export function insertLookDraft(d: Document, built: BuiltLook, targetId: ID | nu
     };
     target.meta = { ...target.meta, [LOOK_META_KEY]: meta };
   }
-  if (!built.groupLayers.length) return null;
+  let topLayers = built.groupLayers;
+  const behindLayers = built.behindLayers ?? [];
+  if (behindLayers.length) {
+    const at = targetId ? behindInsertionPoint(d, targetId) : null;
+    if (at) {
+      const behind = makeGroupLayer({ name: `Look: ${built.lookName} (behind)` });
+      behind.meta = { lookId: built.lookId, lookLayerIds: behindLayers.map((l) => l.id), lookPart: 'behind' };
+      behind.collapsed = true;
+      insertLayerDraft(d, behind, at);
+      for (const l of behindLayers) insertLayerDraft(d, l, { parentId: behind.id });
+    } else topLayers = [...behindLayers, ...topLayers];
+  }
+  if (!topLayers.length) return null;
   const group = makeGroupLayer({ name: `Look: ${built.lookName}` });
-  group.meta = { lookId: built.lookId, lookLayerIds: built.groupLayers.map((l) => l.id) };
+  group.meta = { lookId: built.lookId, lookLayerIds: topLayers.map((l) => l.id) };
   group.collapsed = true;
   insertLayerDraft(d, group, { parentId: null });
-  for (const l of built.groupLayers) insertLayerDraft(d, l, { parentId: group.id });
+  for (const l of topLayers) insertLayerDraft(d, l, { parentId: group.id });
   return group.id;
+}
+
+export interface LookTargets {
+  /** Layer that receives the look's filters/effects and anchors 'behind' overlays. */
+  targetId: ID | null;
+  /** Why the effective target differs from the request (shown to the user). */
+  note?: string;
+  blocked?: string;
+  /** True when the target is the document's character picked for whole-document mode. */
+  character?: boolean;
+}
+
+/**
+ * Effective target of an apply/preview: the resolved requested layer, or — in whole-document
+ * mode — the document's only character layer.
+ */
+export function lookTargets(doc: Document, requested: ID | null): LookTargets {
+  const r = resolveTarget(doc, requested);
+  if (requested || r.targetId) return r;
+  const ch = documentCharacter(doc);
+  if (!ch) return r;
+  return { targetId: ch, character: true, note: `character filters on “${doc.layers[ch].name}”` };
 }
 
 export interface ResolvedTarget {
@@ -399,24 +525,43 @@ export async function applyLook(lookId: string, targetLayerId: ID | null): Promi
     }
     return;
   }
-  const { targetId, note, blocked } = resolveTarget(s.doc, targetLayerId);
+  const { targetId, note, blocked, character } = lookTargets(s.doc, targetLayerId);
   if (blocked) {
     toast(blocked, 'warning', 3600);
     return;
   }
   const built = buildLook(look, s.doc, targetId);
-  if (!built.filters.length && !built.effects.length && !built.groupLayers.length) {
+  const duplicates = built.duplicates ?? [];
+  if (!built.filters.length && !built.effects.length && !built.groupLayers.length && !built.behindLayers?.length) {
     const why = describeTargetSkips(built, targetId ? s.doc.layers[targetId] : null);
-    toast(why ? `“${look.name}”: ${why}.` : `“${look.name}” needs filters/assets that aren’t available yet.`, 'warning', 4600);
+    const dup = duplicates.length ? `its overlays (${listNames(duplicates)}) are already in the document` : '';
+    toast(why || dup ? `“${look.name}”: ${why || dup}.` : `“${look.name}” needs filters/assets that aren’t available yet.`, 'warning', 4600);
     return;
   }
-  useEditor.getState().commit(`Apply Look: ${look.name}`, (d) => {
-    insertLookDraft(d, built, targetId);
-  });
   const target = targetId ? s.doc.layers[targetId] : null;
-  const where = target ? ` to “${target.name}”` : ' to the whole document';
+  // Character filters run before the layer mask: apply a Remove Background mask first.
+  const bake = target && built.filters.length ? prepareCutoutBake(s.doc, target) : null;
+  useEditor.getState().commit(
+    `Apply Look: ${look.name}`,
+    (d) => {
+      const t = targetId ? d.layers[targetId] : undefined;
+      if (bake && t) bake.apply(t);
+      insertLookDraft(d, built, targetId);
+    },
+    bake ? { patches: bake.patches } : undefined,
+  );
+  const where = target && !character ? ` to “${target.name}”` : ' to the whole document';
   const skips = describeTargetSkips(built, target);
-  toast(`Applied look “${look.name}”${where}${note ? ` (${note})` : ''}.${skips ? ` ${skips}.` : ''}`, skips ? 'info' : 'success', skips ? 5600 : note ? 3600 : 2600);
+  const extra = [
+    skips,
+    duplicates.length ? `${listNames(duplicates)} ${duplicates.length > 1 ? 'were' : 'was'} already in the document (not doubled)` : '',
+    bake ? 'the Remove Background mask was applied first' : '',
+  ].filter(Boolean);
+  toast(
+    `Applied look “${look.name}”${where}${note ? ` (${note})` : ''}.${extra.length ? ` ${extra.join('; ')}.` : ''}`,
+    skips ? 'info' : 'success',
+    extra.length ? 5600 : note ? 3600 : 2600,
+  );
 }
 
 /**

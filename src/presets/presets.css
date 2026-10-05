@@ -1,12 +1,12 @@
 /* fonts-color module — Swatches panel, Color panel, palette dialogs. Prefix: fc- */
 
 .fc-dim {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   white-space: nowrap;
 }
 .fc-note {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   line-height: 1.35;
 }
@@ -42,7 +42,7 @@
   align-items: center;
   gap: 6px;
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
   margin: 2px 0 4px;
   white-space: nowrap;
   overflow: hidden;
@@ -52,7 +52,7 @@
   margin-left: auto;
   border: none;
   background: none;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   cursor: pointer;
   padding: 0;
@@ -244,7 +244,7 @@
   padding: 2px 6px;
   border-radius: var(--radius-sm);
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
   cursor: pointer;
 }
 .fc-chips2-info > div.on {

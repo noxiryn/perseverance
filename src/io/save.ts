@@ -32,9 +32,13 @@ export async function saveDocument(docId?: ID, opts: { saveAs?: boolean } = {}):
     return false;
   }
   saving = true;
+  // Save exactly the state that will be marked as saved: the current history step. (A live
+  // preview — a drag or Free Transform not committed yet — is not part of it.) encodeProject
+  // snapshots its pixels synchronously, so undo/redo or edits during the encode can't mix states.
   const entryId = currentEntryId(s);
+  const committed = s.history.entries[s.history.index]?.doc ?? s.doc;
   try {
-    const data = await encodeProject(s.doc);
+    const data = await encodeProject(committed);
     if (!opts.saveAs && s.filePath && isDesktop) {
       await writeFile(s.filePath, data);
       markSavedAt(id, entryId);
@@ -43,7 +47,7 @@ export async function saveDocument(docId?: ID, opts: { saveAs?: boolean } = {}):
       toast(`Saved “${fileNameOf(s.filePath)}”`, 'success');
       return true;
     }
-    const defaultPath = s.filePath && isDesktop ? s.filePath : `${safeFileName(s.doc.name)}.pgfx`;
+    const defaultPath = s.filePath && isDesktop ? s.filePath : `${safeFileName(committed.name)}.pgfx`;
     const result = await saveFile({ title: 'Save As', defaultPath, filters: PROJECT_FILTERS, data });
     if (!result) return false; // cancelled
     if (isDesktop) {

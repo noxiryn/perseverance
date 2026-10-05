@@ -410,13 +410,13 @@ describe('workspaces', () => {
   it('moves and removes panels', () => {
     const w = DEFAULT_WORKSPACE;
     const a = movePanel(w, 'layers', { kind: 'group', slot: 'top', index: 0 });
-    expect(a.groups[0].tabs).toEqual(['layers', 'navigator', 'libraries']);
+    expect(a.groups[0].tabs).toEqual(['layers', 'libraries', 'looks']);
     expect(a.groups[0].active).toBe('layers');
     expect(a.groups[2].tabs).toEqual(['properties', 'history']);
     expect(a.groups[2].active).toBe('properties');
     const b = movePanel(a, 'navigator', { kind: 'strip', index: 0 });
     expect(b.strip[0]).toBe('navigator');
-    expect(b.groups[0].tabs).toEqual(['layers', 'libraries']);
+    expect(b.groups[1].tabs).toEqual(['swatches', 'color']);
     const c = removePanel(b, 'fonts');
     expect(c.strip).not.toContain('fonts');
     // original untouched

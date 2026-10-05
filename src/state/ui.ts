@@ -90,13 +90,21 @@ export interface UIState {
   setShowStart(v: boolean): void;
 }
 
+/**
+ * Default dock. The app's content-heavy browsers (Libraries, Looks) share the tall top group;
+ * Swatches / Color / Navigator share the compact middle one; Layers keeps a generous bottom group.
+ * Tuned so Libraries shows two-plus rows of thumbnails and Looks two rows of cards at 1366×768,
+ * and more at 1600×960 (groups never go below the dock's minimum group height, see Dock.tsx).
+ * Changing this? Add the previous version to LEGACY_PRESETS in src/ui/shell/workspaces.ts so
+ * untouched saved copies migrate to it.
+ */
 export const DEFAULT_WORKSPACE: WorkspaceLayout = {
   id: 'essentials',
   name: 'Essentials',
   groups: [
-    { slot: 'top', tabs: ['navigator', 'libraries'], active: 'navigator', size: 0.9, collapsed: false },
-    { slot: 'middle', tabs: ['swatches', 'color', 'looks'], active: 'swatches', size: 1, collapsed: false },
-    { slot: 'bottom', tabs: ['layers', 'properties', 'history'], active: 'layers', size: 1.6, collapsed: false },
+    { slot: 'top', tabs: ['libraries', 'looks'], active: 'libraries', size: 1.6, collapsed: false },
+    { slot: 'middle', tabs: ['swatches', 'color', 'navigator'], active: 'swatches', size: 0.8, collapsed: false },
+    { slot: 'bottom', tabs: ['layers', 'properties', 'history'], active: 'layers', size: 1.4, collapsed: false },
   ],
   strip: ['adjustments', 'effects', 'character', 'brushes', 'fonts', 'roblox'],
 };

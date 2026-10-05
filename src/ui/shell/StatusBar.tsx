@@ -8,6 +8,7 @@ import { runCommand, statusItems, useRegistry } from '../../registry';
 import { useActiveDoc, useEditor } from '../../state/editor';
 import { useUI } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
+import { releaseSelectFocus, selectFocusHandlers } from '../controls';
 import { clientToViewport, docSizeLabel, formatZoom, zoomToApply } from './docInfo';
 import { ErrorBoundary } from './ErrorBoundary';
 
@@ -160,7 +161,15 @@ export function StatusBar() {
       })}
       <span className="shell-status-spacer" />
       <span className="shell-status-label">Units</span>
-      <select className="shell-status-select" value={units} onChange={(e) => setUnits(e.target.value as 'px' | '%')}>
+      <select
+        className="shell-status-select"
+        value={units}
+        {...selectFocusHandlers}
+        onChange={(e) => {
+          setUnits(e.target.value as 'px' | '%');
+          releaseSelectFocus(e.currentTarget);
+        }}
+      >
         <option value="px">Pixels</option>
         <option value="%">Percent</option>
       </select>

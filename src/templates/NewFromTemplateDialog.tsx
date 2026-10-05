@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { LayoutTemplate, Loader2 } from 'lucide-react';
 import { templates, useRegistry, type TemplateDef } from '../registry';
-import { Button, Dialog, SearchInput } from '../ui/controls';
+import { Button, Dialog, SearchInput, showContextMenu } from '../ui/controls';
+import { deleteUserTemplate, isUserTemplate } from './userTemplates';
 import { nextPaint } from '../looks/shared';
 import { openTemplate } from './open';
 import { cancelPendingTemplatePreviews, pauseTemplatePreviews, useTemplatePreview } from './previews';
 import './templates.css';
 
-const CATEGORY_ORDER: TemplateDef['category'][] = ['Thumbnail', 'Icon', 'Banner', 'Social', 'Blank'];
+const CATEGORY_ORDER: TemplateDef['category'][] = ['Mine', 'Thumbnail', 'Icon', 'Banner', 'Social', 'Blank'];
 const CATEGORY_LABEL: Record<string, string> = {
   All: 'All templates',
+  Mine: 'My templates',
   Thumbnail: 'Thumbnails',
   Icon: 'Icons',
   Banner: 'Banners',
@@ -57,7 +59,22 @@ function TemplateCard({ t, index, busy, disabled, onOpen }: { t: TemplateDef; in
   const preview = useTemplatePreview(t.id, visible, index);
   const ratio = t.width / Math.max(1, t.height);
   return (
-    <button ref={ref} className={`templates-card${busy ? ' busy' : ''}`} disabled={disabled} onClick={() => onOpen(t)} title={t.description ?? t.name}>
+    <button
+      ref={ref}
+      className={`templates-card${busy ? ' busy' : ''}`}
+      disabled={disabled}
+      onClick={() => onOpen(t)}
+      title={isUserTemplate(t.id) ? `${t.name} — right-click to delete` : (t.description ?? t.name)}
+      onContextMenu={
+        isUserTemplate(t.id)
+          ? (e) =>
+              showContextMenu(e, [
+                { label: t.name, heading: true },
+                { label: 'Delete Template', run: () => void deleteUserTemplate(t.id) },
+              ])
+          : undefined
+      }
+    >
       <div className="templates-art">
         <div
           className={`templates-frame${preview ? ' ready' : ''}${t.category === 'Blank' ? ' blank' : ''}`}
@@ -106,8 +123,9 @@ export function NewFromTemplateDialog({ close }: { close: (result?: string) => v
         (category === 'All' || t.category === category) &&
         (!q || `${t.name} ${t.category} ${t.description ?? ''} ${t.width}x${t.height}`.toLowerCase().includes(q)),
     );
-    // Designed templates first, blanks last; keep registration order otherwise.
-    return list.sort((a, b) => Number(a.category === 'Blank') - Number(b.category === 'Blank'));
+    // Your own templates first, blanks last; keep registration order otherwise.
+    const rank = (t: TemplateDef) => (t.category === 'Mine' ? 0 : t.category === 'Blank' ? 2 : 1);
+    return list.sort((a, b) => rank(a) - rank(b));
   }, [all, category, query]);
 
   // Previews still queued when the dialog closes are dropped (finished ones stay cached).

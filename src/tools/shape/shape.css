@@ -30,7 +30,7 @@
 }
 
 .shape-opts-hint {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -227,7 +227,7 @@
   text-align: center;
 }
 .shape-browser-foot {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
 }
 

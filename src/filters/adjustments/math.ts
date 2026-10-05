@@ -68,6 +68,42 @@ export function pixelWords(img: Pixels): Int32Array | null {
   return new Int32Array(d.buffer, d.byteOffset, d.length >> 2);
 }
 
+/**
+ * The pixels as little-endian words (r | g << 8 | b << 16 | a << 24) for READING: the live buffer
+ * when it can be viewed that way, else a decoded copy (unaligned buffer / big-endian host) — so
+ * loops that read words and write their results through `img.data` work everywhere. Word reads
+ * have no per-channel bounds checks and give a cheap "same pixel as before" test.
+ */
+export function readWords(img: Pixels): Int32Array {
+  const u = pixelWords(img);
+  if (u) return u;
+  const d = img.data;
+  const n = d.length >> 2;
+  const out = new Int32Array(n);
+  for (let i = 0, j = 0; i < n; i++, j += 4) out[i] = d[j] | (d[j + 1] << 8) | (d[j + 2] << 16) | (d[j + 3] << 24);
+  return out;
+}
+
+/**
+ * Direct-mapped cache of per-color results (rgb → resulting rgb, both packed r | g << 8 | b << 16)
+ * for the costlier adjustments whose output only depends on the pixel's color. Rendered
+ * thumbnails reuse few colors (≈ 90k distinct colors in a 1080p render → ~95% hits), so most
+ * pixels become one lookup. Usage (inline in the pixel loop, see color.ts): slot =
+ * imul(rgb, 0x9e3779b1) >>> CACHE_SHIFT; on a miss, count it and switch the cache off when, after
+ * CACHE_PROBE misses, there were fewer hits than misses (noisy images: plain computation, almost
+ * no overhead). The arrays are pooled (adjustments run synchronously, never nested) and cleared
+ * per call.
+ */
+export const CACHE_BITS = 16;
+export const CACHE_SHIFT = 32 - CACHE_BITS;
+export const CACHE_PROBE = 16384;
+let cachePool: { keys: Int32Array; vals: Int32Array } | null = null;
+export function colorCache(): { keys: Int32Array; vals: Int32Array } {
+  if (!cachePool) cachePool = { keys: new Int32Array(1 << CACHE_BITS), vals: new Int32Array(1 << CACHE_BITS) };
+  cachePool.keys.fill(-1);
+  return cachePool;
+}
+
 /** A LUT as plain bytes, rounded/clamped exactly like a byte store of each entry. */
 export function toByteLut(l: ArrayLike<number>): Uint8Array {
   const q = new Uint8ClampedArray(256);

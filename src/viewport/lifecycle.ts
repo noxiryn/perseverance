@@ -3,8 +3,9 @@
  *  - tool lifecycle: calls onDeactivate/onActivate when the active tool changes and resets the
  *    cursor override;
  *  - free-transform watchdog: a command committing on top of a live Free Transform preview gets
- *    the transform split into its own history step first; a session whose document/history moved
- *    underneath it otherwise (document switch, undo/redo) is dropped;
+ *    the transform split into its own history step first; switching to another document applies
+ *    the transform to its own document (like the type tool commits text); a session whose
+ *    history moved underneath it otherwise (undo/redo, its document closed) is dropped;
  *  - remembers the last selection per document for Select ▸ Reselect.
  */
 import type { ID, Selection } from '../core/types';
@@ -12,7 +13,7 @@ import { bitmaps } from '../core/bitmaps';
 import { tools } from '../registry';
 import { viewport } from '../editor/viewport';
 import { useEditor } from '../state/editor';
-import { abandonTransform, absorbForeignCommit, activeTransform, isTransformRebasing } from './transform/controller';
+import { abandonTransform, absorbForeignCommit, activeTransform, commitTransformInOwnDoc, isTransformRebasing } from './transform/controller';
 import { clearSmartGuides } from './snap';
 import { vpState } from './state';
 
@@ -26,6 +27,7 @@ export function lastSelectionFor(docId: ID): Selection | null {
 }
 
 let installed = false;
+let pendingOwnDocCommit = false;
 
 function install() {
   if (installed) return;
@@ -56,8 +58,20 @@ function install() {
     const ses = activeTransform();
     if (ses && !isTransformRebasing()) {
       const s = st.activeDocId ? st.sessions[st.activeDocId] : null;
-      if (!s || s.doc.id !== ses.docId) abandonTransform(ses.docId);
-      else {
+      if (!s || s.doc.id !== ses.docId) {
+        if (!st.sessions[ses.docId]) abandonTransform();
+        else if (!pendingOwnDocCommit) {
+          // Document switch: apply the transform in its own document. Deferred to a microtask so
+          // the commit (and the temporary document hop it needs) doesn't run inside this store
+          // notification; nothing renders before microtasks run.
+          pendingOwnDocCommit = true;
+          queueMicrotask(() => {
+            pendingOwnDocCommit = false;
+            // (Still away from its document — a synchronous switch back just keeps transforming.)
+            if (activeTransform() === ses && useEditor.getState().activeDocId !== ses.docId) commitTransformInOwnDoc();
+          });
+        }
+      } else {
         const cur = s.history.entries[s.history.index];
         if (cur?.id !== ses.baseEntryId || cur.doc !== ses.baseDoc) {
           // Another command committed on top of the live preview → give the transform its own

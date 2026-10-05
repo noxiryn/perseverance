@@ -8,7 +8,7 @@ import { FolderOpen, Plus, Trash2 } from 'lucide-react';
 import { palettes, useRegistry, type PaletteDef } from '../registry';
 import { useEditor } from '../state/editor';
 import { toast } from '../state/ui';
-import { IconButton, SearchInput, showContextMenu, showMenuAt, type MenuItem } from '../ui/controls';
+import { IconButton, releaseSelectFocus, SearchInput, selectFocusHandlers, showContextMenu, showMenuAt, type MenuItem } from '../ui/controls';
 import { describeColor, normalizeHex, opaqueHex } from './colorMath';
 import { DEFAULT_PALETTE_ID } from './palettes';
 import { MY_SWATCHES_ID, useUserPalettes, type UserPalette } from './userPalettes';
@@ -293,7 +293,11 @@ export function SwatchesPanel() {
           className="ui-select fc-sw-select"
           value={active?.id ?? ''}
           title="Palette"
-          onChange={(e) => choosePalette(e.target.value)}
+          {...selectFocusHandlers}
+          onChange={(e) => {
+            choosePalette(e.target.value);
+            releaseSelectFocus(e.currentTarget);
+          }}
         >
           {groups.map(([cat, pals]) => (
             <optgroup key={cat} label={cat}>

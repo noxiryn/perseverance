@@ -119,21 +119,55 @@ interface LevelProps {
   onHover(level: number, index: number): void;
   onActivate(level: number, index: number): void;
   itemRef(level: number, index: number, el: HTMLDivElement | null): void;
+  guard: PointerGuard;
 }
 
-function MenuLevel({ rows, x, y, flipX, hl, openChild, level, onHover, onActivate, itemRef }: LevelProps) {
+/**
+ * Guards pointerup activation: the release that ends the click which opened a menu must never run
+ * an item that happens to sit under the cursor. An item runs on pointerup only after the pointer
+ * went down on it or moved over it, and not within the first moments after the menu opened.
+ */
+interface PointerGuard {
+  openedAt: number;
+  armed: string | null;
+}
+
+const ACTIVATE_DELAY_MS = 150;
+
+/** Gap kept between a menu and the bottom of the window (visual px). */
+const MENU_MARGIN = 8;
+
+/**
+ * Where a menu level goes (visual px). Top-level menus never move above their anchor (they would
+ * cover the menu bar and put an item under the opening click): they keep `top = y` and get a max
+ * height instead, so a tall menu scrolls. Submenus may shift up to fit, but never above the window
+ * and never taller than it.
+ */
+export function placeMenu(
+  o: { x: number; y: number; flipX?: number; width: number; height: number; level: number },
+  viewport: { width: number; height: number },
+): { left: number; top: number; maxHeight: number } {
+  let left = o.x;
+  if (left + o.width > viewport.width - 4) left = o.flipX !== undefined ? Math.max(4, o.flipX - o.width) : Math.max(4, viewport.width - o.width - 4);
+  let top = o.y;
+  if (o.level > 0 && top + o.height > viewport.height - MENU_MARGIN) top = Math.max(4, viewport.height - o.height - MENU_MARGIN);
+  top = Math.max(0, Math.min(top, viewport.height - 48));
+  return { left, top, maxHeight: Math.max(40, viewport.height - top - MENU_MARGIN) };
+}
+
+function MenuLevel({ rows, x, y, flipX, hl, openChild, level, onHover, onActivate, itemRef, guard }: LevelProps) {
   const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState({ left: x, top: y, ready: false });
+  const [pos, setPos] = useState<{ left: number; top: number; maxHeight?: number; ready: boolean }>({ left: x, top: y, ready: false });
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    let left = x;
-    let top = y;
-    if (left + r.width > window.innerWidth - 4) left = flipX !== undefined ? Math.max(4, flipX - r.width) : Math.max(4, window.innerWidth - r.width - 4);
-    if (top + r.height > window.innerHeight - 4) top = Math.max(4, window.innerHeight - r.height - 4);
-    setPos({ left, top, ready: true });
-  }, [x, y, flipX, rows]);
+    // Natural (unclipped) height in visual px: the rect may already be capped by max-height.
+    const toVisual = el.offsetHeight > 0 ? r.height / el.offsetHeight : 1;
+    const naturalH = r.height + Math.max(0, el.scrollHeight - el.clientHeight) * toVisual;
+    const p = placeMenu({ x, y, flipX, width: r.width, height: naturalH, level }, { width: window.innerWidth, height: window.innerHeight });
+    setPos({ ...p, ready: true });
+  }, [x, y, flipX, rows, level]);
 
   return (
     <div
@@ -142,7 +176,12 @@ function MenuLevel({ rows, x, y, flipX, hl, openChild, level, onHover, onActivat
       data-shell-menu=""
       role="menu"
       // Positions are measured in visual px; the portal host may carry the UI-scale CSS zoom.
-      style={{ left: toCss(pos.left), top: toCss(pos.top), visibility: pos.ready ? 'visible' : 'hidden' }}
+      style={{
+        left: toCss(pos.left),
+        top: toCss(pos.top),
+        maxHeight: pos.maxHeight !== undefined ? toCss(pos.maxHeight) : undefined,
+        visibility: pos.ready ? 'visible' : 'hidden',
+      }}
       onContextMenu={(e) => e.preventDefault()}
     >
       {rows.map((r, i) => {
@@ -157,8 +196,15 @@ function MenuLevel({ rows, x, y, flipX, hl, openChild, level, onHover, onActivat
             role="menuitem"
             aria-disabled={!r.enabled}
             onPointerEnter={() => onHover(level, i)}
+            onPointerDown={() => {
+              guard.armed = `${level}:${i}`;
+            }}
+            onPointerMove={() => {
+              guard.armed = `${level}:${i}`;
+            }}
             onPointerUp={(e) => {
               if (e.button !== 0) return;
+              if (guard.armed !== `${level}:${i}` || performance.now() - guard.openedAt < ACTIVATE_DELAY_MS) return;
               onActivate(level, i);
             }}
           >
@@ -191,6 +237,7 @@ function MenuDropdown({ rows, anchor, keyboard, onClose, onNavigate }: DropdownP
   const hoverTimer = useRef(0);
   const [, force] = useState(0);
   const forced = useRef('');
+  const guard = useRef<PointerGuard>({ openedAt: performance.now(), armed: null }).current;
 
   const levelRows = useCallback(
     (level: number): Row[] | null => {
@@ -356,6 +403,7 @@ function MenuDropdown({ rows, anchor, keyboard, onClose, onNavigate }: DropdownP
           onHover={hover}
           onActivate={activate}
           itemRef={itemRef}
+          guard={guard}
         />
       ))}
     </>,

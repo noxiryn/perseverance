@@ -77,6 +77,29 @@ export function Checkbox({
 
 /* ---------------- Select ---------------- */
 
+/**
+ * Native <select> focus handling. After a value is picked with the mouse, focus is handed back to
+ * the page (like Photopea) so tool letters, Delete and Ctrl+Z keep working and the select's
+ * type-to-search can't silently change the value again. Keyboard users keep focus on the select.
+ * Inside a dialog focus is left alone (the dialog owns the keyboard).
+ * Spread `selectFocusHandlers` on the element and call `releaseSelectFocus` from onChange; raw
+ * <select>s outside the shared control use the same pair.
+ */
+export const selectFocusHandlers = {
+  onPointerDown: (e: React.PointerEvent<HTMLSelectElement>) => {
+    e.currentTarget.dataset.pointerPick = '1';
+  },
+  onKeyDown: (e: React.KeyboardEvent<HTMLSelectElement>) => {
+    delete e.currentTarget.dataset.pointerPick;
+  },
+};
+
+export function releaseSelectFocus(el: HTMLSelectElement) {
+  const viaPointer = el.dataset.pointerPick === '1';
+  delete el.dataset.pointerPick;
+  if (viaPointer && document.activeElement === el && !el.closest('.ui-dialog')) el.blur();
+}
+
 export function Select<T extends string>({
   value,
   options,
@@ -99,7 +122,11 @@ export function Select<T extends string>({
       title={title}
       disabled={disabled}
       style={{ width }}
-      onChange={(e) => onChange(e.target.value as T)}
+      {...selectFocusHandlers}
+      onChange={(e) => {
+        onChange(e.target.value as T);
+        releaseSelectFocus(e.currentTarget);
+      }}
     >
       {options.map((o) => (
         <option key={o.value} value={o.value}>
@@ -152,12 +179,16 @@ export function NumberField({
   const shown = value * displayScale;
   const [text, setText] = useState(fmt(shown, step));
   const focused = useRef(false);
+  /** Set by Escape: the blur that follows must revert, not commit the typed text. */
+  const cancelRef = useRef(false);
   useEffect(() => {
     if (!focused.current) setText(fmt(shown, step));
   }, [shown, step]);
 
   const clampV = (v: number) => Math.max(min, Math.min(max, v));
   const commitText = () => {
+    // Untouched text: nothing to commit (no spurious history step, no rounding to the display).
+    if (text === fmt(shown, step)) return;
     // Allow simple math like "100*2" or "50+10".
     let v = Number(text);
     if (!Number.isFinite(v) && /^[\d\s+\-*/.()]+$/.test(text)) {
@@ -218,6 +249,11 @@ export function NumberField({
           }}
           onBlur={() => {
             focused.current = false;
+            if (cancelRef.current) {
+              cancelRef.current = false;
+              setText(fmt(shown, step));
+              return;
+            }
             commitText();
           }}
           onChange={(e) => setText(e.target.value)}
@@ -225,6 +261,8 @@ export function NumberField({
             e.stopPropagation();
             if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
             if (e.key === 'Escape') {
+              // Revert: the blur below must not commit the (still unflushed) typed text.
+              cancelRef.current = true;
               setText(fmt(shown, step));
               (e.target as HTMLInputElement).blur();
             }

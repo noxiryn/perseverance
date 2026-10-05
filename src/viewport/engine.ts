@@ -11,7 +11,7 @@ import { bitmaps } from '../core/bitmaps';
 import { rectUnion } from '../core/geometry';
 import { installViewport, viewport } from '../editor/viewport';
 import { tools, viewOverlays, type ToolDef, type ToolPointerEvent } from '../registry';
-import { renderDocumentLive } from '../render/compositor';
+import { onRenderSettle, renderDocumentLive } from '../render/compositor';
 import { activeSession, useEditor } from '../state/editor';
 import { useUI } from '../state/ui';
 import { isTypingTarget } from '../ui/shortcuts';
@@ -33,6 +33,8 @@ type Drag =
 
 /** Default transparency checkerboard square (CSS px); the shell's 'checkerSize' preference overrides it. */
 const CHECKER_CELL = 8;
+/** Idle time (ms) after the last partial redraw before the document canvas is redrawn whole. */
+const SETTLE_MS = 400;
 const CHECKER_LIGHT = '#ffffff';
 const CHECKER_DARK = '#dedede';
 
@@ -67,6 +69,10 @@ export class ViewportEngine {
   private compositeDoc: Document | null = null;
   /** Bumps whenever the composite's pixels change. */
   private compositeGen = 0;
+  /** Content version of the live composite last seen (renderDocumentLive `since`). */
+  private compositeSeq = -1;
+  /** Pending full redraw after partial redraws (see armSettle). */
+  private settleTimer = 0;
   /** Part of the composite (composite px) changed since the document canvas was drawn. */
   private compositeChange: Rect | null | 'full' = 'full';
   private scaled: { src: HTMLCanvasElement; k: number; gen: number; dw: number; dh: number; canvas: HTMLCanvasElement } | null = null;
@@ -164,6 +170,8 @@ export class ViewportEngine {
         this.requestOverlay();
       }),
     );
+    // Approximate incremental work (GPU canvases) was dropped: re-render it exactly.
+    this.disposers.push(onRenderSettle(() => this.requestRender()));
     this.disposers.push(tools.subscribe(() => this.requestOverlay()));
     this.disposers.push(viewOverlays.subscribe(() => this.requestOverlay()));
     this.disposers.push(
@@ -221,6 +229,8 @@ export class ViewportEngine {
     this.raf = 0;
     if (this.antsTimer) clearTimeout(this.antsTimer);
     this.antsTimer = 0;
+    if (this.settleTimer) clearTimeout(this.settleTimer);
+    this.settleTimer = 0;
     installViewport(null);
     this.composite = null;
     this.compositeDoc = null;
@@ -322,7 +332,9 @@ export class ViewportEngine {
     try {
       // The live composite is updated in place: a brush frame re-composites (and reports) only
       // the stroke area, so only that part of the pre-scaled copy and of the screen is redrawn.
-      const r = renderDocumentLive(doc);
+      // `since`: changes made through other callers of the live composite are reported too.
+      const r = renderDocumentLive(doc, this.composite ? { since: this.compositeSeq } : {});
+      this.compositeSeq = r.seq;
       if (r.canvas !== this.composite) {
         this.compositeGen++;
         this.compositeChange = 'full';
@@ -335,7 +347,10 @@ export class ViewportEngine {
           this.compositeChange = c ? rectUnion(c, d) : { ...d };
           // Keep an up-to-date pre-scaled copy up to date (else it is rebuilt when next used).
           const sc = this.scaled;
-          if (sc && sc.src === r.canvas && sc.gen === prevGen && this.patchScaled(sc, d)) sc.gen = this.compositeGen;
+          if (sc && sc.src === r.canvas && sc.gen === prevGen && this.patchScaled(sc, d)) {
+            sc.gen = this.compositeGen;
+            this.armSettle();
+          }
         }
       }
       this.composite = r.canvas;
@@ -438,6 +453,7 @@ export class ViewportEngine {
       const clip = this.screenRectOf(s!.doc, comp!, change);
       if (clip) {
         this.drawDoc(comp, clip);
+        if (clip.w > 0 && clip.h > 0) this.armSettle();
         return;
       }
     }
@@ -481,10 +497,16 @@ export class ViewportEngine {
     const cs = comp.width / Math.max(1, doc.width);
     const f = k / cs;
     let r: { x0: number; y0: number; x1: number; y1: number };
-    if (k < 1 && this.scaled && this.scaled.src === comp && this.scaled.gen === this.compositeGen) {
+    if (k < 1) {
+      // Minified: the pre-scaled copy (patched in place) is blitted 1:1 — exact under a clip.
+      if (!(this.scaled && this.scaled.src === comp && this.scaled.gen === this.compositeGen)) return null;
       const sc = this.scaledRectOf(d, this.scaledFactor(this.scaled), this.scaled.canvas.width, this.scaled.canvas.height);
       r = { x0: x0 + sc.x0, y0: y0 + sc.y0, x1: x0 + sc.x1, y1: y0 + sc.y1 };
     } else {
+      // Magnified: only integer device scales (1:1 copies, k×k pixel blocks) redraw exactly
+      // through a clip. At e.g. 250% a device pixel centre can fall exactly on a boundary between
+      // two document pixels and the clipped draw may sample the other one: redraw everything.
+      if (Math.abs(k - Math.round(k)) > 1e-9) return null;
       const m = Math.ceil(k) + 2;
       r = { x0: Math.floor(x0 + d.x * f) - m, y0: Math.floor(y0 + d.y * f) - m, x1: Math.ceil(x0 + (d.x + d.width) * f) + m, y1: Math.ceil(y0 + (d.y + d.height) * f) + m };
     }
@@ -502,6 +524,22 @@ export class ViewportEngine {
     if (cx1 <= cx0 || cy1 <= cy0) return { x: 0, y: 0, w: 0, h: 0 };
     if ((ex < W && cx1 > Math.floor(ex)) || (ey < H && cy1 > Math.floor(ey))) return null;
     return { x: cx0, y: cy0, w: cx1 - cx0, h: cy1 - cy0 };
+  }
+
+  /**
+   * After partial redraws, redraw everything (and rebuild the pre-scaled copy) once they stop:
+   * clipped draws are exact on the software canvas but may differ by a level or two on a GPU
+   * canvas, so the screen always ends up showing a from-scratch draw shortly after a stroke.
+   */
+  private armSettle() {
+    if (this.settleTimer) clearTimeout(this.settleTimer);
+    this.settleTimer = window.setTimeout(() => {
+      this.settleTimer = 0;
+      if (!this.mounted) return;
+      if (this.scaled) this.scaled.gen = -1;
+      this.shown = null;
+      this.requestDoc();
+    }, SETTLE_MS);
   }
 
   /** Checkerboard square size in CSS px (shell preference 'checkerSize', default 8). */

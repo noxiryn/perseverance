@@ -2,6 +2,9 @@
  * User fonts: "Add font file…" (ttf/otf/woff/woff2). Each file becomes a FontFace added to
  * `document.fonts`, is persisted in IndexedDB ('perseverance-fonts') and re-registered at startup
  * (source 'user').
+ *
+ * Project files embed the user fonts their text layers use (`userFontFiles`); opening such a project
+ * on a machine without them registers the embedded files for the session (`registerEmbeddedFonts`).
  */
 import { create } from 'zustand';
 import { fonts, type FontCategory, type FontDef } from '../registry';
@@ -32,6 +35,15 @@ export interface StoredFont {
 export const useUserFonts = create<{ files: Omit<StoredFont, 'data'>[] }>()(() => ({ files: [] }));
 
 const faces = new Map<string, FontFace>();
+
+/**
+ * Font files known this session but not in IndexedDB: files added while font storage was
+ * unavailable, and fonts embedded in opened projects. Kept so saving a project embeds them again.
+ */
+const sessionFiles = new Map<string, StoredFont>();
+
+const faceId = (family: string, weight: number, style: 'normal' | 'italic') => `${family}|${weight}|${style}`;
+const normFamily = (f: string) => f.replace(/["']/g, '').trim().toLowerCase();
 
 /* ------------------------------ IndexedDB ------------------------------ */
 
@@ -76,8 +88,15 @@ function tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T
 /* ------------------------------ registration ------------------------------ */
 
 
+/** Every known file of a family: installed ones, then session-only ones (embedded in a project). */
+function familyFiles(family: string): Omit<StoredFont, 'data'>[] {
+  const stored = useUserFonts.getState().files.filter((f) => f.family === family);
+  const extra = [...sessionFiles.values()].filter((f) => f.family === family && !stored.some((x) => x.id === f.id)).map(meta);
+  return [...stored, ...extra];
+}
+
 function syncRegistry(family: string) {
-  const files = useUserFonts.getState().files.filter((f) => f.family === family);
+  const files = familyFiles(family);
   if (!files.length) {
     const d = fonts.get(family);
     if (d?.source === 'user') fonts.unregister(family);
@@ -91,7 +110,7 @@ function syncRegistry(family: string) {
     weights: weights.length ? weights : [files[0].weight],
     italic: files.some((f) => f.style === 'italic') || undefined,
     source: 'user',
-    tags: ['my fonts', ...files.map((f) => f.subfamily.toLowerCase())],
+    tags: [useUserFonts.getState().files.some((f) => f.family === family) ? 'my fonts' : 'project font', ...files.map((f) => f.subfamily.toLowerCase())],
   };
   fonts.register(def);
 }
@@ -115,14 +134,94 @@ function meta(rec: StoredFont): Omit<StoredFont, 'data'> {
   return rest;
 }
 
-/** Re-register fonts stored in IndexedDB. Called once at startup. */
-export async function restoreUserFonts(): Promise<void> {
-  const all = (await tx<StoredFont[]>('readonly', (s) => s.getAll())) ?? [];
-  if (!all.length) return;
-  const ok: StoredFont[] = [];
-  for (const rec of all) if (await addFace(rec)) ok.push(rec);
-  useUserFonts.setState({ files: ok.map(meta) });
-  for (const fam of new Set(ok.map((r) => r.family))) syncRegistry(fam);
+let restored: Promise<void> | null = null;
+
+/** Re-register fonts stored in IndexedDB. Called once at startup (repeat calls share the first run). */
+export function restoreUserFonts(): Promise<void> {
+  if (!restored) {
+    restored = (async () => {
+      const all = (await tx<StoredFont[]>('readonly', (s) => s.getAll())) ?? [];
+      if (!all.length) return;
+      const ok: StoredFont[] = [];
+      for (const rec of all) if (await addFace(rec)) ok.push(rec);
+      useUserFonts.setState({ files: ok.map(meta) });
+      for (const fam of new Set(ok.map((r) => r.family))) syncRegistry(fam);
+    })().catch((err) => console.warn('[fonts] could not restore user fonts', err));
+  }
+  return restored;
+}
+
+/** Resolves once the installed user fonts are registered (immediately when restore never ran). */
+export function userFontsReady(): Promise<void> {
+  return restored ?? Promise.resolve();
+}
+
+/**
+ * Font files (with data) of the given families that came from the user — installed with
+ * "Add font file…" or embedded in an opened project. Used to embed them in saved projects.
+ */
+export async function userFontFiles(families: Iterable<string>): Promise<StoredFont[]> {
+  const wanted = new Set([...families].map(normFamily));
+  if (!wanted.size) return [];
+  await userFontsReady();
+  const out = new Map<string, StoredFont>();
+  for (const m of useUserFonts.getState().files) {
+    if (!wanted.has(normFamily(m.family))) continue;
+    const rec = sessionFiles.get(m.id) ?? (await tx<StoredFont | undefined>('readonly', (st) => st.get(m.id) as IDBRequest<StoredFont | undefined>));
+    if (rec?.data) out.set(m.id, rec);
+  }
+  for (const rec of sessionFiles.values()) if (wanted.has(normFamily(rec.family)) && !out.has(rec.id)) out.set(rec.id, rec);
+  return [...out.values()];
+}
+
+export interface EmbeddedFontFile {
+  family: string;
+  weight: number;
+  style: 'normal' | 'italic';
+  fileName: string;
+  format: string;
+  data: ArrayBuffer;
+}
+
+/**
+ * Make font files embedded in an opened project usable for this session. Families that are
+ * already available (`isAvailable`: bundled, installed or system fonts) are left alone. The files
+ * are not installed (they don't show up under My Fonts and are gone after a restart), but saving
+ * the project embeds them again. Returns the families that were registered.
+ */
+export async function registerEmbeddedFonts(list: EmbeddedFontFile[], isAvailable: (family: string) => boolean): Promise<string[]> {
+  await userFontsReady();
+  const added = new Set<string>();
+  const skipped = new Set<string>();
+  for (const f of list) {
+    if (skipped.has(f.family)) continue;
+    if (!added.has(f.family) && isAvailable(f.family)) {
+      skipped.add(f.family);
+      continue;
+    }
+    const id = faceId(f.family, f.weight, f.style);
+    if (faces.has(id)) continue;
+    const rec: StoredFont = {
+      id,
+      family: f.family,
+      subfamily: f.style === 'italic' ? 'Italic' : 'Regular',
+      weight: f.weight,
+      style: f.style,
+      fileName: f.fileName,
+      format: f.format,
+      category: guessCategory(f.family),
+      data: f.data,
+      addedAt: Date.now(),
+    };
+    if (!(await addFace(rec))) continue;
+    sessionFiles.set(id, rec);
+    added.add(f.family);
+  }
+  for (const fam of added) {
+    syncRegistry(fam);
+    void ensureFont(fam);
+  }
+  return [...added];
 }
 
 const ACCEPTED = /\.(ttf|otf|ttc|woff2?)$/i;
@@ -146,7 +245,7 @@ export async function installFontFile(file: OpenedFile): Promise<string | null> 
     return info.family;
   }
   const style: 'normal' | 'italic' = info.italic ? 'italic' : 'normal';
-  const id = `${info.family}|${info.weight}|${style}`;
+  const id = faceId(info.family, info.weight, style);
   const rec: StoredFont = {
     id,
     family: info.family,
@@ -170,7 +269,10 @@ export async function installFontFile(file: OpenedFile): Promise<string | null> 
     return null;
   }
   const saved = await tx('readwrite', (s) => s.put(rec));
-  if (saved === null) toast(`${info.family} added for this session only (font storage unavailable)`, 'warning');
+  if (saved === null) {
+    sessionFiles.set(id, rec);
+    toast(`${info.family} added for this session only (font storage unavailable)`, 'warning');
+  } else sessionFiles.delete(id);
   useUserFonts.setState((st) => ({ files: [...st.files.filter((f) => f.id !== id), meta(rec)] }));
   syncRegistry(info.family);
   void ensureFont(info.family, info.weight, style);
@@ -200,6 +302,7 @@ export async function removeUserFamily(family: string): Promise<void> {
     const face = faces.get(f.id);
     if (face) document.fonts.delete(face);
     faces.delete(f.id);
+    sessionFiles.delete(f.id);
     await tx('readwrite', (s) => s.delete(f.id));
   }
   useUserFonts.setState((st) => ({ files: st.files.filter((f) => f.family !== family) }));

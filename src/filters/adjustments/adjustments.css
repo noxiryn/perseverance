@@ -31,7 +31,7 @@
   align-items: center;
   gap: 4px;
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   margin-bottom: 6px;
@@ -100,7 +100,7 @@ button.adjustments-heading:hover {
 
 .adjustments-hint {
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
   line-height: 1.4;
 }
 .adjustments-hint.center {
@@ -141,7 +141,7 @@ button.adjustments-heading:hover {
   white-space: nowrap;
 }
 .adjustments-preset-head .count {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
 }
 .adjustments-preset-items {
@@ -225,7 +225,7 @@ button.adjustments-heading:hover {
   text-overflow: ellipsis;
 }
 .adjustments-editor-title .layer {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -255,7 +255,7 @@ button.adjustments-heading:hover {
   align-items: center;
   gap: 6px;
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
   margin-top: -4px;
 }
 .adjustments-editor-sub .clip.on {
@@ -344,7 +344,7 @@ button.adjustments-heading:hover {
 }
 .adjustments-sublabel {
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   margin-top: 8px;
@@ -365,7 +365,7 @@ button.adjustments-heading:hover {
   align-items: center;
   gap: 10px;
   padding: 22px 12px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   text-align: center;
   line-height: 1.45;
@@ -399,7 +399,7 @@ button.adjustments-heading:hover {
 .adjustments-cb-row .l,
 .adjustments-cb-row .r {
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
   white-space: nowrap;
 }
 .adjustments-cb-row .r {
@@ -561,7 +561,7 @@ button.adjustments-heading:hover {
 .adjustments-dialog-hint {
   flex: 1;
   min-width: 0;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   overflow: hidden;
   text-overflow: ellipsis;

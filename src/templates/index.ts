@@ -1,5 +1,5 @@
 /** Module entry: registers doc presets, templates and File ▸ New from Template (imported by src/features.ts). */
-import { LayoutTemplate } from 'lucide-react';
+import { LayoutTemplate, BookmarkPlus } from 'lucide-react';
 import { assets, commands, docPresets, templates } from '../registry';
 import type { ID } from '../core/types';
 import { useEditor } from '../state/editor';
@@ -10,6 +10,8 @@ import { NewFromTemplateDialog } from './NewFromTemplateDialog';
 import { DOC_PRESETS } from './presets';
 import { REFERENCE_TEMPLATES } from './reference';
 import { billowSmokeAsset } from './smokeAsset';
+import { loadUserTemplates, saveAsTemplate } from './userTemplates';
+import { activeDoc } from '../state/editor';
 
 export { openTemplate } from './open';
 export { buildTemplate } from './define';
@@ -20,6 +22,8 @@ export { NewFromTemplateDialog } from './NewFromTemplateDialog';
 if (!assets.has(billowSmokeAsset.id)) assets.register(billowSmokeAsset);
 docPresets.registerMany(DOC_PRESETS);
 templates.registerMany([...REFERENCE_TEMPLATES, ...EXTRA_TEMPLATES, ...BLANK_TEMPLATES]);
+// The user's saved templates (File ▸ Save as Template…).
+loadUserTemplates();
 
 /**
  * Templates opened by other code paths (start screen, command palette) call `build()` +
@@ -63,4 +67,16 @@ commands.register({
   run: () => {
     void showNewFromTemplate();
   },
+});
+
+commands.register({
+  id: 'file.saveAsTemplate',
+  label: 'Save as Template…',
+  menu: 'File',
+  group: '20-save',
+  order: 30,
+  icon: BookmarkPlus,
+  keywords: ['template', 'reuse', 'series', 'my templates', 'preset'],
+  enabled: () => !!activeDoc(),
+  run: () => void saveAsTemplate(),
 });

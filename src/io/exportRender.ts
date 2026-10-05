@@ -21,10 +21,10 @@ export interface SizePreset {
 }
 
 export const SIZE_PRESETS: SizePreset[] = [
-  { id: 'icon512', label: 'Roblox Icon', width: 512, height: 512 },
-  { id: 'icon1024', label: 'Icon 1024', width: 1024, height: 1024 },
-  { id: 'thumb1080', label: 'Thumbnail', width: 1920, height: 1080 },
-  { id: 'thumb720', label: 'Thumbnail 720', width: 1280, height: 720 },
+  { id: 'icon512', label: 'Roblox Icon 512×512', width: 512, height: 512 },
+  { id: 'icon1024', label: 'Roblox Icon 1024×1024', width: 1024, height: 1024 },
+  { id: 'thumb1080', label: 'Roblox Thumbnail 1920×1080', width: 1920, height: 1080 },
+  { id: 'thumb720', label: 'Roblox Thumbnail 1280×720', width: 1280, height: 720 },
 ];
 
 export interface ExportOptions {

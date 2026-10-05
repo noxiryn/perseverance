@@ -19,8 +19,7 @@ const PRESETS: { label: string; zoom: number | 'fit' }[] = [
   { label: '150%', zoom: 1.5 },
   { label: '200%', zoom: 2 },
 ];
-const PAD = 12;
-const PILLS_H = 34;
+const PAD = 10;
 
 function useElementSize<T extends HTMLElement>() {
   const ref = useRef<T>(null);
@@ -96,7 +95,8 @@ export function NavigatorPanel() {
   useViewportSizeTick();
 
   const availW = Math.max(0, stage.width - PAD * 2);
-  const availH = Math.max(0, stage.height - PAD * 2 - PILLS_H);
+  // The zoom pills sit in their own row below the stage, so the thumbnail gets the whole stage.
+  const availH = Math.max(0, stage.height - PAD * 2);
   const scale = doc ? Math.max(0.0001, Math.min(availW / doc.width, availH / doc.height)) : 1;
   const dispW = doc ? doc.width * scale : 0;
   const dispH = doc ? doc.height * scale : 0;
@@ -131,7 +131,7 @@ export function NavigatorPanel() {
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!doc || e.button !== 0 || (e.target as HTMLElement).closest('.layers-nav-pills')) return;
+    if (!doc || e.button !== 0) return;
     const el = e.currentTarget;
     el.setPointerCapture(e.pointerId);
     const toDoc = (cx: number, cy: number) => {
@@ -193,30 +193,29 @@ export function NavigatorPanel() {
             {rect && <div className="layers-nav-rect" style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }} />}
           </>
         )}
-        <div className="layers-nav-pills" onPointerDown={(e) => e.stopPropagation()}>
-          {PRESETS.map((p) => {
-            const active = !!doc && p.zoom !== 'fit' && Math.abs(zoom - p.zoom) < 0.001;
-            return (
-              <button
-                key={p.label}
-                className={`layers-nav-pill${active ? ' active' : ''}`}
-                disabled={!doc}
-                title={p.zoom === 'fit' ? 'Fit on screen' : `Zoom to ${p.label}`}
-                onClick={() => {
-                  if (p.zoom === 'fit') viewport.fit();
-                  else setZoom(p.zoom);
-                  viewport.requestRender();
-                }}
-              >
-                {p.label}
-              </button>
-            );
-          })}
-        </div>
       </div>
       <div className="layers-nav-zoom" style={doc ? undefined : { opacity: 0.45, pointerEvents: 'none' }}>
         <div className="layers-nav-zoom-head">
-          <span className="ui-label">Zoom</span>
+          <div className="layers-nav-pills">
+            {PRESETS.map((p) => {
+              const active = !!doc && p.zoom !== 'fit' && Math.abs(zoom - p.zoom) < 0.001;
+              return (
+                <button
+                  key={p.label}
+                  className={`layers-nav-pill${active ? ' active' : ''}`}
+                  disabled={!doc}
+                  title={p.zoom === 'fit' ? 'Fit on screen' : `Zoom to ${p.label}`}
+                  onClick={() => {
+                    if (p.zoom === 'fit') viewport.fit();
+                    else setZoom(p.zoom);
+                    viewport.requestRender();
+                  }}
+                >
+                  {p.label}
+                </button>
+              );
+            })}
+          </div>
           <NumberField
             value={doc ? zoom : 1}
             min={MIN_ZOOM}

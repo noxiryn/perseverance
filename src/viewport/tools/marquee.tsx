@@ -279,7 +279,7 @@ function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
 
   return {
     id,
-    name: kind === 'rect' ? 'Rectangular Marquee Tool' : 'Elliptical Marquee Tool',
+    name: kind === 'rect' ? 'Rectangular Marquee' : 'Elliptical Marquee',
     shortcut: 'M',
     icon: kind === 'rect' ? SquareDashed : Circle,
     group: 'marquee',

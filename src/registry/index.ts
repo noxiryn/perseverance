@@ -349,7 +349,8 @@ export const looks = new Registry<LookDef>('looks');
 export interface TemplateDef {
   id: string;
   name: string;
-  category: 'Thumbnail' | 'Icon' | 'Banner' | 'Social' | 'Blank';
+  /** 'Mine' = templates the user saved (File ▸ Save as Template…). */
+  category: 'Thumbnail' | 'Icon' | 'Banner' | 'Social' | 'Blank' | 'Mine';
   description?: string;
   width: number;
   height: number;

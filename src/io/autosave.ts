@@ -125,23 +125,30 @@ async function autosaveTick(force = false) {
       if (!s) continue;
       if (!lastRun.has(id)) lastRun.set(id, now);
       if (!s.dirty) continue;
-      const entry = currentEntryId(s);
-      if (lastEntry.get(id) === entry) continue;
+      if (lastEntry.get(id) === currentEntryId(s)) continue;
       if (!force && now - (lastRun.get(id) ?? now) < minutes * 60000) continue;
       await idle(1000);
-      const data = await encodeProject(s.doc, { background: true });
+      // Re-read after yielding and snapshot synchronously: the recovery entry, its thumbnail and
+      // its pixels all describe the same (committed) history step.
+      const live = useEditor.getState().sessions[id];
+      if (!live || !live.dirty) continue;
+      const entry = currentEntryId(live);
+      if (lastEntry.get(id) === entry) continue;
+      const doc = live.history.entries[live.history.index]?.doc ?? live.doc;
+      const thumb = thumbnailOf(doc);
+      const data = await encodeProject(doc, { background: true });
       // The document may have been saved or closed while encoding.
       const cur = useEditor.getState().sessions[id];
       if (!cur || !cur.dirty) continue;
       await putRecovery({
         id,
-        name: s.doc.name,
+        name: doc.name,
         time: Date.now(),
-        width: s.doc.width,
-        height: s.doc.height,
+        width: doc.width,
+        height: doc.height,
         data,
-        thumb: thumbnailOf(s.doc),
-        filePath: s.filePath,
+        thumb,
+        filePath: live.filePath,
       });
       lastRun.set(id, Date.now());
       lastEntry.set(id, entry);

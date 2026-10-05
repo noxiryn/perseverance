@@ -1,6 +1,8 @@
 /**
  * Document-level operations built on the background-removal core:
- *  - applyRemoveBackground: result as a layer mask (non-destructive, default) or deleted pixels,
+ *  - applyRemoveBackground: result as deleted pixels (default: the layer is also trimmed to the
+ *    character, so character styles see a real cut-out and the transform box hugs the subject)
+ *    or as a non-destructive layer mask (tagged in layer.meta so styles/looks can bake it first),
  *  - selectSubject: subject selection from the active layer (or the composite) → setSelection.
  */
 import type { BitmapPatch, Document, Layer, LayerMask, RasterLayer } from '../../core/types';
@@ -14,6 +16,7 @@ import { renderDocument, rasterizeLayer } from '../../render/compositor';
 import { viewport } from '../../editor/viewport';
 import { applyMask, maskChangeBounds, removeBackground, subjectMask, unionRect, type BgParams } from './core';
 import { requireDoc } from '../util';
+import { CUTOUT_MASK_KEY, trimRasterLayer } from '../character/cutout';
 
 export type BgOutput = 'mask' | 'delete';
 
@@ -137,13 +140,35 @@ export function applyRemoveBackground(layerId: string, params: BgParams, output:
     return false;
   }
 
+  const st = useEditor.getState();
+  if (output === 'delete') {
+    applyMask(img, mask);
+    // Trim to the character so its transform box hugs it (generated layers keep their box —
+    // their generator placement depends on it).
+    const trimmed = layer.generator ? null : trimRasterLayer(layer, img);
+    if (trimmed) {
+      st.commit(
+        'Remove Background',
+        (d) => {
+          const l = d.layers[layerId];
+          if (!l || l.type !== 'raster') return;
+          l.bitmapId = trimmed.bitmapId;
+          l.width = trimmed.width;
+          l.height = trimmed.height;
+          l.transform = trimmed.transform;
+        },
+        { activeLayerId: layerId },
+      );
+      toast('Background removed — the layer was trimmed to your character.', 'success', 3000);
+      viewport.requestRender();
+      return true;
+    }
+  }
+
   // Only the touched area is written and recorded for undo.
   const patches: BitmapPatch[] = [];
   let dirty = decontaminated.rect;
-  if (output === 'delete') {
-    applyMask(img, mask);
-    dirty = unionRect(dirty, maskChangeBounds(mask, w, h));
-  }
+  if (output === 'delete') dirty = unionRect(dirty, maskChangeBounds(mask, w, h));
   if (dirty) {
     const r = dirty;
     patches.push(
@@ -158,7 +183,6 @@ export function applyRemoveBackground(layerId: string, params: BgParams, output:
     );
   }
 
-  const st = useEditor.getState();
   if (output === 'mask') {
     const prev = layer.mask ?? null;
     const prevCanvas = prev ? bitmaps.tryGet(prev.bitmapId) : null;
@@ -174,6 +198,9 @@ export function applyRemoveBackground(layerId: string, params: BgParams, output:
         // Earlier masking (incl. invert/density/feather) is baked into the new bitmap.
         const next: LayerMask = { bitmapId: maskId, enabled: true, density: 1, feather: 0, inverted: false };
         l.mask = next;
+        // Tagged so the Character Styler / Looks know this mask is a cut-out and apply it first
+        // (smart filters run before the mask and would otherwise see the hidden background).
+        l.meta = { ...(l.meta ?? {}), [CUTOUT_MASK_KEY]: maskId };
       },
       { patches, activeLayerId: layerId },
     );
@@ -182,7 +209,7 @@ export function applyRemoveBackground(layerId: string, params: BgParams, output:
         ? 'Background hidden with a new layer mask — it replaced the disabled mask (Undo restores it).'
         : decontaminated.changed
           ? 'Background hidden with a layer mask; edge colors were decontaminated.'
-          : 'Background hidden with a layer mask (paint the mask to refine).',
+          : 'Background hidden with a layer mask (paint the mask to refine). Character styles apply it automatically.',
       replacedDisabled ? 'warning' : 'success',
       replacedDisabled ? 5000 : 3200,
     );

@@ -1,13 +1,14 @@
 import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { Check, Eraser, Eye, EyeOff, FilePlus2, Layers, Image as ImageIcon, Loader2 } from 'lucide-react';
+import { BookmarkPlus, Check, Eraser, Eye, EyeOff, FilePlus2, Layers, Image as ImageIcon, Loader2, Pencil, Trash2 } from 'lucide-react';
 import type { Document, ID, Layer } from '../core/types';
 import { commands, looks, runCommand, useRegistry, type LookDef } from '../registry';
 import { useActiveDoc, useEditor } from '../state/editor';
-import { Button, IconButton, SearchInput } from '../ui/controls';
-import { applyLook, currentLookId, hasLook, lookTouchesTarget, removeLook, resolveTarget } from './engine';
+import { Button, IconButton, SearchInput, showContextMenu } from '../ui/controls';
+import { applyLook, currentLookId, hasLook, lookTargets, lookTouchesTarget, removeLook, type LookTargets } from './engine';
 import { clearLookPreviewBases, contentSignature, renderLookPreviewURL } from './preview';
 import { IdleQueue, isPointerDown, nextPaint } from './shared';
 import { useLooksUI } from './store';
+import { deleteUserLook, isUserLook, renameUserLook, saveCurrentLook } from './userLooks';
 import './looks.css';
 
 /* ------------------------------------------------------------------ */
@@ -201,6 +202,17 @@ const LookCard = memo(function LookCard({
       disabled={disabled}
       aria-busy={busy || undefined}
       onClick={() => onApply(look.id)}
+      onContextMenu={
+        isUserLook(look.id)
+          ? (e) =>
+              showContextMenu(e, [
+                { label: look.name, heading: true },
+                { label: 'Apply Look', run: () => onApply(look.id) },
+                { label: 'Rename…', icon: Pencil, run: () => void renameUserLook(look.id) },
+                { label: 'Delete Look', icon: Trash2, run: () => deleteUserLook(look.id) },
+              ])
+          : undefined
+      }
     >
       <div className="looks-thumb" style={{ aspectRatio: String(aspect), background: swatchBackground(look.swatch) }}>
         {preview && <img src={preview} alt="" draggable={false} />}
@@ -247,7 +259,7 @@ export function LooksPanel() {
   useEffect(() => pruneClosedDocs(sessions), [sessions]);
 
   const requested = target === 'layer' ? activeLayerId : null;
-  const resolved = doc ? resolveTarget(doc, requested) : { targetId: null as ID | null, note: undefined };
+  const resolved: LookTargets = doc ? lookTargets(doc, requested) : { targetId: null as ID | null };
   const targetId = resolved.targetId;
   const targetLayer = doc && targetId ? (doc.layers[targetId] ?? null) : null;
   const current = currentLookId(doc, targetId);
@@ -289,7 +301,7 @@ export function LooksPanel() {
           <button className={target === 'layer' ? 'active' : ''} onClick={() => setTarget('layer')} title="Filters and effects go on the active layer">
             <Layers size={12} /> Active layer
           </button>
-          <button className={target === 'doc' ? 'active' : ''} onClick={() => setTarget('doc')} title="Everything goes into a look group at the top">
+          <button className={target === 'doc' ? 'active' : ''} onClick={() => setTarget('doc')} title="Grades and textures go into look groups; character filters go on the document’s character (when it has one)">
             <ImageIcon size={12} /> Whole document
           </button>
         </div>
@@ -303,10 +315,10 @@ export function LooksPanel() {
       </div>
 
       {doc ? (
-        <div className="looks-target" title={`${targetLayer ? targetLayer.name : 'Whole document'}${resolved.note ? ` — ${resolved.note}` : ''}`}>
+        <div className="looks-target" title={`${targetLayer && !resolved.character ? targetLayer.name : 'Whole document'}${resolved.note ? ` — ${resolved.note}` : ''}`}>
           <span className="looks-target-label">Target</span>
           <span className="looks-target-name">
-            {targetLayer ? targetLayer.name : 'Whole document'}
+            {targetLayer && !resolved.character ? targetLayer.name : 'Whole document'}
             {resolved.note && <em className={targetLayer ? 'info' : 'warn'}> — {resolved.note}</em>}
           </span>
         </div>
@@ -360,6 +372,13 @@ export function LooksPanel() {
         <Button size="small" variant="ghost" icon={Eraser} disabled={!doc || !canRemove} onClick={() => removeLook(targetId)}>
           Remove look
         </Button>
+        <IconButton
+          icon={BookmarkPlus}
+          size="sm"
+          title="Save as Look… — keep the character’s filters/effects and the overlays above it under My Looks"
+          disabled={!doc}
+          onClick={() => void saveCurrentLook(requested)}
+        />
         <span className="looks-count">{shown.length} looks</span>
       </div>
     </div>

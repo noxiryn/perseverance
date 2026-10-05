@@ -5,8 +5,13 @@
  *   0   4 bytes   magic "PGFX"
  *   4   uint16    container version
  *   6   uint32    header JSON byte length (N)
- *   10  N bytes   header JSON (UTF-8): { version, app, document, bitmaps: [{ id, width, height, offset, length }], ... }
- *   10+N …        concatenated PNG blobs; each bitmap's `offset` is relative to the start of this data section.
+ *   10  N bytes   header JSON (UTF-8): { version, app, document, bitmaps: [{ id, width, height, offset, length }],
+ *                 fonts?: [{ family, weight, style, fileName, format, offset, length }], ... }
+ *   10+N …        concatenated PNG blobs, then the embedded font files; every `offset` is relative to
+ *                 the start of this data section.
+ *
+ * `fonts` (user-added font files used by text layers) was added without a version bump: older
+ * readers ignore the extra header field and the bytes after the bitmaps.
  */
 
 export const PGFX_MAGIC = 'PGFX';
@@ -23,13 +28,34 @@ export interface ContainerBitmapEntry {
   length: number;
 }
 
+/** An embedded font file (a face of a user-added family). */
+export interface ContainerFontEntry {
+  family: string;
+  weight: number;
+  style: 'normal' | 'italic';
+  fileName: string;
+  format: string;
+  offset: number;
+  length: number;
+}
+
 export interface ContainerHeader {
   version: number;
   app: string;
   /** The Document JSON. Kept as unknown here; validated by the project loader. */
   document: unknown;
   bitmaps: ContainerBitmapEntry[];
+  fonts?: ContainerFontEntry[];
   [extra: string]: unknown;
+}
+
+export interface ContainerFont {
+  family: string;
+  weight: number;
+  style: 'normal' | 'italic';
+  fileName: string;
+  format: string;
+  data: ArrayBuffer | Uint8Array;
 }
 
 export interface ContainerBlob {
@@ -43,14 +69,23 @@ export interface UnpackedContainer {
   version: number;
   header: ContainerHeader;
   blobs: { id: string; width: number; height: number; data: Uint8Array }[];
+  /** Embedded font files (empty for files saved before fonts were embedded). */
+  fonts: (Omit<ContainerFont, 'data'> & { data: Uint8Array })[];
 }
 
 function toBytes(d: ArrayBuffer | Uint8Array): Uint8Array {
   return d instanceof Uint8Array ? d : new Uint8Array(d);
 }
 
-/** Build a .pgfx container. `header.bitmaps` is generated from `blobs` (any value passed is replaced). */
-export function packContainer(header: Omit<ContainerHeader, 'bitmaps'> & { bitmaps?: unknown }, blobs: ContainerBlob[]): ArrayBuffer {
+/**
+ * Build a .pgfx container. `header.bitmaps` / `header.fonts` are generated from `blobs` / `fonts`
+ * (any value passed is replaced).
+ */
+export function packContainer(
+  header: Omit<ContainerHeader, 'bitmaps' | 'fonts'> & { bitmaps?: unknown; fonts?: unknown },
+  blobs: ContainerBlob[],
+  fonts: ContainerFont[] = [],
+): ArrayBuffer {
   const entries: ContainerBitmapEntry[] = [];
   let offset = 0;
   const parts = blobs.map((b) => {
@@ -59,7 +94,16 @@ export function packContainer(header: Omit<ContainerHeader, 'bitmaps'> & { bitma
     offset += bytes.byteLength;
     return bytes;
   });
-  const json = new TextEncoder().encode(JSON.stringify({ ...header, bitmaps: entries }));
+  const fontEntries: ContainerFontEntry[] = [];
+  for (const f of fonts) {
+    const bytes = toBytes(f.data);
+    fontEntries.push({ family: f.family, weight: f.weight, style: f.style, fileName: f.fileName, format: f.format, offset, length: bytes.byteLength });
+    offset += bytes.byteLength;
+    parts.push(bytes);
+  }
+  const { fonts: _ignored, ...rest } = header;
+  const full = fontEntries.length ? { ...rest, bitmaps: entries, fonts: fontEntries } : { ...rest, bitmaps: entries };
+  const json = new TextEncoder().encode(JSON.stringify(full));
   const out = new Uint8Array(PREAMBLE + json.byteLength + offset);
   const view = new DataView(out.buffer);
   for (let i = 0; i < 4; i++) out[i] = PGFX_MAGIC.charCodeAt(i);
@@ -106,5 +150,23 @@ export function unpackContainer(buf: ArrayBuffer | Uint8Array): UnpackedContaine
     if (e.offset < 0 || e.length < 0 || end > bytes.byteLength) throw new Error(`Project file is truncated (bitmap ${e.id})`);
     return { id: String(e.id), width: e.width | 0, height: e.height | 0, data: bytes.subarray(start, end) };
   });
-  return { version, header: { ...header, bitmaps: entries }, blobs };
+  // Fonts are optional extras: a damaged entry is skipped (the text then uses a fallback font)
+  // rather than making the whole project unreadable.
+  const fontEntries = Array.isArray(header.fonts) ? header.fonts : [];
+  const fonts: UnpackedContainer['fonts'] = [];
+  for (const f of fontEntries) {
+    if (!f || typeof f !== 'object' || typeof f.family !== 'string' || !f.family) continue;
+    const start = dataStart + (f.offset | 0);
+    const end = start + (f.length | 0);
+    if (f.offset < 0 || f.length <= 0 || end > bytes.byteLength) continue;
+    fonts.push({
+      family: f.family,
+      weight: Number.isFinite(f.weight) ? f.weight : 400,
+      style: f.style === 'italic' ? 'italic' : 'normal',
+      fileName: typeof f.fileName === 'string' ? f.fileName : `${f.family}.ttf`,
+      format: typeof f.format === 'string' ? f.format : '',
+      data: bytes.subarray(start, end),
+    });
+  }
+  return { version, header: { ...header, bitmaps: entries }, blobs, fonts };
 }

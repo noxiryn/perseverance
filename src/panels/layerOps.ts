@@ -67,7 +67,7 @@ import {
 } from './treeOps';
 import { alignDelta, distributeDeltas, pixelBox, reboxTransform, unionRects, type AlignMode, type DistributeMode } from './geometryMath';
 import { layerContentBounds } from './bounds';
-import { effectName, type StylePreset } from './effectPresets';
+import { adaptPresetToFill, effectName, layerFillLuminance, type StylePreset } from './effectPresets';
 import { effectPlacement } from './effectOrder';
 import { unknockAlpha } from './pixelMath';
 
@@ -1508,11 +1508,14 @@ export function addEffect(effectId: string, params?: ParamValues, opts: { showPa
 export function applyStylePreset(preset: StylePreset, replace = false) {
   const ctx = styleTarget('apply a style to');
   if (!ctx) return;
-  const list = preset.effects.map((e) => makeEffect(e.effectId, e.params));
+  // Fixed preset colours adapt to the layer (a black outline on a black title becomes white).
+  const adapted = adaptPresetToFill(preset.effects, layerFillLuminance(ctx.layer));
+  const list = adapted.effects.map((e) => makeEffect(e.effectId, e.params));
   ed().commit(`Style: ${preset.name}`, (d) => {
     const l = d.layers[ctx.layer.id];
     l.effects = replace ? list : [...l.effects, ...list];
   });
+  if (adapted.changes.length) toast(`“${preset.name}” adapted to the layer’s colour: ${adapted.changes.join(', ')}.`, 'info', 3200);
 }
 
 export function updateEffect(layerId: ID, effectInstId: ID, change: (e: LayerEffect) => void, phase: Phase, label?: string) {

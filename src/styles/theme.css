@@ -17,6 +17,9 @@
   --text: #d6d6d6;
   --text-strong: #f2f2f2;
   --text-dim: #9a9a9a;
+  /* Secondary informational text (sizes, counts, hints, badges): ≥4.5:1 on --bg-panel. */
+  --text-muted: #858585;
+  /* Disabled controls and decorative glyphs only (3.2:1 on --bg-panel — too faint for reading). */
   --text-faint: #6a6a6a;
   --accent: #8b7cf6;
   --accent-strong: #a597ff;
@@ -352,7 +355,7 @@ input.ui-input {
   user-select: text;
 }
 .ui-num .unit {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   padding-right: 5px;
 }
@@ -482,7 +485,7 @@ input.ui-input {
 .ui-menu-item .shortcut {
   margin-left: auto;
   padding-left: 24px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
 }
 .ui-menu-item:hover .shortcut,
@@ -497,7 +500,7 @@ input.ui-input {
 .ui-menu-heading {
   padding: 6px 8px 2px;
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -520,6 +523,9 @@ input.ui-input {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+.ui-dialog:focus {
+  outline: none;
 }
 .ui-dialog-head {
   display: flex;
@@ -565,7 +571,7 @@ input.ui-input {
 }
 
 .ui-empty {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   padding: 16px;
   text-align: center;

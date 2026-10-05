@@ -88,7 +88,7 @@ export interface QuickPreset {
 }
 
 export const BUILTIN_QUICK_PRESETS: QuickPreset[] = [
-  { id: 'roblox-icon', name: 'Roblox Game Icon', width: 512, height: 512, description: 'Square experience icon' },
+  { id: 'roblox-icon', name: 'Roblox Icon', width: 512, height: 512, description: 'Square experience icon' },
   { id: 'roblox-thumbnail', name: 'Roblox Thumbnail', width: 1920, height: 1080, description: '16:9 experience thumbnail' },
 ];
 

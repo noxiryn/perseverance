@@ -44,6 +44,7 @@ import { uid } from '../core/ids';
 import { resolveParams } from '../filters/engine';
 import { measureText } from '../render/compositor';
 import { renderPlaceholderCharacter, type PlaceholderOptions } from '../roblox/placeholder';
+import { TEMPLATE_STYLE_KEY, templateStyleOf } from '../looks/characterStyling';
 import { fitFontSize, segmentTransform } from './layout';
 import { smokeCanvas, type SmokeOptions } from './paint';
 import { BILLOW_SMOKE_ID } from './smokeAsset';
@@ -669,6 +670,12 @@ export class DocBuilder {
   finish(meta: Record<string, unknown> = {}): Document {
     this.flushSync();
     this.doc.meta = { ...this.doc.meta, ...meta };
+    // Record the treatment authored on placeholder characters as the template's, so a Character
+    // Styler style or a Look applied later replaces it instead of stacking on top of it.
+    for (const l of Object.values(this.doc.layers)) {
+      if (l.meta?.placeholder !== true || (!l.filters.length && !l.effects.length)) continue;
+      l.meta = { ...l.meta, [TEMPLATE_STYLE_KEY]: templateStyleOf(l) };
+    }
     return this.doc;
   }
 }

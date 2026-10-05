@@ -41,7 +41,7 @@ export function RigSection({ layerId }: { layerId: ID }) {
       <div style={{ display: 'grid', gridTemplateColumns: '72px 1fr', rowGap: 3, fontSize: 'var(--fs-sm)' }}>
         {rows.map(([k, v]) => (
           <div key={k} style={{ display: 'contents' }}>
-            <span style={{ color: 'var(--text-faint)' }}>{k}</span>
+            <span style={{ color: 'var(--text-muted)' }}>{k}</span>
             <span style={{ color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v}</span>
           </div>
         ))}
@@ -78,7 +78,7 @@ export function ModelSection({ layerId }: { layerId: ID }) {
       <div style={{ display: 'grid', gridTemplateColumns: '72px 1fr', rowGap: 3, fontSize: 'var(--fs-sm)' }}>
         {rows.map(([k, v]) => (
           <div key={k} style={{ display: 'contents' }}>
-            <span style={{ color: 'var(--text-faint)' }}>{k}</span>
+            <span style={{ color: 'var(--text-muted)' }}>{k}</span>
             <span style={{ color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v}</span>
           </div>
         ))}

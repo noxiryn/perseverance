@@ -557,7 +557,7 @@ function renderOverlay(ctx: CanvasRenderingContext2D) {
 
 export const moveTool: ToolDef = {
   id: 'move',
-  name: 'Move Tool',
+  name: 'Move',
   shortcut: 'V',
   icon: Move,
   group: 'move',

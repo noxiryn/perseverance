@@ -62,4 +62,30 @@ describe('pgfx container', () => {
     new DataView(future.buffer).setUint16(4, 999, true);
     expect(() => unpackContainer(future)).toThrow(/newer version/);
   });
+
+  it('round-trips embedded font files after the bitmaps', () => {
+    const font = new Uint8Array([0, 1, 0, 0, 9, 8, 7, 6, 5]);
+    const buf = packContainer(
+      { version: 1, app: 'x', document: { ok: 1 } },
+      [{ id: 'b', width: 1, height: 1, data: fakePng(12, 4) }],
+      [{ family: 'My Brush', weight: 700, style: 'italic', fileName: 'MyBrush-BoldItalic.otf', format: 'opentype', data: font }],
+    );
+    const out = unpackContainer(buf);
+    expect([...out.blobs[0].data]).toEqual([...fakePng(12, 4)]);
+    expect(out.fonts).toHaveLength(1);
+    expect(out.fonts[0]).toMatchObject({ family: 'My Brush', weight: 700, style: 'italic', fileName: 'MyBrush-BoldItalic.otf', format: 'opentype' });
+    expect([...out.fonts[0].data]).toEqual([...font]);
+  });
+
+  it('reads files without fonts and skips damaged font entries', () => {
+    const plain = unpackContainer(packContainer({ version: 1, app: 'x', document: {} }, []));
+    expect(plain.fonts).toEqual([]);
+    expect(plain.header.fonts).toBeUndefined();
+    const buf = new Uint8Array(
+      packContainer({ version: 1, app: 'x', document: {} }, [], [{ family: 'F', weight: 400, style: 'normal', fileName: 'f.ttf', format: 'truetype', data: new Uint8Array(32) }]),
+    );
+    // Truncated font data: the project still opens, the font is just not embedded.
+    const out = unpackContainer(buf.subarray(0, buf.byteLength - 8));
+    expect(out.fonts).toEqual([]);
+  });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { encodeCached, PngCache } from './pngCache';
+import { encodeCached, PngCache, startEncodes } from './pngCache';
 
 const fakeCanvas = (width: number, height: number) => ({ width, height });
 const bytes = (...v: number[]) => new Uint8Array(v).buffer as ArrayBuffer;
@@ -73,5 +73,74 @@ describe('PngCache', () => {
     cache.prune(new Set(['b']));
     expect(cache.size).toBe(1);
     expect(cache.lookup('b', b, 1)).not.toBeNull();
+  });
+});
+
+describe('startEncodes (consistent save snapshot)', () => {
+  /** A canvas stand-in whose "pixels" can change after the snapshot (an edit or an undo). */
+  const live = (width: number, height: number, pixels: number) => ({ width, height, pixels });
+  /** Encoder that captures the pixels synchronously and finishes later, like canvas.toBlob. */
+  const toBlobLike = () => {
+    const calls: number[] = [];
+    const encode = (c: { pixels: number }) => {
+      const captured = c.pixels;
+      calls.push(captured);
+      return new Promise<ArrayBuffer>((resolve) => setTimeout(() => resolve(bytes(captured)), 5));
+    };
+    return { calls, encode };
+  };
+
+  it('starts every encode before returning, so later edits cannot reach the file', async () => {
+    const cache = new PngCache();
+    const a = live(4, 4, 1);
+    const b = live(4, 4, 2);
+    const { calls, encode } = toBlobLike();
+    const jobs = startEncodes(cache, [
+      { id: 'a', canvas: a, version: 1 },
+      { id: 'b', canvas: b, version: 1 },
+    ], encode);
+    // Synchronously after the call: both snapshots are taken.
+    expect(calls).toEqual([1, 2]);
+    // The user undoes / paints while the PNGs are still encoding.
+    a.pixels = 10;
+    b.pixels = 20;
+    const out = await Promise.all(jobs.map((j) => j.data));
+    expect(out.map((d) => new Uint8Array(d)[0])).toEqual([1, 2]);
+  });
+
+  it('reuses cached PNGs of unchanged canvases and caches new ones under the snapshot version', async () => {
+    const cache = new PngCache();
+    const a = live(4, 4, 7);
+    const { calls, encode } = toBlobLike();
+    await Promise.all(startEncodes(cache, [{ id: 'a', canvas: a, version: 3 }], encode).map((j) => j.data));
+    const again = startEncodes(cache, [{ id: 'a', canvas: a, version: 3 }], encode);
+    expect(again[0].cached).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(new Uint8Array(await again[0].data)).toEqual(new Uint8Array([7]));
+    // Edited after the first save: re-encoded.
+    a.pixels = 8;
+    const edited = startEncodes(cache, [{ id: 'a', canvas: a, version: 4 }], encode);
+    expect(edited[0].cached).toBe(false);
+    expect(new Uint8Array(await edited[0].data)).toEqual(new Uint8Array([8]));
+  });
+
+  it('caches under the version read at snapshot time, not the version after the encode', async () => {
+    const cache = new PngCache();
+    const a = live(4, 4, 1);
+    const { encode } = toBlobLike();
+    const jobs = startEncodes(cache, [{ id: 'a', canvas: a, version: 1 }], encode);
+    a.pixels = 2; // edited (version 2) while encoding
+    await jobs[0].data;
+    // (lookup drops a stale entry, so check the snapshot version first)
+    expect(cache.lookup('a', a, 1)).not.toBeNull();
+    expect(cache.lookup('a', a, 2)).toBeNull();
+  });
+
+  it('reports encoder failures through the job, without unhandled rejections', async () => {
+    const cache = new PngCache();
+    const jobs = startEncodes(cache, [{ id: 'a', canvas: live(1, 1, 0), version: 1 }], () => {
+      throw new Error('toBlob failed');
+    });
+    await expect(jobs[0].data).rejects.toThrow('toBlob failed');
   });
 });

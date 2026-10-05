@@ -1,8 +1,14 @@
 /**
  * Background removal core (pure, typed-array based):
- *  - 'auto'  : sample the dominant border colors and flood-fill from every edge with a tolerance,
+ *  - 'auto'  : sample the dominant border colors and flood-fill from every edge with a tolerance.
+ *              The flood also follows smooth color gradients (sky, fog, vignettes) away from the
+ *              border palette, removes thin background seams (e.g. the antialiased horizon line
+ *              between sky and baseplate) and drops small leftover islands,
  *  - 'color' : key out one picked color (globally or contiguous from the edges),
  *  - 'green' : chroma key on green dominance.
+ * Contiguous floods only cross pixels at or below the tolerance; the softness band gives partial
+ * transparency in a thin edge band next to the removed background, so it can never leak into the
+ * subject and leave its interior semi-transparent.
  * Then shrink (erode) the edge, feather it, and optionally decontaminate color spill.
  */
 import { blurFloat, distanceToOutside, hexToRgb, smoothstep, type PixelBuffer } from '../pixels';
@@ -30,8 +36,8 @@ export interface BgParams {
 export const DEFAULT_BG_PARAMS: BgParams = {
   mode: 'auto',
   keyColor: '#00b140',
-  tolerance: 18,
-  softness: 12,
+  tolerance: 10,
+  softness: 6,
   contiguous: true,
   feather: 0.6,
   shrink: 0,
@@ -172,6 +178,174 @@ export function paletteFor(img: PixelBuffer, params: BgParams): RGB[] {
   return [hexToRgb(params.mode === 'green' ? '#00b140' : params.keyColor)];
 }
 
+/** Auto mode: neighbouring pixels closer than this (0..100) continue the flood along a gradient. */
+export const GRADIENT_STEP = 2.2;
+/** How far (0..100) beyond tolerance + softness a gradient-followed background may drift. */
+export const GRADIENT_DRIFT = 24;
+/** Width (px) of the partially transparent band next to the removed background. */
+export const SOFT_EDGE_BAND = 2;
+/** Auto mode: background seams up to this many px thick between removed areas are removed too. */
+export const SEAM_MAX = 3;
+/** Auto mode: kept islands smaller than this share of the largest kept region are dropped. */
+export const ISLAND_SHARE = 0.015;
+
+const ALPHA_MIN = 16;
+
+/**
+ * Flood the background from every border pixel. A pixel joins when its background distance is
+ * at or below `tol`, or — with `grad` — when it is a small color step away from the pixel it is
+ * reached from and has not drifted further than `grad.cap` from the palette.
+ */
+export function floodBackground(img: PixelBuffer, D: Float32Array, tol: number, grad: { step: number; cap: number } | null): Uint8Array {
+  const { width: w, height: h, data: d } = img;
+  const n = w * h;
+  const R = new Uint8Array(n);
+  const queue = new Int32Array(n);
+  let head = 0,
+    tail = 0;
+  const seed = (i: number) => {
+    if (!R[i] && D[i] <= tol) (R[i] = 1), (queue[tail++] = i);
+  };
+  for (let x = 0; x < w; x++) seed(x), seed((h - 1) * w + x);
+  for (let y = 0; y < h; y++) seed(y * w), seed(y * w + w - 1);
+  const stepSq = grad ? (grad.step / DIST_SCALE) ** 2 : 0;
+  const cap = grad ? grad.cap : 0;
+  const last = n - w;
+  // One shared neighbour visit (no per-pixel allocations — this runs over millions of pixels).
+  const visit = (i: number, j: number) => {
+    if (R[j]) return;
+    const dj = D[j];
+    if (dj <= tol) {
+      R[j] = 1;
+      queue[tail++] = j;
+      return;
+    }
+    if (!grad || dj > cap) return;
+    const p = i * 4,
+      q = j * 4;
+    if (d[p + 3] < ALPHA_MIN || d[q + 3] < ALPHA_MIN) return;
+    if (colorDistanceSq(d[p], d[p + 1], d[p + 2], d[q], d[q + 1], d[q + 2]) <= stepSq) {
+      R[j] = 1;
+      queue[tail++] = j;
+    }
+  };
+  while (head < tail) {
+    const i = queue[head++];
+    const x = i % w;
+    if (x > 0) visit(i, i - 1);
+    if (x < w - 1) visit(i, i + 1);
+    if (i >= w) visit(i, i - w);
+    if (i < last) visit(i, i + w);
+  }
+  return R;
+}
+
+/**
+ * Mark thin unreached runs (≤ `maxGap` px, horizontally or vertically) between two reached
+ * background pixels whose color is a blend of those two — antialiased seams where two background
+ * areas meet (the horizon between sky and baseplate). Thin subject parts (a sword blade against
+ * the sky) are not a blend of the background around them and stay. Returns the number marked.
+ */
+export function removeSeams(img: PixelBuffer, reach: Uint8Array, maxDist: number, maxGap = SEAM_MAX): number {
+  const { width: w, height: h, data: d } = img;
+  const n = w * h;
+  const marked: number[] = [];
+  const maxSq = (maxDist / DIST_SCALE) ** 2;
+  for (let i = 0; i < n; i++) {
+    if (reach[i]) continue;
+    const x = i % w,
+      y = (i - x) / w;
+    for (let dir = 0; dir < 2; dir++) {
+      const stride = dir === 0 ? 1 : w;
+      const pos = dir === 0 ? x : y;
+      const size = dir === 0 ? w : h;
+      let ka = 0,
+        kb = 0;
+      for (let k = 1; k <= maxGap && pos - k >= 0; k++) {
+        if (reach[i - k * stride]) {
+          ka = k;
+          break;
+        }
+      }
+      if (!ka) continue;
+      for (let k = 1; k <= maxGap - ka + 1 && pos + k < size; k++) {
+        if (reach[i + k * stride]) {
+          kb = k;
+          break;
+        }
+      }
+      if (!kb) continue;
+      const a = (i - ka * stride) * 4,
+        b = (i + kb * stride) * 4,
+        p = i * 4;
+      // Distance from p to the segment a..b in RGB.
+      const abr = d[b] - d[a],
+        abg = d[b + 1] - d[a + 1],
+        abb = d[b + 2] - d[a + 2];
+      const len = abr * abr + abg * abg + abb * abb;
+      let t = len > 0 ? ((d[p] - d[a]) * abr + (d[p + 1] - d[a + 1]) * abg + (d[p + 2] - d[a + 2]) * abb) / len : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      if (colorDistanceSq(d[p], d[p + 1], d[p + 2], d[a] + abr * t, d[a + 1] + abg * t, d[a + 2] + abb * t) <= maxSq) {
+        marked.push(i);
+        break;
+      }
+    }
+  }
+  for (const i of marked) reach[i] = 1;
+  return marked.length;
+}
+
+/**
+ * Zero kept regions (8-connected, value > 0.04) smaller than `share` of the largest one — specks
+ * of background clutter the flood could not reach. Separate large parts (a second character, a
+ * detached sword) stay. Returns the number of regions dropped.
+ */
+export function dropIslands(maskF: Float32Array, w: number, h: number, share = ISLAND_SHARE): number {
+  const n = w * h;
+  const label = new Int32Array(n);
+  const queue = new Int32Array(n);
+  const areas: number[] = [0];
+  for (let s = 0; s < n; s++) {
+    if (label[s] || maskF[s] <= 0.04) continue;
+    const id = areas.length;
+    let head = 0,
+      tail = 0,
+      area = 0;
+    label[s] = id;
+    queue[tail++] = s;
+    while (head < tail) {
+      const i = queue[head++];
+      area++;
+      const x = i % w,
+        y = (i - x) / w;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx;
+          if ((!dx && !dy) || xx < 0 || xx >= w) continue;
+          const j = yy * w + xx;
+          if (!label[j] && maskF[j] > 0.04) {
+            label[j] = id;
+            queue[tail++] = j;
+          }
+        }
+      }
+    }
+    areas.push(area);
+  }
+  if (areas.length <= 2) return 0;
+  let largest = 0;
+  for (const a of areas) if (a > largest) largest = a;
+  const min = Math.max(2, largest * share);
+  let dropped = 0;
+  const drop = new Uint8Array(areas.length);
+  for (let k = 1; k < areas.length; k++) if (areas[k] < min) (drop[k] = 1), dropped++;
+  if (!dropped) return 0;
+  for (let i = 0; i < n; i++) if (drop[label[i]]) maskF[i] = 0;
+  return dropped;
+}
+
 /**
  * Compute the keep-mask (0 = removed, 255 = kept) for an image. The result does NOT include the
  * image's own alpha; multiply with `applyMask`.
@@ -183,49 +357,53 @@ export function computeKeepMask(img: PixelBuffer, params: BgParams, palette = pa
   const tol = Math.max(0, params.tolerance);
   const soft = Math.max(0.001, params.softness);
   const limit = tol + soft;
-  const contiguous = params.mode === 'auto' ? true : params.contiguous;
-  let reach: Uint8Array | null = null;
+  const auto = params.mode === 'auto';
+  const contiguous = auto ? true : params.contiguous;
+  const maskF = new Float32Array(n);
   if (contiguous) {
-    // Flood fill from every border pixel through pixels below the limit (inlined: no per-pixel
-    // closures — this runs over millions of pixels).
-    const R = (reach = new Uint8Array(n));
+    // Smart extras need real border colors (an empty palette means the border is transparent and
+    // the image alpha already separates the subject).
+    const smart = auto && palette.length > 0;
+    const core = floodBackground(img, D, tol, smart ? { step: GRADIENT_STEP, cap: limit + GRADIENT_DRIFT } : null);
+    if (smart) removeSeams(img, core, tol + soft * 0.5);
+    // Soft edge: pixels within the softness band get partial alpha, but only in a thin band next
+    // to the removed background (BFS depth-limited) — never deep inside the subject.
+    maskF.fill(1);
+    const depth = new Uint8Array(n);
     const queue = new Int32Array(n);
     let head = 0,
       tail = 0;
-    for (let x = 0; x < w; x++) {
-      const a = x,
-        b = (h - 1) * w + x;
-      if (!R[a] && D[a] < limit) (R[a] = 1), (queue[tail++] = a);
-      if (!R[b] && D[b] < limit) (R[b] = 1), (queue[tail++] = b);
-    }
-    for (let y = 0; y < h; y++) {
-      const a = y * w,
-        b = y * w + w - 1;
-      if (!R[a] && D[a] < limit) (R[a] = 1), (queue[tail++] = a);
-      if (!R[b] && D[b] < limit) (R[b] = 1), (queue[tail++] = b);
+    for (let i = 0; i < n; i++) {
+      if (core[i]) {
+        maskF[i] = 0;
+        queue[tail++] = i;
+      }
     }
     const last = n - w;
+    const grow = (j: number, di: number) => {
+      if (core[j] || depth[j]) return;
+      const v = D[j];
+      if (v >= limit) return;
+      depth[j] = di + 1;
+      maskF[j] = (v - tol) / soft;
+      queue[tail++] = j;
+    };
     while (head < tail) {
       const i = queue[head++];
+      const di = depth[i];
+      if (di >= SOFT_EDGE_BAND) continue;
       const x = i % w;
-      let j = i - 1;
-      if (x > 0 && !R[j] && D[j] < limit) (R[j] = 1), (queue[tail++] = j);
-      j = i + 1;
-      if (x < w - 1 && !R[j] && D[j] < limit) (R[j] = 1), (queue[tail++] = j);
-      j = i - w;
-      if (i >= w && !R[j] && D[j] < limit) (R[j] = 1), (queue[tail++] = j);
-      j = i + w;
-      if (i < last && !R[j] && D[j] < limit) (R[j] = 1), (queue[tail++] = j);
+      if (x > 0) grow(i - 1, di);
+      if (x < w - 1) grow(i + 1, di);
+      if (i >= w) grow(i - w, di);
+      if (i < last) grow(i + w, di);
     }
-  }
-  const maskF = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    if (reach && !reach[i]) {
-      maskF[i] = 1;
-      continue;
+    if (smart) dropIslands(maskF, w, h);
+  } else {
+    for (let i = 0; i < n; i++) {
+      const v = D[i];
+      maskF[i] = v <= tol ? 0 : v >= limit ? 1 : (v - tol) / soft;
     }
-    const v = D[i];
-    maskF[i] = v <= tol ? 0 : v >= limit ? 1 : (v - tol) / soft;
   }
   // Shrink edge
   if (params.shrink > 0.01) {
@@ -240,6 +418,42 @@ export function computeKeepMask(img: PixelBuffer, params: BgParams, palette = pa
   const out = new Uint8ClampedArray(n);
   for (let i = 0; i < n; i++) out[i] = maskF[i] * 255 + 0.5;
   return out;
+}
+
+export interface CutoutStats {
+  /** Share (0..1) of the opaque layer pixels that end up removed. */
+  removed: number;
+  /** Share (0..1) of the subject's interior (> 3 px from the cut) that is partially transparent. */
+  partialInterior: number;
+}
+
+/** Interior pixels partially transparent above this share → the dialog warns. */
+export const PARTIAL_INTERIOR_WARN = 0.05;
+
+/** Quality numbers for a keep-mask over an image (preview footer + warnings). */
+export function cutoutStats(img: PixelBuffer, mask: Uint8ClampedArray): CutoutStats {
+  const { width: w, height: h, data: d } = img;
+  const n = w * h;
+  const inside = new Uint8Array(n);
+  let opaque = 0,
+    removed = 0;
+  for (let i = 0, q = 3; i < n; i++, q += 4) {
+    const visible = d[q] > ALPHA_MIN;
+    if (visible) {
+      opaque++;
+      if (mask[i] < 128) removed++;
+    }
+    inside[i] = visible && mask[i] > 8 ? 1 : 0;
+  }
+  const dist = distanceToOutside(inside, w, h, true);
+  let interior = 0,
+    partial = 0;
+  for (let i = 0; i < n; i++) {
+    if (dist[i] <= 3) continue;
+    interior++;
+    if (mask[i] < 240) partial++;
+  }
+  return { removed: opaque ? removed / opaque : 0, partialInterior: interior ? partial / interior : 0 };
 }
 
 export interface PixelRect {
@@ -387,7 +601,7 @@ export function unionRect(a: PixelRect | null, b: PixelRect | null): PixelRect |
 
 /** Subject selection heuristic: alpha if the image has transparency, else auto background removal. */
 export function subjectMask(img: PixelBuffer): Uint8ClampedArray {
-  const params: BgParams = { ...DEFAULT_BG_PARAMS, tolerance: 16, softness: 10, feather: 0.5, decontaminate: 0 };
+  const params: BgParams = { ...DEFAULT_BG_PARAMS, tolerance: 12, softness: 8, feather: 0.5, decontaminate: 0 };
   const mask = computeKeepMask(img, params);
   const d = img.data;
   for (let i = 0, q = 3; i < mask.length; i++, q += 4) mask[i] = (mask[i] * d[q]) / 255;

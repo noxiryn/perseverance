@@ -6,6 +6,8 @@ import {
   anchor,
   blurPlane,
   blurPlanes,
+  blurredOne,
+  isOpaque,
   bool,
   clamp,
   coarseField,
@@ -57,8 +59,16 @@ function blurredColor(img: Img, sigma: number) {
 function blurredDarkness(img: Img, sigma: number): Float32Array {
   const { width: w, height: h, data } = img;
   const n = w * h;
-  const L = new Float32Array(n),
-    A = new Float32Array(n);
+  const L = new Float32Array(n);
+  if (isOpaque(data)) {
+    // alpha is 1 everywhere: its blur is a known constant (no second plane to blur)
+    for (let i = 0, j = 0; i < n; i++, j += 4) L[i] = (data[j] * 0.2126 + data[j + 1] * 0.7152 + data[j + 2] * 0.0722) * (255 / 255 / 255);
+    blurPlane(L, w, h, sigma);
+    const a = blurredOne(w, h, sigma);
+    for (let i = 0; i < n; i++) L[i] = a > 1e-4 ? 1 - Math.min(1, L[i] / a) : 0;
+    return L;
+  }
+  const A = new Float32Array(n);
   for (let i = 0, j = 0; i < n; i++, j += 4) {
     const a = data[j + 3] / 255;
     A[i] = a;
@@ -267,24 +277,29 @@ function applyHalftone<T extends Img>(img: T, p: ParamValues, ctx: FilterContext
     const dark = blurredDarkness(img, toneSigma(S));
     const out = new Float32Array(n);
     screenPlane(dark, w, h, screen, out);
-    for (let i = 0, j = 0; i < n; i++, j += 4) {
-      const a = data[j + 3];
-      if (a === 0) continue;
-      const v = out[i];
-      if (transparent) {
-        data[j] = ink[0];
-        data[j + 1] = ink[1];
-        data[j + 2] = ink[2];
-        data[j + 3] = a * v;
-      } else {
-        data[j] = paper[0] + (ink[0] - paper[0]) * v;
-        data[j + 1] = paper[1] + (ink[1] - paper[1]) * v;
-        data[j + 2] = paper[2] + (ink[2] - paper[2]) * v;
-      }
-    }
+    inkOnPaper(data, n, out, ink[0], ink[1], ink[2], paper[0], paper[1], paper[2], transparent);
   }
   if (orig) mixWith(orig, data, mix);
   return img;
+}
+
+/** Mono screen result → pixels: ink coverage v over the paper (or ink with alpha·v). */
+function inkOnPaper(data: Uint8ClampedArray, n: number, out: Float32Array, i0: number, i1: number, i2: number, p0: number, p1: number, p2: number, transparent: boolean) {
+  for (let i = 0, j = 0; i < n; i++, j += 4) {
+    const a = data[j + 3];
+    if (a === 0) continue;
+    const v = out[i];
+    if (transparent) {
+      data[j] = i0;
+      data[j + 1] = i1;
+      data[j + 2] = i2;
+      data[j + 3] = a * v;
+    } else {
+      data[j] = p0 + (i0 - p0) * v;
+      data[j + 1] = p1 + (i1 - p1) * v;
+      data[j + 2] = p2 + (i2 - p2) * v;
+    }
+  }
 }
 
 export const halftone: FilterDef = {

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useRef, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { closeDialog, useUI } from '../../state/ui';
 
@@ -36,6 +36,41 @@ function enterBelongsToTarget(el: HTMLElement | null): boolean {
   return !!el.closest('[data-enter-local]');
 }
 
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
+
+/** Inputs that take typed text (initial-focus candidates). */
+const TEXT_ENTRY =
+  'input:not([disabled]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([readonly]), textarea:not([disabled]):not([readonly])';
+
+function isShown(el: HTMLElement): boolean {
+  return el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+}
+
+/** Keyboard-focusable elements inside `root`, in tab order (document order; positive tabIndex is not used in the app). */
+export function focusableIn(root: HTMLElement): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.tabIndex >= 0 && !el.closest('[inert]') && isShown(el));
+}
+
+/**
+ * Where focus goes when a dialog opens: an element that already took focus itself (autoFocus),
+ * then an explicit [data-autofocus], the first text field, the primary footer button, any
+ * focusable element, and finally the dialog frame itself.
+ */
+function initialFocusTarget(root: HTMLElement): HTMLElement {
+  const pick = (sel: string) => [...root.querySelectorAll<HTMLElement>(sel)].find((el) => el.tabIndex >= 0 && isShown(el));
+  return (
+    pick('[data-autofocus], [autofocus]') ??
+    pick(TEXT_ENTRY) ??
+    pick('.ui-dialog-foot .ui-btn.primary:not([disabled])') ??
+    focusableIn(root).find((el) => !el.closest('.ui-dialog-head')) ??
+    root
+  );
+}
+
+/** Popovers / menus opened from inside a dialog live in portals outside it: leave Tab to them. */
+const inFloatingUi = (el: Element | null) => !!el?.closest('.ui-popover, .ui-menu, [data-shell-menu]');
+
 /**
  * Standard dialog frame. Use inside a component opened with `openDialog(Component, props)`:
  *
@@ -46,6 +81,10 @@ function enterBelongsToTarget(el: HTMLElement | null): boolean {
  * Keyboard: Escape → onClose, Enter → onSubmit (not from textareas). Only the topmost dialog reacts.
  * Enter first blurs a focused text field so its typed value is committed before onSubmit runs.
  * A click on the backdrop calls onClose too (unless the dialog was opened with closeOnBackdrop:false).
+ *
+ * Focus: on open, focus moves into the dialog (an autoFocus element, else the first text field,
+ * else the primary button, else the frame); Tab / Shift+Tab wrap inside the topmost dialog so
+ * nothing behind the backdrop can be reached; on close, focus returns to where it was.
  */
 export function Dialog({
   title,
@@ -65,9 +104,34 @@ export function Dialog({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const entryId = useContext(DialogIdContext);
+  const titleId = useId();
   // Latest onSubmit: after an Enter blur-commit the parent re-renders with fresh state before we submit.
   const submitRef = useRef(onSubmit);
   submitRef.current = onSubmit;
+  // Focus to restore on close: captured during the first render, before autoFocus children run.
+  const restoreRef = useRef<Element | null | undefined>(undefined);
+  if (restoreRef.current === undefined) restoreRef.current = typeof document !== 'undefined' ? document.activeElement : null;
+
+  useEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    const active = document.activeElement;
+    if (!active || !root.contains(active)) {
+      const target = initialFocusTarget(root);
+      target.focus({ preventScroll: true });
+      if (target instanceof HTMLInputElement && target.matches(TEXT_ENTRY)) target.select();
+    }
+    const restore = restoreRef.current;
+    return () => {
+      // Runs after the dialog left the DOM. Give focus back unless something else took it meanwhile
+      // (e.g. the next dialog in a chain focused its own field).
+      const now = document.activeElement;
+      if (now && now !== document.body && now.isConnected) return;
+      if (restore instanceof HTMLElement && restore !== document.body && restore.isConnected && !restore.closest('[inert]')) {
+        restore.focus({ preventScroll: true });
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!entryId) return;
@@ -84,6 +148,30 @@ export function Dialog({
     };
     const key = (e: KeyboardEvent) => {
       if (!isTopmost()) return;
+      if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        const root = ref.current;
+        if (!root) return;
+        const active = document.activeElement;
+        if (inFloatingUi(active)) return;
+        const items = focusableIn(root);
+        if (!items.length) {
+          e.preventDefault();
+          root.focus({ preventScroll: true });
+          return;
+        }
+        const first = items[0];
+        const last = items[items.length - 1];
+        const inside = !!active && root.contains(active);
+        let next: HTMLElement | null = null;
+        if (!inside) next = e.shiftKey ? last : first;
+        else if (e.shiftKey && (active === first || active === root)) next = last;
+        else if (!e.shiftKey && active === last) next = first;
+        if (next) {
+          e.preventDefault();
+          next.focus({ preventScroll: true });
+        }
+        return;
+      }
       if (e.key === 'Escape') {
         e.stopPropagation();
         onClose();
@@ -101,9 +189,20 @@ export function Dialog({
   }, [onClose, onSubmit]);
 
   return (
-    <div ref={ref} className="ui-dialog" style={{ width }} onPointerDown={(e) => e.stopPropagation()}>
+    <div
+      ref={ref}
+      className="ui-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      tabIndex={-1}
+      style={{ width }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
       <div className="ui-dialog-head">
-        <span style={{ flex: 1 }}>{title}</span>
+        <span id={titleId} style={{ flex: 1 }}>
+          {title}
+        </span>
         <button className="ui-icon-btn" onClick={onClose} title="Close">
           <X size={15} />
         </button>

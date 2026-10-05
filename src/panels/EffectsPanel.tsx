@@ -1,14 +1,15 @@
 /**
  * Effects panel (id 'effects'): layer style editor for the active layer — list of effects with
  * enable toggles, expandable ParamEditors (live preview + coalesced commits), drag reorder,
- * duplicate/delete, "Add effect" menu, style presets and copy/paste/clear style.
+ * duplicate/delete, "Add effect" menu, style presets (colours adapt to the layer), the user's own
+ * saved styles ("My Styles": effects + optional smart filters) and copy/paste/clear style.
  *
  * Rows are listed in the order the renderer really draws them (top row = drawn last): effects
  * drawn over the content, a "Layer content" divider, then effects drawn behind it. Effect types
  * have a fixed order; only effects of the same type (e.g. a double stroke) can be reordered.
  */
 import { useRef, useState } from 'react';
-import { ChevronDown, ChevronRight, ClipboardCopy, ClipboardPaste, CopyPlus, Eraser, GripVertical, Plus, RotateCcw, Sparkle, Trash2 } from 'lucide-react';
+import { BookmarkPlus, ChevronDown, ChevronRight, ClipboardCopy, ClipboardPaste, CopyPlus, Eraser, GripVertical, Pencil, Plus, Replace, RotateCcw, Sparkle, Trash2 } from 'lucide-react';
 import type { Layer } from '../core/types';
 import { useEditor } from '../state/editor';
 import { effects, useRegistry } from '../registry';
@@ -17,6 +18,8 @@ import { Checkbox, IconButton, ParamEditor, Section, showContextMenu, showMenuAt
 import * as ops from './layerOps';
 import { STYLE_PRESETS, effectMenuIds, effectName, type StylePreset } from './effectPresets';
 import { effectPlacement, effectsTopDown, reorderTarget, type OrderedEffect } from './effectOrder';
+import { applyUserStyle, saveLayerStyle, useUserStyles, type UserStyle } from './userStyles';
+import { promptSave } from '../looks/SavePresetDialog';
 import './panels.css';
 
 const cls = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
@@ -128,6 +131,13 @@ function EffectsEditor({ layer }: { layer: Layer }) {
         <IconButton icon={ClipboardCopy} size="sm" title="Copy layer style" disabled={!n} onClick={ops.copyStyle} />
         <IconButton icon={ClipboardPaste} size="sm" title="Paste layer style" disabled={!clip} onClick={ops.pasteStyle} />
         <IconButton icon={Eraser} size="sm" title="Clear layer style" disabled={!n} onClick={ops.clearStyle} />
+        <IconButton
+          icon={BookmarkPlus}
+          size="sm"
+          title="Save Layer Style… — keep these effects (and smart filters) under My Styles"
+          disabled={!n && !layer.filters.length}
+          onClick={() => void saveLayerStyle()}
+        />
       </div>
       <div className="layers-props-scroll">
         {n === 0 ? (
@@ -159,16 +169,75 @@ function EffectsEditor({ layer }: { layer: Layer }) {
             {dividerAt === rows.length && <ContentDivider />}
           </div>
         )}
+        <MyStyles canSave={n > 0 || layer.filters.length > 0} />
         <Section title="Style Presets">
           <div className="layers-presets">
             {STYLE_PRESETS.map((p) => (
               <PresetTile key={p.id} preset={p} />
             ))}
           </div>
-          <div className="layers-note">Click a preset to add its effects to the current style · Alt-click replaces the style.</div>
+          <div className="layers-note">Click a preset to add its effects to the current style · Alt-click replaces the style. Outline colours adapt to the layer (a dark title gets a light outline).</div>
         </Section>
       </div>
     </div>
+  );
+}
+
+/** First colour param of a saved style (for its tile swatch). */
+function styleSwatch(st: UserStyle): string[] {
+  const colors = [...st.effects, ...st.filters].map((x) => x.params.color).filter((c): c is string => typeof c === 'string');
+  return colors.length ? colors.slice(0, 3) : ['#3a3a3a'];
+}
+
+/** "My Styles": styles the user saved from layers (effects + optional smart filters). */
+function MyStyles({ canSave }: { canSave: boolean }) {
+  const styles = useUserStyles((s) => s.styles);
+  const menu = (st: UserStyle): MenuItem[] => [
+    { label: 'Add to Layer Style', run: () => applyUserStyle(st) },
+    { label: 'Replace Layer Style', icon: Replace, run: () => applyUserStyle(st, true) },
+    { separator: true },
+    {
+      label: 'Rename…',
+      icon: Pencil,
+      run: () =>
+        void promptSave({ title: 'Rename Style', confirm: 'Rename', defaultName: st.name }).then((r) => {
+          if (r) useUserStyles.getState().rename(st.id, r.name);
+        }),
+    },
+    { label: 'Delete Style', icon: Trash2, run: () => useUserStyles.getState().remove(st.id) },
+  ];
+  return (
+    <Section
+      title="My Styles"
+      actions={<IconButton icon={BookmarkPlus} size="sm" title="Save the current layer style…" disabled={!canSave} onClick={() => void saveLayerStyle()} />}
+    >
+      {styles.length ? (
+        <>
+          <div className="layers-presets">
+            {styles.map((st) => {
+              const sw = styleSwatch(st);
+              return (
+                <button
+                  key={st.id}
+                  className="layers-preset"
+                  title={`${st.name}\n${st.effects.length} effect${st.effects.length === 1 ? '' : 's'}${st.filters.length ? ` · ${st.filters.length} smart filter${st.filters.length === 1 ? '' : 's'}` : ''}\nClick: add · Alt-click: replace · right-click: rename/delete`}
+                  onClick={(e) => applyUserStyle(st, e.altKey)}
+                  onContextMenu={(e) => showContextMenu(e, menu(st))}
+                >
+                  <span className="layers-preset-sample" style={{ background: sw.length > 1 ? `linear-gradient(135deg, ${sw.join(', ')})` : sw[0] }}>
+                    <span style={{ color: '#f4f4f4', textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>Aa</span>
+                  </span>
+                  <span className="layers-preset-name">{st.name}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="layers-note">Your saved styles · right-click to rename or delete.</div>
+        </>
+      ) : (
+        <div className="layers-note">Save a layer’s effects and smart filters here to reuse them on your next thumbnail.</div>
+      )}
+    </Section>
   );
 }
 

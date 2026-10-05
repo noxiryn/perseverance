@@ -16,6 +16,22 @@ import { openWarpDialog } from './WarpDialog';
 
 const hasDoc = () => !!activeDoc();
 
+/**
+ * Menu state for the text-only commands: enabled while on-canvas text editing runs or a text layer
+ * is the target, so they grey out like the Layer/Edit menus instead of answering with a toast.
+ * (needTextLayer's toast stays as the fallback for palette/shortcut paths.)
+ */
+const hasTextTarget = () => !!activeDoc() && (isEditing() || !!primaryTextTarget());
+
+/** Rasterize / Convert act on every selected text layer: enabled when the selection has one. */
+function selectionHasText(): boolean {
+  const s = activeSession();
+  if (!s) return false;
+  if (isEditing()) return true;
+  const ids = s.selectedLayerIds.length ? s.selectedLayerIds : s.activeLayerId ? [s.activeLayerId] : [];
+  return ids.some((id) => s.doc.layers[id]?.type === 'text');
+}
+
 function needTextLayer(what: string): boolean {
   if (!activeDoc()) {
     toast('Open a document first', 'info');
@@ -37,7 +53,7 @@ function toggleCommand(id: string, key: TextToggle, label: string, order: number
     order,
     icon,
     keywords: ['text', 'type', 'character'],
-    enabled: hasDoc,
+    enabled: hasTextTarget,
     checked: () => !!primaryTextTarget() && !!currentTextView()[key],
     run: () => {
       if (!needTextLayer(`turn ${label} on or off`)) return;
@@ -88,7 +104,7 @@ export const typeCommands: CommandDef[] = [
     order: 20,
     icon: Pencil,
     keywords: ['text', 'type', 'caret', 'retype'],
-    enabled: hasDoc,
+    enabled: hasTextTarget,
     run: () => {
       if (!needTextLayer('edit its text')) return;
       const l = primaryTextTarget();
@@ -128,7 +144,7 @@ export const typeCommands: CommandDef[] = [
     order: 10,
     icon: Spline,
     keywords: ['arc', 'arch', 'bulge', 'flag', 'wave', 'curve text', 'bend'],
-    enabled: hasDoc,
+    enabled: hasTextTarget,
     run: () => openWarpDialog(),
   },
   {
@@ -139,7 +155,7 @@ export const typeCommands: CommandDef[] = [
     order: 10,
     icon: ImageIcon,
     keywords: ['pixels', 'flatten text'],
-    enabled: hasDoc,
+    enabled: selectionHasText,
     run: () => rasterizeSelectedText(),
   },
   {
@@ -150,7 +166,7 @@ export const typeCommands: CommandDef[] = [
     order: 20,
     icon: Shapes,
     keywords: ['outline', 'vector', 'path', 'create outlines'],
-    enabled: hasDoc,
+    enabled: selectionHasText,
     run: () => convertSelectedTextToShape(),
   },
   {
@@ -161,7 +177,7 @@ export const typeCommands: CommandDef[] = [
     order: 30,
     icon: Pilcrow,
     keywords: ['wrap', 'box', 'point text', 'paragraph text'],
-    enabled: hasDoc,
+    enabled: hasTextTarget,
     run: () => {
       if (!needTextLayer('convert it')) return;
       const l = primaryTextTarget();

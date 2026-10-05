@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { EffectDef } from '../registry';
 import { filters } from '../registry';
 import { EFFECT_DEFS } from './effects';
-import { alignGrid, alignRect, effectInfluence, effectUsesFields, fieldBucket, fieldReach, filtersLocal, isPixelExact, mapDirtyRect, FAR } from './region';
+import { alignGrid, alignRect, changesSince, effectInfluence, effectUsesFields, fieldBucket, fieldReach, filtersLocal, isPixelExact, mapDirtyRect, FAR } from './region';
 
 /** Minimal affine matrix (jsdom has no DOMMatrix). */
 function mat(a: number, b: number, c: number, d: number, e: number, f: number): DOMMatrix {
@@ -100,5 +100,33 @@ describe('smart filter locality', () => {
     expect(filtersLocal([inst('test-local-adj')])).toBe(true);
     expect(filtersLocal([inst('test-local-adj'), inst('test-blur')])).toBe(false);
     expect(filtersLocal([inst('test-blur', false)])).toBe(true);
+  });
+});
+
+describe('live composite change log', () => {
+  const r = (x: number, y: number, w: number, h: number) => ({ x, y, w, h });
+  const log = [
+    { seq: 10, rect: null },
+    { seq: 11, rect: r(0, 0, 10, 10) },
+    { seq: 12, rect: r(20, 5, 10, 10) },
+    { seq: 13, rect: r(5, 30, 2, 2) },
+  ];
+
+  it('unions every change after the caller\'s version', () => {
+    expect(changesSince(log, 13, 12)).toEqual(r(5, 30, 2, 2));
+    expect(changesSince(log, 13, 11)).toEqual(r(5, 5, 25, 27));
+    expect(changesSince(log, 13, 10)).toEqual(r(0, 0, 30, 32));
+  });
+
+  it('reports no change for the current version', () => {
+    expect(changesSince(log, 13, 13)).toEqual(r(0, 0, 0, 0));
+  });
+
+  it('is unknown (null) across a full change, beyond the log, or for foreign versions', () => {
+    expect(changesSince(log, 13, 9)).toBeNull(); // includes the full change at 10
+    expect(changesSince(log.slice(2), 13, 10)).toBeNull(); // 11 forgotten
+    expect(changesSince(log, 13, 14)).toBeNull(); // from the future / another canvas
+    expect(changesSince([], 13, 12)).toBeNull();
+    expect(changesSince(log, 15, 13)).toBeNull(); // log does not reach the current version
   });
 });

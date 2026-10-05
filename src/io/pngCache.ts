@@ -78,3 +78,57 @@ export async function encodeCached<C extends Sized>(
   cache.store(id, canvas, version, data, { width, height });
   return { data, width, height, cached: false };
 }
+
+export interface SnapshotItem<C extends Sized> {
+  id: string;
+  canvas: C;
+  /** Bitmap version at snapshot time. */
+  version: number;
+}
+
+export interface EncodeJob {
+  id: string;
+  width: number;
+  height: number;
+  /** PNG bytes: cached ones are available immediately, the others when their encode finishes. */
+  data: Promise<ArrayBuffer>;
+  cached: boolean;
+}
+
+/**
+ * Snapshot a set of canvases for one file, SYNCHRONOUSLY: unchanged canvases reuse their cached
+ * PNG and every other encode is started before this function returns. `encode` must capture the
+ * pixels when it is called — `canvas.toBlob` does (the HTML spec copies the canvas bitmap at call
+ * time and only serializes that copy in parallel). Whatever happens to the canvases afterwards
+ * (edits, undo/redo applying patches in place, garbage collection) cannot reach the result, so a
+ * file built from these jobs always holds one consistent state.
+ *
+ * Results are cached under the version read here, before encoding.
+ */
+export function startEncodes<C extends Sized>(cache: PngCache, items: SnapshotItem<C>[], encode: (c: C) => Promise<ArrayBuffer>): EncodeJob[] {
+  return items.map(({ id, canvas, version }) => {
+    const width = canvas.width;
+    const height = canvas.height;
+    const hit = cache.lookup(id, canvas, version);
+    if (hit) return { id, width, height, data: Promise.resolve(hit), cached: true };
+    let data: Promise<ArrayBuffer>;
+    try {
+      data = encode(canvas);
+    } catch (err) {
+      data = Promise.reject(err);
+    }
+    const job: EncodeJob = {
+      id,
+      width,
+      height,
+      data: data.then((buf) => {
+        cache.store(id, canvas, version, buf, { width, height });
+        return buf;
+      }),
+      cached: false,
+    };
+    // A failed encode is reported by whoever awaits the job; never as an unhandled rejection.
+    job.data.catch(() => undefined);
+    return job;
+  });
+}

@@ -7,6 +7,17 @@ import { activeDoc, useEditor } from '../../state/editor';
 import { toast } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
 import { newTransparentDocument } from '../util';
+import { isPlaceholder, replaceLayerContents } from '../character/replace';
+import type { Document, Layer } from '../../core/types';
+
+/** The active layer when it is a template placeholder (renders replace it), else null. */
+function activePlaceholder(doc: Document): Layer | null {
+  const st = useEditor.getState();
+  const s = st.activeDocId ? st.sessions[st.activeDocId] : null;
+  if (!s || s.doc.id !== doc.id || !s.activeLayerId) return null;
+  const l = doc.layers[s.activeLayerId];
+  return l && isPlaceholder(l) ? l : null;
+}
 import { freshTransform, outputFrameSize, padCrop, readPlacement, reeditTransform, type Placement } from './placement';
 import type { StudioScene } from './scene';
 import type { StudioOutput } from './types';
@@ -73,6 +84,16 @@ export function commitRender(scene: StudioScene, opts: CommitRenderOptions): boo
       { activeLayerId: old.id },
     );
     toast(`Updated “${old.name}” (${opts.kind === 'model' ? 'model render' : 'Pose Studio render'})`, 'success');
+  } else if (!opts.replaceLayerId && isPlaceholder(activePlaceholder(doc))) {
+    // A template's placeholder is selected: the render takes its place, size and styling.
+    const ph = activePlaceholder(doc)!;
+    replaceLayerContents(ph.id, cropped, {
+      name: nextLayerName(doc, opts.name),
+      keepResolution: true,
+      generator,
+      meta: { roblox: { kind: 'character', source: opts.kind } },
+      label: `Replace Character (${what})`,
+    });
   } else {
     const layer = makeRasterLayer({
       name: nextLayerName(doc, opts.name),

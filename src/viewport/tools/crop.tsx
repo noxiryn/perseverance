@@ -368,7 +368,7 @@ function renderOverlay(ctx: CanvasRenderingContext2D) {
 
 export const cropTool: ToolDef = {
   id: 'crop',
-  name: 'Crop Tool',
+  name: 'Crop',
   shortcut: 'C',
   icon: Crop,
   group: 'crop',

@@ -5,7 +5,7 @@
 import { Camera, Gem, Palette, Pipette, Scale, Shuffle, SunMoon } from 'lucide-react';
 import type { ParamDef, ParamValues } from '../../../core/types';
 import type { FilterDef } from '../../../registry';
-import { applyLuts, clamp255, hslToRgbInto, luma, pixelWords, rgbOf, type Pixels } from '../math';
+import { ALPHA_MASK, CACHE_PROBE, CACHE_SHIFT, applyLuts, clamp255, colorCache, hslToRgbInto, luma, pixelWords, readWords, rgbOf, type Pixels } from '../math';
 import { bool, boolP, colorP, num, numP, pctP, selectP, str } from '../params';
 
 const scratch = new Float64Array(3);
@@ -23,42 +23,85 @@ export function vibrancePixels(img: Pixels, vibrance: number, saturation: number
   const sat = Math.max(-1, Math.min(1, saturation / 100));
   if (vib === 0 && sat === 0) return img;
   const d = img.data;
-  for (let i = 0, n = d.length; i < n; i += 4) {
-    if (d[i + 3] === 0) continue;
-    const r = d[i],
-      g = d[i + 1],
-      b = d[i + 2];
-    const mx = r > g ? (r > b ? r : b) : g > b ? g : b;
-    const mn = r < g ? (r < b ? r : b) : g < b ? g : b;
-    if (mx === mn) continue; // neutral: nothing to (de)saturate
-    const s = (mx - mn) / mx;
-    const L = luma(r, g, b);
-    let f = 1;
-    if (vib > 0) {
-      const u = 1 - s;
-      let w = u * Math.sqrt(u) * 1.3; // (1 − s)^1.5
-      // Skin protection: warm hues (r ≥ g ≥ b, hue ≈ 10°–45°) get a gentler boost.
-      if (r >= g && g >= b) {
-        const hue = (60 * (g - b)) / (r - b || 1);
-        const skin = 1 - Math.abs(hue - 25) / 22;
-        if (skin > 0) w *= 1 - 0.6 * skin;
-      }
-      // Cap the vibrance boost so the most extreme channel just reaches 0 or 255 (no clipping).
-      let cap = Infinity;
-      if (mx > L) cap = (255 - L) / (mx - L);
-      if (mn < L) cap = Math.min(cap, L / (L - mn));
-      f = Math.min(1 + vib * w, Math.max(1, cap));
-    } else if (vib < 0) {
-      f = 1 + vib * (1 - s * 0.5);
+  const live = pixelWords(img);
+  const u = live ?? readWords(img);
+  const { keys: ck, vals: cv } = colorCache();
+  let cacheOn = live !== null,
+    cacheHits = 0,
+    cacheMisses = 0;
+  const R = RECIP;
+  const sat1 = 1 + sat;
+  let prev = ~u[0];
+  for (let q = 0, n = u.length; q < n; q++) {
+    const p = u[q];
+    const j = q << 2;
+    if (p === prev) {
+      // same pixel as the previous one → same result
+      d[j] = d[j - 4];
+      d[j + 1] = d[j - 3];
+      d[j + 2] = d[j - 2];
+      continue;
     }
-    f *= 1 + sat;
-    if (f < 0) f = 0;
-    d[i] = L + (r - L) * f;
-    d[i + 1] = L + (g - L) * f;
-    d[i + 2] = L + (b - L) * f;
+    prev = p;
+    if (p >>> 24 === 0) continue;
+    const rgb = p & 0xffffff;
+    let slot = 0;
+    if (cacheOn) {
+      slot = Math.imul(rgb, -1640531535) >>> CACHE_SHIFT;
+      if (ck[slot] === rgb) {
+        u[q] = (p & ALPHA_MASK) | cv[slot];
+        cacheHits++;
+        continue;
+      }
+      if (++cacheMisses === CACHE_PROBE && cacheHits < CACHE_PROBE) cacheOn = false;
+    }
+    px: {
+      const r = p & 255,
+        g = (p >> 8) & 255,
+        b = (p >> 16) & 255;
+      const mx = r > g ? (r > b ? r : b) : g > b ? g : b;
+      const mn = r < g ? (r < b ? r : b) : g < b ? g : b;
+      if (mx === mn) break px; // neutral: nothing to (de)saturate
+      const C = mx - mn;
+      const L = 0.299 * r + 0.587 * g + 0.114 * b;
+      let f: number;
+      if (vib > 0) {
+        const v = 1 - C * R[mx]; // 1 − s (HSV saturation)
+        let w = v * Math.sqrt(v) * 1.3; // (1 − s)^1.5
+        // Skin protection: warm hues (r ≥ g ≥ b, hue ≈ 10°–45°) get a gentler boost.
+        if (r >= g && g >= b) {
+          const skin = 1 - Math.abs(60 * (g - b) * R[C] - 25) / 22;
+          if (skin > 0) w *= 1 - 0.6 * skin;
+        }
+        f = 1 + vib * w;
+        // Cap the boost so the most extreme channel just reaches 0 or 255 (no clipping); the caps
+        // are only divided out for pixels that would actually clip.
+        if ((mx > L && f * (mx - L) > 255 - L) || (mn < L && f * (L - mn) > L)) {
+          let cap = Infinity;
+          if (mx > L) cap = (255 - L) / (mx - L);
+          if (mn < L) cap = Math.min(cap, L / (L - mn));
+          f = Math.min(f, Math.max(1, cap));
+        }
+      } else if (vib < 0) {
+        f = 1 + vib * (1 - C * R[mx] * 0.5);
+      } else f = 1;
+      f *= sat1;
+      if (f < 0) f = 0;
+      d[j] = L + (r - L) * f;
+      d[j + 1] = L + (g - L) * f;
+      d[j + 2] = L + (b - L) * f;
+    }
+    if (cacheOn) {
+      ck[slot] = rgb;
+      cv[slot] = u[q] & 0xffffff;
+    }
   }
   return img;
 }
+
+/** 1 / i for i = 1..255 (RECIP[0] = 0). */
+const RECIP = new Float64Array(256);
+for (let i = 1; i < 256; i++) RECIP[i] = 1 / i;
 
 export const vibrance: FilterDef = {
   id: 'vibrance',
@@ -138,10 +181,33 @@ export function hueSaturationPixels(img: Pixels, p: ParamValues): Pixels {
     return img;
   }
   // Whole pixels as little-endian words (r | g << 8 | b << 16 | a << 24): one load/store each.
+  // A pixel equal to the previous one gets the previous result (flat areas, runs of one color);
+  // other colors seen before come from the color cache.
+  const { keys: ck, vals: cv } = colorCache();
+  let cacheOn = true,
+    cacheHits = 0,
+    cacheMisses = 0;
+  let prev = ~u[0];
   for (let i = 0, n = u.length; i < n; i++) {
     const p = u[i];
+    if (p === prev) {
+      u[i] = u[i - 1];
+      continue;
+    }
+    prev = p;
     const a = p >>> 24;
     if (a === 0) continue;
+    const rgb = p & 0xffffff;
+    let slot = 0;
+    if (cacheOn) {
+      slot = Math.imul(rgb, -1640531535) >>> CACHE_SHIFT;
+      if (ck[slot] === rgb) {
+        u[i] = (p & ALPHA_MASK) | cv[slot];
+        cacheHits++;
+        continue;
+      }
+      if (++cacheMisses === CACHE_PROBE && cacheHits < CACHE_PROBE) cacheOn = false;
+    }
     const r = p & 255,
       g = (p >> 8) & 255,
       b = (p >> 16) & 255;
@@ -184,7 +250,12 @@ export function hueSaturationPixels(img: Pixels, p: ParamValues): Pixels {
     if (C === 0) {
       // gray: no hue, no saturation → lightness only
       const v = lightLut[r];
-      u[i] = (a << 24) | (v << 16) | (v << 8) | v;
+      const o = (v << 16) | (v << 8) | v;
+      u[i] = (a << 24) | o;
+      if (cacheOn) {
+        ck[slot] = rgb;
+        cv[slot] = o;
+      }
       continue;
     }
     const X = (k & 1 ? M - mid : mid - m) + C * phi;
@@ -231,6 +302,10 @@ export function hueSaturationPixels(img: Pixels, p: ParamValues): Pixels {
         o = hi | (lo << 8) | (vi << 16);
     }
     u[i] = (a << 24) | o;
+    if (cacheOn) {
+      ck[slot] = rgb;
+      cv[slot] = o;
+    }
   }
   return img;
 }
@@ -418,20 +493,52 @@ export function colorBalancePixels(img: Pixels, p: ParamValues): Pixels {
     for (let c = 0; c < 3; c++) off[k * 3 + c] = (sh[c] * ws + md[c] * wm + hi[c] * wh) * 255;
   }
   const d = img.data;
-  for (let i = 0, n = d.length; i < n; i += 4) {
-    if (d[i + 3] === 0) continue;
-    const r0 = d[i],
-      g0 = d[i + 1],
-      b0 = d[i + 2];
+  const live = pixelWords(img);
+  const u = live ?? readWords(img);
+  const { keys: ck, vals: cv } = colorCache();
+  let cacheOn = live !== null,
+    cacheHits = 0,
+    cacheMisses = 0;
+  let prev = ~u[0];
+  for (let q = 0, n = u.length; q < n; q++) {
+    const p = u[q];
+    const i = q << 2;
+    if (p === prev) {
+      // same pixel as the previous one → same result
+      d[i] = d[i - 4];
+      d[i + 1] = d[i - 3];
+      d[i + 2] = d[i - 2];
+      continue;
+    }
+    prev = p;
+    if (p >>> 24 === 0) continue;
+    const rgb = p & 0xffffff;
+    let slot = 0;
+    if (cacheOn) {
+      slot = Math.imul(rgb, -1640531535) >>> CACHE_SHIFT;
+      if (ck[slot] === rgb) {
+        u[q] = (p & ALPHA_MASK) | cv[slot];
+        cacheHits++;
+        continue;
+      }
+      if (++cacheMisses === CACHE_PROBE && cacheHits < CACHE_PROBE) cacheOn = false;
+    }
+    const r0 = p & 255,
+      g0 = (p >> 8) & 255,
+      b0 = (p >> 16) & 255;
     const mx = r0 > g0 ? (r0 > b0 ? r0 : b0) : g0 > b0 ? g0 : b0;
     const mn = r0 < g0 ? (r0 < b0 ? r0 : b0) : g0 < b0 ? g0 : b0;
     const k = (mx + mn) * 3;
-    let r = clamp255(r0 + off[k]);
-    let g = clamp255(g0 + off[k + 1]);
-    let b = clamp255(b0 + off[k + 2]);
+    let r = r0 + off[k],
+      g = g0 + off[k + 1],
+      b = b0 + off[k + 2];
+    r = r < 0 ? 0 : r > 255 ? 255 : r;
+    g = g < 0 ? 0 : g > 255 ? 255 : g;
+    b = b < 0 ? 0 : b > 255 ? 255 : b;
     if (preserve) {
       // Restore the original HSL lightness keeping hue & saturation (closed form of
-      // rgb→hsl→set L→rgb): rescale the chroma around the new lightness.
+      // rgb→hsl→set L→rgb): rescale the chroma around the new lightness. The chroma ratio
+      // C0/C1 = s1·D0/C1 simplifies to D0/D1 (D = 255 − |2L − 255|): one division.
       const M1 = r > g ? (r > b ? r : b) : g > b ? g : b;
       const m1 = r < g ? (r < b ? r : b) : g < b ? g : b;
       const L2 = mx + mn; // original lightness ×2 (0..510)
@@ -439,10 +546,9 @@ export function colorBalancePixels(img: Pixels, p: ParamValues): Pixels {
       if (C1 <= 0) {
         r = g = b = L2 / 2;
       } else {
-        const s1 = C1 / (255 - Math.abs(M1 + m1 - 255) || 1);
-        const C0 = s1 * (255 - Math.abs(L2 - 255));
-        const k0 = C0 / C1;
-        const base = L2 / 2 - C0 / 2;
+        const S1 = M1 + m1 - 255;
+        const k0 = (255 - (L2 > 255 ? L2 - 255 : 255 - L2)) / (255 - (S1 < 0 ? -S1 : S1));
+        const base = (L2 - C1 * k0) / 2;
         r = base + (r - m1) * k0;
         g = base + (g - m1) * k0;
         b = base + (b - m1) * k0;
@@ -451,6 +557,10 @@ export function colorBalancePixels(img: Pixels, p: ParamValues): Pixels {
     d[i] = r;
     d[i + 1] = g;
     d[i + 2] = b;
+    if (cacheOn) {
+      ck[slot] = rgb;
+      cv[slot] = u[q] & 0xffffff;
+    }
   }
   return img;
 }
@@ -565,11 +675,13 @@ export function blackWhitePixels(img: Pixels, p: ParamValues): Pixels {
     wB = w.blues / 100,
     wM = w.magentas / 100;
   const d = img.data;
-  for (let i = 0, n = d.length; i < n; i += 4) {
-    if (d[i + 3] === 0) continue;
-    const r = d[i],
-      g = d[i + 1],
-      b = d[i + 2];
+  const u = readWords(img);
+  for (let q = 0, n = u.length; q < n; q++) {
+    const p = u[q];
+    if (p >>> 24 === 0) continue;
+    const r = p & 255,
+      g = (p >> 8) & 255,
+      b = (p >> 16) & 255;
     // Inlined blackWhiteGray(): min + (max−mid)·w[primary] + (mid−min)·w[secondary].
     let v: number;
     if (r >= g) {
@@ -580,8 +692,9 @@ export function blackWhitePixels(img: Pixels, p: ParamValues): Pixels {
     else if (g >= b) v = r + (g - b) * wG + (b - r) * wC;
     else v = r + (b - g) * wB + (g - r) * wC;
     const gray = v < 0 ? 0 : v > 255 ? 255 : v;
+    const i = q << 2;
     if (tint) {
-      const k = Math.round(gray) * 3;
+      const k = ((gray + 0.5) | 0) * 3; // Math.round for 0..255
       d[i] = gray + tint[k];
       d[i + 1] = gray + tint[k + 1];
       d[i + 2] = gray + tint[k + 2];
@@ -633,11 +746,13 @@ export function photoFilterPixels(img: Pixels, color: string, density: number, p
   const mg = 1 - dn + (dn * fg) / 255;
   const mb = 1 - dn + (dn * fb) / 255;
   const d = img.data;
-  for (let i = 0, n = d.length; i < n; i += 4) {
-    if (d[i + 3] === 0) continue;
-    const r0 = d[i],
-      g0 = d[i + 1],
-      b0 = d[i + 2];
+  const u = readWords(img);
+  for (let q = 0, n = u.length; q < n; q++) {
+    const p = u[q];
+    if (p >>> 24 === 0) continue;
+    const r0 = p & 255,
+      g0 = (p >> 8) & 255,
+      b0 = (p >> 16) & 255;
     let r = r0 * mr,
       g = g0 * mg,
       b = b0 * mb;
@@ -647,6 +762,7 @@ export function photoFilterPixels(img: Pixels, color: string, density: number, p
       g += shift;
       b += shift;
     }
+    const i = q << 2;
     d[i] = r;
     d[i + 1] = g;
     d[i + 2] = b;
@@ -691,20 +807,26 @@ export function channelMixerPixels(img: Pixels, p: ParamValues): Pixels {
   const mono = bool(p, 'monochrome', false);
   if (!mono && rr === 1 && gg === 1 && bb === 1 && !rg && !rb && !gr && !gb && !br && !bg) return img;
   const d = img.data;
-  for (let i = 0, n = d.length; i < n; i += 4) {
-    if (d[i + 3] === 0) continue;
-    const r = d[i],
-      g = d[i + 1],
-      b = d[i + 2];
+  const u = readWords(img);
+  for (let q = 0, n = u.length; q < n; q++) {
+    const p = u[q];
+    if (p >>> 24 === 0) continue;
+    const r = p & 255,
+      g = (p >> 8) & 255,
+      b = (p >> 16) & 255;
+    const i = q << 2;
     if (mono) {
       const v = rr * r + rg * g + rb * b;
       d[i] = v;
       d[i + 1] = v;
       d[i + 2] = v;
     } else {
-      d[i] = rr * r + rg * g + rb * b;
-      d[i + 1] = gr * r + gg * g + gb * b;
-      d[i + 2] = br * r + bg * g + bb * b;
+      const x = rr * r + rg * g + rb * b,
+        y = gr * r + gg * g + gb * b,
+        z = br * r + bg * g + bb * b;
+      d[i] = x;
+      d[i + 1] = y;
+      d[i + 2] = z;
     }
   }
   return img;
@@ -786,74 +908,118 @@ export function selectiveColorPixels(img: Pixels, p: ParamValues): Pixels {
   // Precomputed per-range channel factors: delta_v = ((−1 − a)·k − a) · (relative ? 1 − v : 1).
   const fac = new Float32Array(9 * 3);
   for (let k = 0; k < 9; k++) for (let c = 0; c < 3; c++) fac[k * 3 + c] = (-1 - adj[k * 4 + c]) * adj[k * 4 + 3] - adj[k * 4 + c];
-  const aR = active[0],
-    aY = active[1],
-    aG = active[2],
-    aC = active[3],
-    aB = active[4],
-    aM = active[5],
-    aW = active[6],
+  // Contribution tables (0 for inactive ranges, so they add nothing):
+  //  - hue ranges by amount: HUE[((range · 256) + amount) · 3 + c] = amount/255 · factor
+  //  - whites by min, blacks by max.
+  const HUE = new Float64Array(6 * 256 * 3);
+  for (let k = 0; k < 6; k++) {
+    if (!active[k]) continue;
+    for (let v = 0; v < 256; v++) {
+      const a = v / 255;
+      for (let c = 0; c < 3; c++) HUE[(k * 256 + v) * 3 + c] = a * fac[k * 3 + c];
+    }
+  }
+  const aW = active[6],
     aN = active[7],
     aK = active[8];
+  const WB = new Float64Array(256 * 6); // [whites by min (3) | blacks by max (3)]
+  for (let v = 0; v < 256; v++) {
+    if (aW && v > 128) {
+      const a = ((v - 128) * 2) / 255;
+      for (let c = 0; c < 3; c++) WB[v * 6 + c] = a * fac[18 + c];
+    }
+    if (aK && v < 128) {
+      const a = ((128 - v) * 2) / 255;
+      for (let c = 0; c < 3; c++) WB[v * 6 + 3 + c] = a * fac[24 + c];
+    }
+  }
+  const n0 = fac[21],
+    n1 = fac[22],
+    n2 = fac[23];
   const d = img.data;
-  for (let i = 0, n = d.length; i < n; i += 4) {
-    if (d[i + 3] === 0) continue;
-    const r = d[i],
-      g = d[i + 1],
-      b = d[i + 2];
+  const live = pixelWords(img);
+  const u = live ?? readWords(img);
+  const { keys: ck, vals: cv } = colorCache();
+  let cacheOn = live !== null,
+    cacheHits = 0,
+    cacheMisses = 0;
+  let prev = ~u[0];
+  for (let q = 0, n = u.length; q < n; q++) {
+    const p = u[q];
+    const i = q << 2;
+    if (p === prev) {
+      // same pixel as the previous one → same result
+      d[i] = d[i - 4];
+      d[i + 1] = d[i - 3];
+      d[i + 2] = d[i - 2];
+      continue;
+    }
+    prev = p;
+    if (p >>> 24 === 0) continue;
+    const rgb = p & 0xffffff;
+    let slot = 0;
+    if (cacheOn) {
+      slot = Math.imul(rgb, -1640531535) >>> CACHE_SHIFT;
+      if (ck[slot] === rgb) {
+        u[q] = (p & ALPHA_MASK) | cv[slot];
+        cacheHits++;
+        continue;
+      }
+      if (++cacheMisses === CACHE_PROBE && cacheHits < CACHE_PROBE) cacheOn = false;
+    }
+    const r = p & 255,
+      g = (p >> 8) & 255,
+      b = (p >> 16) & 255;
     const mx = r > g ? (r > b ? r : b) : g > b ? g : b;
     const mn = r < g ? (r < b ? r : b) : g < b ? g : b;
     const md = r + g + b - mx - mn;
-    // Accumulate weighted factors (amount/255 · factor) per channel.
+    // Accumulate weighted factors (amount/255 · factor) per channel: primary range (max channel,
+    // by max − mid), secondary (the max+mid pair, by mid − min), whites, blacks, neutrals.
     let f0 = 0,
       f1 = 0,
       f2 = 0;
     if (mx !== mn) {
-      const prim = r === mx ? (aR ? 0 : -1) : g === mx ? (aG ? 2 : -1) : aB ? 4 : -1;
-      if (prim >= 0) {
-        const a = (mx - md) / 255;
-        f0 += a * fac[prim * 3];
-        f1 += a * fac[prim * 3 + 1];
-        f2 += a * fac[prim * 3 + 2];
-      }
-      const sec = b === mn ? (aY ? 1 : -1) : r === mn ? (aC ? 3 : -1) : aM ? 5 : -1;
-      if (sec >= 0) {
-        const a = (md - mn) / 255;
-        f0 += a * fac[sec * 3];
-        f1 += a * fac[sec * 3 + 1];
-        f2 += a * fac[sec * 3 + 2];
-      }
+      const pi = ((r === mx ? 0 : g === mx ? 2 : 4) * 256 + mx - md) * 3;
+      const si = ((b === mn ? 1 : r === mn ? 3 : 5) * 256 + md - mn) * 3;
+      f0 = HUE[pi] + HUE[si];
+      f1 = HUE[pi + 1] + HUE[si + 1];
+      f2 = HUE[pi + 2] + HUE[si + 2];
     }
-    if (aW && mn > 128) {
-      const a = ((mn - 128) * 2) / 255;
-      f0 += a * fac[18];
-      f1 += a * fac[19];
-      f2 += a * fac[20];
+    if (aW) {
+      const k = mn * 6;
+      f0 += WB[k];
+      f1 += WB[k + 1];
+      f2 += WB[k + 2];
     }
-    if (aK && mx < 128) {
-      const a = ((128 - mx) * 2) / 255;
-      f0 += a * fac[24];
-      f1 += a * fac[25];
-      f2 += a * fac[26];
+    if (aK) {
+      const k = mx * 6 + 3;
+      f0 += WB[k];
+      f1 += WB[k + 1];
+      f2 += WB[k + 2];
     }
     if (aN) {
       const a = 255 - (Math.abs(mx - 127.5) + Math.abs(mn - 127.5));
       if (a > 0) {
         const t = a / 255;
-        f0 += t * fac[21];
-        f1 += t * fac[22];
-        f2 += t * fac[23];
+        f0 += t * n0;
+        f1 += t * n1;
+        f2 += t * n2;
       }
     }
-    if (f0 === 0 && f1 === 0 && f2 === 0) continue;
-    if (relative) {
-      d[i] = r + f0 * (255 - r);
-      d[i + 1] = g + f1 * (255 - g);
-      d[i + 2] = b + f2 * (255 - b);
-    } else {
-      d[i] = r + f0 * 255;
-      d[i + 1] = g + f1 * 255;
-      d[i + 2] = b + f2 * 255;
+    if (f0 !== 0 || f1 !== 0 || f2 !== 0) {
+      if (relative) {
+        d[i] = r + f0 * (255 - r);
+        d[i + 1] = g + f1 * (255 - g);
+        d[i + 2] = b + f2 * (255 - b);
+      } else {
+        d[i] = r + f0 * 255;
+        d[i + 1] = g + f1 * 255;
+        d[i + 2] = b + f2 * 255;
+      }
+    }
+    if (cacheOn) {
+      ck[slot] = rgb;
+      cv[slot] = u[q] & 0xffffff;
     }
   }
   return img;

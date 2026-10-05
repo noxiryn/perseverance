@@ -1,6 +1,8 @@
 /**
  * Built-in Looks (one-click styles). Filter/effect/asset ids and param keys follow
  * ARCHITECTURE.md §5.4–5.6; anything not registered at apply time is skipped gracefully.
+ * Atmosphere overlays that would cover the character (smoke, rays, fog, bokeh, grids, speed
+ * lines, star fields) use `placement: 'behind'`: with a target they go directly below it.
  */
 import type { CurvePoints, CurvesValue, Gradient } from '../core/types';
 import type { ExtLookDef } from './engine';
@@ -69,7 +71,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     swatch: ['#2a0d02', '#c2410c', '#f59e0b', '#ffe8b0'],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#ffc46b', opacity: 0.55, size: 36, blendMode: 'screen' } }],
     overlays: [
-      { assetId: 'sunburst-rays', params: { rays: 120, center: { x: 0.5, y: 0.36 }, color: '#fff1c2', thickness: 0.25, fade: 0.8 }, blendMode: 'soft-light', opacity: 0.55, name: 'Sunburst' },
+      { assetId: 'sunburst-rays', params: { rays: 120, center: { x: 0.5, y: 0.36 }, color: '#fff1c2', thickness: 0.25, fade: 0.8 }, blendMode: 'soft-light', opacity: 0.55, name: 'Sunburst', placement: 'behind' },
       { assetId: 'light-leak', params: { seed: 4 }, blendMode: 'screen', opacity: 0.45, name: 'Warm Glow' },
       { assetId: 'halftone-dots', params: { size: 6, angle: 45, color: '#2a0d00' }, blendMode: 'multiply', opacity: 0.35, name: 'Halftone' },
       { assetId: 'fold-creases', params: { folds: 3, strength: 0.6 }, blendMode: 'overlay', name: 'Fold Creases' },
@@ -141,7 +143,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     ],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#ff1f1f', opacity: 0.35, size: 40, blendMode: 'screen' } }],
     overlays: [
-      { assetId: 'billow-smoke', params: { color: '#c4141c', highlight: '#ff4a3a', shadow: '#2a0204', density: 0.9, coverage: 0.55, side: 'right', seed: 7 }, blendMode: 'screen', opacity: 0.85, name: 'Red Smoke' },
+      { assetId: 'billow-smoke', params: { color: '#c4141c', highlight: '#ff4a3a', shadow: '#2a0204', density: 0.9, coverage: 0.55, side: 'right', seed: 7 }, blendMode: 'screen', opacity: 0.85, name: 'Red Smoke', placement: 'behind' },
       { assetId: 'film-scratches', params: { density: 0.55, color: '#ffffff' }, blendMode: 'screen', opacity: 0.6, name: 'Film Scratches' },
       { assetId: 'dust-specks', params: {}, blendMode: 'screen', opacity: 0.5, name: 'Dust' },
       { assetId: 'fold-creases', params: { folds: 4, strength: 0.6 }, blendMode: 'overlay', name: 'Fold Creases' },
@@ -159,7 +161,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     swatch: ['#020a02', '#0f3d0b', '#39d353', '#d9ff7a'],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#5cff3d', opacity: 0.7, size: 28, blendMode: 'screen' } }],
     overlays: [
-      { assetId: 'fog', params: { color: '#7dff6a' }, blendMode: 'screen', opacity: 0.3, name: 'Toxic Fog' },
+      { assetId: 'fog', params: { color: '#7dff6a' }, blendMode: 'screen', opacity: 0.3, name: 'Toxic Fog', placement: 'behind' },
       { assetId: 'film-grain', params: {}, blendMode: 'overlay', opacity: 0.35, name: 'Grain' },
     ],
     adjustments: [
@@ -187,7 +189,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     swatch: ['#0a0414', '#3b1670', '#9b6bff', '#ffe29a'],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#b28cff', opacity: 0.6, size: 26, blendMode: 'screen' } }],
     overlays: [
-      { assetId: 'bokeh', params: { color1: '#b28cff', color2: '#7a4dff', color3: '#ffe29a' }, blendMode: 'screen', opacity: 0.45, name: 'Bokeh' },
+      { assetId: 'bokeh', params: { color1: '#b28cff', color2: '#7a4dff', color3: '#ffe29a' }, blendMode: 'screen', opacity: 0.45, name: 'Bokeh', placement: 'behind' },
       { assetId: 'stars', params: { color: '#ffe29a' }, blendMode: 'screen', opacity: 0.7, name: 'Sparkles' },
       { assetId: 'vignette-overlay', params: { color: '#0a0414', amount: 0.55 }, blendMode: 'multiply', name: 'Vignette' },
     ],
@@ -216,7 +218,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     layerFilters: [{ filterId: 'rim-light', params: { color: '#cdeeff', width: 14, angle: 135, intensity: 0.8 } }],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#9fd8ff', opacity: 0.55, size: 24, blendMode: 'screen' } }],
     overlays: [
-      { assetId: 'fog', params: { color: '#cfe8ff' }, blendMode: 'screen', opacity: 0.3, name: 'Frost Mist' },
+      { assetId: 'fog', params: { color: '#cfe8ff' }, blendMode: 'screen', opacity: 0.3, name: 'Frost Mist', placement: 'behind' },
       { assetId: 'snow', params: {}, blendMode: 'screen', opacity: 0.8, name: 'Snow' },
     ],
     adjustments: [
@@ -250,7 +252,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     layerFilters: [{ filterId: 'chromatic-aberration', params: { amount: 6, angle: 0 } }],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#ff3cac', opacity: 0.6, size: 22, blendMode: 'screen' } }],
     overlays: [
-      { assetId: 'grid-floor', params: { color: '#ff3cac' }, blendMode: 'screen', opacity: 0.55, name: 'Neon Grid' },
+      { assetId: 'grid-floor', params: { color: '#ff3cac' }, blendMode: 'screen', opacity: 0.55, name: 'Neon Grid', placement: 'behind' },
       { assetId: 'scanlines-overlay', params: {}, blendMode: 'overlay', opacity: 0.3, name: 'Scanlines' },
     ],
     adjustments: [{ filterId: 'split-toning', params: { shadowColor: '#3a0ca3', highlightColor: '#ff6ec7', balance: 0, amount: 0.6 }, name: 'Split Tone' }],
@@ -263,7 +265,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     swatch: ['#070000', '#4a0000', '#d01616', '#ffb199'],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#ff2a2a', opacity: 0.55, size: 32, blendMode: 'screen' } }],
     overlays: [
-      { assetId: 'clouds', params: { color: '#5a0000' }, blendMode: 'multiply', opacity: 0.6, name: 'Red Clouds' },
+      { assetId: 'clouds', params: { color: '#5a0000' }, blendMode: 'multiply', opacity: 0.6, name: 'Red Clouds', placement: 'behind' },
       { assetId: 'sparks-embers', params: { color: '#ff5a2a' }, blendMode: 'screen', opacity: 0.8, name: 'Embers' },
       { assetId: 'vignette-overlay', params: { color: '#000000', amount: 0.75 }, blendMode: 'multiply', name: 'Vignette' },
     ],
@@ -366,7 +368,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
       { effectId: 'stroke', params: { color: '#ff2bd6', size: 3, position: 'outside' } },
     ],
     overlays: [
-      { assetId: 'bokeh', params: { color1: '#ff2bd6', color2: '#00e5ff', color3: '#7a5cff' }, blendMode: 'screen', opacity: 0.35, name: 'Neon Bokeh' },
+      { assetId: 'bokeh', params: { color1: '#ff2bd6', color2: '#00e5ff', color3: '#7a5cff' }, blendMode: 'screen', opacity: 0.35, name: 'Neon Bokeh', placement: 'behind' },
       { assetId: 'scanlines-overlay', params: {}, blendMode: 'overlay', opacity: 0.35, name: 'Scanlines' },
     ],
     adjustments: [{ filterId: 'split-toning', params: { shadowColor: '#2a0050', highlightColor: '#00e5ff', balance: -10, amount: 0.55 }, name: 'Neon Split' }],
@@ -380,7 +382,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     layerFilters: [{ filterId: 'rim-light', params: { color: '#ffb000', width: 16, angle: 90, intensity: 0.9 } }],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#ff6a00', opacity: 0.7, size: 34, blendMode: 'screen' } }],
     overlays: [
-      { assetId: 'billow-smoke', params: { color: '#ff5a1f', highlight: '#ffb347', shadow: '#3a0a00', side: 'bottom', coverage: 0.45, density: 0.7, seed: 23 }, blendMode: 'screen', opacity: 0.55, name: 'Fire Smoke' },
+      { assetId: 'billow-smoke', params: { color: '#ff5a1f', highlight: '#ffb347', shadow: '#3a0a00', side: 'bottom', coverage: 0.45, density: 0.7, seed: 23 }, blendMode: 'screen', opacity: 0.55, name: 'Fire Smoke', placement: 'behind' },
       { assetId: 'sparks-embers', params: { color: '#ffb347' }, blendMode: 'screen', opacity: 0.9, name: 'Embers' },
     ],
     adjustments: [
@@ -408,7 +410,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     swatch: ['#8d939c', '#c9ced6', '#eef1f5', '#ffffff'],
     layerEffects: [{ effectId: 'outer-glow', params: { color: '#ffffff', opacity: 0.6, size: 42, blendMode: 'screen' } }],
     overlays: [
-      { assetId: 'fog', params: { color: '#ffffff' }, blendMode: 'screen', opacity: 0.5, name: 'Fog' },
+      { assetId: 'fog', params: { color: '#ffffff' }, blendMode: 'screen', opacity: 0.5, name: 'Fog', placement: 'behind' },
       { assetId: 'dust-particles', params: { color: '#ffffff' }, blendMode: 'screen', opacity: 0.6, name: 'Particles' },
     ],
     adjustments: [
@@ -425,8 +427,8 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
     swatch: ['#02030a', '#0b1a4a', '#3f6fd8', '#d6e6ff'],
     layerFilters: [{ filterId: 'rim-light', params: { color: '#a9c8ff', width: 12, angle: 135, intensity: 0.7 } }],
     overlays: [
-      { assetId: 'stars', params: { color: '#d6e6ff' }, blendMode: 'screen', opacity: 0.65, name: 'Stars' },
-      { assetId: 'fog', params: { color: '#3f6fd8' }, blendMode: 'screen', opacity: 0.25, name: 'Night Mist' },
+      { assetId: 'stars', params: { color: '#d6e6ff' }, blendMode: 'screen', opacity: 0.65, name: 'Stars', placement: 'behind' },
+      { assetId: 'fog', params: { color: '#3f6fd8' }, blendMode: 'screen', opacity: 0.25, name: 'Night Mist', placement: 'behind' },
       { assetId: 'vignette-overlay', params: { color: '#02030a', amount: 0.6 }, blendMode: 'multiply', name: 'Vignette' },
     ],
     adjustments: [
@@ -473,7 +475,7 @@ export const BUILTIN_LOOKS: ExtLookDef[] = [
       { effectId: 'drop-shadow', params: { color: '#000000', opacity: 0.6, angle: 120, distance: 12, size: 18 } },
     ],
     overlays: [
-      { assetId: 'speed-lines', params: { color: '#0d0d0d' }, blendMode: 'multiply', opacity: 0.75, name: 'Speed Lines' },
+      { assetId: 'speed-lines', params: { color: '#0d0d0d' }, blendMode: 'multiply', opacity: 0.75, name: 'Speed Lines', placement: 'behind' },
       { assetId: 'halftone-dots', params: { size: 6, angle: 45, color: '#0d0d0d' }, blendMode: 'multiply', opacity: 0.2, name: 'Screentone' },
     ],
     adjustments: [

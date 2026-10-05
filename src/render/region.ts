@@ -13,7 +13,7 @@
 import type { FilterInstance, ParamValues, Rect } from '../core/types';
 import { filters, type EffectDef } from '../registry';
 import { effectExtent, effectReach } from './effects';
-import { coverRect, expandRect, maxSide, type PxRect } from './surface';
+import { coverRect, expandRect, maxSide, unionRect, type PxRect } from './surface';
 
 /** Far outside any canvas: used for changes that extend to infinity (clamped mask edges). */
 export const FAR = 1 << 24;
@@ -204,4 +204,30 @@ export function alignRect(r: PxRect, origin: PxRect, grid: number): PxRect | nul
   const y1 = Math.min(origin.y + origin.h, r.y + r.h);
   if (x1 <= x0 || y1 <= y0) return null;
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+/** One change of a versioned canvas: its content version and the area it changed (null = all). */
+export interface ChangeEntry {
+  seq: number;
+  rect: PxRect | null;
+}
+
+const NO_CHANGE: PxRect = Object.freeze({ x: 0, y: 0, w: 0, h: 0 }) as PxRect;
+
+/**
+ * Area changed after version `since` of a canvas now at version `seq`, from its change log
+ * (oldest first, consecutive changes): an empty rect when nothing changed, null when unknown
+ * (a change of everything, a version older than the log or from another canvas).
+ */
+export function changesSince(log: readonly ChangeEntry[], seq: number, since: number): PxRect | null {
+  if (since === seq) return NO_CHANGE;
+  // Every change after `since` must be in the log.
+  if (since > seq || !log.length || log[0].seq > since + 1 || log[log.length - 1].seq !== seq) return null;
+  let r: PxRect | null = null;
+  for (let i = log.length - 1; i >= 0 && log[i].seq > since; i--) {
+    const e = log[i].rect;
+    if (!e) return null;
+    r = unionRect(r, e);
+  }
+  return r ?? NO_CHANGE;
 }

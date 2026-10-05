@@ -43,7 +43,7 @@ function cursorFor(mode: SelectionMode): string {
 
 export const magicWandTool: ToolDef = {
   id: 'magic-wand',
-  name: 'Magic Wand Tool',
+  name: 'Magic Wand',
   shortcut: 'W',
   icon: WandSparkles,
   group: 'wand',

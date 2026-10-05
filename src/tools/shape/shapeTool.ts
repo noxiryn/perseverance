@@ -259,12 +259,12 @@ function makeShapeTool(id: ShapeToolId, name: string, icon: ComponentType<{ size
 }
 
 export const shapeTools: ToolDef[] = [
-  makeShapeTool('shape-rect', 'Rectangle Tool', Square),
-  makeShapeTool('shape-ellipse', 'Ellipse Tool', Circle),
-  makeShapeTool('shape-polygon', 'Polygon Tool', Hexagon),
-  makeShapeTool('shape-star', 'Star Tool', Star),
-  makeShapeTool('shape-line', 'Line Tool', Minus),
-  makeShapeTool('shape-custom', 'Custom Shape Tool', Shapes),
+  makeShapeTool('shape-rect', 'Rectangle', Square),
+  makeShapeTool('shape-ellipse', 'Ellipse', Circle),
+  makeShapeTool('shape-polygon', 'Polygon', Hexagon),
+  makeShapeTool('shape-star', 'Star', Star),
+  makeShapeTool('shape-line', 'Line', Minus),
+  makeShapeTool('shape-custom', 'Custom Shape', Shapes),
 ];
 
 /** Is a shape drag in progress (for tests/debugging). */

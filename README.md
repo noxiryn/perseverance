@@ -43,23 +43,35 @@ can share and open in any copy of Perseverance. Double-clicking a `.pgfx` opens 
 
 | Area | Highlights |
 |---|---|
-| **Editor** | Photoshop-like workspace: menus, tool options bar, tools panel with flyouts, document tabs, dockable panels (Navigator, Libraries, Swatches, Color, Looks, Layers, Properties, History, Adjustments, Effects, Character, Brushes, Fonts, Roblox), command search (Ctrl K), workspaces |
+| **Editor** | Photoshop-like workspace: menus, tool options bar, tools panel with flyouts, document tabs, dockable panels (Navigator, Libraries, Swatches, Color, Looks, Layers, Properties, History, Adjustments, Effects, Character, Brushes, Fonts, Character Styler), command search (Ctrl K), workspaces |
 | **Layers** | Raster, text, shape, fill, adjustment and group layers · 16 blend modes · opacity and fill · layer masks · clipping masks · smart (non-destructive) filters · undo history |
-| **Layer styles** | Drop shadow, outer/inner glow, stroke, long shadow, inner shadow, color/gradient/pattern overlay, bevel, style presets |
+| **Layer styles** | Drop shadow, outer/inner glow, stroke, long shadow, inner shadow, color/gradient/pattern overlay, bevel, style presets that adapt to the layer colour · save your own (My Styles, incl. smart filters), copy/paste smart filters |
 | **Adjustments** | Brightness/contrast, levels, curves, exposure, vibrance, hue/saturation, color balance, black & white, photo filter, channel mixer, gradient map, selective color, posterize, threshold, duotone, split toning, color looks |
 | **Filters** | Halftone, cel-shade, cutout, ink outline, dither, risograph, chromatic aberration, glitch, VHS, rough edges, blurs, distortions, grain, bloom, light rays, vignette and many more, with a live-preview Filter Gallery |
 | **Assets** | Generated, tweakable textures and overlays: paper, grunge, torn borders, gothic tendrils, newspaper clippings, smoke, film scratches, fold creases, sunbursts, speed lines, halftone screens, sparks, bokeh, splatter… plus your own imported images |
 | **Text** | ~85 bundled fonts (blackletter, condensed, script/signature, horror, Japanese, cartoon) + your system fonts · warp text · character styles |
-| **Roblox** | Pose Studio (R6/R15 rig, poses, hair/accessories, toon shading, outlines, rim lights) · OBJ/GLB/FBX import from Roblox Studio · Remove Background · Character Styler · rim-light/top-shade/toon filters · safe-zone overlays · game-card preview · avatar fetch by username |
+| **Roblox** | Pose Studio (R6/R15 rig, poses, hair/accessories, toon shading, outlines, rim lights) · Import 3D Model (OBJ/GLB/FBX from Roblox Studio) · Fetch Roblox Avatar · Replace Character (swap your render into a template, keeping its styling) · Remove Background · Character Styler · rim-light/top-shade/toon filters · Roblox Safe Zones · Roblox Preview (game cards) |
 | **Files** | `.pgfx` projects, PNG/JPG/WebP export with Roblox size presets, PSD import/export, autosave and crash recovery, clipboard paste, drag & drop |
 
 ### Making a Roblox thumbnail in a minute
-1. **File → New from Template…** and pick a style (or **File → New** → *Roblox ▸ Game Thumbnail*).
-2. Drag your avatar render onto the canvas (or **Roblox → Pose Studio** to make one).
-3. **Roblox → Remove Background**, then choose a style in the **Roblox** (Character Styler) panel.
+1. **File → New from Template…** and pick a style (or **File → New** → *Roblox Thumbnail*).
+2. Swap in your character: with the template's placeholder selected, drop your render on the canvas and pick
+   **Replace Placeholder Character** — or use **Roblox → Replace Character…** (file or clipboard). Your render
+   takes the placeholder's spot, size, filters and effects; an opaque background is removed automatically.
+   No render yet? **Roblox → Pose Studio…** or **Roblox → Fetch Roblox Avatar…** fill the placeholder too.
+3. Starting from a blank canvas instead? Drop the render, run **Roblox → Remove Background…**, then choose a
+   style in the **Character Styler** panel (Roblox → Character Styler).
 4. Double-click the title text to edit it, and tweak the **Looks**, **Libraries** and **Effects** panels.
-5. **View → Roblox Safe Zones** to check framing, **Roblox → Preview** to see it at real size.
-6. **File → Export As…** → *Roblox Thumbnail 1920×1080* (or *Icon 512×512*).
+5. **Roblox → Roblox Safe Zones** to check framing, **Roblox → Roblox Preview…** to see it at real size.
+6. **File → Export As…** → *Roblox Thumbnail 1920×1080* (or *Roblox Icon 512×512*).
+7. Making a series? **File → Save as Template…**, **Looks → Save as Look…** and **Effects → Save Layer Style…**
+   keep your work reusable for the next game's thumbnail.
+
+Prefer to be walked through it? Click **Make a Roblox thumbnail** on the start screen (or the
+lightbulb in the title bar, or **Help → Make Your First Roblox Thumbnail…**): the guide runs each
+step for you and picks up where you left off when you reopen it. The start screen's **Start from
+your character** row opens Pose Studio, avatar fetch, 3D model import, or an image straight into
+Remove Background.
 
 ---
 

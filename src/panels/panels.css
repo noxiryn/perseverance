@@ -27,7 +27,7 @@
   align-items: center;
   gap: 8px;
   padding: 26px 14px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   text-align: center;
   line-height: 1.45;
@@ -379,7 +379,7 @@ body.layers-dragging * {
 }
 .layers-sub-title {
   font-style: italic;
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 
 .layers-foot {
@@ -453,7 +453,7 @@ body.layers-dragging * {
 }
 .layers-props-sub {
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 .layers-grid2 {
   display: grid;
@@ -553,7 +553,7 @@ body.layers-dragging * {
 }
 .layers-note {
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
   line-height: 1.4;
 }
 
@@ -679,7 +679,7 @@ body.layers-dragging * {
   gap: 6px;
   height: 18px;
   padding: 0 4px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 10px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -806,10 +806,23 @@ body.layers-dragging * {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.layers-hist-time {
-  font-size: var(--fs-xs);
-  color: var(--text-faint);
+/* Snapshot row: document name over the step that created it, both ellipsized. */
+.layers-hist-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.layers-hist-text .layers-hist-label {
   flex: none;
+}
+.layers-hist-sub {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .layers-hist-foot {
   flex: none;
@@ -818,7 +831,7 @@ body.layers-dragging * {
   gap: 2px;
   padding: 4px 6px 4px 10px;
   border-top: 1px solid var(--divider);
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
 }
 
@@ -828,8 +841,9 @@ body.layers-dragging * {
 
 .layers-nav-stage {
   position: relative;
-  flex: 1;
-  min-height: 80px;
+  /* Grows to fill a dock group; 180px when the panel sizes to its content (strip flyout). */
+  flex: 1 1 180px;
+  min-height: 64px;
   margin: 6px 8px 0;
   border-radius: var(--radius);
   background: #151515;
@@ -856,22 +870,19 @@ body.layers-dragging * {
 .layers-nav-stage.dragging * {
   cursor: grabbing;
 }
+/* Zoom presets: in the row under the stage (never over the thumbnail or the empty state). */
 .layers-nav-pills {
-  position: absolute;
-  left: 50%;
-  bottom: 8px;
-  transform: translateX(-50%);
   display: flex;
-  gap: 2px;
-  padding: 3px;
-  border-radius: 8px;
-  background: rgba(30, 30, 30, 0.92);
-  border: 1px solid #333;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  gap: 1px;
+  padding: 2px;
+  border-radius: 6px;
+  background: #151515;
+  border: 1px solid #2a2a2a;
+  min-width: 0;
 }
 .layers-nav-pill {
-  height: 20px;
-  padding: 0 8px;
+  height: 18px;
+  padding: 0 7px;
   border: none;
   border-radius: 5px;
   background: transparent;
@@ -899,6 +910,7 @@ body.layers-dragging * {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
 }
 .layers-nav-zoom .ui-slider {
   width: 100%;

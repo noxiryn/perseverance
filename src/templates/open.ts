@@ -21,9 +21,11 @@ export async function openTemplate(id: string): Promise<ID | null> {
     void loadFonts(docFonts(doc));
     const docId = useEditor.getState().openDocument(doc, { label: `New from “${def.name}”`, activeLayerId: characterId });
     toast(
-      characterId ? `Created “${def.name}” — replace the placeholder character with yours.` : `Created “${def.name}” from template.`,
+      characterId
+        ? `Created “${def.name}”. Swap in your character: drop your render on the canvas or use Roblox ▸ Replace Character… (keeps the template’s styling).`
+        : `Created “${def.name}” from template.`,
       'success',
-      characterId ? 3600 : 2600,
+      characterId ? 6000 : 2600,
     );
     return docId;
   } catch (e) {

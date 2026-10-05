@@ -195,6 +195,10 @@ export function kmeansPalette(lab: Float32Array, alpha: Uint8ClampedArray | null
 export function cutoutQuantize(lab: Float32Array, alpha: Uint8ClampedArray | null, n: number, K: number, T: number): { lbl: Uint8Array; pal: Float32Array; count: number } {
   const cent = kmeansPalette(lab, alpha, n, K, 10, 0.45);
   const group = new Uint8Array(n);
+  let pL = NaN,
+    pA = NaN,
+    pB = NaN,
+    pc = 0;
   for (let i = 0; i < n; i++) {
     if (alpha && alpha[i * 4 + 3] === 0) {
       group[i] = 255;
@@ -203,6 +207,10 @@ export function cutoutQuantize(lab: Float32Array, alpha: Uint8ClampedArray | nul
     const L = lab[i * 3],
       A = lab[i * 3 + 1],
       B = lab[i * 3 + 2];
+    if (L === pL && A === pA && B === pB) {
+      group[i] = pc; // same color as the last assigned pixel
+      continue;
+    }
     let bc = 0,
       bd = Infinity;
     for (let c = 0; c < K; c++) {
@@ -216,6 +224,10 @@ export function cutoutQuantize(lab: Float32Array, alpha: Uint8ClampedArray | nul
       }
     }
     group[i] = bc;
+    pL = L;
+    pA = A;
+    pB = B;
+    pc = bc;
   }
   // tone centers per family (1-D k-means on lightness, quantile-initialized)
   const tones = new Float32Array(K * T);
@@ -333,6 +345,84 @@ function modeFilter(lbl: Uint8Array, w: number, h: number, K: number): Uint8Arra
   return out;
 }
 
+/** OKLab of every pixel (3 floats each); runs of one color reuse the previous result. */
+function labOf(d: Uint8ClampedArray, n: number): Float32Array {
+  const lab = new Float32Array(n * 3);
+  let pr = -1,
+    pg = -1,
+    pb = -1;
+  for (let i = 0, j = 0; i < n; i++, j += 4) {
+    const r = d[j],
+      g = d[j + 1],
+      b = d[j + 2];
+    const o = i * 3;
+    if (r === pr && g === pg && b === pb) {
+      lab[o] = lab[o - 3];
+      lab[o + 1] = lab[o - 2];
+      lab[o + 2] = lab[o - 1];
+      continue;
+    }
+    pr = r;
+    pg = g;
+    pb = b;
+    toOklab(r, g, b, lab, o);
+  }
+  return lab;
+}
+
+/**
+ * Soften the edges between flat regions: a pixel whose 4-neighbour labels differ becomes the
+ * average of itself (×2) and its non-transparent neighbours, all read from the unsoftened image.
+ */
+function antialiasRegions(data: Uint8ClampedArray, lbl: Uint8Array, w: number, h: number) {
+  const src = new Uint8ClampedArray(data);
+  const w4 = w * 4;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const c = lbl[i];
+      if (c === 255) continue;
+      const l = x > 0 ? lbl[i - 1] : c,
+        r = x < w - 1 ? lbl[i + 1] : c,
+        u = y > 0 ? lbl[i - w] : c,
+        d = y < h - 1 ? lbl[i + w] : c;
+      if ((l === c || l === 255) && (r === c || r === 255) && (u === c || u === 255) && (d === c || d === 255)) continue;
+      const j = i * 4;
+      let sr = src[j] * 2,
+        sg = src[j + 1] * 2,
+        sb = src[j + 2] * 2,
+        cnt = 2;
+      if (x > 0 && l !== 255) {
+        sr += src[j - 4];
+        sg += src[j - 3];
+        sb += src[j - 2];
+        cnt++;
+      }
+      if (x < w - 1 && r !== 255) {
+        sr += src[j + 4];
+        sg += src[j + 5];
+        sb += src[j + 6];
+        cnt++;
+      }
+      if (y > 0 && u !== 255) {
+        sr += src[j - w4];
+        sg += src[j - w4 + 1];
+        sb += src[j - w4 + 2];
+        cnt++;
+      }
+      if (y < h - 1 && d !== 255) {
+        sr += src[j + w4];
+        sg += src[j + w4 + 1];
+        sb += src[j + w4 + 2];
+        cnt++;
+      }
+      data[j] = sr / cnt;
+      data[j + 1] = sg / cnt;
+      data[j + 2] = sb / cnt;
+    }
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Cutout                                                              */
 /* ------------------------------------------------------------------ */
@@ -364,8 +454,7 @@ export const cutout: FilterDef = {
     // simplification pre-pass: the separable median is plenty here (quantization + mode filter follow)
     if (simp >= 0.75) medianImage(work, simp, true, true);
     const wd = work.data;
-    const lab = new Float32Array(n * 3);
-    for (let i = 0, j = 0; i < n; i++, j += 4) toOklab(wd[j], wd[j + 1], wd[j + 2], lab, i * 3);
+    const lab = labOf(wd, n);
     const q = cutoutQuantize(lab, data, n, K, T);
     let lbl = q.lbl;
     // smooth region outlines (fewer jaggies/specks at lower fidelity)
@@ -394,38 +483,7 @@ export const cutout: FilterDef = {
       data[j + 2] = pal[c * 3 + 2];
     }
     // anti-alias region boundaries: average with neighbours only where labels change
-    const src = new Uint8ClampedArray(data);
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const i = y * w + x;
-        const c = lbl[i];
-        if (c === 255) continue;
-        const l = x > 0 ? lbl[i - 1] : c,
-          r = x < w - 1 ? lbl[i + 1] : c,
-          u = y > 0 ? lbl[i - w] : c,
-          d = y < h - 1 ? lbl[i + w] : c;
-        if ((l === c || l === 255) && (r === c || r === 255) && (u === c || u === 255) && (d === c || d === 255)) continue;
-        const j = i * 4;
-        let sr = src[j] * 2,
-          sg = src[j + 1] * 2,
-          sb = src[j + 2] * 2,
-          cnt = 2;
-        const add = (k: number, lab2: number) => {
-          if (lab2 === 255) return;
-          sr += src[k];
-          sg += src[k + 1];
-          sb += src[k + 2];
-          cnt++;
-        };
-        if (x > 0) add(j - 4, l);
-        if (x < w - 1) add(j + 4, r);
-        if (y > 0) add(j - w * 4, u);
-        if (y < h - 1) add(j + w * 4, d);
-        data[j] = sr / cnt;
-        data[j + 1] = sg / cnt;
-        data[j + 2] = sb / cnt;
-      }
-    }
+    antialiasRegions(data, lbl, w, h);
     return img;
   },
 };

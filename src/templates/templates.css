@@ -52,7 +52,7 @@
 }
 .templates-count {
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 
 .templates-main {
@@ -180,7 +180,7 @@
 }
 .templates-size {
   flex: none;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
 }
@@ -201,6 +201,6 @@
 .templates-foot-hint {
   margin-right: auto;
   align-self: center;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
 }

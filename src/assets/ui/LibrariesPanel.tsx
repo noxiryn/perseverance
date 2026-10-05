@@ -43,6 +43,7 @@ function AssetsTab({ compact }: { compact: boolean }) {
           selectedId={selectedId}
           onSelect={(id) => select(selectedId === id ? null : id)}
           emptyText={query ? `No assets match “${query}”.` : 'No assets in this category yet.'}
+          clickPlaces
         />
       </div>
       {selected && (

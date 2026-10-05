@@ -70,7 +70,7 @@ function makeLasso(): ToolDef {
 
   return {
     id,
-    name: 'Lasso Tool',
+    name: 'Lasso',
     shortcut: 'L',
     icon: Lasso,
     group: 'lasso',
@@ -207,7 +207,7 @@ function makePolyLasso(): ToolDef {
 
   return {
     id,
-    name: 'Polygonal Lasso Tool',
+    name: 'Polygonal Lasso',
     shortcut: 'L',
     icon: LassoSelect,
     group: 'lasso',

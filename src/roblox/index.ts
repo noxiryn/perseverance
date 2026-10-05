@@ -12,21 +12,24 @@ import { StylerPanel } from './styler/StylerPanel';
 import { safeZoneOverlay } from './preview/safeZones';
 import { ModelSection, RigSection, isModelLayer, isRigLayer } from './studio/RigSection';
 import { runCommand } from '../registry';
+import './character';
 
 filters.registerMany(robloxFilters);
 
 panels.register({
   id: 'roblox',
-  title: 'Roblox',
+  // Same name as Roblox ▸ Character Styler, the README and the guide.
+  title: 'Character Styler',
   icon: Box,
   component: StylerPanel,
   defaultSlot: 'strip',
   order: 90,
   menu: () => [
+    { label: 'Replace Character…', run: () => void runCommand('roblox.replaceCharacter') },
+    { label: 'Remove Background…', run: () => void runCommand('roblox.removeBackground') },
     { label: 'Pose Studio…', run: () => void runCommand('roblox.poseStudio') },
     { label: 'Import 3D Model…', run: () => void runCommand('roblox.importModel') },
-    { label: 'Fetch Avatar…', run: () => void runCommand('roblox.fetchAvatar') },
-    { label: 'Remove Background…', run: () => void runCommand('roblox.removeBackground') },
+    { label: 'Fetch Roblox Avatar…', run: () => void runCommand('roblox.fetchAvatar') },
     { label: 'Roblox Preview…', run: () => void runCommand('roblox.preview') },
   ],
 });

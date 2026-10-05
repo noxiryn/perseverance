@@ -3,7 +3,8 @@
  *  1. skip when typing in a text field (or a modal dialog / menu owns the keyboard);
  *  2. active tool's onKeyDown;
  *  3. commands registry shortcuts (matchShortcut, preventDefault);
- *  4. tool single-key shortcuts (Shift+key cycles tools sharing the key);
+ *  4. number keys → layer opacity (Shift: fill); tool single-key shortcuts (Shift+key cycles
+ *     tools sharing the key);
  *  5. hold Space → temporary Hand tool; hold Alt with a paint tool → temporary Eyedropper;
  *     a lone Alt press focuses the menu bar; Alt+mnemonic opens a menu.
  * Also blocks browser defaults (Ctrl+S/O/N/P/W, page zoom, …) and Ctrl+wheel page zoom.
@@ -18,6 +19,7 @@ import { runCommandSafely, openMenuByMnemonic } from './MenuBar';
 import { menuBarActive, useShell } from './shellStore';
 import { ALT_EYEDROPPER_TOOLS, resolveToolShortcut } from './toolModel';
 import { useToolMemory } from './toolMemory';
+import { applyOpacityDigit, digitOf } from './opacityKeys';
 
 /* ---------------- shortcut index ---------------- */
 
@@ -100,13 +102,16 @@ const CONTROL_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
 
 /**
  * 'text' — keyboard input belongs to a text field (no global shortcuts at all);
- * 'control' — a checkbox/slider/radio has focus: only the keys it uses are left to it, so tool
- *  letters keep working after clicking an options-bar checkbox;
+ * 'control' — a checkbox/slider/radio/select has focus: only the keys it uses (arrows, Home/End,
+ *  PageUp/PageDown, Space, Enter) are left to it, so tool letters, Delete and Ctrl+Z keep working
+ *  after picking a blend mode or clicking an options-bar checkbox. A handled shortcut calls
+ *  preventDefault, which also stops a focused select's type-to-search from changing its value;
  * null — nothing special.
  */
 export function focusKind(t: EventTarget | null): 'text' | 'control' | null {
   const el = t as HTMLElement | null;
   if (!el || !el.tagName) return null;
+  if (el.tagName === 'SELECT') return 'control';
   if (el.tagName === 'INPUT') {
     const type = ((el as HTMLInputElement).type || '').toLowerCase();
     return TEXT_INPUT_TYPES.has(type) ? 'text' : 'control';
@@ -189,6 +194,20 @@ export function handleKeyDown(e: KeyboardEvent) {
     return;
   }
   if (e.altKey || e.metaKey) return;
+
+  // Number keys → opacity (Shift: fill) of the selected layers, as in Photoshop. Paint tools took
+  // their digits (brush opacity) in step 1 already.
+  const digit = digitOf(e);
+  if (digit !== null) {
+    if (e.repeat) {
+      e.preventDefault();
+      return;
+    }
+    if (applyOpacityDigit(digit, e.shiftKey)) {
+      e.preventDefault();
+      return;
+    }
+  }
 
   // 3. Tool single-key shortcuts.
   const k = eventKey(e);

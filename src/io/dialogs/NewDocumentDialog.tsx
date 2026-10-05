@@ -224,14 +224,15 @@ export function NewDocumentDialog({ close, initial }: { close: (r?: NewDocumentS
             >
               <span style={{ width: 13, height: 9 }} />
             </button>
-            <Button size="small" variant="ghost" icon={ArrowLeftRight} disabled={square} onClick={swap} title="Swap width and height">
-              Swap
-            </Button>
             {square && (
-              <span className="io-faint" style={{ fontSize: 'var(--fs-sm)' }}>
+              <span className="io-orient-chip" title="Width and height are equal" aria-label="Orientation: square">
+                <span className="glyph" />
                 Square
               </span>
             )}
+            <Button size="small" variant="ghost" icon={ArrowLeftRight} disabled={square} onClick={swap} title="Swap width and height">
+              Swap
+            </Button>
           </div>
           <div className="io-form-label">Background</div>
           <div className="ui-row">

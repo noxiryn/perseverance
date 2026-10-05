@@ -127,8 +127,10 @@ export function HistoryPanel() {
             return (
               <div key={e.id} className={`layers-hist-row snapshot ${state}`} onClick={() => jump(0)} title={`${e.label} — ${timeFmt.format(e.timestamp)}`}>
                 <CanvasView canvas={snapshotOf(e)} width={44} height={30} className="layers-hist-thumb" />
-                <span className="layers-hist-label">{docName || e.label}</span>
-                <span className="layers-hist-time">{e.label}</span>
+                <span className="layers-hist-text">
+                  <span className="layers-hist-label">{docName || e.label}</span>
+                  {docName && docName !== e.label && <span className="layers-hist-sub">{e.label}</span>}
+                </span>
               </div>
             );
           }

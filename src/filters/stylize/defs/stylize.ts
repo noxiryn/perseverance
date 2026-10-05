@@ -170,24 +170,51 @@ export function applyCelShade<T extends Img>(img: T, p: ParamValues, ctx: Filter
   const n = w * h;
   const { lo, hi } = toneRange(lumS, data);
   const reps = bandRepresentatives(lumS, data, levels, lo, hi);
-  const invSpan = 1 / (hi - lo);
+  celFinish(data, n, lumS, lum0, lo, 1 / (hi - lo), levels, smooth, reps, sat, cov, oc[0], oc[1], oc[2]);
+  return img;
+}
+
+/**
+ * Per pixel: band re-lighting, then the saturation step, then the ink outline — the three
+ * whole-image passes of the original fused into one (each step still reads back the bytes the
+ * previous one stored, so the result is identical).
+ */
+function celFinish(
+  data: Uint8ClampedArray,
+  n: number,
+  lumS: Float32Array,
+  lum0: Float32Array,
+  lo: number,
+  invSpan: number,
+  levels: number,
+  smooth: number,
+  reps: Float32Array,
+  sat: number,
+  cov: Float32Array | null,
+  o0: number,
+  o1: number,
+  o2: number,
+) {
+  const doSat = !(Math.abs(sat - 1) < 1e-3); // saturateInPlace's no-op test
   for (let i = 0, j = 0; i < n; i++, j += 4) {
     if (data[j + 3] === 0) continue;
     const t = (lumS[i] - lo) * invSpan;
     const Lq = quantizeSmooth(t < 0 ? 0 : t > 1 ? 1 : t, levels, smooth, reps);
     relight(data, j, lum0[i], Lq);
-  }
-  saturateInPlace(data, sat);
-  if (cov) {
-    for (let i = 0, j = 0; i < n; i++, j += 4) {
+    if (doSat) {
+      const l = data[j] * 0.2126 + data[j + 1] * 0.7152 + data[j + 2] * 0.0722;
+      data[j] = l + (data[j] - l) * sat;
+      data[j + 1] = l + (data[j + 1] - l) * sat;
+      data[j + 2] = l + (data[j + 2] - l) * sat;
+    }
+    if (cov) {
       const v = cov[i];
-      if (v <= 0 || data[j + 3] === 0) continue;
-      data[j] += (oc[0] - data[j]) * v;
-      data[j + 1] += (oc[1] - data[j + 1]) * v;
-      data[j + 2] += (oc[2] - data[j + 2]) * v;
+      if (v <= 0) continue;
+      data[j] += (o0 - data[j]) * v;
+      data[j + 1] += (o1 - data[j + 1]) * v;
+      data[j + 2] += (o2 - data[j + 2]) * v;
     }
   }
-  return img;
 }
 
 export const celShade: FilterDef = {

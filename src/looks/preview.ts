@@ -14,7 +14,7 @@ import { bitmaps } from '../core/bitmaps';
 import { createDocument, insertLayerDraft, makeRasterLayer } from '../core/document';
 import { resolveParams } from '../filters/engine';
 import { renderDocument } from '../render/compositor';
-import { buildLook, insertLookDraft, resolveTarget, stripLookDraft, type OverlayFactory } from './engine';
+import { buildLook, insertLookDraft, lookTargets, stripLookDraft, type OverlayFactory } from './engine';
 import { dropBitmaps } from './shared';
 
 /* ------------------------------------------------------------------ */
@@ -177,14 +177,14 @@ export function renderLookPreview(doc: Document, look: LookDef, targetId: ID | n
   if (look.apply) return null;
   const scale = Math.min(1, size / Math.max(doc.width, doc.height));
   const created: ID[] = [];
-  const { targetId: tid } = resolveTarget(doc, targetId);
+  const { targetId: tid } = lookTargets(doc, targetId);
   // Generate overlays at ~2× the preview resolution for crisp downsampling.
   const genScale = Math.min(1, scale * 2);
   let built: ReturnType<typeof buildLook> | null = null;
   try {
     built = buildLook(look, doc, tid, previewOverlayFactory(genScale, created), { maskScale: genScale });
     const bl = built;
-    if (!bl.filters.length && !bl.effects.length) {
+    if (!bl.filters.length && !bl.effects.length && !bl.behindLayers?.length) {
       // Target untouched: composite the look group over the cached base render.
       const base = baseFor(doc, tid, scale);
       const mini = createDocument({ name: 'Look preview', width: doc.width, height: doc.height, background: null });
@@ -197,7 +197,7 @@ export function renderLookPreview(doc: Document, look: LookDef, targetId: ID | n
     });
     return renderDocument(lookDoc, { scale });
   } finally {
-    dropBitmaps(built ? [...created, ...maskIds(built.groupLayers)] : created);
+    dropBitmaps(built ? [...created, ...maskIds(built.groupLayers), ...maskIds(built.behindLayers ?? [])] : created);
   }
 }
 

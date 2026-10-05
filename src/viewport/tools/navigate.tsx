@@ -66,7 +66,7 @@ let handLast: Point | null = null;
 
 export const handTool: ToolDef = {
   id: 'hand',
-  name: 'Hand Tool',
+  name: 'Hand',
   shortcut: 'H',
   icon: Hand,
   group: 'hand',
@@ -133,7 +133,7 @@ function isOut(e: { altKey: boolean }): boolean {
 
 export const zoomTool: ToolDef = {
   id: 'zoom',
-  name: 'Zoom Tool',
+  name: 'Zoom',
   shortcut: 'Z',
   icon: ZoomIn,
   group: 'zoom',

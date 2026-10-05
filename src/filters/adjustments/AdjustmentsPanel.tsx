@@ -131,7 +131,8 @@ export function AdjustmentsPanel() {
           {!session && <div className="adjustments-hint center">Open or create a document to add adjustments.</div>}
         </div>
 
-        {showPresets && (
+        {/* Without a document: one empty state only (the dimmed grid + hint above). */}
+        {showPresets && session && (
           <div className="adjustments-section">
             <button className="adjustments-heading toggle" onClick={() => setPresetsOpen(!presetsOpen)}>
               {presetsOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -141,22 +142,22 @@ export function AdjustmentsPanel() {
           </div>
         )}
 
-        <div className="adjustments-section grow">
-          {adj ? (
-            <AdjustmentEditor key={adj.id} layerId={adj.id} context="panel" />
-          ) : (
-            <div className="adjustments-empty">
-              <SlidersHorizontal size={22} strokeWidth={1.4} />
-              <div>
-                {session
-                  ? layer
+        {session && (
+          <div className="adjustments-section grow">
+            {adj ? (
+              <AdjustmentEditor key={adj.id} layerId={adj.id} context="panel" />
+            ) : (
+              <div className="adjustments-empty">
+                <SlidersHorizontal size={22} strokeWidth={1.4} />
+                <div>
+                  {layer
                     ? `“${layer.name}” is not an adjustment layer. Click an icon above to add one above it, or select an adjustment layer to edit it.`
-                    : 'Click an icon above to add an adjustment layer, or select one in the Layers panel to edit it.'
-                  : 'No document open.'}
+                    : 'Click an icon above to add an adjustment layer, or select one in the Layers panel to edit it.'}
+                </div>
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

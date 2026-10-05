@@ -18,9 +18,13 @@ import {
   isInsideLookGroup,
   lookGroups,
   lookMetaOf,
+  lookTargets,
+  behindInsertionPoint,
+  documentCharacter,
   resolveTarget,
   stripLookDraft,
   targetCaps,
+  type ExtLookDef,
   type OverlayFactory,
 } from './engine';
 import { BUILTIN_LOOKS } from './defs';
@@ -372,5 +376,149 @@ describe('preview content signature', () => {
     const withPixels = contentSignature(doc);
     bitmaps.touch('bm_char');
     expect(contentSignature(doc)).not.toBe(withPixels);
+  });
+});
+
+/* ---------- placement, duplicates, whole-document character, ownership ---------- */
+
+const ATMOS: ExtLookDef = {
+  id: 'atmos',
+  name: 'Atmos',
+  category: 'Test',
+  swatch: ['#000'],
+  layerFilters: [{ filterId: 't-cel' }],
+  overlays: [
+    { assetId: 'smoke', name: 'Smoke', placement: 'behind' },
+    { assetId: 'scratches', name: 'Scratches' },
+  ],
+};
+
+function docWithBackground() {
+  const { doc, charId, textId } = makeDoc();
+  const bg = makeRasterLayer({ name: 'Background', bitmapId: 'bm_bg', width: 100, height: 50 });
+  insertLayerDraft(doc, bg, { parentId: null, index: 0 });
+  return { doc, charId, textId, bgId: bg.id };
+}
+
+describe('look overlay placement', () => {
+  it('puts behind-overlays in a second look group directly below the target', () => {
+    const { doc, charId, bgId } = docWithBackground();
+    const built = buildLook(ATMOS, doc, charId, fakeOverlay);
+    expect(built.behindLayers?.map((l) => l.name)).toEqual(['Smoke']);
+    expect(built.groupLayers.map((l) => l.name)).toEqual(['Scratches']);
+    const out = produce(doc, (d) => {
+      insertLookDraft(d, built, charId);
+    });
+    const groups = lookGroups(out);
+    expect(groups).toHaveLength(2);
+    const behind = groups.find((g) => g.meta?.lookPart === 'behind')!;
+    // root order (bottom → top): Background, behind group, Character, …, top group
+    expect(out.rootIds.indexOf(behind.id)).toBe(out.rootIds.indexOf(bgId) + 1);
+    expect(out.rootIds.indexOf(behind.id)).toBe(out.rootIds.indexOf(charId) - 1);
+    expect(out.rootIds[out.rootIds.length - 1]).not.toBe(behind.id);
+    // stripping removes both groups
+    const stripped = produce(out, (d) => {
+      stripLookDraft(d, charId);
+    });
+    expect(lookGroups(stripped)).toHaveLength(0);
+  });
+
+  it('without a target every overlay stays in the top group', () => {
+    const { doc } = docWithBackground();
+    const built = buildLook(ATMOS, doc, null, fakeOverlay);
+    expect(built.behindLayers).toEqual([]);
+    expect(built.groupLayers.map((l) => l.name)).toContain('Smoke');
+  });
+
+  it('goes below the base of a clipping group', () => {
+    const { doc, charId } = docWithBackground();
+    const clipped = produce(doc, (d) => {
+      const shade = makeRasterLayer({ name: 'Shade', bitmapId: 'bm_s', width: 10, height: 10 });
+      shade.clipped = true;
+      insertLayerDraft(d, shade, { aboveId: charId });
+    });
+    const shadeId = clipped.rootIds[clipped.rootIds.indexOf(charId) + 1];
+    expect(behindInsertionPoint(clipped as Document, shadeId)).toEqual({ parentId: null, index: clipped.rootIds.indexOf(charId) });
+  });
+
+  it('skips overlays whose asset is already in the document', () => {
+    const { doc, charId } = docWithBackground();
+    const withScratches = produce(doc, (d) => {
+      const l = makeRasterLayer({ name: 'My scratches', bitmapId: 'bm_x', width: 100, height: 50 });
+      l.generator = { kind: 'asset:scratches', params: {} };
+      insertLayerDraft(d, l);
+    });
+    const built = buildLook(ATMOS, withScratches, charId, fakeOverlay);
+    expect(built.duplicates).toEqual(['Scratches']);
+    expect(built.groupLayers).toEqual([]);
+    expect(built.behindLayers?.map((l) => l.name)).toEqual(['Smoke']);
+  });
+});
+
+describe('whole-document looks with a character', () => {
+  it('target the document’s only character', () => {
+    const { doc, charId } = docWithBackground();
+    expect(documentCharacter(doc)).toBeNull();
+    const tagged = produce(doc, (d) => {
+      d.layers[charId].meta = { kind: 'character' };
+    });
+    expect(documentCharacter(tagged)).toBe(charId);
+    const t = lookTargets(tagged, null);
+    expect(t.targetId).toBe(charId);
+    expect(t.character).toBe(true);
+    // An explicit layer request is not redirected.
+    expect(lookTargets(tagged, charId)).toEqual({ targetId: charId });
+  });
+
+  it('do not pick one of several characters', () => {
+    const { doc, charId } = docWithBackground();
+    const two = produce(doc, (d) => {
+      d.layers[charId].meta = { placeholder: true };
+      const other = makeRasterLayer({ name: 'Rival', bitmapId: 'bm_r', width: 10, height: 10 });
+      other.meta = { placeholder: true };
+      insertLayerDraft(d, other);
+    });
+    expect(documentCharacter(two)).toBeNull();
+    expect(lookTargets(two, null).targetId).toBeNull();
+  });
+});
+
+describe('look vs character styling ownership', () => {
+  it('a look with filters replaces the template and styler treatment', () => {
+    const { doc, charId } = docWithBackground();
+    const styled = produce(doc, (d) => {
+      const l = d.layers[charId];
+      const t = makeFilterInstance('t-cel');
+      const s = makeFilterInstance('t-rim');
+      l.filters.push(t, s);
+      l.meta = { placeholder: true, templateStyle: { filterIds: [t.id], effectIds: [] }, styler: { style: 'x', filters: { base: { id: s.id, filterId: 't-rim' } }, effects: {} } };
+    });
+    const out = produce(styled, (d) => {
+      insertLookDraft(d, buildLook(ATMOS, d, charId, fakeOverlay), charId);
+    });
+    const l = out.layers[charId];
+    expect(l.filters.map((f) => f.filterId)).toEqual(['user-filter', 't-cel']);
+    expect(l.meta?.templateStyle).toBeUndefined();
+    expect(l.meta?.styler).toBeUndefined();
+    expect(lookMetaOf(l)?.lookId).toBe('atmos');
+  });
+
+  it('a look that only adds effects keeps the styler filters and drops duplicate effect types', () => {
+    const { doc, charId } = docWithBackground();
+    const glowLook: LookDef = { id: 'glow', name: 'Glow', category: 'Test', swatch: ['#fff'], layerEffects: [{ effectId: 't-shadow' }] };
+    const styled = produce(doc, (d) => {
+      const l = d.layers[charId];
+      const s = makeFilterInstance('t-rim');
+      l.filters.push(s);
+      l.effects.push({ id: 'se', effectId: 't-shadow', enabled: true, params: {} });
+      l.meta = { styler: { style: 'x', filters: { base: { id: s.id, filterId: 't-rim' } }, effects: { glow: { id: 'se', effectId: 't-shadow' } } } };
+    });
+    const out = produce(styled, (d) => {
+      insertLookDraft(d, buildLook(glowLook, d, charId, fakeOverlay), charId);
+    });
+    const l = out.layers[charId];
+    expect(l.filters.map((f) => f.filterId)).toEqual(['user-filter', 't-rim']);
+    expect(l.effects).toHaveLength(1);
+    expect(l.effects[0].id).not.toBe('se');
   });
 });

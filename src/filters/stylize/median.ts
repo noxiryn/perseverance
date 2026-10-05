@@ -92,6 +92,71 @@ function median1D(src: Uint8Array, dst: Uint8Array, len: number, lines: number, 
   }
 }
 
+/**
+ * Sliding median along each row (clamp-to-edge) for small windows: the window is kept sorted and
+ * updated by one removal + one insertion per step (O(r), no 256-bin histogram walk). Same values
+ * as median1D.
+ */
+function medianRowsSorted(src: Uint8Array, dst: Uint8Array, w: number, h: number, r: number) {
+  const n = 2 * r + 1;
+  const win = new Int32Array(n);
+  for (let y = 0; y < h; y++) {
+    const base = y * w;
+    const last = base + w - 1;
+    // initial window: taps -r..r clamped, sorted (insertion sort)
+    for (let k = 0; k < n; k++) {
+      const q = base + k - r;
+      const v = src[q < base ? base : q > last ? last : q];
+      let p = k;
+      while (p > 0 && win[p - 1] > v) {
+        win[p] = win[p - 1];
+        p--;
+      }
+      win[p] = v;
+    }
+    dst[base] = win[r];
+    for (let i = 1; i < w; i++) {
+      const qo = base + i - r - 1,
+        qi = base + i + r;
+      const vo = src[qo < base ? base : qo],
+        vi = src[qi > last ? last : qi];
+      if (vo !== vi) {
+        // remove vo, then insert vi (shifting the values in between)
+        let p = 0;
+        while (win[p] !== vo) p++;
+        if (vi > vo) {
+          while (p < n - 1 && win[p + 1] < vi) {
+            win[p] = win[p + 1];
+            p++;
+          }
+        } else {
+          while (p > 0 && win[p - 1] > vi) {
+            win[p] = win[p - 1];
+            p--;
+          }
+        }
+        win[p] = vi;
+      }
+      dst[base + i] = win[r];
+    }
+  }
+}
+
+/** Blocked transpose of a w×h byte plane into dst (h×w). */
+function transposeBytes(src: Uint8Array, dst: Uint8Array, w: number, h: number) {
+  const B = 32;
+  for (let y0 = 0; y0 < h; y0 += B) {
+    const y1 = Math.min(h, y0 + B);
+    for (let x0 = 0; x0 < w; x0 += B) {
+      const x1 = Math.min(w, x0 + B);
+      for (let y = y0; y < y1; y++) {
+        const ro = y * w;
+        for (let x = x0; x < x1; x++) dst[x * h + y] = src[ro + x];
+      }
+    }
+  }
+}
+
 /** Median of one 8-bit channel plane (`separable`: rows then columns, O(1) per pixel). */
 export function medianChannel(src: Uint8Array, w: number, h: number, radius: number, separable = false): Uint8Array {
   const r = Math.max(0, Math.round(radius));
@@ -105,6 +170,15 @@ export function medianChannel(src: Uint8Array, w: number, h: number, radius: num
     return dst;
   }
   const tmp = new Uint8Array(src.length);
+  if (r <= 12) {
+    // small windows: sorted-window medians; columns as rows of the transposed plane
+    medianRowsSorted(src, tmp, w, h, r); // rows
+    const t = new Uint8Array(src.length);
+    transposeBytes(tmp, t, w, h);
+    medianRowsSorted(t, tmp, h, w, r); // columns
+    transposeBytes(tmp, dst, h, w);
+    return dst;
+  }
   median1D(src, tmp, w, h, w, 1, r); // rows
   median1D(tmp, dst, h, w, 1, w, r); // columns
   return dst;

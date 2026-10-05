@@ -293,6 +293,20 @@ async function decode(blob: Blob | null): Promise<HTMLCanvasElement | null> {
 }
 
 /**
+ * The image Edit ▸ Paste would use right now (the system clipboard image when it is newer than
+ * our internal copy, else a copy of the internal clipboard), or null when there is none. Used by
+ * features that consume a clipboard image themselves (e.g. Replace Character).
+ */
+export async function readClipboardImage(): Promise<HTMLCanvasElement | null> {
+  const external = await decode(await readSystemImage());
+  if (external && preferSystem(external, clip)) return external;
+  if (!clip) return external;
+  const canvas = createCanvas(clip.canvas.width, clip.canvas.height);
+  ctx2d(canvas).drawImage(clip.canvas, 0, 0);
+  return canvas;
+}
+
+/**
  * Edit ▸ Paste / Paste in Place: the system clipboard image when it is newer than (and not the
  * same as) our internal copy, else the internal clipboard.
  */

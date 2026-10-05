@@ -2,8 +2,9 @@
  * Layer style presets (several effects at once) and fallback effect names. Effect ids and param
  * keys follow ARCHITECTURE.md §5.5 (effects are rendered by the renderer module).
  */
-import type { ParamValues } from '../core/types';
+import type { Layer, Paint, ParamValues } from '../core/types';
 import { effects } from '../registry';
+import { parseColor } from '../core/color';
 
 /** Display names used when the effect definition is not (yet) registered. */
 export const EFFECT_NAMES: Record<string, string> = {
@@ -201,3 +202,72 @@ export const STYLE_PRESETS: StylePreset[] = [
     ],
   },
 ];
+
+/* ------------------------------------------------------------------ */
+/* Colour-aware presets                                                */
+/* ------------------------------------------------------------------ */
+
+/** Luminance difference below which a preset outline can't be told apart from the fill. */
+export const MIN_OUTLINE_CONTRAST = 0.35;
+
+/** Relative luminance (0..1) of a CSS color. */
+function luminance(color: string): number {
+  const c = parseColor(color);
+  return (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) / 255;
+}
+
+/** Relative luminance (0..1) of a paint: a solid color, or the mean of a gradient's stops. */
+export function paintLuminance(p: Paint | null | undefined): number | null {
+  if (!p) return null;
+  if (p.type === 'solid') return luminance(p.color);
+  if (p.type === 'gradient' && p.gradient.stops.length) return p.gradient.stops.reduce((a, st) => a + luminance(st.color), 0) / p.gradient.stops.length;
+  return null;
+}
+
+/** Luminance of a layer's own fill (text/shape layers), or null when it has no single color. */
+export function layerFillLuminance(layer: Layer | null | undefined): number | null {
+  if (!layer) return null;
+  if (layer.type === 'text') return paintLuminance(layer.text.fill);
+  if (layer.type === 'shape') return paintLuminance(layer.shape.fill);
+  if (layer.type === 'fill' && layer.fill.type === 'solid') return luminance(layer.fill.color);
+  return null;
+}
+
+export interface AdaptedPreset {
+  effects: { effectId: string; params: ParamValues }[];
+  /** Human-readable list of the colours that were changed (empty when none). */
+  changes: string[];
+}
+
+/**
+ * Adapt a preset's fixed colours to the layer it lands on (pure): an outline (stroke) that is
+ * about as dark/light as the fill becomes white on dark fills and black on light ones, and a
+ * long shadow that would merge with the fill is lifted to a mid tone when no contrasting outline
+ * separates them. A black "Long Shadow Title" on a black blackletter title thus gets a white
+ * outline instead of turning the title into a black blob.
+ */
+export function adaptPresetToFill(list: { effectId: string; params: ParamValues }[], fillLum: number | null): AdaptedPreset {
+  const out = list.map((e) => ({ effectId: e.effectId, params: { ...e.params } }));
+  const changes: string[] = [];
+  if (fillLum === null) return { effects: out, changes };
+  const dark = fillLum < 0.5;
+  const lum = (c: unknown) => (typeof c === 'string' ? luminance(c) : null);
+  const clashes = (c: unknown) => {
+    const l = lum(c);
+    return l !== null && Math.abs(l - fillLum) < MIN_OUTLINE_CONTRAST;
+  };
+  for (const e of out) {
+    if (e.effectId === 'stroke' && clashes(e.params.color)) {
+      e.params.color = dark ? '#ffffff' : '#000000';
+      changes.push(`outline → ${dark ? 'white' : 'black'}`);
+    }
+  }
+  const separated = out.some((e) => e.effectId === 'stroke' && !clashes(e.params.color));
+  for (const e of out) {
+    if (e.effectId === 'long-shadow' && clashes(e.params.color) && !separated) {
+      e.params.color = dark ? '#8c8c8c' : '#3a3a3a';
+      changes.push('long shadow → mid tone');
+    }
+  }
+  return { effects: out, changes };
+}

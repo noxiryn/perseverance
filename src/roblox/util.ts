@@ -9,7 +9,7 @@ import { toast } from '../state/ui';
 export function requireDoc(action = 'do this'): Document | null {
   const doc = activeDoc();
   if (!doc) {
-    toast(`Open or create a document to ${action} (Roblox ▸ New Icon / New Thumbnail).`, 'warning', 3600);
+    toast(`Open or create a document to ${action} (Roblox ▸ New Roblox Icon / New Roblox Thumbnail).`, 'warning', 3600);
     return null;
   }
   return doc;

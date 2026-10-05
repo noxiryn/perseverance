@@ -48,7 +48,7 @@
   min-width: 8px;
 }
 .type-opts-hint {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -408,6 +408,6 @@
   color: var(--accent-strong);
 }
 .type-warp-hint {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
 }

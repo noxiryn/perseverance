@@ -84,7 +84,7 @@ function sampleAt(e: ToolPointerEvent) {
 
 export const eyedropperTool: ToolDef = {
   id: 'eyedropper',
-  name: 'Eyedropper Tool',
+  name: 'Eyedropper',
   shortcut: 'I',
   icon: Pipette,
   group: 'eyedropper',

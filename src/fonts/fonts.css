@@ -1,7 +1,7 @@
 /* fonts-color module — FontSelect, font picker popover and Fonts panel. Prefix: fc- */
 
 .fc-dim {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   white-space: nowrap;
 }
@@ -92,7 +92,7 @@
   font-size: var(--fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 .fc-picker-row {
   height: 100%;
@@ -132,7 +132,7 @@
   margin-left: auto;
   padding-left: 8px;
   flex: none;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   font-family: var(--font-ui);
 }
@@ -141,7 +141,7 @@
   align-items: center;
   gap: 4px;
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
   flex: none;
 }
 .fc-picker-foot .ui-btn.small {
@@ -282,7 +282,7 @@
 .fc-card-meta {
   margin-left: auto;
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
   white-space: nowrap;
   flex: none;
 }

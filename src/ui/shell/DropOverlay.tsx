@@ -10,6 +10,7 @@ import { toast } from '../../state/ui';
 import { dropMode, isSupportedDrop } from './docInfo';
 import { openFileWithIo } from './documents';
 import { useShell } from './shellStore';
+import { claimFileDrop, fileDropHints } from './dropHooks';
 
 const ASSET_MIME = 'application/x-perseverance-asset';
 
@@ -69,6 +70,8 @@ export function useFileDrop() {
         }
         try {
           const data = await f.arrayBuffer();
+          // Feature hooks (e.g. Replace Character on a selected placeholder) may claim the file.
+          if (await claimFileDrop({ file: f, data, count: files.length, hasDoc, shift, clientX: e.clientX, clientY: e.clientY })) continue;
           await openFileWithIo({ path: null, name: f.name, data }, { asNewDocument: dropMode(f.name, hasDoc, shift) === 'new' });
         } catch (err) {
           console.error(err);
@@ -114,6 +117,12 @@ export function DropOverlay() {
             <>Images, .pgfx projects and .psd files open as new documents</>
           )}
         </div>
+        {hasDoc &&
+          fileDropHints().map((h) => (
+            <div key={h} className="shell-drop-hint">
+              {h}
+            </div>
+          ))}
       </div>
     </div>
   );

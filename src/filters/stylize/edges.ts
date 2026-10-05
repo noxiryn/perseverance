@@ -35,20 +35,30 @@ export function detectEdges(lum: Float32Array, w: number, h: number, threshold: 
   const strong = edgeThresholdValue(threshold);
   const weak = strong * 0.5;
   const cand = edgeSeeds(mag, gx, gy, w, h, weak);
-  const out = new Uint8Array(w * h);
-  const visited = new Uint8Array(w * h);
-  const stack = new Int32Array(w * h);
-  const comp: number[] = [];
-  for (let i = 0; i < w * h; i++) {
+  return keepConnected(cand, mag, w, h, strong, minLength);
+}
+
+/**
+ * Hysteresis + speck removal: the 8-connected components of `cand` that contain a pixel with
+ * mag ≥ strong and have at least minLength pixels (flood fill from each strong seed, in scan
+ * order — same components as before, with typed-array bookkeeping).
+ */
+function keepConnected(cand: Uint8Array, mag: Float32Array, w: number, h: number, strong: number, minLength: number): Uint8Array {
+  const n = w * h;
+  const out = new Uint8Array(n);
+  const visited = new Uint8Array(n);
+  const stack = new Int32Array(n);
+  const comp = new Int32Array(n);
+  for (let i = 0; i < n; i++) {
     if (!cand[i] || visited[i] || mag[i] < strong) continue;
     // flood the connected candidate component starting from a strong pixel
-    let sp = 0;
+    let sp = 0,
+      nc = 0;
     stack[sp++] = i;
     visited[i] = 1;
-    comp.length = 0;
     while (sp > 0) {
       const p = stack[--sp];
-      comp.push(p);
+      comp[nc++] = p;
       const px = p % w,
         py = (p - px) / w;
       for (let dy = -1; dy <= 1; dy++) {
@@ -65,7 +75,7 @@ export function detectEdges(lum: Float32Array, w: number, h: number, threshold: 
         }
       }
     }
-    if (comp.length >= minLength) for (const p of comp) out[p] = 1;
+    if (nc >= minLength) for (let c = 0; c < nc; c++) out[comp[c]] = 1;
   }
   return out;
 }

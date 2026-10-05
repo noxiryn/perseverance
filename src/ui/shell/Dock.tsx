@@ -1,6 +1,9 @@
 /**
  * Right dock: resizable column of three panel groups (tabs, ⋯ menu, collapse, splitters, tab
  * drag & drop between groups) plus the 34px icon strip with 320px flyout panels.
+ *
+ * Expanded groups never shrink below GROUP_MIN_H (header + a usable body); when the dock is too
+ * short for that, the group column scrolls instead of squeezing panels into slivers.
  */
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronsLeft, ChevronsRight, Ellipsis, Minus, PanelRightDashed, X } from 'lucide-react';
@@ -9,12 +12,16 @@ import { useUI, type DockGroupState } from '../../state/ui';
 import { showMenuAt, type MenuItem } from '../controls';
 import { ErrorBoundary } from './ErrorBoundary';
 import { PANEL_MIME, panelIcon, panelTitle } from './panelMeta';
-import { useShell } from './shellStore';
+import { isTypingTarget } from '../shortcuts';
+import { menuBarActive, useShell } from './shellStore';
 import { Tip } from './Toolbar';
 import { toCss } from './uiScale';
 import { movePanel, removePanel, type DropTarget } from './workspaces';
 
 type Slot = DockGroupState['slot'];
+
+/** Minimum height of an expanded panel group in CSS px (30px header + 160px body); see .shell-group. */
+export const GROUP_MIN_H = 190;
 
 /* ------------------------------------------------------------------ */
 /* Panel content                                                       */
@@ -123,11 +130,68 @@ function insertIndex(container: HTMLElement, clientX: number): number {
 /* Panel group                                                         */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Horizontal scroll needed to bring [left, right] (px relative to the container's visible box)
+ * fully into a container `width` px wide, with `pad` px of breathing room. 0 when already visible.
+ */
+export function scrollDeltaToReveal(left: number, right: number, width: number, pad = 8): number {
+  if (left < 0) return left - pad;
+  if (right > width) return Math.min(left - pad, right - width + pad);
+  return 0;
+}
+
+/** Overflowing tab strips: keep the active tab in view, map the wheel to horizontal scrolling. */
+function useTabStrip(ref: React.RefObject<HTMLDivElement | null>, active: string, deps: unknown[]) {
+  const [edges, setEdges] = useState({ left: false, right: false });
+  const update = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const left = el.scrollLeft > 1;
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+    setEdges((e) => (e.left === left && e.right === right ? e : { left, right }));
+  }, [ref]);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const tab = el.querySelector<HTMLElement>(`[data-tab="${CSS.escape(active)}"]`);
+    if (tab) {
+      // Rects are visual px; scrollLeft is CSS px of the (possibly CSS-zoomed) UI.
+      const cr = el.getBoundingClientRect();
+      const tr = tab.getBoundingClientRect();
+      const k = cr.width > 0 ? el.clientWidth / cr.width : 1;
+      const d = scrollDeltaToReveal((tr.left - cr.left) * k, (tr.right - cr.left) * k, el.clientWidth);
+      if (d) el.scrollLeft += d;
+    }
+    update();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, update, ...deps]);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (el.scrollWidth <= el.clientWidth || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+      e.preventDefault();
+      el.scrollLeft += e.deltaY;
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('scroll', update, { passive: true });
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
+    ro?.observe(el);
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('scroll', update);
+      ro?.disconnect();
+    };
+  }, [ref, update]);
+  return edges;
+}
+
 function PanelGroup({ g, groupRef }: { g: DockGroupState; groupRef: (el: HTMLDivElement | null) => void }) {
   useRegistry(panels);
   const tabsRef = useRef<HTMLDivElement>(null);
   const [dropAt, setDropAt] = useState<number | null>(null);
   const ui = useUI.getState;
+  const edges = useTabStrip(tabsRef, g.active, [g.tabs.join('|'), g.collapsed]);
 
   const openMenu = (el: HTMLElement) => {
     const id = g.active;
@@ -168,7 +232,7 @@ function PanelGroup({ g, groupRef }: { g: DockGroupState; groupRef: (el: HTMLDiv
           dropPanel(e, { kind: 'group', slot: g.slot, index: idx });
         }}
       >
-        <div className="shell-group-tabs" ref={tabsRef}>
+        <div className={`shell-group-tabs${edges.left ? ' fade-l' : ''}${edges.right ? ' fade-r' : ''}`} ref={tabsRef}>
           {g.tabs.map((id, i) => (
             <Fragment key={id}>
               {dropAt === i && <span className="shell-drop-caret" />}
@@ -231,7 +295,7 @@ function Splitter({ above, below, getEl }: { above: DockGroupState; below: DockG
     const W = above.size + below.size;
     const H = hA + hB;
     const visualPerCss = H / Math.max(1, a.offsetHeight + b.offsetHeight);
-    const MIN = Math.min(96 * visualPerCss, H / 2); // 96 CSS px minimum group height
+    const MIN = Math.min(GROUP_MIN_H * visualPerCss, H / 2); // same floor as the CSS min-height
     trackDrag(e, 'shell-resizing-row', (ev) => {
       const nA = Math.max(MIN, Math.min(H - MIN, hA + (ev.clientY - startY)));
       const wA = (W * nA) / H;
@@ -262,27 +326,29 @@ function DockColumn() {
   return (
     <div className="shell-dock" style={{ width }}>
       <div className="shell-dock-resize" onPointerDown={startResize} onDoubleClick={() => useUI.getState().setDockWidth(268)} title="Drag to resize" />
-      {groups.map((g, i) => (
-        <Fragment key={g.slot}>
-          {i > 0 && <Splitter above={groups[i - 1]} below={g} getEl={(s) => els.current.get(s) ?? null} />}
-          <PanelGroup
-            g={g}
-            groupRef={(el) => {
-              if (el) els.current.set(g.slot, el);
-              else els.current.delete(g.slot);
-            }}
-          />
-        </Fragment>
-      ))}
-      {(allCollapsed || !groups.length) && (
-        <div
-          className="shell-dock-filler"
-          onDragOver={(e) => hasPanel(e) && e.preventDefault()}
-          onDrop={(e) => dropPanel(e, { kind: 'group', slot: (groups[groups.length - 1]?.slot ?? 'bottom') as Slot })}
-        >
-          {!groups.length && <span>Drag panels here, or open them from the Window menu</span>}
-        </div>
-      )}
+      <div className="shell-dock-groups">
+        {groups.map((g, i) => (
+          <Fragment key={g.slot}>
+            {i > 0 && <Splitter above={groups[i - 1]} below={g} getEl={(s) => els.current.get(s) ?? null} />}
+            <PanelGroup
+              g={g}
+              groupRef={(el) => {
+                if (el) els.current.set(g.slot, el);
+                else els.current.delete(g.slot);
+              }}
+            />
+          </Fragment>
+        ))}
+        {(allCollapsed || !groups.length) && (
+          <div
+            className="shell-dock-filler"
+            onDragOver={(e) => hasPanel(e) && e.preventDefault()}
+            onDrop={(e) => dropPanel(e, { kind: 'group', slot: (groups[groups.length - 1]?.slot ?? 'bottom') as Slot })}
+          >
+            {!groups.length && <span>Drag panels here, or open them from the Window menu</span>}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -399,26 +465,73 @@ function Strip() {
   );
 }
 
+/**
+ * Flyout placement (CSS px relative to the side column): next to its strip icon, inside
+ * [8, bottom - 8]. `height` is the current rendered height (0 before the first layout); the
+ * max height is everything available, so short panels shrink to their content.
+ */
+export function placeFlyout(iconTop: number, bottom: number, height: number): { top: number; maxHeight: number } {
+  const avail = Math.max(120, bottom - 16);
+  const h = Math.min(Math.max(height, 0) || Math.min(620, avail), avail);
+  const top = Math.max(8, Math.min(iconTop, bottom - h - 8));
+  return { top, maxHeight: Math.max(120, bottom - top - 8) };
+}
+
 function Flyout({ sideRef }: { sideRef: React.RefObject<HTMLDivElement | null> }) {
   const id = useUI((s) => s.flyoutPanel);
   useRegistry(panels);
   const ref = useRef<HTMLDivElement>(null);
-  const [top, setTop] = useState(8);
-  const [height, setHeight] = useState(560);
+  const [box, setBox] = useState({ top: 8, maxHeight: 560 });
 
   useLayoutEffect(() => {
     if (!id || !sideRef.current) return;
-    // Measured in visual px, applied as CSS px of the (possibly CSS-zoomed) UI.
-    const side = sideRef.current.getBoundingClientRect();
-    const sideH = toCss(side.height);
-    const icon = sideRef.current.querySelector<HTMLElement>(`[data-strip-panel="${CSS.escape(id)}"]`);
-    const avail = sideH - 16;
-    const h = Math.min(avail, Math.max(380, Math.min(620, avail)));
-    let t = icon ? toCss(icon.getBoundingClientRect().top - side.top) - 6 : 8;
-    t = Math.max(8, Math.min(t, sideH - h - 8));
-    setTop(t);
-    setHeight(h);
+    const place = () => {
+      const sideEl = sideRef.current;
+      if (!sideEl) return;
+      // Measured in visual px, applied as CSS px of the (possibly CSS-zoomed) UI.
+      const side = sideEl.getBoundingClientRect();
+      // The flyout overlaps the canvas column: keep it above the status bar there.
+      const status = document.querySelector<HTMLElement>('.shell-statusbar')?.getBoundingClientRect();
+      const bottom = status && status.top > side.top ? Math.min(side.bottom, status.top) : side.bottom;
+      const icon = sideEl.querySelector<HTMLElement>(`[data-strip-panel="${CSS.escape(id)}"]`);
+      const iconTop = icon ? toCss(icon.getBoundingClientRect().top - side.top) - 6 : 8;
+      // Natural height of the panel: measure without the current max-height cap (restored right
+      // away; React then applies the new value).
+      const el = ref.current;
+      let natural = 0;
+      if (el) {
+        const prev = el.style.maxHeight;
+        el.style.maxHeight = 'none';
+        natural = toCss(el.getBoundingClientRect().height);
+        el.style.maxHeight = prev;
+      }
+      setBox(placeFlyout(iconTop, toCss(bottom - side.top), natural));
+    };
+    place();
+    // Re-place when the panel's content height settles (the flyout shrinks to its content).
+    const ro = typeof ResizeObserver !== 'undefined' && ref.current ? new ResizeObserver(place) : null;
+    if (ro && ref.current) ro.observe(ref.current);
+    window.addEventListener('resize', place);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener('resize', place);
+    };
   }, [id, sideRef]);
+
+  // Escape closes the flyout (unless a text field, dialog, menu or popover has the key).
+  useEffect(() => {
+    if (!id) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      if (isTypingTarget(e.target) || useUI.getState().dialogs.length || menuBarActive()) return;
+      if (document.querySelector('.ui-popover, .ui-menu')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      useUI.getState().setFlyout(null);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [id]);
 
   // Close on outside click (ignoring portals opened from inside the panel).
   useEffect(() => {
@@ -454,7 +567,7 @@ function Flyout({ sideRef }: { sideRef: React.RefObject<HTMLDivElement | null> }
   if (!id) return null;
   const Icon = panelIcon(id);
   return (
-    <div ref={ref} className="shell-flyout" style={{ top, height }}>
+    <div ref={ref} className="shell-flyout" style={{ top: box.top, maxHeight: box.maxHeight }}>
       <div className="shell-flyout-head">
         <Icon size={13} strokeWidth={1.7} />
         <span className="shell-flyout-title">{panelTitle(id)}</span>

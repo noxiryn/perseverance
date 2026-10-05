@@ -4,13 +4,17 @@ import {
   DEFAULT_BG_PARAMS,
   GREEN_PRESET,
   GREEN_SPILL_BAND,
+  PARTIAL_INTERIOR_WARN,
   applyMask,
   colorDistance,
   computeKeepMask,
+  cutoutStats,
   decontaminate,
+  dropIslands,
   maskChangeBounds,
   paletteFor,
   removeBackground,
+  removeSeams,
   sampleBorderPalette,
   subjectMask,
   unionRect,
@@ -197,5 +201,129 @@ describe('pipeline', () => {
     const m = subjectMask(img);
     expect(at(m, w, 1, 1)).toBe(0);
     expect(at(m, w, 10, 10)).toBeGreaterThan(200);
+  });
+});
+
+/**
+ * Synthetic Roblox Studio screenshot: sky gradient (top) over a green baseplate (bottom) with an
+ * antialiased 1px horizon row, and a character (brown shirt close to the baseplate green in
+ * redmean distance, dark pants, a thin sword blade over the sky).
+ */
+function studioShot(w = 160, h = 120) {
+  const img = makeBuffer(w, h, [0, 0, 0, 255]);
+  const horizon = Math.round(h * 0.6);
+  const set = (x: number, y: number, c: [number, number, number]) => img.data.set([c[0], c[1], c[2], 255], (y * w + x) * 4);
+  const sky = (y: number): [number, number, number] => {
+    const t = y / horizon;
+    return [Math.round(110 + 110 * t), Math.round(170 + 60 * t), 245];
+  };
+  const ground: [number, number, number] = [92, 140, 70];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (y < horizon) set(x, y, sky(y));
+      else if (y === horizon) {
+        const s = sky(horizon - 1);
+        set(x, y, [Math.round((s[0] + ground[0]) / 2), Math.round((s[1] + ground[1]) / 2), Math.round((s[2] + ground[2]) / 2)]);
+      } else set(x, y, ground);
+    }
+  }
+  const shirt: [number, number, number] = [150, 95, 60]; // ≈17 from the baseplate green
+  const pants: [number, number, number] = [30, 34, 60];
+  const box = { x: 60, y: 30, w: 40, h: 70 };
+  for (let y = box.y; y < box.y + box.h; y++) {
+    for (let x = box.x; x < box.x + box.w; x++) set(x, y, y < box.y + 40 ? shirt : pants);
+  }
+  // Thin (2px) steel sword blade sticking out over the sky.
+  for (let x = box.x + box.w; x < box.x + box.w + 30; x++) for (let y = 40; y < 42; y++) set(x, y, [125, 128, 140]);
+  return { img, w, h, horizon, box };
+}
+
+describe('auto mode on a Roblox Studio screenshot', () => {
+  it('keeps the whole subject opaque (the softness band cannot leak into it)', () => {
+    const { img, w, box } = studioShot();
+    const mask = computeKeepMask(img, { ...DEFAULT_BG_PARAMS, ...noEdges });
+    // Shirt interior, pants, sword blade: fully kept.
+    expect(at(mask, w, box.x + 20, box.y + 20)).toBe(255);
+    expect(at(mask, w, box.x + 20, box.y + 60)).toBe(255);
+    expect(at(mask, w, box.x + box.w + 10, 40)).toBe(255);
+  });
+
+  it('even generous settings only soften the edge band, not the interior', () => {
+    const { img, w, box } = studioShot();
+    const mask = computeKeepMask(img, { ...DEFAULT_BG_PARAMS, ...noEdges, tolerance: 14, softness: 30 });
+    expect(at(mask, w, box.x + 20, box.y + 20)).toBe(255);
+    expect(cutoutStats(img, mask).partialInterior).toBeLessThan(PARTIAL_INTERIOR_WARN);
+  });
+
+  it('removes the sky gradient, the baseplate and the antialiased horizon line', () => {
+    const { img, w, h, horizon } = studioShot();
+    const mask = computeKeepMask(img, { ...DEFAULT_BG_PARAMS, ...noEdges });
+    expect(at(mask, w, 5, 5)).toBe(0);
+    expect(at(mask, w, 30, horizon - 3)).toBe(0);
+    expect(at(mask, w, 5, h - 3)).toBe(0);
+    // The horizon row away from the character.
+    let worst = 0;
+    for (let x = 0; x < 50; x++) worst = Math.max(worst, at(mask, w, x, horizon));
+    for (let x = 135; x < w; x++) worst = Math.max(worst, at(mask, w, x, horizon));
+    expect(worst).toBe(0);
+  });
+
+  it('reports a clean cut-out in the stats', () => {
+    const { img } = studioShot();
+    const mask = computeKeepMask(img, { ...DEFAULT_BG_PARAMS, ...noEdges });
+    const stats = cutoutStats(img, mask);
+    expect(stats.removed).toBeGreaterThan(0.6);
+    expect(stats.partialInterior).toBe(0);
+  });
+});
+
+describe('cleanup helpers', () => {
+  it('removeSeams marks blended runs between background but keeps thin subject parts', () => {
+    // Column: sky, blended seam, ground — and a second column with a dark 1px line between sky.
+    const img = makeBuffer(2, 3);
+    img.data.set([120, 180, 250, 255], 0);
+    img.data.set([105, 160, 160, 255], 8); // blend of sky (row 0) and ground (row 2)
+    img.data.set([90, 140, 70, 255], 16);
+    img.data.set([120, 180, 250, 255], 4);
+    img.data.set([20, 20, 20, 255], 12); // dark line: not a blend
+    img.data.set([120, 180, 250, 255], 20);
+    const reach = new Uint8Array([1, 1, 0, 0, 1, 1]);
+    expect(removeSeams(img, reach, 8)).toBe(1);
+    expect([...reach]).toEqual([1, 1, 1, 0, 1, 1]);
+  });
+
+  it('dropIslands removes specks but keeps a second large subject', () => {
+    const w = 60,
+      h = 20;
+    const m = new Float32Array(w * h);
+    const fill = (x0: number, y0: number, x1: number, y1: number) => {
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) m[y * w + x] = 1;
+    };
+    fill(2, 2, 20, 18); // character A
+    fill(30, 2, 46, 18); // character B
+    fill(55, 5, 56, 6); // speck
+    expect(dropIslands(m, w, h)).toBe(1);
+    expect(m[10 * w + 10]).toBe(1);
+    expect(m[10 * w + 40]).toBe(1);
+    expect(m[5 * w + 55]).toBe(0);
+  });
+
+  it('auto mode drops background clutter the flood cannot reach', () => {
+    const w = 60,
+      h = 60;
+    const img = scene(w, h, [240, 240, 240, 255], [20, 40, 160, 255], [15, 10, 30, 45]);
+    img.data.set([60, 60, 60, 255], (3 * w + 52) * 4); // a 1px dark speck in the backdrop
+    const mask = computeKeepMask(img, { ...DEFAULT_BG_PARAMS, ...noEdges });
+    expect(at(mask, w, 52, 3)).toBe(0);
+    expect(at(mask, w, 30, 30)).toBe(255);
+  });
+
+  it('cutoutStats flags a semi-transparent interior', () => {
+    const w = 30,
+      h = 30;
+    const img = makeBuffer(w, h, [100, 100, 100, 255]);
+    const mask = new Uint8ClampedArray(w * h);
+    for (let y = 5; y < 25; y++) for (let x = 5; x < 25; x++) mask[y * w + x] = 128;
+    expect(cutoutStats(img, mask).partialInterior).toBeGreaterThan(PARTIAL_INTERIOR_WARN);
   });
 });

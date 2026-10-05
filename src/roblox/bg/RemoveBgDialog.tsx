@@ -1,7 +1,8 @@
 /**
  * Remove Background dialog: live preview on a checkerboard (computed on a downscaled working copy),
  * Auto / Color key / Green screen modes, tolerance + softness, feather, shrink edge, spill
- * decontamination, and output as a layer mask (default) or deleted pixels.
+ * decontamination, and output as deleted pixels (default, trims the layer to the character) or a
+ * layer mask. Warns when parts of the subject would end up semi-transparent.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Eraser, Pipette, Scissors } from 'lucide-react';
@@ -13,7 +14,7 @@ import { createCanvas, ctx2d, ctxRead } from '../../core/canvas';
 import type { RasterLayer } from '../../core/types';
 import '../roblox.css';
 import { ColorRow, Group, Hint, Seg, SliderRow } from '../studio/ui';
-import { DEFAULT_BG_PARAMS, GREEN_PRESET, applyMask, paletteFor, removeBackground, type BgMode, type BgParams } from './core';
+import { DEFAULT_BG_PARAMS, GREEN_PRESET, PARTIAL_INTERIOR_WARN, applyMask, cutoutStats, paletteFor, removeBackground, type BgMode, type BgParams } from './core';
 import { applyRemoveBackground, type BgOutput } from './apply';
 import { rgbToHexString } from '../pixels';
 
@@ -28,7 +29,9 @@ const MODE_OPTIONS: { value: BgMode; label: string; title: string }[] = [
 ];
 
 let lastParams: BgParams = { ...DEFAULT_BG_PARAMS };
-let lastOutput: BgOutput = 'mask';
+// Delete is the default: character styles and looks need a real cut-out (smart filters run before
+// a layer mask), and the layer gets trimmed to the character.
+let lastOutput: BgOutput = 'delete';
 
 interface Working {
   img: ImageData;
@@ -59,7 +62,7 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
   const [output, setOutput] = useState<BgOutput>(lastOutput);
   const [view, setView] = useState<View>('result');
   const [picking, setPicking] = useState(false);
-  const [stats, setStats] = useState<{ removed: number; palette: string[] } | null>(null);
+  const [stats, setStats] = useState<{ removed: number; partialInterior: number; palette: string[] } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const set = (patch: Partial<BgParams>) => setParams((p) => ({ ...p, ...patch }));
@@ -77,14 +80,9 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
       const out = new ImageData(img.width, img.height);
       const o = out.data;
       const d = copy.data;
-      let removed = 0;
-      let opaque = 0;
+      const quality = cutoutStats(img, mask);
       for (let i = 0, q = 0; i < mask.length; i++, q += 4) {
         const m = mask[i];
-        if (img.data[q + 3] > 16) {
-          opaque++;
-          if (m < 128) removed++;
-        }
         if (view === 'mask') {
           o[q] = o[q + 1] = o[q + 2] = (m * d[q + 3]) / 255;
           o[q + 3] = 255;
@@ -105,7 +103,7 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
       c.width = img.width;
       c.height = img.height;
       ctx2d(c).putImageData(out, 0, 0);
-      setStats({ removed: opaque ? removed / opaque : 0, palette: palette.map((p) => rgbToHexString(p[0], p[1], p[2])) });
+      setStats({ removed: quality.removed, partialInterior: quality.partialInterior, palette: palette.map((p) => rgbToHexString(p[0], p[1], p[2])) });
     }, 40);
     return () => window.clearTimeout(t);
   }, [working, params, view]);
@@ -209,7 +207,13 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
               </>
             )}
             <SliderRow label="Tolerance" value={params.tolerance} min={0} max={100} step={1} onChange={(tolerance) => set({ tolerance })} hint="How different a color may be and still count as background" />
-            <SliderRow label="Softness" value={params.softness} min={0} max={60} step={1} onChange={(softness) => set({ softness })} hint="Partial transparency band above the tolerance" />
+            <SliderRow label="Softness" value={params.softness} min={0} max={60} step={1} onChange={(softness) => set({ softness })} hint="Partial transparency band along the cut" />
+            {stats && stats.partialInterior > PARTIAL_INTERIOR_WARN && (
+              <div className="roblox-bg-warn" role="status">
+                ⚠ {Math.round(stats.partialInterior * 100)}% of the subject would be semi-transparent — lower Tolerance or Softness
+                {params.mode === 'auto' ? ', or pick the background color with Color key' : ''}. Check the Mask view (white = kept).
+              </div>
+            )}
             {params.mode !== 'auto' && (
               <Field label="">
                 <Checkbox checked={params.contiguous} onChange={(contiguous) => set({ contiguous })} label="Only connected to the edges" />
@@ -235,15 +239,15 @@ export function RemoveBgDialog({ close, layerId }: RemoveBgProps & { close: (r?:
             <Seg
               value={output}
               options={[
-                { value: 'mask', label: 'Layer mask', title: 'Non-destructive: hides the background with a layer mask' },
-                { value: 'delete', label: 'Delete pixels', title: 'Erase the background pixels from the layer' },
+                { value: 'delete', label: 'Delete background', title: 'Erase the background and trim the layer to the character (best for character styles and looks)' },
+                { value: 'mask', label: 'Layer mask', title: 'Non-destructive: hide the background with a layer mask' },
               ]}
               onChange={setOutput}
             />
             <Hint>
               {output === 'mask'
-                ? `Non-destructive — refine later by painting on the mask, or disable it with Shift-click on its thumbnail.${params.decontaminate > 0 ? ' Edge decontamination still recolors pixels along the cut.' : ''}`
-                : 'Pixels are erased from the layer (undo with Ctrl+Z).'}
+                ? `Non-destructive — refine later by painting on the mask, or disable it with Shift-click on its thumbnail. Character Styler styles and looks apply this mask automatically before styling.${params.decontaminate > 0 ? ' Edge decontamination still recolors pixels along the cut.' : ''}`
+                : 'Erases the background and trims the layer to your character, so styles, looks and the transform box follow the character (undo with Ctrl+Z).'}
             </Hint>
             {output === 'mask' && layer.mask && (
               <Hint>

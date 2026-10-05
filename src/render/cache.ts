@@ -248,6 +248,15 @@ export class SlotCache {
     this.map.delete(key);
   }
 
+  /** Drop every slot whose key (and composite flag) matches. */
+  deleteWhere(pred: (key: string, composite: boolean) => boolean) {
+    for (const [k, s] of this.map) {
+      if (!pred(k, !!s.composite)) continue;
+      for (const e of s.entries) this.dropEntry(e);
+      this.map.delete(k);
+    }
+  }
+
   /**
    * Clear everything, or the slots tagged with `layerId` plus (unless `composites` is false)
    * every composite slot.

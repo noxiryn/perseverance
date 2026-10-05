@@ -48,7 +48,7 @@
 .fxf-hint {
   flex: 1;
   min-width: 0;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -168,7 +168,7 @@
 }
 .fxf-dim {
   margin-left: auto;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   font-variant-numeric: tabular-nums;
 }
@@ -193,7 +193,7 @@
 }
 
 .fxf-empty {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   padding: 12px 0;
 }
@@ -259,7 +259,7 @@
   box-shadow: inset 2px 0 0 var(--accent);
 }
 .fxf-count {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
 }
@@ -304,7 +304,7 @@
   max-height: 100%;
 }
 .fxf-thumb-wait {
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 .fxf-thumb-label {
   display: flex;
@@ -344,7 +344,7 @@
 .fxf-side-cat {
   margin-left: auto;
   font-size: var(--fs-xs);
-  color: var(--text-faint);
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -370,6 +370,6 @@
   white-space: nowrap;
 }
 .fxf-source em {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-style: normal;
 }

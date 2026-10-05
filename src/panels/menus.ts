@@ -30,6 +30,8 @@ import { adjustmentFilters } from '../filters/engine';
 import * as ops from './layerOps';
 import { STYLE_PRESETS, effectMenuIds, effectName } from './effectPresets';
 import { openFillLayerDialog } from './dialogs';
+import { copySmartFilters, hasFilterClipboard, pasteSmartFilters, saveLayerStyle } from './userStyles';
+import { runCommand } from '../registry';
 
 export const LABEL_COLORS: { value: LabelColor; label: string; css: string }[] = [
   { value: 'none', label: 'No Color', css: 'transparent' },
@@ -57,6 +59,10 @@ export function effectMenuItems(): MenuItem[] {
     { label: 'Copy Layer Style', run: ops.copyStyle },
     { label: 'Paste Layer Style', run: ops.pasteStyle, disabled: !ops.useLayersUI.getState().styleClipboard },
     { label: 'Clear Layer Style', run: ops.clearStyle },
+    { label: 'Save Layer Style…', run: () => void saveLayerStyle() },
+    { separator: true },
+    { label: 'Copy Smart Filters', run: copySmartFilters },
+    { label: 'Paste Smart Filters', run: pasteSmartFilters, disabled: !hasFilterClipboard() },
   );
   return items;
 }
@@ -119,6 +125,12 @@ export function layerContextMenu(layer: Layer, startRename: (id: ID) => void): M
       disabled: isGroup || layer.type === 'adjustment' || (!layer.effects.length && !layer.filters.length),
     },
     { label: 'Add Layer Style', submenu: effectMenuItems(), disabled: layer.type === 'adjustment' },
+    ...(!multi && layer.type === 'raster'
+      ? [
+          { label: 'Replace Contents…', run: () => void runCommand('layer.replaceContents') },
+          { label: 'Trim Transparent Pixels', run: () => void runCommand('layer.trimTransparent') },
+        ]
+      : []),
     { separator: true },
     { label: mergeLabel, icon: Merge, shortcut: 'Ctrl+E', run: ops.mergeDown },
     { label: 'Merge Visible', shortcut: 'Shift+Ctrl+E', run: ops.mergeVisible },

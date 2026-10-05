@@ -2,7 +2,7 @@
  * Type module: Type tool (T), Character panel, Type menu and the text Properties section.
  * Imported by src/features.ts.
  */
-import { CaseSensitive } from 'lucide-react';
+import { Type } from 'lucide-react';
 import { commands, panels, propertiesSections, tools } from '../../registry';
 import type { Document, Point, TextLayer } from '../../core/types';
 import { DEFAULT_TEXT, flattenIds, isEffectivelyVisible } from '../../core/document';
@@ -47,7 +47,8 @@ function resetCharacter() {
 panels.register({
   id: CHARACTER_PANEL_ID,
   title: 'Character',
-  icon: CaseSensitive,
+  // Distinct from the Fonts panel's "Aa" (CaseSensitive) so the two never look alike in the strip.
+  icon: Type,
   component: CharacterPanel,
   defaultSlot: 'strip',
   order: 30,

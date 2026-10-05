@@ -15,6 +15,7 @@ import { produce, setAutoFreeze } from 'immer';
 import type { BitmapPatch, DocSession, Document, EditTarget, HistoryEntry, ID, Layer, ViewState } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
 import { uid } from '../core/ids';
+import { useUI } from './ui';
 import {
   detachLayerDraft,
   flattenIds,
@@ -114,29 +115,109 @@ function makeSession(doc: Document, filePath: string | null, label: string, acti
   };
 }
 
-/** Collect every bitmap id referenced by any open document history. */
-function referencedBitmaps(sessions: Record<ID, DocSession>): Set<ID> {
-  const keep = new Set<ID>();
-  const addDoc = (d: Document) => {
-    for (const l of Object.values(d.layers)) {
-      if (l.type === 'raster') keep.add(l.bitmapId);
-      if (l.mask) keep.add(l.mask.bitmapId);
-    }
-    if (d.selection) keep.add(d.selection.bitmapId);
-  };
-  for (const s of Object.values(sessions)) {
-    addDoc(s.doc);
-    for (const e of s.history.entries) {
-      addDoc(e.doc);
-      e.patches?.forEach((p) => keep.add(p.bitmapId));
-    }
+/* ------------------------------------------------------------------ */
+/* Bitmap garbage collection                                           */
+/* ------------------------------------------------------------------ */
+/*
+ * The bitmap store owns every canvas; documents only reference ids. Bitmaps become garbage when
+ * a document closes, when history entries are dropped (a redo branch discarded by a new commit, or
+ * the oldest steps trimmed past HISTORY_LIMIT), when a slider coalesces into a step, or when a tool
+ * / dialog previewed with a temporary bitmap and cancelled. Three mechanisms free them:
+ *
+ *  1. Immediately (no grace period) for bitmaps referenced ONLY by a closed session or by dropped
+ *     history entries — nothing can reach those any more (they are not in any open document, its
+ *     live preview or remaining history). Freshly created tool bitmaps are never in that set.
+ *  2. A throttled idle pass (`requestBitmapGc`) ~31 s after the first document change since the
+ *     last pass: frees everything unreferenced that is older than the store's 30 s grace (bitmaps a
+ *     tool created but has not committed yet are younger than that). It is postponed while a
+ *     dialog is open (dialogs may hold preview bitmaps outside any document).
+ *  3. Pinned bitmaps (`bitmaps.pin`, e.g. clipboard contents) are never collected.
+ */
+
+/** Grace period for bitmaps not referenced by any document (they may be about to be committed). */
+export const BITMAP_GC_GRACE_MS = 30000;
+
+/** Add every bitmap id a document references (raster contents, masks, selection) to `out`. */
+function addDocBitmaps(d: Document, out: Set<ID>) {
+  for (const l of Object.values(d.layers)) {
+    if (l.type === 'raster') out.add(l.bitmapId);
+    if (l.mask) out.add(l.mask.bitmapId);
   }
+  if (d.selection) out.add(d.selection.bitmapId);
+}
+
+/** Bitmaps referenced by history entries (their documents and pixel patches). */
+export function entryBitmaps(entries: readonly HistoryEntry[], out: Set<ID> = new Set()): Set<ID> {
+  for (const e of entries) {
+    addDocBitmaps(e.doc, out);
+    e.patches?.forEach((p) => out.add(p.bitmapId));
+  }
+  return out;
+}
+
+/** Bitmaps a session can reach: its current document (possibly a live preview) and its history. */
+export function sessionBitmaps(s: DocSession, out: Set<ID> = new Set()): Set<ID> {
+  addDocBitmaps(s.doc, out);
+  return entryBitmaps(s.history.entries, out);
+}
+
+/** Every bitmap id referenced by any open session. */
+export function referencedBitmaps(sessions: Record<ID, DocSession>): Set<ID> {
+  const keep = new Set<ID>();
+  for (const s of Object.values(sessions)) sessionBitmaps(s, keep);
   return keep;
 }
 
-function gcBitmaps(sessions: Record<ID, DocSession>) {
-  // Bitmaps created in the last 30s are kept by the store: a tool may be about to commit them.
-  bitmaps.retainOnly(referencedBitmaps(sessions));
+/**
+ * Free the `candidates` that no open session references any more, right away (no grace period).
+ * Returns the number of bitmaps removed.
+ */
+export function freeUnreferencedBitmaps(candidates: Set<ID>, sessions: Record<ID, DocSession>): number {
+  if (!candidates.size) return 0;
+  const live = referencedBitmaps(sessions);
+  const drop = new Set<ID>();
+  for (const id of candidates) if (!live.has(id) && bitmaps.has(id)) drop.add(id);
+  if (!drop.size) return 0;
+  // retainOnly with a negative grace removes every unpinned bitmap outside `keep`, however young.
+  bitmaps.retainOnly(new Set(bitmaps.ids().filter((id) => !drop.has(id))), -1);
+  return drop.size;
+}
+
+/** Full pass: remove every unreferenced bitmap older than the grace period (pinned ones stay). */
+export function gcBitmaps(sessions: Record<ID, DocSession> = useEditor.getState().sessions) {
+  bitmaps.retainOnly(referencedBitmaps(sessions), BITMAP_GC_GRACE_MS);
+}
+
+let gcTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** True while bitmaps may be held outside any document (an open dialog's previews). */
+function gcDeferred(): boolean {
+  return useUI.getState().dialogs.length > 0;
+}
+
+function runIdleGc() {
+  gcTimer = null;
+  if (gcDeferred()) {
+    gcTimer = setTimeout(runIdleGc, 5000);
+    return;
+  }
+  gcBitmaps();
+}
+
+/**
+ * Schedule an idle GC pass. Throttled, not debounced: a pending pass is kept, so continuous
+ * editing cannot postpone collection forever. Runs just after the grace period, so bitmaps that
+ * were young at the time of the change are old enough to be collected by then.
+ */
+export function requestBitmapGc(delayMs = BITMAP_GC_GRACE_MS + 1000) {
+  if (gcTimer !== null) return;
+  gcTimer = setTimeout(runIdleGc, delayMs);
+}
+
+/** Cancel a pending idle pass (tests). */
+export function cancelBitmapGc() {
+  if (gcTimer !== null) clearTimeout(gcTimer);
+  gcTimer = null;
 }
 
 function sanitizeSelection(s: DocSession, doc: Document): Pick<DocSession, 'activeLayerId' | 'selectedLayerIds'> {
@@ -179,6 +260,7 @@ export const useEditor = create<EditorState>()((set, get) => {
     },
 
     closeDocument(id) {
+      const closing = get().sessions[id];
       set((st) => {
         const sessions = { ...st.sessions };
         delete sessions[id];
@@ -190,7 +272,10 @@ export const useEditor = create<EditorState>()((set, get) => {
         }
         return { sessions, docOrder, activeDocId };
       });
-      gcBitmaps(get().sessions);
+      // Pixels only this document used are freed now; anything younger that a tool still holds
+      // is left to the idle pass.
+      if (closing) freeUnreferencedBitmaps(sessionBitmaps(closing), get().sessions);
+      requestBitmapGc();
     },
 
     setActiveDoc(id) {
@@ -229,6 +314,9 @@ export const useEditor = create<EditorState>()((set, get) => {
         return;
       }
       let entries = s.history.entries.slice(0, s.history.index + 1);
+      // Entries no longer reachable after this commit: the discarded redo branch, a step replaced
+      // by coalescing, and steps trimmed off the front. Their pixels are freed below.
+      const dropped: HistoryEntry[] = s.history.entries.slice(s.history.index + 1);
       const last = entries[entries.length - 1];
       if (
         opts.coalesce &&
@@ -239,16 +327,16 @@ export const useEditor = create<EditorState>()((set, get) => {
         !opts.patches?.length
       ) {
         entries[entries.length - 1] = { ...last, doc, timestamp: Date.now() };
+        dropped.push(last);
       } else {
         entries.push(newEntry(label, doc, opts.patches));
       }
-      let trimmed = false;
       let savedIndex = s.savedIndex;
       if (entries.length > HISTORY_LIMIT) {
         const drop = entries.length - HISTORY_LIMIT;
+        dropped.push(...entries.slice(0, drop));
         entries = entries.slice(drop);
         savedIndex -= drop;
-        trimmed = true;
       }
       const index = entries.length - 1;
       const next: DocSession = {
@@ -269,7 +357,7 @@ export const useEditor = create<EditorState>()((set, get) => {
         ),
       };
       set({ sessions: { ...sessions, [activeDocId]: next } });
-      if (trimmed) gcBitmaps(get().sessions);
+      if (dropped.length) freeUnreferencedBitmaps(entryBitmaps(dropped), get().sessions);
     },
 
     preview(recipe) {
@@ -493,6 +581,12 @@ export const useEditor = create<EditorState>()((set, get) => {
       set((st) => ({ recentColors: [c, ...st.recentColors.filter((x) => x.toLowerCase() !== c.toLowerCase())].slice(0, 24) }));
     },
   };
+});
+
+// Any document change can leave bitmaps behind (cancelled previews, coalesced steps, tool
+// leftovers): schedule an idle collection pass.
+useEditor.subscribe((st, prev) => {
+  if (st.sessions !== prev.sessions) requestBitmapGc();
 });
 
 /* ------------------------------------------------------------------ */

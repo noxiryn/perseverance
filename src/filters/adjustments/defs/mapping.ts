@@ -3,7 +3,7 @@ import { Blend, Clapperboard, Columns2, Droplets, PaintBucket } from 'lucide-rea
 import type { Gradient, ParamValues } from '../../../core/types';
 import type { FilterDef } from '../../../registry';
 import { LOOK_PRESETS, LUT_SIZE, isKnownLook, lookCube } from '../looks';
-import { BAYER4, apply3DLut, applyLuts, clamp01, gradientLutFloat, lum3, luma, rgbOf, sCurve, setLumInto, type Pixels } from '../math';
+import { BAYER4, apply3DLut, applyLuts, clamp01, gradientLutFloat, lum3, luma, readWords, rgbOf, sCurve, setLumInto, type Pixels } from '../math';
 import { bool, boolP, colorP, gradientP, isGradient, num, numP, pctP, selectP, str } from '../params';
 
 /* ================================================================== */
@@ -23,6 +23,9 @@ export const DEFAULT_MAP_GRADIENT: Gradient = {
 /** LUT resolution: 4 entries per luma level (index = (r·306 + g·601 + b·117) >> 8 ∈ 0..1020). */
 const MAP_SIZE = 1021;
 
+/** 4·BAYER4[v]·256 (the dither offset in luma·256 units): BAYER4[v] = (m + 0.5)/16 − 0.5 → 64m − 480. */
+const BAYER_OFF = Int32Array.from(BAYER4, (b) => Math.round(b * 1024));
+
 /**
  * Map luminosity through a gradient. Stops with alpha blend the mapped color over the original;
  * `dither` adds an ordered (Bayer 4×4) dither to hide banding in smooth gradients.
@@ -30,8 +33,12 @@ const MAP_SIZE = 1021;
 export function gradientMapPixels(img: Pixels, gradient: Gradient, reverse: boolean, dither: boolean): Pixels {
   const rev = reverse !== !!gradient.reverse;
   const lut = gradientLutFloat(gradient.stops, rev, MAP_SIZE);
-  let opaque = true;
-  for (let k = 3; k < lut.length; k += 4) if (lut[k] < 0.999) opaque = false;
+  let opaque = true,
+    solid = true; // every stop fully opaque (no blend with the original at all)
+  for (let k = 3; k < lut.length; k += 4) {
+    if (lut[k] < 0.999) opaque = false;
+    if (lut[k] < 1) solid = false;
+  }
   const d = img.data;
   const w = img.width;
   const h = img.height;
@@ -43,12 +50,49 @@ export function gradientMapPixels(img: Pixels, gradient: Gradient, reverse: bool
       t8[k * 3 + 1] = lut[k * 4 + 1];
       t8[k * 3 + 2] = lut[k * 4 + 2];
     }
-    for (let i = 0, n = d.length; i < n; i += 4) {
-      if (d[i + 3] === 0) continue;
-      const k = ((d[i] * 306 + d[i + 1] * 601 + d[i + 2] * 117) >> 8) * 3;
+    const u = readWords(img);
+    for (let q = 0, n = u.length; q < n; q++) {
+      const p = u[q];
+      if (p >>> 24 === 0) continue;
+      const k = (((p & 255) * 306 + ((p >> 8) & 255) * 601 + ((p >> 16) & 255) * 117) >> 8) * 3;
+      const i = q << 2;
       d[i] = t8[k];
       d[i + 1] = t8[k + 1];
       d[i + 2] = t8[k + 2];
+    }
+    return img;
+  }
+  if (solid) {
+    // Dithered, opaque: the Bayer offset n = (v + 0.5)/16 − 0.5 moves the luma index by 4n, i.e.
+    // by (64v − 480)/256, so the index is integer math, and lut[k] + n is pre-rounded into one
+    // byte table per Bayer value (same values as the float path below).
+    const t8 = new Uint8ClampedArray(16 * MAP_SIZE * 3);
+    for (let v = 0; v < 16; v++) {
+      const nv = BAYER4[v];
+      for (let k = 0; k < MAP_SIZE; k++) {
+        const o = (v * MAP_SIZE + k) * 3;
+        t8[o] = lut[k * 4] + nv;
+        t8[o + 1] = lut[k * 4 + 1] + nv;
+        t8[o + 2] = lut[k * 4 + 2] + nv;
+      }
+    }
+    const u = readWords(img);
+    const top = MAP_SIZE - 1;
+    for (let y = 0; y < h; y++) {
+      const row = (y & 3) * 4;
+      for (let x = 0, q = y * w; x < w; x++, q++) {
+        const p = u[q];
+        if (p >>> 24 === 0) continue;
+        const v = row + (x & 3);
+        // round((luma·256 + 64·bayer − 480) / 256), clamped to the table
+        let k = ((p & 255) * 306 + ((p >> 8) & 255) * 601 + ((p >> 16) & 255) * 117 + BAYER_OFF[v] + 128) >> 8;
+        k = k < 0 ? 0 : k > top ? top : k;
+        const o = (v * MAP_SIZE + k) * 3;
+        const i = q << 2;
+        d[i] = t8[o];
+        d[i + 1] = t8[o + 1];
+        d[i + 2] = t8[o + 2];
+      }
     }
     return img;
   }
@@ -189,12 +233,18 @@ export function splitToningPixels(img: Pixels, p: ParamValues): Pixels {
   if (amount === 0) return img;
   const t = splitToningTable(str(p, 'shadowColor', '#1d6f8a'), str(p, 'highlightColor', '#f2a03d'), num(p, 'balance', 0), amount);
   const d = img.data;
-  for (let i = 0, n = d.length; i < n; i += 4) {
-    if (d[i + 3] === 0) continue;
-    const k = ((d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29 + 128) >> 8) * 3;
-    d[i] += t[k];
-    d[i + 1] += t[k + 1];
-    d[i + 2] += t[k + 2];
+  const u = readWords(img);
+  for (let q = 0, n = u.length; q < n; q++) {
+    const p = u[q];
+    if (p >>> 24 === 0) continue;
+    const r = p & 255,
+      g = (p >> 8) & 255,
+      b = (p >> 16) & 255;
+    const k = ((r * 77 + g * 150 + b * 29 + 128) >> 8) * 3;
+    const i = q << 2;
+    d[i] = r + t[k];
+    d[i + 1] = g + t[k + 1];
+    d[i + 2] = b + t[k + 2];
   }
   return img;
 }

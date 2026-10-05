@@ -2,7 +2,7 @@
 import { Camera, FileImage, Glasses, Monitor, Rows3, ScanLine, Tv, Bug } from 'lucide-react';
 import type { FilterDef } from '../../../registry';
 import type { Img } from '../util';
-import { anchor, autoEdge, blurPlane, bool, clamp, coarseField, fbmValue, hash, hashGauss, isEmpty, num, prng, pt, rgb, sc, smoothstep, str } from '../util';
+import { anchor, autoEdge, blurPlane, bool, clamp, coarseField, fbmValue, hash, hashGauss, isEmpty, num, prng, pt, rgb, sc, scratchF32, smoothstep, str } from '../util';
 import { blurPlaneMultires, lineBoxBlur } from '../ops';
 import { vignetteAt } from './light';
 import { angleP, boolP, colorP, numP, pctP, pointP, pxP, seedP, selectP } from '../params';
@@ -82,7 +82,18 @@ export const chromaticAberration: FilterDef = {
     if (Math.abs(amt) < 0.05) return img;
     const radial = str(p.mode, 'linear') === 'radial';
     const clampEdge = autoEdge(img) === 'clamp';
-    const P = premulPlanes(img);
+    const n = w * h;
+    // premultiplied channels, interleaved (r, g, b, a): a bilinear tap reads color + alpha from
+    // the same cache line. Values are those of premulPlanes() (v/255 from a table: same doubles).
+    const P = scratchF32('chromatic-aberration', n * 4);
+    const V = INV255;
+    for (let i = 0, j = 0; i < n; i++, j += 4) {
+      const al = V[data[j + 3]];
+      P[j] = V[data[j]] * al;
+      P[j + 1] = V[data[j + 1]] * al;
+      P[j + 2] = V[data[j + 2]] * al;
+      P[j + 3] = al;
+    }
     const th = (num(p.angle, 0) * Math.PI) / 180;
     const ux = Math.cos(th),
       uy = -Math.sin(th);
@@ -90,39 +101,212 @@ export const chromaticAberration: FilterDef = {
     const cx = c.x * ctx.docWidth * s - ax,
       cy = c.y * ctx.docHeight * s - ay;
     const Rn = Math.max(1, Math.hypot(ctx.docWidth * s, ctx.docHeight * s) / 2);
+    const k = amt / Rn;
+    const w4 = w * 4;
+    // composite one pixel from its red (−d) and blue (+d) samples
+    const put = (j: number, rA: number, rR: number, bA: number, bB: number) => {
+      const gA = P[j + 3],
+        gG = P[j + 1];
+      const A = Math.max(rA, gA, bA);
+      if (A <= 0.002) {
+        data[j] = data[j + 1] = data[j + 2] = data[j + 3] = 0;
+        return;
+      }
+      data[j] = (rR / A) * 255;
+      data[j + 1] = (gG / A) * 255;
+      data[j + 2] = (bB / A) * 255;
+      data[j + 3] = A * 255;
+    };
+    if (!radial) {
+      // Linear offset: every red sample sits at (x − dx, y − dy), every blue one at (x + dx,
+      // y + dy). The horizontal half of the bilinear tap only depends on the column and the source
+      // row, so each source row is interpolated once (for the two output rows that use it) and
+      // kept in a small row cache; the vertical half is one lerp per output pixel. Same
+      // expressions as the per-pixel taps → identical values. Samples touching the border use
+      // the edge-aware bil4().
+      const dx = ux * amt,
+        dy = uy * amt;
+      const red = new ShiftedRows(P, w, h, -dx, 0, 3),
+        blue = new ShiftedRows(P, w, h, dx, 2, 3);
+      for (let y = 0; y < h; y++) {
+        const fyR = y - dy,
+          fyB = y + dy;
+        const rOk = red.row(fyR),
+          bOk = blue.row(fyB);
+        const tyR = red.ty,
+          tyB = blue.ty;
+        const rT = red.top,
+          rB = red.bot,
+          bT = blue.top,
+          bBt = blue.bot;
+        const rIn = red.inside,
+          bIn = blue.inside;
+        for (let x = 0, j = y * w4; x < w; x++, j += 4) {
+          let rA: number, rR: number, bA: number, bB: number;
+          if (rOk && rIn[x]) {
+            const q = x * 2;
+            rA = rT[q + 1] * (1 - tyR) + rB[q + 1] * tyR;
+            rR = rT[q] * (1 - tyR) + rB[q] * tyR;
+          } else {
+            rA = bil4(P, 3, w, h, x - dx, fyR, clampEdge);
+            rR = bil4(P, 0, w, h, x - dx, fyR, clampEdge);
+          }
+          if (bOk && bIn[x]) {
+            const q = x * 2;
+            bA = bT[q + 1] * (1 - tyB) + bBt[q + 1] * tyB;
+            bB = bT[q] * (1 - tyB) + bBt[q] * tyB;
+          } else {
+            bA = bil4(P, 3, w, h, x + dx, fyB, clampEdge);
+            bB = bil4(P, 2, w, h, x + dx, fyB, clampEdge);
+          }
+          put(j, rA, rR, bA, bB);
+        }
+      }
+      return img;
+    }
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
-        const i = y * w + x,
-          j = i * 4;
-        let dx: number, dy: number;
-        if (radial) {
-          const k = amt / Rn;
-          dx = (x + 0.5 - cx) * k;
-          dy = (y + 0.5 - cy) * k;
+        const j = (y * w + x) * 4;
+        const dx = (x + 0.5 - cx) * k;
+        const dy = (y + 0.5 - cy) * k;
+        // red (alpha + red) sampled at −d, blue (alpha + blue) at +d; interior taps inline, the
+        // border goes through the edge-aware bil4() (identical arithmetic either way)
+        let rA: number, rR: number, bA: number, bB: number;
+        let fx = x - dx,
+          fy = y - dy;
+        let x0 = Math.floor(fx),
+          y0 = Math.floor(fy);
+        if (x0 >= 0 && y0 >= 0 && x0 + 1 < w && y0 + 1 < h) {
+          const tx = fx - x0,
+            ty = fy - y0;
+          const q = (y0 * w + x0) * 4;
+          rA = (P[q + 3] * (1 - tx) + P[q + 7] * tx) * (1 - ty) + (P[q + w4 + 3] * (1 - tx) + P[q + w4 + 7] * tx) * ty;
+          rR = (P[q] * (1 - tx) + P[q + 4] * tx) * (1 - ty) + (P[q + w4] * (1 - tx) + P[q + w4 + 4] * tx) * ty;
         } else {
-          dx = ux * amt;
-          dy = uy * amt;
+          rA = bil4(P, 3, w, h, fx, fy, clampEdge);
+          rR = bil4(P, 0, w, h, fx, fy, clampEdge);
         }
-        const rA = bil(P.a, w, h, x - dx, y - dy, clampEdge),
-          rR = bil(P.r, w, h, x - dx, y - dy, clampEdge);
-        const bA = bil(P.a, w, h, x + dx, y + dy, clampEdge),
-          bB = bil(P.b, w, h, x + dx, y + dy, clampEdge);
-        const gA = P.a[i],
-          gG = P.g[i];
-        const A = Math.max(rA, gA, bA);
-        if (A <= 0.002) {
-          data[j] = data[j + 1] = data[j + 2] = data[j + 3] = 0;
-          continue;
+        fx = x + dx;
+        fy = y + dy;
+        x0 = Math.floor(fx);
+        y0 = Math.floor(fy);
+        if (x0 >= 0 && y0 >= 0 && x0 + 1 < w && y0 + 1 < h) {
+          const tx = fx - x0,
+            ty = fy - y0;
+          const q = (y0 * w + x0) * 4;
+          bA = (P[q + 3] * (1 - tx) + P[q + 7] * tx) * (1 - ty) + (P[q + w4 + 3] * (1 - tx) + P[q + w4 + 7] * tx) * ty;
+          bB = (P[q + 2] * (1 - tx) + P[q + 6] * tx) * (1 - ty) + (P[q + w4 + 2] * (1 - tx) + P[q + w4 + 6] * tx) * ty;
+        } else {
+          bA = bil4(P, 3, w, h, fx, fy, clampEdge);
+          bB = bil4(P, 2, w, h, fx, fy, clampEdge);
         }
-        data[j] = (rR / A) * 255;
-        data[j + 1] = (gG / A) * 255;
-        data[j + 2] = (bB / A) * 255;
-        data[j + 3] = A * 255;
+        put(j, rA, rR, bA, bB);
       }
     }
     return img;
   },
 };
+
+/** v / 255 for every byte value. */
+const INV255 = new Float64Array(256);
+for (let v = 0; v < 256; v++) INV255[v] = v / 255;
+
+/**
+ * Horizontal halves of bilinear taps at a constant offset `ox` of two channels (c0, c1) of
+ * interleaved 4-channel data, for the pair of source rows a sample row needs: `top[2x + k]` /
+ * `bot[2x + k]` = P(y0 | y0 + 1, x0)·(1 − tx) + P(…, x0 + 1)·tx with x0 = floor(x + ox) — the
+ * same expressions as a full bilinear tap. Moving down one row reuses the previous bottom row.
+ * `inside[x]` marks columns whose two taps are inside the image.
+ */
+class ShiftedRows {
+  top: Float64Array;
+  bot: Float64Array;
+  ty = 0;
+  readonly inside: Uint8Array;
+  private readonly x0: Int32Array;
+  private readonly tx: Float64Array;
+  private y0 = -2;
+  constructor(
+    private readonly P: Float32Array,
+    private readonly w: number,
+    private readonly h: number,
+    ox: number,
+    private readonly c0: number,
+    private readonly c1: number,
+  ) {
+    this.top = new Float64Array(w * 2);
+    this.bot = new Float64Array(w * 2);
+    this.inside = new Uint8Array(w);
+    this.x0 = new Int32Array(w);
+    this.tx = new Float64Array(w);
+    for (let x = 0; x < w; x++) {
+      const fx = x + ox;
+      const x0 = Math.floor(fx);
+      this.x0[x] = x0;
+      this.tx[x] = fx - x0;
+      this.inside[x] = x0 >= 0 && x0 + 1 < w ? 1 : 0;
+    }
+  }
+  /** Prepare the sample row at fy; false when its taps leave the image vertically. */
+  row(fy: number): boolean {
+    const y0 = Math.floor(fy);
+    this.ty = fy - y0;
+    if (!(y0 >= 0 && y0 + 1 < this.h)) return false;
+    if (y0 === this.y0) return true;
+    if (y0 === this.y0 + 1) {
+      const t = this.top;
+      this.top = this.bot;
+      this.bot = t;
+      this.fill(this.bot, y0 + 1);
+    } else {
+      this.fill(this.top, y0);
+      this.fill(this.bot, y0 + 1);
+    }
+    this.y0 = y0;
+    return true;
+  }
+  private fill(out: Float64Array, y: number) {
+    const { P, w, c0, c1, x0: X0, tx: TX, inside } = this;
+    const base = y * w * 4;
+    for (let x = 0; x < w; x++) {
+      if (!inside[x]) continue;
+      const q = base + X0[x] * 4;
+      const t = TX[x];
+      out[x * 2] = P[q + c0] * (1 - t) + P[q + 4 + c0] * t;
+      out[x * 2 + 1] = P[q + c1] * (1 - t) + P[q + 4 + c1] * t;
+    }
+  }
+}
+
+/** bil() on channel `c` of interleaved 4-channel data. */
+function bil4(P: Float32Array, c: number, w: number, h: number, fx: number, fy: number, clampEdge: boolean): number {
+  let x0 = Math.floor(fx),
+    y0 = Math.floor(fy);
+  const tx = fx - x0,
+    ty = fy - y0;
+  let x1 = x0 + 1,
+    y1 = y0 + 1;
+  const at = (xx: number, yy: number) => P[(yy * w + xx) * 4 + c];
+  if (clampEdge) {
+    x0 = x0 < 0 ? 0 : x0 >= w ? w - 1 : x0;
+    x1 = x1 < 0 ? 0 : x1 >= w ? w - 1 : x1;
+    y0 = y0 < 0 ? 0 : y0 >= h ? h - 1 : y0;
+    y1 = y1 < 0 ? 0 : y1 >= h ? h - 1 : y1;
+    return (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) + (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
+  }
+  if (x0 >= 0 && y0 >= 0 && x1 < w && y1 < h) {
+    return (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) + (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
+  }
+  const inX0 = x0 >= 0 && x0 < w,
+    inX1 = x1 >= 0 && x1 < w,
+    inY0 = y0 >= 0 && y0 < h,
+    inY1 = y1 >= 0 && y1 < h;
+  const a = inX0 && inY0 ? at(x0, y0) : 0,
+    b = inX1 && inY0 ? at(x1, y0) : 0,
+    cc = inX0 && inY1 ? at(x0, y1) : 0,
+    d = inX1 && inY1 ? at(x1, y1) : 0;
+  return (a * (1 - tx) + b * tx) * (1 - ty) + (cc * (1 - tx) + d * tx) * ty;
+}
 
 /* ------------------------------------------------------------------ */
 /* Glitch                                                              */

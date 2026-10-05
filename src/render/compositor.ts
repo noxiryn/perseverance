@@ -27,8 +27,11 @@ import {
   layerGeometry,
   layerSig,
   makeRC,
+  onSettle,
   renderLayer,
   renderStats,
+  settleApproximations,
+  settlePending,
   type RC,
 } from './engine';
 import { maskValue } from './mask';
@@ -73,13 +76,21 @@ export interface LiveRender {
   /** Live composite canvas: owned by the renderer and updated IN PLACE by later calls. */
   canvas: HTMLCanvasElement;
   /**
-   * Area (output px = doc px × scale) that changed since the previous call for the same
-   * document/options: an empty rect (width 0) when nothing changed, null when the whole canvas
-   * must be considered new (first call, structure change, large change…).
+   * Area (output px = doc px × scale) that changed since the caller's previous result
+   * (`opts.since`; without it: since the previous call for the same document/options): an empty
+   * rect (width 0) when nothing changed, null when the whole canvas must be considered new
+   * (first call, structure change, large change…).
    */
   dirty: Rect | null;
-  /** Whether any pixel may have changed since the previous call. */
+  /** Whether any pixel may have changed. */
   changed: boolean;
+  /** Content version of the canvas: pass it as `opts.since` next time. */
+  seq: number;
+}
+
+export interface LiveRenderOptions extends RenderOptions {
+  /** `seq` of the caller's previous result: `dirty` then covers every change made since. */
+  since?: number;
 }
 
 /**
@@ -89,15 +100,38 @@ export interface LiveRender {
  * is re-composited (the layers below the painted one come from a cache, adjustments above it run
  * over the area only) and reported as `dirty`, so the caller can redraw just that part.
  * Do not keep the canvas expecting it to stay unchanged (copy it, or use renderDocument).
+ * Work that is only approximate on GPU canvases is re-rendered exactly shortly after painting
+ * stops: subscribe with onRenderSettle to redraw then.
  */
-export function renderDocumentLive(doc: Document, opts: RenderOptions = {}): LiveRender {
-  const r = compositeDocumentLive(doc, {
-    scale: opts.scale ?? 1,
-    background: opts.background !== false,
-    hidden: opts.hidden ?? null,
-    below: opts.below ?? null,
-  });
-  return { canvas: r.canvas, changed: r.changed, dirty: r.dirty ? { x: r.dirty.x, y: r.dirty.y, width: r.dirty.w, height: r.dirty.h } : null };
+export function renderDocumentLive(doc: Document, opts: LiveRenderOptions = {}): LiveRender {
+  const r = compositeDocumentLive(
+    doc,
+    {
+      scale: opts.scale ?? 1,
+      background: opts.background !== false,
+      hidden: opts.hidden ?? null,
+      below: opts.below ?? null,
+    },
+    opts.since,
+  );
+  return { canvas: r.canvas, changed: r.changed, seq: r.seq, dirty: r.dirty ? { x: r.dirty.x, y: r.dirty.y, width: r.dirty.w, height: r.dirty.h } : null };
+}
+
+/**
+ * Called after approximate incremental work (GPU blurs / resampling of crops during live
+ * painting) was dropped so the next render is exact: displays should re-render. Returns the
+ * unsubscriber.
+ */
+export function onRenderSettle(fn: () => void): () => void {
+  return onSettle(fn);
+}
+
+/**
+ * Re-render approximate incremental work exactly now instead of after the idle delay (tests,
+ * exports). Returns whether anything was approximate.
+ */
+export function settleRenderCaches(): boolean {
+  return settleApproximations();
 }
 
 /**
@@ -407,5 +441,5 @@ export function invalidateRenderCache(layerId?: ID) {
 
 /** Cache statistics (debugging / performance checks). */
 export function renderCacheInfo() {
-  return { slots: slots.size, slotPixels: slots.pixels, assets: renderCache.size, assetPixels: renderCache.pixels, ...renderStats };
+  return { slots: slots.size, slotPixels: slots.pixels, assets: renderCache.size, assetPixels: renderCache.pixels, settlePending: settlePending(), ...renderStats };
 }

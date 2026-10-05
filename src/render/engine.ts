@@ -33,7 +33,7 @@ import { applyFilterStack, compositeOp, makeFilterContext, resolveParams, runFil
 import { cacheGeneration, objId, slots, type Resource } from './cache';
 import { edgeDistance } from './distance';
 import { applyMask, lerpInto, maskAlpha } from './mask';
-import { alignGrid, alignRect, effectInfluence, effectUsesFields, fieldBucket, filtersLocal, isPixelExact, mapDirtyRect } from './region';
+import { alignGrid, alignRect, changesSince, effectInfluence, effectUsesFields, fieldBucket, filtersLocal, isPixelExact, mapDirtyRect, type ChangeEntry } from './region';
 import { fillWithPaint } from './paint';
 import { renderShapeContent, shapeLocalBounds } from './shapes';
 import { layoutTextProps, renderTextContent, textCacheEpoch, textFontReady, textLocalBounds, type LocalContent } from './text';
@@ -200,6 +200,12 @@ export const renderStats = {
   /** Live (viewport) composites updated in place. */
   liveRegionRenders: 0,
   liveFullRenders: 0,
+  /** Region updates / partial composites that may differ from a full render on a GPU canvas. */
+  approxUpdates: 0,
+  /** ...of which may differ on every canvas (shared distance fields): settled likewise. */
+  inexactUpdates: 0,
+  /** Settles (approximate work re-rendered exactly). */
+  settles: 0,
   fieldHits: 0,
   fieldComputes: 0,
   docRenders: 0,
@@ -812,6 +818,98 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
 
 /* ---------------- region updates (live painting) ---------------- */
 
+/*
+ * Settling approximate work. On the software canvas every region update / partial composite
+ * below reproduces a full render exactly. Accelerated (GPU) canvases blur and resample a crop
+ * slightly differently than the whole surface (a few levels per channel, more where a threshold
+ * follows — e.g. a stroke effect on a feathered edge), so such work is marked approximate: once
+ * no approximate update happened for SETTLE_MS (the stroke ended or paused), the affected layer
+ * renders and the composites at their render scale are dropped and settle listeners (the
+ * viewport) re-render. After a stroke the composite is therefore always a from-scratch render.
+ * Several effects sharing distance fields are approximate on every canvas (see sharedFields).
+ */
+
+/** Idle time (ms) after the last approximate update before it is re-rendered exactly. */
+export const SETTLE_MS = 350;
+/**
+ * Approximate work per render scale (`rc.s.toFixed(5)`): the layers whose cached render holds
+ * approximate pixels (an empty set: only composites do). Composites at a scale draw the layer
+ * renders of that scale only, so a settle drops just that scale's renders and composites (the
+ * navigator's small renders never invalidate the viewport's 1:1 composite).
+ */
+const approx = new Map<string, Set<ID>>();
+/** Bumped on every approximate update (lets a group see that a child's update was approximate). */
+let approxSeq = 0;
+let settleTimer: ReturnType<typeof setTimeout> | null = null;
+const settleListeners = new Set<() => void>();
+
+const scaleKey = (s: number) => s.toFixed(5);
+
+/**
+ * Record approximate work at a render scale (in a layer's render, or null = in a composite) and
+ * (re)arm the settle timer. `inexact`: approximate on the software canvas too.
+ */
+function markApprox(rc: RC, layerId: ID | null, inexact = false) {
+  approxSeq++;
+  renderStats.approxUpdates++;
+  if (inexact) renderStats.inexactUpdates++;
+  const sk = scaleKey(rc.s);
+  let set = approx.get(sk);
+  if (!set) approx.set(sk, (set = new Set()));
+  if (layerId !== null) set.add(layerId);
+  if (settleTimer !== null) clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => {
+    settleTimer = null;
+    settleApproximations();
+  }, SETTLE_MS);
+}
+
+/** Whether approximate work is waiting to be re-rendered exactly. */
+export function settlePending(): boolean {
+  return approx.size > 0;
+}
+
+/**
+ * Re-render approximate work exactly now (normally called by the settle timer): drops the
+ * affected layer renders and the composites at their scales, then notifies settle listeners.
+ * False when nothing was approximate.
+ */
+export function settleApproximations(): boolean {
+  if (settleTimer !== null) clearTimeout(settleTimer);
+  settleTimer = null;
+  if (!approx.size) return false;
+  for (const [sk, layers] of approx) {
+    const tag = `|${sk}|`;
+    const prefixes = [...layers].map((id) => `L|${id}${tag}`);
+    // Layer renders of the approximate layers, every composite (documents, adjustment
+    // snapshots, below caches) and live composite at that scale.
+    slots.deleteWhere((key, composite) => (composite && key.includes(tag)) || prefixes.some((p) => key.startsWith(p)));
+    for (const k of [...liveStates.keys()]) if (k.includes(tag)) liveStates.delete(k);
+  }
+  approx.clear();
+  renderStats.settles++;
+  for (const fn of [...settleListeners]) {
+    try {
+      fn();
+    } catch (err) {
+      warnOnce('settle listener failed', err);
+    }
+  }
+  return true;
+}
+
+/** Subscribe to settles (re-render when called). Returns the unsubscriber. */
+export function onSettle(fn: () => void): () => void {
+  settleListeners.add(fn);
+  return () => settleListeners.delete(fn);
+}
+
+/**
+ * Effects whose output on a crop matches the full render on every canvas backend: CPU distance
+ * fields / height maps and plain fills. The others blur or resample on the GPU.
+ */
+const CROP_EXACT_EFFECTS = new Set(['stroke', 'bevel', 'color-overlay']);
+
 /** Where a layer render changed between two sets of bitmap versions (output px). */
 interface Change {
   /** Area of the content canvas (content + smart filters + mask) that changed. */
@@ -996,9 +1094,10 @@ function updateRenderRegion(rc: RC, l: Layer, flags: RenderFlags, p: LayerRender
     if (!ok || p.behind.length) return 'fail';
   } else {
     if (!p.core || !p.extent || !sized(p.core) || !p.behind.every((b) => sized(b.canvas) && !borrowed.has(b.canvas))) return 'fail';
-    // Several effects sharing distance fields: see effectUsesFields.
-    if (fx.filter((e) => effectUsesFields(e.def.id)).length > 1) return 'fail';
   }
+  // Several effects sharing distance fields (see effectUsesFields): a crop can make different
+  // sharing choices than a full render, which changes a few soft pixels — approximate.
+  const sharedFields = fx.filter((e) => effectUsesFields(e.def.id)).length > 1;
   const rho = fx.length ? effectsInfluenceOf(l, rc.s) : 0;
   // Partial work starts on the same pixel grid as the full render (dither, blur downsampling).
   const grid = alignGrid(Math.max(flags.mask ? maskSigma(l.mask, rc.s) : 0, rho / 3));
@@ -1006,6 +1105,9 @@ function updateRenderRegion(rc: RC, l: Layer, flags: RenderFlags, p: LayerRender
   if (!Dc) return 'ok';
   const lr: PxRect = { x: Dc.x - region.x, y: Dc.y - region.y, w: Dc.w, h: Dc.h };
   const cctx = ctx2d(C);
+  // Whether this update may differ from a full render on a GPU canvas (see markApprox).
+  const seq0 = approxSeq;
+  let isApprox = sharedFields || fx.some((e) => !CROP_EXACT_EFFECTS.has(e.def.id)) || (flags.mask && maskSigma(l.mask, rc.s) > 0.05);
 
   // 2) content
   const geom = layerGeometry(l, rc.s);
@@ -1016,8 +1118,13 @@ function updateRenderRegion(rc: RC, l: Layer, flags: RenderFlags, p: LayerRender
   cctx.clip();
   cctx.clearRect(lr.x, lr.y, lr.w, lr.h);
   try {
-    if (l.type === 'group' || contentPixelExact(rc, l, geom) || insideQuad(l, geom, Dc)) drawContent(rc, l, C, region, geom, Dc);
-    else {
+    if (l.type === 'group' || contentPixelExact(rc, l, geom) || insideQuad(l, geom, Dc)) {
+      drawContent(rc, l, C, region, geom, Dc);
+      // A resampled bitmap or a gradient/pattern fill drawn through a clip: exact on the software
+      // canvas, not on every GPU. Groups: approximate when a child's update was.
+      if (l.type === 'raster' && !contentPixelExact(rc, l, geom)) isApprox = true;
+      if (l.type === 'fill' && (l.fill as Paint).type !== 'solid') isApprox = true;
+    } else {
       // A transformed quad cut by a clip (or by a smaller canvas) gets different edge anti-
       // aliasing on the GPU than the same quad drawn whole: draw it whole, exactly like a fresh
       // render, and keep the changed part.
@@ -1032,6 +1139,8 @@ function updateRenderRegion(rc: RC, l: Layer, flags: RenderFlags, p: LayerRender
     return 'corrupt';
   }
   cctx.restore();
+  if (approxSeq !== seq0) isApprox = true;
+  if (isApprox) markApprox(rc, l.id, sharedFields);
 
   // 3) smart filters (pixel-local adjustment filters only), on a crop with the crop's offset
   if (hasF) {
@@ -1632,6 +1741,8 @@ function applyAdjustment(rc: RC, acc: Acc, adj: AdjustmentLayer) {
     // feather blur line up with a full render.
     const c = intersectRect(full, acc.clip);
     abs = c && alignRect(c, full, alignGrid(maskSigma(adj.mask, rc.s)));
+    // A feathered mask blurred over a crop is GPU-approximate.
+    if (abs && maskSigma(adj.mask, rc.s) > 0.05) markApprox(rc, null);
   }
   if (!abs) return;
   const r: PxRect = { x: abs.x - acc.x, y: abs.y - acc.y, w: abs.w, h: abs.h };
@@ -1639,7 +1750,16 @@ function applyAdjustment(rc: RC, acc: Acc, adj: AdjustmentLayer) {
   const ctx = acc.ctx;
   let img: ImageData;
   try {
-    img = ctx.getImageData(r.x, r.y, r.w, r.h);
+    if (acc.clip) {
+      // Incremental composite (the live viewport canvas, below caches): read through a CPU
+      // scratch copy. Chrome moves a GPU canvas to the CPU once it is read back, and the live
+      // canvas must stay accelerated (every brush frame draws layer renders into it).
+      const R = acquire(r.w, r.h, { read: true });
+      const rc2 = ctx2d(R, { willReadFrequently: true });
+      rc2.drawImage(acc.canvas, -r.x, -r.y);
+      img = rc2.getImageData(0, 0, r.w, r.h);
+      release(R);
+    } else img = ctx.getImageData(r.x, r.y, r.w, r.h);
   } catch (err) {
     warnOnce('adjustment readback failed', err);
     return;
@@ -1682,6 +1802,7 @@ function compositePassThrough(rc: RC, acc: Acc, g: GroupLayer) {
   if (acc.clip) {
     const c = intersectRect({ x: acc.clip.x - acc.x, y: acc.clip.y - acc.y, w: acc.clip.w, h: acc.clip.h }, all);
     wr = c && alignRect(c, all, alignGrid(maskSigma(masked ? g.mask : null, rc.s)));
+    if (wr && masked && maskSigma(g.mask, rc.s) > 0.05) markApprox(rc, null);
   }
   if (!wr) {
     // Nothing visible to update; still composite for the bookkeeping (bounds, `below` stop).
@@ -2251,10 +2372,15 @@ export function compositeDocument(doc: Document, o: DocRenderOptions): HTMLCanva
 export interface LiveComposite {
   /** The live canvas (owned by the renderer, updated in place by later calls). */
   canvas: HTMLCanvasElement;
-  /** Area (output px) this call re-composited: empty when nothing changed, null = everything. */
+  /**
+   * Area (output px) that changed since the caller's previous result (`since`), or this call
+   * alone when `since` is not given: empty when nothing changed, null = everything.
+   */
   dirty: PxRect | null;
   /** Whether any pixel of the canvas may have changed. */
   changed: boolean;
+  /** Version of the canvas content: pass it back as `since` on the next call. */
+  seq: number;
 }
 
 interface LiveState {
@@ -2262,35 +2388,57 @@ interface LiveState {
   canvas: HTMLCanvasElement;
   sig: string;
   items: DocItem[];
+  /** Content version (bumped by every change). */
+  seq: number;
+  /** Recent changes, oldest first (rect null = everything). */
+  log: ChangeEntry[];
 }
 
 /** Live composites per document composite key (most recent last). */
 const liveStates = new Map<string, LiveState>();
 const LIVE_MAX = 4;
+/** Changes remembered per live composite (for callers that skipped a few updates). */
+const LIVE_LOG = 64;
+/** Live composite content versions are unique across states (a dropped state never matches). */
+let liveSeq = 0;
 const NO_RECT: PxRect = Object.freeze({ x: 0, y: 0, w: 0, h: 0 }) as PxRect;
+
+function touchLive(key: string, cur: LiveState) {
+  liveStates.delete(key);
+  liveStates.set(key, cur);
+  while (liveStates.size > LIVE_MAX) liveStates.delete(liveStates.keys().next().value!);
+}
 
 /**
  * Composite the document into a canvas owned by the renderer that is updated IN PLACE: when only
  * part of the document changed (a brush frame), only that area is re-composited and reported as
  * `dirty`, so the caller (the viewport) can redraw just that part. The canvas keeps its identity
- * across calls — do not hold on to it expecting it to stay unchanged.
+ * across calls — do not hold on to it expecting it to stay unchanged. Callers pass the `seq` of
+ * their previous result as `since` so changes made through other callers are reported too.
  */
-export function compositeDocumentLive(doc: Document, o: DocRenderOptions): LiveComposite {
+export function compositeDocumentLive(doc: Document, o: DocRenderOptions, since?: number): LiveComposite {
   const st = docState(doc, o);
-  const cur = liveStates.get(st.key);
-  if (cur && cur.canvas.width === st.rc.W && cur.canvas.height === st.rc.H) {
-    if (cur.sig === st.sig) return { canvas: cur.canvas, dirty: NO_RECT, changed: false };
-    if (cur.sig.startsWith(st.base)) {
-      const plan = planIncremental(st, cur.items, 0.7);
-      if (plan) {
-              if (plan.dirty) recomposite(st, plan, cur.canvas);
-        cur.sig = st.sig;
-        cur.items = plan.items;
-        liveStates.delete(st.key);
-        liveStates.set(st.key, cur);
-        renderStats.liveRegionRenders++;
-        return { canvas: cur.canvas, dirty: plan.dirty ?? NO_RECT, changed: !!plan.dirty };
+  let cur = liveStates.get(st.key);
+  if (cur && (cur.canvas.width !== st.rc.W || cur.canvas.height !== st.rc.H)) cur = undefined;
+  const result = (c: LiveState, own: PxRect | null): LiveComposite => {
+    const dirty = since === undefined ? own : changesSince(c.log, c.seq, since);
+    return { canvas: c.canvas, dirty, changed: !dirty || (dirty.w > 0 && dirty.h > 0), seq: c.seq };
+  };
+  if (cur && cur.sig === st.sig) return result(cur, NO_RECT);
+  if (cur && cur.sig.startsWith(st.base)) {
+    const plan = planIncremental(st, cur.items, 0.7);
+    if (plan) {
+      if (plan.dirty) {
+        recomposite(st, plan, cur.canvas);
+        cur.seq = ++liveSeq;
+        cur.log.push({ seq: cur.seq, rect: plan.dirty });
+        if (cur.log.length > LIVE_LOG) cur.log.splice(0, cur.log.length - LIVE_LOG);
       }
+      cur.sig = st.sig;
+      cur.items = plan.items;
+      touchLive(st.key, cur);
+      renderStats.liveRegionRenders++;
+      return result(cur, plan.dirty ?? NO_RECT);
     }
   }
   renderStats.liveFullRenders++;
@@ -2305,10 +2453,10 @@ export function compositeDocumentLive(doc: Document, o: DocRenderOptions): LiveC
   k.drawImage(src, 0, 0);
   k.restore();
   const known = entry && entry.sig === st.sig;
-  liveStates.delete(st.key);
-  liveStates.set(st.key, { docId: doc.id, canvas, sig: known ? st.sig : '', items: known ? entry.value.items : [] });
-  while (liveStates.size > LIVE_MAX) liveStates.delete(liveStates.keys().next().value!);
-  return { canvas, dirty: null, changed: true };
+  const seq = ++liveSeq;
+  const next: LiveState = { docId: doc.id, canvas, sig: known ? st.sig : '', items: known ? entry.value.items : [], seq, log: [{ seq, rect: null }] };
+  touchLive(st.key, next);
+  return result(next, null);
 }
 
 /** Forget live composites (of one document, or all). */

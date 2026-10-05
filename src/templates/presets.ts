@@ -3,10 +3,10 @@ import type { DocPresetDef } from '../registry';
 
 export const DOC_PRESETS: DocPresetDef[] = [
   // Roblox
-  { id: 'roblox-icon-512', name: 'Game Icon', category: 'Roblox', width: 512, height: 512, description: 'Experience icon (512 × 512)' },
-  { id: 'roblox-icon-1024', name: 'Game Icon (HD)', category: 'Roblox', width: 1024, height: 1024, description: 'Experience icon at full upload size' },
-  { id: 'roblox-thumbnail-1920', name: 'Game Thumbnail', category: 'Roblox', width: 1920, height: 1080, description: 'Experience thumbnail, 16:9 full HD' },
-  { id: 'roblox-thumbnail-1280', name: 'Thumbnail', category: 'Roblox', width: 1280, height: 720, description: 'Experience thumbnail, 16:9 HD' },
+  { id: 'roblox-icon-512', name: 'Roblox Icon', category: 'Roblox', width: 512, height: 512, description: 'Experience icon (512 × 512)' },
+  { id: 'roblox-icon-1024', name: 'Roblox Icon (HD)', category: 'Roblox', width: 1024, height: 1024, description: 'Experience icon at full upload size' },
+  { id: 'roblox-thumbnail-1920', name: 'Roblox Thumbnail', category: 'Roblox', width: 1920, height: 1080, description: 'Experience thumbnail, 16:9 full HD' },
+  { id: 'roblox-thumbnail-1280', name: 'Roblox Thumbnail (720p)', category: 'Roblox', width: 1280, height: 720, description: 'Experience thumbnail, 16:9 HD' },
   { id: 'roblox-badge', name: 'Badge', category: 'Roblox', width: 512, height: 512, description: 'Badge image (displayed as a circle)' },
   { id: 'roblox-gamepass', name: 'Game Pass', category: 'Roblox', width: 512, height: 512, description: 'Game pass icon (displayed as a circle)' },
   { id: 'roblox-devproduct', name: 'Developer Product', category: 'Roblox', width: 512, height: 512, description: 'Developer product icon' },

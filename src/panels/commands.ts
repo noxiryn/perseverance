@@ -17,6 +17,7 @@ import {
   ArrowUpToLine,
   ArrowDown,
   ArrowUp,
+  BookmarkPlus,
   ClipboardCopy,
   ClipboardPaste,
   ClipboardX,
@@ -44,6 +45,7 @@ import { activeSession } from '../state/editor';
 import * as ops from './layerOps';
 import { EFFECT_NAMES, EFFECT_ORDER, STYLE_PRESETS, effectName } from './effectPresets';
 import { openFillLayerDialog } from './dialogs';
+import { copySmartFilters, hasFilterClipboard, pasteSmartFilters, saveLayerStyle } from './userStyles';
 
 const hasDoc = () => ops.hasDoc();
 const hasLayer = () => ops.hasLayer();
@@ -172,6 +174,47 @@ export function registerLayerCommands() {
     icon: ClipboardPaste,
     enabled: () => hasLayer() && !!ops.useLayersUI.getState().styleClipboard,
     run: ops.pasteStyle,
+  });
+  cmd({
+    id: 'layer.copyFilters',
+    label: 'Copy Smart Filters',
+    menu: 'Layer/Layer Style',
+    group: '30-style~filters',
+    order: 10,
+    icon: ClipboardCopy,
+    keywords: ['smart filters', 'copy filters', 'halftone', 'gradient map'],
+    enabled: () => {
+      const s = activeSession();
+      const l = s?.activeLayerId ? s.doc.layers[s.activeLayerId] : null;
+      return !!l && l.filters.length > 0;
+    },
+    run: copySmartFilters,
+  });
+  cmd({
+    id: 'layer.pasteFilters',
+    label: 'Paste Smart Filters',
+    menu: 'Layer/Layer Style',
+    group: '30-style~filters',
+    order: 20,
+    icon: ClipboardPaste,
+    keywords: ['smart filters', 'paste filters'],
+    enabled: () => hasLayer() && hasFilterClipboard(),
+    run: pasteSmartFilters,
+  });
+  cmd({
+    id: 'layer.saveStyle',
+    label: 'Save Layer Style…',
+    menu: 'Layer/Layer Style',
+    group: '30-style~clip',
+    order: 25,
+    icon: BookmarkPlus,
+    keywords: ['my styles', 'save preset', 'style preset', 'reuse', 'series'],
+    enabled: () => {
+      const s = activeSession();
+      const l = s?.activeLayerId ? s.doc.layers[s.activeLayerId] : null;
+      return !!l && (l.effects.length > 0 || l.filters.length > 0);
+    },
+    run: () => void saveLayerStyle(),
   });
   cmd({
     id: 'layer.clearStyle',
