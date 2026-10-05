@@ -20,9 +20,10 @@ export function PlaceAssetDialog({ close }: { close: (placed?: boolean) => void 
   const { all, list, categories } = useFilteredAssets(category, query);
   const selected = selectedId ? assets.get(selectedId) : undefined;
 
-  // preselect the first visible asset so the settings column is never empty
+  // the settings column follows the grid: preselect the first visible asset, and move the
+  // selection when a category/search change hides the selected one
   useEffect(() => {
-    if (!selected && list.length) select(list[0].id);
+    if (list.length && (!selected || !list.some((d) => d.id === selected.id))) select(list[0].id);
   }, [selected, list]);
 
   const activate = async (id: string) => {

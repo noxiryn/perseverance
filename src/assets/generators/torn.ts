@@ -89,17 +89,35 @@ export const tornBorder = defineAsset(
       const kBig = 1 / (300 * u);
       const kMid = 1 / (80 * u);
       const kSmall = 1 / (26 * u);
-      const reach = T * (1 + 1.4 * rough) + 4 * u;
-      // deep bites into the paper and a few retreats
-      const chunks = Array.from({ length: Math.round(4 + 12 * rough) }, () => {
+      const reach = T * (1 + 1.4 * rough) + 4 * u + T * 1.6 * (0.4 + rough * 0.8);
+      // perimeter-relative counts (same density on any canvas size)
+      const perimScale = (2 * (W + H)) / (4000 * u);
+      // deep bites into the paper (some big lobes) and a few retreats
+      const chunks = Array.from({ length: Math.round((5 + 12 * rough) * perimScale) }, () => {
         const q = perimeterPoint(r(), W, H);
-        const w = (14 + r() * 70) * u;
+        const lobe = r() < 0.22;
+        const w = (lobe ? 60 + r() * 90 : 14 + r() * 60) * u;
         return {
           x: q.x + q.nx * T,
           y: q.y + q.ny * T,
           w2: 1 / (w * w),
-          h: T * (r() < 0.7 ? 0.4 + r() * 1.1 : -(0.3 + r() * 0.35)) * (0.4 + rough * 0.8),
-          sharp: r() < 0.55,
+          h: T * (r() < 0.72 ? (lobe ? 0.7 + r() * 1.1 : 0.4 + r() * 1.1) : -(0.3 + r() * 0.35)) * (0.4 + rough * 0.8),
+          sharp: !lobe && r() < 0.55,
+        };
+      });
+      // torn teeth: straight-sided V spikes of black ripping into the paper, and white V notches
+      // cut into the black — the angular tears of ripped paper (a profile across the edge only)
+      const teeth = Array.from({ length: Math.round((8 + 22 * rough) * perimScale) }, () => {
+        const q = perimeterPoint(r(), W, H);
+        const inward = r() < 0.68;
+        return {
+          x: q.x + q.nx * T,
+          y: q.y + q.ny * T,
+          nx: q.nx,
+          ny: q.ny,
+          w: (6 + r() * r() * 46) * u,
+          h: T * (inward ? 0.35 + r() * 1.25 : -(0.25 + r() * 0.45)) * (0.35 + rough * 0.9),
+          k: 0.75 + r() * 0.6,
         };
       });
       for (let j = 0; j < gh; j++) {
@@ -126,6 +144,15 @@ export const tornBorder = defineAsset(
             const q = (dx * dx + dy * dy) * c.w2;
             if (q > 9) continue;
             bite += c.h * (c.sharp ? Math.max(0, 1 - Math.sqrt(q)) ** 1.5 : Math.exp(-q * 1.6));
+          }
+          for (const tt of teeth) {
+            const dx = x - tt.x;
+            const dy = y - tt.y;
+            const across = Math.abs(dx * -tt.ny + dy * tt.nx);
+            if (across >= tt.w) continue;
+            const along = dx * tt.nx + dy * tt.ny;
+            if (along < -T * 2 || along > T * 2.5 + Math.abs(tt.h)) continue;
+            bite += tt.h * Math.pow(1 - across / tt.w, tt.k);
           }
           e = T * Math.max(0.15, e) + bite;
           E[j * gw + i] = e;
@@ -158,6 +185,10 @@ export const tornBorder = defineAsset(
       const pale = shade(color, 0.62);
       const g1 = grainField(7301, 256, 1);
       const g2 = grainField(7409, 256, 3);
+      // paper fibers: a fine field sampled stretched along the edge normal → short streaks
+      // across the tear instead of round spray speckles
+      const fF = grainField(7507, 256, 1);
+      const FS = 3; // streak length factor
       const gs = Math.max(1, Math.round(u * 0.95)); // grain clump scale in px
       const band = fineAmp + dissolve * 1.1 + 2;
       // the tiles are shared; a seed-dependent offset decorrelates different seeds
@@ -202,10 +233,18 @@ export const tornBorder = defineAsset(
           const grain2 = g2[gi];
           let a = 1;
           if (v > -band) {
-            // fibrous tear detail + speckled dissolve, only near the edge
+            // fibrous tear detail + dissolve, only near the edge
             const fa = fA[gi] - 0.5;
+            // fibers run along the normal of the nearest edge (blended across the corner diagonal)
+            const xs = (x / gs) | 0;
+            const ys = (y / gs) | 0;
+            const fh = fF[((ys + tileOy) & 255) * 256 + ((((xs / FS) | 0) + tileOx) & 255)];
+            const fv = fF[((((ys / FS) | 0) + tileOy) & 255) * 256 + ((xs + tileOx) & 255)];
+            const ew = dxEdge - dyEdge;
+            const mixV = ew < -T * 0.25 ? 0 : ew > T * 0.25 ? 1 : (ew + T * 0.25) / (T * 0.5);
+            const fiber = fh + (fv - fh) * mixV;
             v -= fineAmp * (0.9 - 2.6 * (fa < 0 ? -fa : fa) + 0.9 * (fB[gi] - 0.5));
-            const t = 0.5 - v / dissolve + (grain - 0.5) * 1.25 + (grain2 - 0.5) * 0.9;
+            const t = 0.5 - v / dissolve + (fiber - 0.5) * 0.85 + (grain - 0.5) * 0.95 + (grain2 - 0.5) * 0.75;
             a = t <= 0.44 ? 0 : t >= 0.56 ? 1 : (t - 0.44) / 0.12;
             if (a <= 0) continue;
           }
@@ -217,7 +256,7 @@ export const tornBorder = defineAsset(
             const streak = STREAK[q0] * w00 + STREAK[q0 + 1] * w10 + STREAK[q1] * w01 + STREAK[q1 + 1] * w11;
             const speck = grain > 0.94 && grain2 > 0.58 ? 1 : 0;
             // mostly an even near-black with fine grain; scuffs only where the print is worn
-            k = texture * (worn * grain * grain * 0.42 + grain * 0.1 + streak * grain * grain * grain * 0.9 + speck * 0.7 * (0.35 + worn));
+            k = texture * (worn * grain * grain * 0.6 + grain * 0.12 + streak * grain * grain * grain * 1.1 + speck * 0.8 * (0.35 + worn));
             if (k > 1) k = 1;
           }
           const tc = k > 0.6 ? pale : light;
@@ -236,8 +275,8 @@ export const tornBorder = defineAsset(
         ctx.save();
         ctx.globalCompositeOperation = 'source-atop';
         const per = (2 * (W + H) * T) / (u * u * 1e5);
-        drawScratches(ctx, W, H, u, '#d8d8d8', r, 26 * texture * per, { angle: 0, angleJitter: 0.22, alpha: 0.32, maxLen: 120, width: 0.6 });
-        drawScratches(ctx, W, H, u, '#d8d8d8', r, 12 * texture * per, { angle: Math.PI / 2, angleJitter: 0.25, alpha: 0.28, maxLen: 80, width: 0.55 });
+        drawScratches(ctx, W, H, u, '#d8d8d8', r, 26 * texture * per, { angle: 0, angleJitter: 0.22, alpha: 0.4, maxLen: 120, width: 0.6 });
+        drawScratches(ctx, W, H, u, '#d8d8d8', r, 12 * texture * per, { angle: Math.PI / 2, angleJitter: 0.25, alpha: 0.34, maxLen: 80, width: 0.55 });
         const dust = new Path2D();
         const nd = Math.round(60 * texture * per);
         for (let i = 0; i < nd; i++) {
@@ -290,6 +329,27 @@ export const tornBorder = defineAsset(
         }
         ctx.fillStyle = rgba(color, 0.92);
         ctx.fill(fl);
+      }
+      // paper flecks left inside the black near the tear (bits of the sheet that didn't burn
+      // away): small irregular light chips, only on the black
+      if (fleckAmt > 0) {
+        const chips = new Path2D();
+        const n = Math.round(perim * 140 * fleckAmt);
+        for (let i = 0; i < n; i++) {
+          const e = edgeAt(r());
+          if (!e) continue;
+          const d = (0.15 + r() * r() * 1.1) * T;
+          const tj = (r() - 0.5) * 6 * u;
+          const x = e.x - e.nx * d - e.ny * tj;
+          const y = e.y - e.ny * d + e.nx * tj;
+          const size = u * (0.5 + r() ** 3 * 3.2);
+          tracePoly(chips, blob(x, y, size, r, r.int(4, 7), 0.75));
+        }
+        ctx.save();
+        ctx.globalCompositeOperation = 'source-atop';
+        ctx.fillStyle = rgba('#dedbd2', 0.82);
+        ctx.fill(chips);
+        ctx.restore();
       }
       // paper fibers crossing the torn edge
       {
