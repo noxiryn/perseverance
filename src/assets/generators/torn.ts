@@ -115,8 +115,8 @@ export const tornBorder = defineAsset(
           y: q.y + q.ny * T,
           nx: q.nx,
           ny: q.ny,
-          w: (6 + r() * r() * 46) * u,
-          h: T * (inward ? 0.35 + r() * 1.25 : -(0.25 + r() * 0.45)) * (0.35 + rough * 0.9),
+          w: (12 + r() * r() * 52) * u,
+          h: T * (inward ? 0.3 + r() * 0.95 : -(0.25 + r() * 0.4)) * (0.35 + rough * 0.9),
           k: 0.75 + r() * 0.6,
         };
       });
@@ -166,7 +166,7 @@ export const tornBorder = defineAsset(
               n(x * k * 0.28 + ox, y * k * 1.9) * (1 - wv) + n(x * k * 1.9 + ox, y * k * 0.28) * wv;
             const wn = along(nWear, kWear, 0) * 0.75 + along(nWear, kWear2, 7.7) * 0.25;
             WEAR[j * gw + i] = smoothstep(0.25, 1, wn);
-            STREAK[j * gw + i] = smoothstep(0.35, 0.95, along(nFib, kStreak, 3.3)) * (1 - smoothstep(0, T * 0.8, d));
+            STREAK[j * gw + i] = smoothstep(0.2, 0.9, along(nFib, kStreak, 3.3)) * (1 - smoothstep(0, T * 0.9, d));
           }
         }
       }

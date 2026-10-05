@@ -3,8 +3,9 @@
  *
  * All three are volumetric-looking density fields computed on a reduced grid (≈ 150–200k samples)
  * and up-scaled with smoothing — soft media hide the up-scaling and keep 1080p renders fast.
- *  - smoke: two-level domain-warped fbm (billows curling into each other) + ridged wisps, lit
- *    from the open side with a blurred-density gradient → bright billow rims, dark folds.
+ *  - smoke: billow noise (puffs inside puffs) over a soft plume mass, gently warped, feathered
+ *    towards the open side; each puff is lit by comparing it with a copy shifted towards the
+ *    light (bright rims, dark creases), plus faint ridged wisps in the thin outer smoke.
  *  - fog: horizontally stretched, warped wisps layered in depth bands with soft falloff.
  *  - clouds: billowy fbm with a cauliflower edge, self-shadowed from above (lit tops, gray bases).
  */
@@ -113,71 +114,109 @@ const smoke = defineAsset(
       const side = str(p, 'side', 'right');
       const glow = num(p, 'glow', 0.6);
       const wisps = num(p, 'wisps', 0.5);
-      const { fw, fh, s } = fieldDims(W, H, 150_000);
+      const { fw, fh, s } = fieldDims(W, H, 125_000);
       const fu = s * u; // field px per length unit
-      const k = 1 / ((560 * fu) / scale); // noise units per field px (billows ≈ 560 units)
+      const k = 1 / ((520 * fu) / scale); // noise units per field px (billows ≈ 520 units)
       const nA = simplex(seed);
       const nB = simplex(seed + 1);
       const nC = simplex(seed + 2);
       const nD = simplex(seed + 3);
-      // big soft billows get a gentle warp; the fine detail gets a stronger, faster warp
-      const warpBig = 0.35 + turb * 0.5;
-      const warpDet = 0.1 + turb * 0.4;
-      const detW = 0.14 + wisps * 0.22;
+      // a gentle, LOW-frequency domain warp: strong or fast warps marble the density into
+      // contour-like veins; real smoke billows only lean and curl a little
+      // (its gradient must stay small: steep displacement folds the fine octaves into streaks)
+      const warp = 0.05 + turb * 0.08;
       const aspect = W / H;
       const n = fw * fh;
       const dens = new Float32Array(n);
-      const tone = new Float32Array(n);
+      const puffs = new Float32Array(n);
+      const wisp = new Float32Array(n);
       for (let j = 0; j < fh; j++) {
         for (let i = 0; i < fw; i++) {
           const x = i * k;
           const y = j * k;
-          // the large-scale warp is low frequency: two octaves are enough
-          const qx = fbm2(nA, x, y, 2);
-          const qy = fbm2(nA, x + 5.2, y + 1.3, 2);
-          const big = fbm2(nC, x + warpBig * qx, y + warpBig * qy, 3) * 0.5 + 0.5;
-          const q2x = fbm2(nB, x * 3, y * 3, 2);
-          const q2y = fbm2(nB, x * 3 + 3.3, y * 3 - 1.1, 2);
-          // fine cloudy turbulence (multi-octave fbm, gently warped): soft mottling like real
-          // smoke instead of the marbled veins a strong warp produces
-          const det = clamp01((fbm2(nD, x * 3 + warpDet * q2x + qx * 0.6, y * 3 + warpDet * q2y + qy * 0.6, 4, 0.55) * 0.5) * 1.7 + 0.5);
-          const f = big * (1 - detW) + det * detW;
-          const m = sideMask(side, i / fw, j / fh, coverage, qx * 2.2 + qy * 0.8, aspect);
-          const d = smoothstep(0.34, 0.86, f + (m - 0.6) * 0.62) * smoothstep(0.0, 0.45, m);
+          const qx = nA(x * 0.55, y * 0.55);
+          const qy = nA(x * 0.55 + 5.2, y * 0.55 + 1.3);
+          const m = sideMask(side, i / fw, j / fh, coverage, qx * 1.5 + qy * 0.55, aspect);
+          if (m < 0.012) continue; // nothing can show here (open side of the placement)
+          const wx = x + warp * qx;
+          const wy = y + warp * qy;
+          // billow noise (sum of |noise|): rounded puffs inside puffs, separated by creases —
+          // the cauliflower structure of thick smoke
+          let pf = 0;
+          let amp = 1;
+          let norm = 0;
+          let fq = 1.6;
+          for (let oc = 0; oc < 4; oc++) {
+            pf += amp * Math.abs(nD(wx * fq + oc * 19.19, wy * fq - oc * 7.37));
+            norm += amp;
+            amp *= 0.52;
+            fq *= 2.03;
+          }
+          pf = Math.min(1, (pf / norm) * 1.55);
+          // the large mass of the plume
+          const mass = fbm2(nC, wx * 0.8, wy * 0.8, 3) * 0.5 + 0.5;
+          const f = mass * 0.68 + pf * 0.32;
+          // soft threshold + a wide falloff towards the open side: feathered, never a hard rim
+          const d = smoothstep(0.36, 0.92, f + (m - 0.55) * 0.8) * smoothstep(0.02, 0.8, m);
           const idx = j * fw + i;
           dens[idx] = d;
-          tone[idx] = det;
+          puffs[idx] = pf;
+          if (wisps > 0 && d < 0.97 && m > 0.05) {
+            // faint drifting strands in the thin outer smoke
+            const rr = ridged2(nB, wx * 1.2 + qy * 0.5, wy * 1.2 - qx * 0.5, 2);
+            wisp[idx] = smoothstep(0.6, 1, rr) * smoothstep(0.05, 0.4, m) * (1 - d) * (0.5 + 0.5 * pf);
+          }
         }
       }
-      // broad lighting from a blurred copy: billow sides facing the open space glow brighter
-      const soft = blurField(Float32Array.from(dens), fw, fh, Math.max(1.5, 16 * fu), 2);
+      // lighting: each puff is lit on the side facing the light — compare the puff field with a
+      // copy shifted towards the light (it drops there → lit rim; it rises → shadowed crease);
+      // the whole plume also gets a broad rim from the blurred density
+      const soft = blurField(Float32Array.from(dens), fw, fh, Math.max(1, 6 * fu), 2);
+      // puffs are lit from a softened copy: lighting the finest octaves looks embossed
+      const puffL = blurField(Float32Array.from(puffs), fw, fh, Math.max(1, 1.6 * fu), 2);
       const L = lightFor(side);
-      const deep = shade(color, -0.78);
+      const offP = Math.max(1, 3.5 * fu);
+      const pox = Math.round(-L.x * offP);
+      const poy = Math.round(-L.y * offP);
+      const offD = Math.max(1.5, 14 * fu);
+      const dox = Math.round(-L.x * offD);
+      const doy = Math.round(-L.y * offD);
+      const deep = shade(color, -0.86);
+      const dark = shade(color, -0.5);
       const mid = color;
       // brighter, more saturated versions of the color (no washing out to pink/white)
-      const lit = { r: Math.min(255, color.r * 1.22 + 26), g: Math.min(255, color.g * 1.12 + 10), b: Math.min(255, color.b * 1.1 + 10) };
-      const hot = { r: Math.min(255, color.r * 1.35 + 50), g: Math.min(255, color.g * 1.3 + 34), b: Math.min(255, color.b * 1.25 + 28) };
-      const gk = 6 / Math.max(0.05, fu);
+      const lit = { r: Math.min(255, color.r * 1.25 + 30), g: Math.min(255, color.g * 1.12 + 12), b: Math.min(255, color.b * 1.1 + 12) };
+      const hot = { r: Math.min(255, color.r * 1.4 + 58), g: Math.min(255, color.g * 1.35 + 40), b: Math.min(255, color.b * 1.3 + 32) };
       const [lo, lctx] = newCanvas(fw, fh);
       const img = lctx.createImageData(fw, fh);
       const px = img.data;
       for (let j = 0; j < fh; j++) {
+        const pj = Math.min(fh - 1, Math.max(0, j + poy)) * fw;
+        const dj = Math.min(fh - 1, Math.max(0, j + doy)) * fw;
         for (let i = 0; i < fw; i++) {
           const idx = j * fw + i;
           const d = dens[idx];
+          const wv = wisp[idx] * wisps;
           const o = idx * 4;
-          if (d <= 0.003) continue;
-          const sx = soft[idx + (i < fw - 1 ? 1 : 0)] - soft[idx - (i > 0 ? 1 : 0)];
-          const sy = soft[idx + (j < fh - 1 ? fw : 0)] - soft[idx - (j > 0 ? fw : 0)];
-          const facing = clamp01(0.5 + (sx * L.x + sy * L.y) * gk);
-          const t = tone[idx];
-          // emissive-looking smoke: brightness follows density, the puffs catch extra light
-          const br = clamp01(d * 1.1) * (0.45 + 0.55 * t);
-          let c: RGB = mixRGB(deep, mid, clamp01(0.12 + br * 1.12));
-          c = mixRGB(c, lit, clamp01((facing - 0.45) * 1.6 * glow + br * 0.22 * glow + (t - 0.6) * 1.4 * glow * d));
-          c = mixRGB(c, hot, clamp01((facing - 0.7) * 1.6 * glow * d));
-          // only mild alpha modulation by the detail: dense smoke has no see-through veins
-          const a = clamp01(Math.pow(d, 1.15) * (0.86 + 0.2 * t) * density * 1.3);
+          if (d <= 0.003 && wv <= 0.01) continue;
+          const pf = puffs[idx];
+          const pl = puffL[idx];
+          const pTow = puffL[pj + Math.min(fw - 1, Math.max(0, i + pox))];
+          const dTow = soft[dj + Math.min(fw - 1, Math.max(0, i + dox))];
+          const puffRim = clamp01((pl - pTow) * 5);
+          const crease = clamp01((pTow - pl) * 3.5);
+          const plumeRim = clamp01((soft[idx] - dTow) * 2.4);
+          // body: thicker puffs scatter more light; creases between puffs sink to black-red
+          const body = d * (0.35 + 0.65 * pf);
+          let c: RGB = mixRGB(deep, dark, clamp01(body * 1.9));
+          c = mixRGB(c, mid, clamp01((body - 0.28) * 1.7));
+          c = mixRGB(c, deep, crease * 0.6 * d);
+          // the thickest puffs glow (scattered light), the gaps between them stay dark
+          c = mixRGB(c, lit, clamp01((pf - 0.5) * 1.6) * clamp01(d * 1.3) * glow);
+          c = mixRGB(c, lit, clamp01((puffRim * 0.9 + plumeRim * 0.8) * glow * 1.3) * clamp01(d * 1.5));
+          c = mixRGB(c, hot, clamp01((puffRim + plumeRim - 0.75) * 1.3 * glow) * d);
+          if (wv > 0) c = mixRGB(c, dark, clamp01(wv * (1 - d)));
+          const a = clamp01(Math.pow(d, 1.2) * (0.75 + 0.35 * pf) * density * 1.35 + wv * 0.22 * density);
           px[o] = c.r;
           px[o + 1] = c.g;
           px[o + 2] = c.b;
