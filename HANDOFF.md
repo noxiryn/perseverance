@@ -25,7 +25,7 @@ ARCHITECTURE.md §3 for each module's full feature list).
 | renderer (compositor, text, shapes, layer styles) | `src/render` | **done** |
 | viewport-select (canvas, selection/transform/crop tools, Select/View menus) | `src/viewport` | **done** |
 | roblox (Pose Studio, remove bg, styler, safe zones, preview) | `src/roblox` | **done** |
-| io (projects, export, PSD, clipboard, autosave, File/Edit/Image menus) | `src/io` | in review |
+| io (projects, export, PSD, clipboard, autosave, File/Edit/Image menus) | `src/io` | **done** |
 | type-shape (type tool, character panel, shapes + presets) | `src/tools/type`, `src/tools/shape` | **done** |
 | looks-templates (looks engine, templates, doc presets) | `src/looks`, `src/templates` | **done** |
 | fx-filters (creative filters, filter dialog, gallery) | `src/filters/stylize`, `src/filters/ui` | implementing |
@@ -60,6 +60,8 @@ starting point; don't rewrite modules from scratch.
    - Optional: FilterContext.contentRect so edge-sensitive filters (rim-light, toon) know the real layer box.
    - (done) viewport.fit accounts for rulers; Alt+wheel no longer focuses the menu bar; Dialog submits with the
      latest onSubmit after Enter blur-commit.
+   - (done) CommandDef.paletteHidden (edit.redoAlt hidden from the palette); ARCHITECTURE §5.3 Edit/Transform layout.
+   - Optional: renderLayerToDoc option to skip fillOpacity (PSD export renders a copy with fill 1 today).
    - (done) NumberField `disabled` prop; (done) NumberField arrow keys keep the displayed text in sync.
    - renderer: export `warpPoint`/`isWarpActive`/`ITALIC_SKEW` from compositor.ts (type tool imports warpMath.ts directly).
    - viewport move tool: call `editTextLayer(layerId, {at})` from src/tools/type on double-click of a text layer

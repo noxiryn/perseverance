@@ -276,7 +276,7 @@ export const ioCommands: CommandDef[] = [
     enabled: canRedo,
     run: redo,
   },
-  cmd({ id: 'edit.redoAlt', label: 'Redo (Ctrl+Y)', shortcut: 'Ctrl+Y', icon: Redo2, keywords: ['redo'], enabled: canRedo, run: redo }),
+  cmd({ id: 'edit.redoAlt', label: 'Redo (Ctrl+Y)', shortcut: 'Ctrl+Y', icon: Redo2, keywords: ['redo'], paletteHidden: true, enabled: canRedo, run: redo }),
   cmd({
     id: 'edit.stepBackward',
     label: 'Step Backward',

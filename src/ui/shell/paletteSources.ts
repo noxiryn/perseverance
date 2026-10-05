@@ -144,7 +144,7 @@ export function collectPaletteItems(): PaletteItem[] {
   const coveredFilters = filterNamesCoveredByCommands(allCommands);
 
   for (const c of allCommands) {
-    if (PALETTE_HIDDEN.has(c.id)) continue;
+    if (PALETTE_HIDDEN.has(c.id) || c.paletteHidden) continue;
     out.push({
       key: `command:${c.id}`,
       kind: 'command',

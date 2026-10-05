@@ -115,6 +115,8 @@ export interface CommandDef {
   shortcut?: string;
   icon?: ComponentType<{ size?: number; strokeWidth?: number }>;
   keywords?: string[];
+  /** Hide from the command palette (e.g. alias commands that only exist for an extra shortcut). */
+  paletteHidden?: boolean;
   run(): void | Promise<void>;
   enabled?(): boolean;
   checked?(): boolean;
