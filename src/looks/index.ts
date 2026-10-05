@@ -4,7 +4,7 @@ import { commands, looks, panels } from '../registry';
 import { activeDoc } from '../state/editor';
 import { useUI } from '../state/ui';
 import { BUILTIN_LOOKS } from './defs';
-import { applyLook, hasLook, removeLook } from './engine';
+import { hasLook, removeLook } from './engine';
 import { LooksPanel } from './LooksPanel';
 import { currentTargetId, useLooksUI } from './store';
 
@@ -49,13 +49,4 @@ commands.register({
   run: () => useUI.getState().showPanel('looks'),
 });
 
-for (const look of BUILTIN_LOOKS) {
-  commands.register({
-    id: `looks.apply.${look.id}`,
-    label: `Apply Look: ${look.name}`,
-    icon: WandSparkles,
-    keywords: ['look', 'style', look.category.toLowerCase(), ...(look.description ?? '').toLowerCase().split(/[^a-z]+/).filter((w) => w.length > 3).slice(0, 6)],
-    enabled: () => !!activeDoc(),
-    run: () => applyLook(look.id, currentTargetId()),
-  });
-}
+// Individual looks are listed in the command palette by the shell (one entry per registered look).

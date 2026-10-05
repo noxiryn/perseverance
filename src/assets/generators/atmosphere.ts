@@ -284,22 +284,22 @@ const SKIES: Record<string, string[]> = {
 };
 
 function cloudDensity(nA: Noise2, nB: Noise2, x: number, y: number, cover: number, soft: number): number {
-  // large shapes + billowy (abs) detail → cauliflower edges
-  const big = fbm2(nA, x, y, 3, 0.5) * 0.5 + 0.5;
+  // large rounded masses + billowy (|n|) puffs → cumulus-like lumpy outlines
+  const big = fbm2(nA, x, y, 4, 0.5) * 0.5 + 0.5;
   let b = 0;
   let amp = 0.5;
-  let f = 2.1;
+  let f = 2.3;
   let norm = 0;
-  for (let o = 0; o < 4; o++) {
-    b += amp * (1 - Math.abs(nB(x * f + o * 3.1, y * f - o * 1.7)));
+  for (let o = 0; o < 3; o++) {
+    b += amp * Math.abs(nB(x * f + o * 3.1, y * f - o * 1.7));
     norm += amp;
     amp *= 0.5;
-    f *= 2.03;
+    f *= 2.1;
   }
   b /= norm;
-  const v = big * 0.72 + b * 0.38;
-  const t0 = 0.86 - cover * 0.55;
-  return smoothstep(t0, t0 + 0.06 + soft * 0.3, v);
+  const v = big * 0.85 + b * 0.32;
+  const t0 = 0.78 - cover * 0.5;
+  return smoothstep(t0, t0 + 0.06 + soft * 0.24, v);
 }
 
 const clouds = defineAsset(
@@ -348,16 +348,22 @@ const clouds = defineAsset(
       const nB = simplex(seed + 1);
       const n = fw * fh;
       const dens = new Float32Array(n);
+      const puff = new Float32Array(n);
       for (let j = 0; j < fh; j++) {
         for (let i = 0; i < fw; i++) {
           // slightly flattened clouds (wider than tall)
-          dens[j * fw + i] = cloudDensity(nA, nB, i * k * 0.8, j * k * 1.25, cover, soft);
+          const x = i * k * 0.8;
+          const y = j * k * 1.25;
+          const d = cloudDensity(nA, nB, x, y, cover, soft);
+          dens[j * fw + i] = d;
+          // interior lumps (only where there is cloud)
+          if (d > 0.01) puff[j * fw + i] = fbm2(nB, x * 5.3 + 4.1, y * 5.3 - 2.2, 2);
         }
       }
       // self-shadowing: light coming from the sun direction; sample density towards the sun
       const lx = Math.cos(la);
       const ly = -Math.sin(la);
-      const blur = blurField(Float32Array.from(dens), fw, fh, Math.max(1, 5 * fu), 2);
+      const blur = blurField(Float32Array.from(dens), fw, fh, Math.max(1, 4 * fu), 2);
       const off = Math.max(1, 14 * fu);
       const [lo, lctx] = newCanvas(fw, fh);
       const img = lctx.createImageData(fw, fh);
@@ -375,8 +381,8 @@ const clouds = defineAsset(
           const toward2 = blur[sj2 * fw + si2];
           // facing the sun (less cloud towards it) → bright; far side / deep inside → shadowed
           const here = blur[idx];
-          const lightT = clamp01(0.66 + (here - toward) * 2.4 - (toward2 - here) * 0.35 - here * 0.12);
-          let c = mixRGB(shadowC, light, lightT);
+          const lightT = clamp01(0.62 + (here - toward) * 3.2 - (toward2 - here) * 0.5 - here * 0.18);
+          let c = mixRGB(shadowC, light, clamp01(lightT + puff[idx] * 0.22));
           // thin wisps let the light through
           const thin = 1 - smoothstep(0.15, 0.7, here);
           c = mixRGB(c, light, thin * 0.35);

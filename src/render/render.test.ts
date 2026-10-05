@@ -56,6 +56,37 @@ describe('mesh warp', () => {
     expect(holes).toBe(0);
   });
 
+  it('skipping empty cells never drops the bilinear footprint of sparse pixels', () => {
+    const w = 40,
+      h = 24;
+    const src = new Uint8ClampedArray(w * h * 4);
+    // Interior pixels sitting on/next to cell borders (cells are 8×8 px).
+    for (const [x, y] of [
+      [7, 7],
+      [8, 15],
+      [15, 3],
+      [16, 8],
+      [31, 16],
+      [24, 12],
+    ])
+      src.set([200, 100, 50, 255], (y * w + x) * 4);
+    // identity: exact copy
+    const id = new Uint8ClampedArray(src.length);
+    warpImage(src, w, h, id, w, h, buildGrid(w, h, 5, 3, (x, y) => [x, y]));
+    expect(Array.from(id)).toEqual(Array.from(src));
+    // sub-pixel shift: total coverage is preserved (nothing lost at cell borders)
+    const sh = new Uint8ClampedArray(src.length);
+    warpImage(src, w, h, sh, w, h, buildGrid(w, h, 5, 3, (x, y) => [x + 0.37, y + 0.61]));
+    let a0 = 0,
+      a1 = 0;
+    for (let i = 3; i < src.length; i += 4) {
+      a0 += src[i];
+      a1 += sh[i];
+    }
+    // bilinear resampling preserves the total coverage (up to 8-bit rounding of each sample)
+    expect(Math.abs(a1 - a0)).toBeLessThanOrEqual(12);
+  });
+
   it('translation shifts the content and samples bilinearly in premultiplied space', () => {
     const w = 4,
       h = 1;

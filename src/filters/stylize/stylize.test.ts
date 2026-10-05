@@ -12,7 +12,7 @@ import { vignetteAt } from './defs/light';
 import { cutoutQuantize, fromOklab, toOklab } from './defs/artistic';
 import { separateInks } from './defs/comic';
 import { boxIntegral, quantTable } from './defs/retro';
-import { boundedDistance, distanceTransform, insideDistance } from './util';
+import { boundedDistance, boxBlurPlane, coarseField, distanceTransform, insideDistance } from './util';
 import { spotLUT } from './screen';
 
 type Img = { data: Uint8ClampedArray; width: number; height: number };
@@ -439,5 +439,44 @@ describe('distance helpers', () => {
     const exact = insideDistance(img, true);
     const bounded = insideDistance(img, true, 3);
     for (let i = 0; i < 900; i++) if (exact[i] <= 3) expect(bounded[i]).toBeCloseTo(exact[i], 4);
+  });
+});
+
+describe('fast planes', () => {
+  it('boxBlurPlane matches a naive clamped box blur and preserves constants', () => {
+    const w = 37,
+      h = 23,
+      r = 3;
+    const a = new Float32Array(w * h);
+    for (let i = 0; i < a.length; i++) a[i] = ((i * 7919) % 101) / 100;
+    let ref = Float32Array.from(a);
+    const at = (b: Float32Array, x: number, y: number) => b[Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))];
+    for (let p = 0; p < 2; p++) {
+      const hp = new Float32Array(w * h);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let s0 = 0; for (let k = -r; k <= r; k++) s0 += at(ref, x + k, y); hp[y * w + x] = s0 / (2 * r + 1); }
+      const vp = new Float32Array(w * h);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let s0 = 0; for (let k = -r; k <= r; k++) s0 += at(hp, x, y + k); vp[y * w + x] = s0 / (2 * r + 1); }
+      ref = vp;
+    }
+    boxBlurPlane(a, w, h, r, 2);
+    for (let i = 0; i < a.length; i++) expect(a[i]).toBeCloseTo(ref[i], 4);
+    const c = new Float32Array(w * h).fill(0.7);
+    boxBlurPlane(c, w, h, 5, 3);
+    for (let i = 0; i < c.length; i++) expect(c[i]).toBeCloseTo(0.7, 5);
+  });
+
+  it('gaussian blur keeps a flat opaque image flat', () => {
+    const img = makeImg(30, 20, () => [100, 150, 200, 255]);
+    const out = run('gaussian-blur', img, { radius: 6 });
+    for (let j = 0; j < out.data.length; j += 4) {
+      expect(Math.abs(out.data[j] - 100)).toBeLessThanOrEqual(1);
+      expect(Math.abs(out.data[j + 2] - 200)).toBeLessThanOrEqual(1);
+      expect(out.data[j + 3]).toBe(255);
+    }
+  });
+
+  it('coarseField reproduces linear fields exactly', () => {
+    const f = coarseField(30, 20, 6, (x, y) => x * 2 + y * 0.5);
+    for (let y = 0; y < 20; y++) for (let x = 0; x < 30; x++) expect(f[y * 30 + x]).toBeCloseTo(x * 2 + y * 0.5, 4);
   });
 });

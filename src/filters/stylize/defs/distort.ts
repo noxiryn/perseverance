@@ -10,7 +10,7 @@ import { AudioWaveform, CircleDashed, Globe, MoveDiagonal, Shrink, Tornado, Wave
 import { createNoise2D } from '../../../core/noise';
 import type { FilterDef } from '../../../registry';
 import type { Edge, Img } from '../util';
-import { anchor, autoEdge, clamp, isEmpty, num, pt, remap, str } from '../util';
+import { anchor, autoEdge, clamp, coarseField, isEmpty, num, pt, remap, str } from '../util';
 import { angleP, numP, pctP, pointP, pxP, seedP, selectP } from '../params';
 
 const EDGE_OPTIONS: [string, string][] = [
@@ -320,14 +320,17 @@ export const displaceNoise: FilterDef = {
       }
       return sum / norm;
     };
+    // the displacement is smooth: evaluate it on a grid fine enough for the finest octave
+    const step = clamp(Math.floor(scale / Math.pow(2, oct + 1)), 1, 8);
+    const fx = coarseField(w, img.height, step, (x, y) => fbm(nx, (x + ax) / scale, (y + ay) / scale) * amt);
+    const fy = coarseField(w, img.height, step, (x, y) => fbm(ny, (x + ax) / scale, (y + ay) / scale) * amt);
     return remap(
       img,
       (sx, sy, y) => {
-        const Y = (y + ay) / scale;
+        const o = y * w;
         for (let x = 0; x < w; x++) {
-          const X = (x + ax) / scale;
-          sx[x] = x + fbm(nx, X, Y) * amt;
-          sy[x] = y + fbm(ny, X, Y) * amt;
+          sx[x] = x + fx[o + x];
+          sy[x] = y + fy[o + x];
         }
       },
       edgeOf(img, p.edge),

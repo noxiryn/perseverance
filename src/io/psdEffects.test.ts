@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Gradient, LayerEffect } from '../core/types';
-import { effectsFromPsd, effectsToPsd, fromPsdColor, fromPsdGradient, toPsdGradient } from './psdEffects';
+import { effectsFromPsd, effectsToPsd, fillFromPsd, fillToPsd, fromPsdColor, fromPsdGradient, toPsdGradient } from './psdEffects';
 
 const fx = (effectId: string, params: LayerEffect['params'], enabled = true): LayerEffect => ({ id: `e_${effectId}`, effectId, enabled, params });
 
@@ -114,5 +114,14 @@ describe('psd layer effects', () => {
     const { info } = effectsToPsd([fx('drop-shadow', {}), fx('stroke', { size: 2 })]);
     expect(effectsFromPsd({ ...info!, disabled: true })).toEqual([]);
     expect(effectsFromPsd(info, (id) => id !== 'stroke').map((e) => e.effectId)).toEqual(['drop-shadow']);
+  });
+
+  it('round-trips solid and gradient fill layers; patterns stay pixels', () => {
+    expect(fillFromPsd(fillToPsd({ type: 'solid', color: '#c4141c' })!)).toEqual({ type: 'solid', color: '#c4141c' });
+    const g: Gradient = { kind: 'reflected', angle: 45, scale: 0.8, reverse: false, stops: [{ offset: 0, color: '#000000' }, { offset: 0.6, color: '#ff8800' }] };
+    const back = fillFromPsd(fillToPsd({ type: 'gradient', gradient: g })!);
+    expect(back).toEqual({ type: 'gradient', gradient: g });
+    expect(fillToPsd({ type: 'pattern', assetId: 'paper-texture', scale: 1 })).toBeNull();
+    expect(fillFromPsd(undefined)).toBeNull();
   });
 });

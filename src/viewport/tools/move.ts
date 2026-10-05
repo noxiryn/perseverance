@@ -15,7 +15,7 @@ import { useUI } from '../../state/ui';
 import { matchShortcut } from '../../ui/shortcuts';
 import { TransformSession, type Hit } from '../transform/session';
 import { activeTransform, cancelTransform, commitTransform } from '../transform/controller';
-import { cloneLayerTree, layerCorners, layersTopDown, pickLayer, safeBounds, topGroupOf, topLevelIds, transformableLeaves } from '../layers';
+import { cloneLayerTree, layerCorners, layerFrame, layersTopDown, pickLayer, safeBounds, topGroupOf, topLevelIds, transformableLeaves } from '../layers';
 import { clearSmartGuides, collectSnapTargets, snapRect, type SnapTargets } from '../snap';
 import { MaskFollower } from '../maskFollow';
 import { translate } from '../math/affine';
@@ -83,7 +83,16 @@ function controlsSession(): TransformSession | null {
   const s = activeSession();
   if (!s || !useUI.getState().view.transformControls) return null;
   const ids = controlIds(s.doc);
-  const key = ids.join(',');
+  // Sizes are part of the key: text re-measures when its web font finishes loading.
+  const sizes = transformableLeaves(s.doc, ids)
+    .movable.map((id) => {
+      const l = s.doc.layers[id];
+      if (!isTransformable(l)) return '';
+      const f = layerFrame(l);
+      return `${f.w.toFixed(2)}x${f.h.toFixed(2)}`;
+    })
+    .join(';');
+  const key = `${ids.join(',')}|${sizes}`;
   if (controls && controls.doc === s.doc && controls.key === key) return controls.session;
   const res = ids.length ? TransformSession.forLayers(s.doc, ids, 'immediate') : null;
   controls = { key, doc: s.doc, session: res && typeof res !== 'string' ? res : null };

@@ -11,7 +11,11 @@ import type { Accessories, FaceStyle, HairStyle } from './types';
 export type SurfaceKind = 'hair' | 'metal' | 'dark' | 'gold' | 'accent' | 'leather' | 'cloth';
 
 export interface PartsFactory {
-  material(kind: SurfaceKind, color: string, opts?: { doubleSide?: boolean }): THREE.Material;
+  /**
+   * Material for a surface. `slot: 'accent'` binds the color to the appearance accent color so it
+   * can be recolored in place (no rebuild) while the user drags a color picker.
+   */
+  material(kind: SurfaceKind, color: string, opts?: { doubleSide?: boolean; slot?: 'accent' }): THREE.Material;
   track<T extends { dispose(): void }>(g: T): T;
 }
 
@@ -186,7 +190,7 @@ export function buildKatana(f: PartsFactory, accent: string): THREE.Group {
   g.name = 'Katana';
   const sheath = f.material('dark', '#141416');
   const wrap = f.material('cloth', '#2b2b2f');
-  const cord = f.material('accent', accent);
+  const cord = f.material('accent', accent, { slot: 'accent' });
   const inner = new THREE.Group();
   inner.add(mesh(new THREE.BoxGeometry(0.13, 3.0, 0.18), sheath, f, (m) => (m.position.y = -0.6)));
   inner.add(mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.05, 16), cord, f, (m) => (m.position.y = 0.92)));
@@ -202,7 +206,7 @@ export function buildKatana(f: PartsFactory, accent: string): THREE.Group {
 export function buildShield(f: PartsFactory, accent: string): THREE.Group {
   const g = new THREE.Group();
   g.name = 'Shield';
-  const face = f.material('accent', accent);
+  const face = f.material('accent', accent, { slot: 'accent' });
   const rim = f.material('metal', '#8e9097');
   g.add(mesh(new THREE.CylinderGeometry(0.85, 0.85, 0.14, 28), face, f, (m) => (m.rotation.z = Math.PI / 2)));
   g.add(mesh(new THREE.TorusGeometry(0.85, 0.07, 6, 28), rim, f, (m) => (m.rotation.y = Math.PI / 2)));
@@ -235,7 +239,7 @@ export function buildHeadphones(f: PartsFactory, accent: string): THREE.Group {
   const g = new THREE.Group();
   g.name = 'Headphones';
   const dark = f.material('dark', '#1b1b1f');
-  const ring = f.material('accent', accent);
+  const ring = f.material('accent', accent, { slot: 'accent' });
   g.add(mesh(new THREE.TorusGeometry(0.74, 0.07, 8, 28, Math.PI), dark, f, (m) => (m.position.y = 0.08)));
   for (const s of [-1, 1]) {
     g.add(
@@ -271,10 +275,10 @@ export function buildCape(f: PartsFactory, accent: string, torsoTop: number): TH
     pos.setZ(i, pos.getZ(i) - 0.12 - 0.55 * t * t + wave - Math.abs(x) * 0.08 * (1 - t));
   }
   geo.computeVertexNormals();
-  g.add(mesh(geo, f.material('cloth', accent, { doubleSide: true }), f));
+  g.add(mesh(geo, f.material('cloth', accent, { doubleSide: true, slot: 'accent' }), f));
   // Collar
   g.add(
-    mesh(new THREE.BoxGeometry(2.2, 0.16, 0.5), f.material('cloth', accent), f, (m) => {
+    mesh(new THREE.BoxGeometry(2.2, 0.16, 0.5), f.material('cloth', accent, { slot: 'accent' }), f, (m) => {
       m.position.set(0, -0.02, -0.18);
     }),
   );
@@ -301,10 +305,8 @@ export function buildAccessories(
 /* Face                                                                */
 /* ------------------------------------------------------------------ */
 
-/** Face texture painted over the skin color (front face of the head). Null for 'blank'. */
-export function buildFaceTexture(style: FaceStyle, skin: string): THREE.CanvasTexture | null {
-  if (style === 'blank') return null;
-  const c = document.createElement('canvas');
+/** Paint a face decal over the skin color into a 256×256 canvas (no-op for 'blank'). */
+export function paintFace(c: HTMLCanvasElement, style: FaceStyle, skin: string) {
   c.width = c.height = 256;
   const g = c.getContext('2d')!;
   g.fillStyle = skin;
@@ -339,6 +341,13 @@ export function buildFaceTexture(style: FaceStyle, skin: string): THREE.CanvasTe
     g.closePath();
     g.fill();
   }
+}
+
+/** Face texture painted over the skin color (front face of the head). Null for 'blank'. */
+export function buildFaceTexture(style: FaceStyle, skin: string): THREE.CanvasTexture | null {
+  if (style === 'blank') return null;
+  const c = document.createElement('canvas');
+  paintFace(c, style, skin);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;

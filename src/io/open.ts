@@ -56,6 +56,11 @@ export async function openFile(file: OpenedFile, opts: { asNewDocument?: boolean
       return;
     }
     if (kind === 'psd') {
+      if (file.data.byteLength > 4 * 1024 * 1024) {
+        // Parsing is synchronous: show feedback and let it paint first.
+        toast(`Reading “${file.name}”…`, 'info', 2000);
+        await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+      }
       const { importPsd } = await import('./psd');
       const doc = await importPsd(file);
       addRecentFile(file.path, file.name);

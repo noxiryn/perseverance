@@ -24,7 +24,7 @@ export function paintPaper(ctx: CanvasRenderingContext2D, W: number, H: number, 
   const specks = o.specks ?? 0.3;
   // 1. tonal mottling (low-res, upscaled)
   const { fw, fh, s } = fieldDims(W, H, 50_000);
-  const up = s / u; // field px per unit
+  const up = s * u; // field px per unit
   const f1 = noiseField(fw, fh, up, { seed, freq: 2.2, octaves: 4 });
   const f2 = noiseField(fw, fh, up, { seed: seed + 7, freq: 11, octaves: 3, gain: 0.55 });
   const m = 0.09 * mottle;

@@ -39,6 +39,8 @@ interface DesktopBridge {
   onMaximizeChange(cb: (maximized: boolean) => void): () => void;
   /** Directory for user data (assets library, autosave). */
   userDataPath(): Promise<string>;
+  /** Native page zoom (UI scale preference). */
+  setZoomFactor?(factor: number): void;
 }
 
 declare global {

@@ -62,10 +62,14 @@ export function formatShortcut(s: string): string {
   return `${p.ctrl ? '⌘' : ''}${p.alt ? '⌥' : ''}${p.shift ? '⇧' : ''}${p.key.length === 1 ? p.key.toUpperCase() : p.key[0].toUpperCase() + p.key.slice(1)}`;
 }
 
+/** Input types that don't take text: global single-key shortcuts must keep working on them. */
+const NON_TEXT_INPUTS = new Set(['checkbox', 'radio', 'range', 'color', 'button', 'submit', 'reset', 'file', 'image']);
+
 /** True when keyboard focus is in a text field (global shortcuts should be ignored). */
 export function isTypingTarget(t: EventTarget | null): boolean {
   const el = t as HTMLElement | null;
-  if (!el) return false;
+  if (!el || !el.tagName) return false;
   const tag = el.tagName;
-  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+  if (tag === 'INPUT') return !NON_TEXT_INPUTS.has(((el as HTMLInputElement).type || 'text').toLowerCase());
+  return tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
 }

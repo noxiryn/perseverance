@@ -295,7 +295,7 @@ export function CharacterPanel() {
       <TargetLine />
       <div className="type-char-scroll">
         <CharacterBlock />
-        <Section title="Outline">
+        <Section title="Stroke">
           <StrokeBlock />
         </Section>
         <Section title="Paragraph">

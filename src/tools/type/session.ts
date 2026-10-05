@@ -430,6 +430,13 @@ export function commitEditing() {
     if (!cur || !l || l.type !== 'text') return;
     const content = l.text.content;
     const unchanged = currentEntryId(s.docId) === s.initialEntryId;
+    // Edited back to exactly what it was: no history step.
+    const baseDoc = cur.history.entries[cur.history.index]?.doc;
+    const baseLayer = baseDoc?.layers[s.layerId];
+    if (!s.isNew && baseLayer && cur.doc !== baseDoc && JSON.stringify(baseLayer) === JSON.stringify(l)) {
+      st.cancelPreview();
+      return;
+    }
     if (!content.trim()) {
       if (s.isNew && unchanged) {
         st.cancelPreview();

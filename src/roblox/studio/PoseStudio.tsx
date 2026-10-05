@@ -151,6 +151,11 @@ export function PoseStudioDialog({ close, layerId }: PoseStudioProps & { close: 
 
   const update = useCallback((fn: (s: StudioState) => StudioState) => setState(fn), []);
 
+  // Remember the character however the dialog closes (Cancel, Esc, backdrop click or Add).
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  useEffect(() => () => rememberState(stateRef.current), []);
+
   /* ---------------- scene sync ---------------- */
 
   useEffect(() => {

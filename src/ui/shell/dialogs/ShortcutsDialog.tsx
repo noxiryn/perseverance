@@ -16,6 +16,9 @@ interface Group {
   rows: Row[];
 }
 
+/** Groups longer than this may continue in the next column (keeps the two columns balanced). */
+const LONG_GROUP = 14;
+
 const CANVAS_KEYS: Row[] = [
   { label: 'Hand tool (temporary)', path: 'Hold', shortcuts: ['Space'] },
   { label: 'Eyedropper while painting (temporary)', path: 'Hold', shortcuts: ['Alt'] },
@@ -89,7 +92,7 @@ export function ShortcutsDialog({ close }: { close: (r?: unknown) => void }) {
       <div className="shell-sc-scroll">
         <div className="shell-sc-list">
           {filtered.map((g) => (
-            <div key={g.title} className="shell-sc-group">
+            <div key={g.title} className={`shell-sc-group${g.rows.length > LONG_GROUP ? ' long' : ''}`}>
               <div className="shell-sc-group-title">{g.title}</div>
               {g.rows.map((r, i) => (
                 <div key={i} className="shell-sc-row">

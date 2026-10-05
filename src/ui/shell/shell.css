@@ -1554,8 +1554,8 @@ body.shell-resizing-row .shell-splitter.active::after {
 .shell-pal-chips {
   flex: none;
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+  flex-wrap: wrap; /* never clip a chip, even when counts grow */
+  gap: 3px;
   padding: 7px 10px;
   border-bottom: 1px solid #262626;
 }
@@ -1564,7 +1564,7 @@ body.shell-resizing-row .shell-splitter.active::after {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 0 8px;
+  padding: 0 7px;
   border-radius: 999px;
   border: 1px solid #2c2c2c;
   background: transparent;
@@ -2271,9 +2271,13 @@ body.shell-resizing-row .shell-splitter.active::after {
   column-fill: balance;
 }
 .shell-sc-group {
-  /* Long groups (Tools, Layer menu…) may continue in the next column so the two columns stay
-     balanced; single rows and a title with its first row are never split. */
+  /* Short groups stay whole; long ones (.long: Tools, Layer menu…) may continue in the next
+     column so the two columns stay balanced. Rows and a title + first row never split. */
   margin-bottom: 14px;
+  break-inside: avoid;
+}
+.shell-sc-group.long {
+  break-inside: auto;
 }
 .shell-sc-group-title {
   break-after: avoid;

@@ -2,7 +2,7 @@
  * Ornaments: swirl-tendrils, thorns, chains, barbed-wire, ornate-corners, crosses.
  */
 import type { AssetDef } from '../../registry';
-import { arcFractions, catmullRom, cubic, dist, resample, spiralPoints, spiralStartTangent, taperedOutline } from '../lib/geom';
+import { arcFractions, catmullRom, cubic, dist, positiveWinding, resample, signedArea, spiralPoints, spiralStartTangent, taperedOutline } from '../lib/geom';
 import type { SpiralSpec } from '../lib/geom';
 import { P, defineAsset } from '../lib/params';
 import { swirlTendrils } from './tendrils';
@@ -14,34 +14,37 @@ import { TAU, makeRand, newCanvas, num, rgbOf, rgba, shade, str, tracePoly, trac
 /* thorns                                                              */
 /* ------------------------------------------------------------------ */
 
-function thornVine(path: Path2D, start: Pt, heading: number, L: number, width: number, thornAmt: number, u: number, r: Rand) {
+function thornVine(path: Path2D, start: Pt, heading: number, L: number, width: number, thornAmt: number, u: number, r: Rand, depth = 0) {
   const ctrl: Pt[] = [start];
   let a = heading;
   let x = start.x;
   let y = start.y;
-  const seg = 70 * u;
-  const n = Math.max(3, Math.round(L / seg));
-  let bend = (r() - 0.5) * 0.5;
+  const seg = 46 * u;
+  const n = Math.max(4, Math.round(L / seg));
+  let curv = (r() - 0.5) * 0.3;
+  const curlDir = r() < 0.5 ? -1 : 1;
   for (let i = 0; i < n; i++) {
-    bend += (r() - 0.5) * 0.35;
-    bend *= 0.85;
-    a += bend;
+    curv += (r() - 0.5) * 0.28;
+    curv = Math.max(-0.4, Math.min(0.4, curv * 0.9));
+    // the tip curls over like a briar shoot
+    const tipCurl = i > n * 0.72 ? curlDir * 0.22 * ((i - n * 0.72) / (n * 0.28)) : 0;
+    a += curv + tipCurl;
     x += Math.cos(a) * seg;
     y += Math.sin(a) * seg;
     ctrl.push({ x, y });
   }
-  const pts = resample(catmullRom(ctrl, 8), 6 * u);
+  const pts = resample(catmullRom(ctrl, 8), 5 * u);
   const fr = arcFractions(pts);
-  const widths = fr.map((f) => Math.max(0.8 * u, width * (1 - f * 0.9)));
-  tracePoly(path, taperedOutline(pts, widths));
-  // thorns
-  let side = 1;
-  let next = 18 * u;
+  const widths = fr.map((f) => Math.max(0.6 * u, width * (1 - f * 0.78) * (f > 0.92 ? (1 - f) / 0.08 : 1)));
+  tracePoly(path, positiveWinding(taperedOutline(pts, widths)));
+  // hooked rose thorns, alternating sides, leaning towards the tip
+  let side = r() < 0.5 ? 1 : -1;
+  let next = (10 + r() * 20) * u;
   let travelled = 0;
-  for (let i = 1; i < pts.length - 1; i++) {
+  for (let i = 1; i < pts.length - 2; i++) {
     travelled += dist(pts[i - 1], pts[i]);
     if (travelled < next) continue;
-    next = travelled + (22 + r() * 30) * u / Math.max(0.2, thornAmt);
+    next = travelled + ((16 + r() * 26) * u) / Math.max(0.15, thornAmt);
     const dx = pts[i + 1].x - pts[i - 1].x;
     const dy = pts[i + 1].y - pts[i - 1].y;
     const dl = Math.hypot(dx, dy) || 1;
@@ -50,18 +53,33 @@ function thornVine(path: Path2D, start: Pt, heading: number, L: number, width: n
     const nx = -ty * side;
     const ny = tx * side;
     const w = widths[i];
-    const tl = (8 + r() * 12) * u * (0.5 + w / width);
-    const bw = w * 0.9 + 2 * u;
-    const bx = pts[i].x + nx * w * 0.35;
-    const by = pts[i].y + ny * w * 0.35;
-    path.moveTo(bx - tx * bw, by - ty * bw);
-    path.lineTo(bx + nx * tl + tx * tl * 0.55, by + ny * tl + ty * tl * 0.55);
-    path.lineTo(bx + tx * bw * 0.6, by + ty * bw * 0.6);
+    if (w < 1.2 * u) continue;
+    const bw = w * 0.6 + 1.2 * u;
+    const tl = w * (1 + r() * 0.9) + 4 * u;
+    const bx = pts[i].x + nx * w * 0.4;
+    const by = pts[i].y + ny * w * 0.4;
+    const tipX = bx + nx * tl * 0.85 + tx * tl * 0.7;
+    const tipY = by + ny * tl * 0.85 + ty * tl * 0.7;
+    const A = { x: bx - tx * bw, y: by - ty * bw };
+    const B = { x: bx + tx * bw, y: by + ty * bw };
+    const c1 = { x: bx + nx * tl * 0.55 - tx * bw * 0.1, y: by + ny * tl * 0.55 - ty * bw * 0.1 };
+    const c2 = { x: bx + nx * tl * 0.25 + tx * bw * 0.7, y: by + ny * tl * 0.25 + ty * bw * 0.7 };
+    // keep the same winding as the stem so the nonzero fill unions instead of punching holes
+    if (signedArea([A, { x: tipX, y: tipY }, B]) >= 0) {
+      path.moveTo(A.x, A.y);
+      path.quadraticCurveTo(c1.x, c1.y, tipX, tipY);
+      path.quadraticCurveTo(c2.x, c2.y, B.x, B.y);
+    } else {
+      path.moveTo(B.x, B.y);
+      path.quadraticCurveTo(c2.x, c2.y, tipX, tipY);
+      path.quadraticCurveTo(c1.x, c1.y, A.x, A.y);
+    }
     path.closePath();
-    side = r() < 0.75 ? -side : side;
-    // occasional twig
-    if (r() < 0.06 && w > 3 * u) {
-      thornVine(path, pts[i], Math.atan2(ny, nx) + (r() - 0.5) * 0.6 + Math.atan2(ty, tx) * 0, L * 0.25, w * 0.6, thornAmt, u, r);
+    side = r() < 0.7 ? -side : side;
+    // side shoots
+    if (depth < 2 && r() < 0.16 && w > 3 * u) {
+      const ang = Math.atan2(ty, tx) + side * (0.6 + r() * 0.5);
+      thornVine(path, pts[i], ang, L * (0.22 + r() * 0.18), w * 0.6, thornAmt, u, r, depth + 1);
     }
   }
 }
@@ -76,10 +94,10 @@ const thorns = defineAsset(
     defaultBlendMode: 'normal',
     params: [
       P.color('color', 'Color', '#0b0b0b'),
-      P.num('count', 'Vines', 1, 16, 6),
-      P.num('thickness', 'Thickness', 3, 50, 14, { unit: 'px' }),
+      P.num('count', 'Vines', 1, 24, 10),
+      P.num('thickness', 'Thickness', 3, 60, 22, { unit: 'px' }),
       P.pct('thorns', 'Thorn density', 0.6),
-      P.num('length', 'Reach', 0.2, 1.5, 0.7, { step: 0.05, unit: '×' }),
+      P.num('length', 'Reach', 0.2, 1.5, 0.55, { step: 0.05, unit: '×' }),
       P.select(
         'side',
         'Grow from',
@@ -96,10 +114,10 @@ const thorns = defineAsset(
     generate(p, { width: W, height: H }) {
       const u = unitOf(W, H);
       const r = makeRand(num(p, 'seed', 23));
-      const n = Math.max(1, Math.round(num(p, 'count', 6)));
+      const n = Math.max(1, Math.round(num(p, 'count', 10)));
       const side = str(p, 'side', 'corners');
-      const width = num(p, 'thickness', 14) * u;
-      const reach = num(p, 'length', 0.7) * Math.min(W, H);
+      const width = num(p, 'thickness', 22) * u;
+      const reach = num(p, 'length', 0.55) * Math.min(W, H);
       const thornAmt = num(p, 'thorns', 0.6);
       const path = new Path2D();
       for (let i = 0; i < n; i++) {
@@ -111,7 +129,11 @@ const thorns = defineAsset(
           const cx = corner % 2 === 0 ? 0 : W;
           const cy = corner < 2 ? 0 : H;
           start = { x: cx + (r() - 0.5) * 40 * u, y: cy + (r() - 0.5) * 40 * u };
-          heading = Math.atan2(H / 2 - cy, W / 2 - cx) + (r() - 0.5) * 1.1;
+          // between hugging an edge and heading for the middle
+          const diag = Math.atan2(H / 2 - cy, W / 2 - cx);
+          const edgeA = r() < 0.5 ? Math.atan2(0, W / 2 - cx) : Math.atan2(H / 2 - cy, 0);
+          const t = r();
+          heading = diag + (((edgeA - diag + Math.PI * 3) % (Math.PI * 2)) - Math.PI) * t * 0.85;
         } else if (pick === 'bottom') {
           start = { x: W * r(), y: H + 10 * u };
           heading = -Math.PI / 2 + (r() - 0.5) * 1.2;
@@ -526,9 +548,14 @@ function crossPath(style: string, w: number, h: number): Path2D {
       break;
     }
     case 'gothic': {
-      // budded cross with trefoil terminals and a pointed foot
-      p.rect(cx - bar / 2, h * 0.08, bar, h * 0.78);
-      p.rect(cx - span / 2 + bar * 0.6, armY, span - bar * 1.2, bar);
+      // budded cross with trefoil terminals and a flared foot (kept inside the box)
+      const top = h * 0.15;
+      const gspan = w * 0.76;
+      const armL = cx - gspan / 2 + bar * 0.6;
+      const armR = cx + gspan / 2 - bar * 0.6;
+      const gy = h * 0.34;
+      p.rect(cx - bar / 2, top, bar, h * 0.72 - top + h * 0.06);
+      p.rect(armL, gy, armR - armL, bar);
       const bud = (x: number, y: number, dx: number, dy: number) => {
         const rr = bar * 0.62;
         const nx = -dy;
@@ -542,12 +569,15 @@ function crossPath(style: string, w: number, h: number): Path2D {
           p.arc(x + ox, y + oy, rr, 0, TAU);
         }
       };
-      bud(cx, h * 0.08, 0, -1);
-      bud(cx - span / 2 + bar * 0.6, armY + bar / 2, -1, 0);
-      bud(cx + span / 2 - bar * 0.6, armY + bar / 2, 1, 0);
-      p.moveTo(cx - bar * 0.9, h * 0.86);
-      p.lineTo(cx + bar * 0.9, h * 0.86);
-      p.lineTo(cx, h * 0.99);
+      bud(cx, top, 0, -1);
+      bud(armL, gy + bar / 2, -1, 0);
+      bud(armR, gy + bar / 2, 1, 0);
+      // flared foot
+      p.moveTo(cx - bar / 2, h * 0.8);
+      p.lineTo(cx + bar / 2, h * 0.8);
+      p.quadraticCurveTo(cx + bar * 0.55, h * 0.92, cx + bar * 1.05, h * 0.97);
+      p.lineTo(cx - bar * 1.05, h * 0.97);
+      p.quadraticCurveTo(cx - bar * 0.55, h * 0.92, cx - bar / 2, h * 0.8);
       p.closePath();
       break;
     }

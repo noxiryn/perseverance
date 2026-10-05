@@ -73,6 +73,7 @@ export function RecoveryDialog({ close, entries }: { close: (r?: string) => void
                 })
               }
             />
+            <div className="io-recover-thumb">{e.thumb ? <img src={e.thumb} alt="" /> : <span className="io-checker" />}</div>
             <div style={{ minWidth: 0 }}>
               <div className="io-recover-name">{e.name}</div>
               <div className="io-recover-meta">

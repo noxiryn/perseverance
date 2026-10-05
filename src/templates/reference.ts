@@ -117,7 +117,7 @@ export const gothicPaper = defineTemplate({
 
     b.asset(
       'swirl-tendrils',
-      { color: '#0b0b0b', outlineColor: '#6f63c9', outlineWidth: 4, count: 6, thickness: 40, scale: 1.35, side: 'both', style: 'angular', spikes: 0.45, seed: 17 },
+      { color: '#0b0b0b', outlineColor: '#6f63c9', outlineWidth: 6, count: 6, thickness: 34, scale: 0.9, side: 'both', style: 'angular', spikes: 0.45, rimAngle: 135, seed: 5 },
       { name: 'Swirl Tendrils' },
     );
 

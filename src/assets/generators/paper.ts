@@ -99,7 +99,7 @@ const grungePaper = defineAsset(
       paintPaper(ctx, W, H, u, tone, seed, { mottle: 1, grain: num(p, 'grain', 0.7), fibers: 0.6, specks: 0.8 });
       // stains + burnt edges, computed on a reduced grid
       const { fw, fh, s } = fieldDims(W, H, 140_000);
-      const up = s / u;
+      const up = s * u;
       const f = noiseField(fw, fh, up, { seed: seed + 1, freq: 3.4, octaves: 5, warp: 0.9 });
       const f2 = noiseField(fw, fh, up, { seed: seed + 2, freq: 1.6, octaves: 3 });
       const M = Math.min(fw, fh);
@@ -394,8 +394,8 @@ const foldCreases = defineAsset(
       const [c, ctx] = newCanvas(W, H);
       // neutral gray with faint wrinkle relief
       const { fw, fh, s } = fieldDims(W, H, 60_000);
-      const f = noiseField(fw, fh, s / u, { seed, freq: 7, octaves: 4, kind: 'ridged' });
-      const g2 = noiseField(fw, fh, s / u, { seed: seed + 1, freq: 2.5, octaves: 3 });
+      const f = noiseField(fw, fh, s * u, { seed, freq: 7, octaves: 4, kind: 'ridged' });
+      const g2 = noiseField(fw, fh, s * u, { seed: seed + 1, freq: 2.5, octaves: 3 });
       const bg = paintField(fw, fh, (i, _x, _y, px, o) => {
         const v = 128 + ((f[i] - 0.55) * 26 + g2[i] * 10) * wear;
         px[o] = px[o + 1] = px[o + 2] = v;
@@ -801,9 +801,9 @@ const concrete = defineAsset(
       const rough = num(p, 'roughness', 0.6);
       const stains = num(p, 'stains', 0.45);
       const { fw, fh, s } = fieldDims(W, H, 150_000);
-      const f1 = noiseField(fw, fh, s / u, { seed, freq: 2.5, octaves: 5, warp: 0.5 });
-      const f2 = noiseField(fw, fh, s / u, { seed: seed + 1, freq: 18, octaves: 3 });
-      const f3 = noiseField(fw, fh, s / u, { seed: seed + 2, freq: 1.2, octaves: 3, stretchY: 3 });
+      const f1 = noiseField(fw, fh, s * u, { seed, freq: 2.5, octaves: 5, warp: 0.5 });
+      const f2 = noiseField(fw, fh, s * u, { seed: seed + 1, freq: 18, octaves: 3 });
+      const f3 = noiseField(fw, fh, s * u, { seed: seed + 2, freq: 1.2, octaves: 3, stretchY: 3 });
       const base = paintField(fw, fh, (i, _x, _y, px, o) => {
         const streak = Math.max(0, f3[i]) * stains * 0.35;
         const k = 1 + f1[i] * 0.22 * rough + f2[i] * 0.08 * rough - streak;

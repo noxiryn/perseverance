@@ -10,6 +10,8 @@ import { toast } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
 import { isMac } from '../../platform';
 import { textLayerAt } from './apply';
+import { apply } from './affine';
+import { textFrame } from './frame';
 import { TYPE_DEFAULTS, TYPE_TOOL_ID } from './options';
 import {
   beginEditLayer,
@@ -122,12 +124,50 @@ function onPointerUp(e: ToolPointerEvent) {
   else beginNewText(g.start, null);
 }
 
+let hoverId: string | null = null;
+let lastHoverAt = 0;
+
+function setHover(id: string | null) {
+  if (id === hoverId) return;
+  hoverId = id;
+  viewport.requestOverlay();
+}
+
 function onHover(e: ToolPointerEvent) {
   if (isEditing()) {
+    setHover(null);
     viewport.setCursor(sessionCursor(e));
     return;
   }
   viewport.setCursor(null);
+  const now = performance.now();
+  if (now - lastHoverAt < 30) return;
+  lastHoverAt = now;
+  const s = activeSession();
+  setHover(s ? textLayerAt(s.doc, { x: e.docX, y: e.docY }, 4, s.activeLayerId) : null);
+}
+
+/** Dashed outline of the text layer under the pointer (it will be edited on click). */
+function drawHover(ctx: CanvasRenderingContext2D) {
+  const s = activeSession();
+  const l = hoverId ? s?.doc.layers[hoverId] : null;
+  if (!l || l.type !== 'text') return;
+  const frame = textFrame(l);
+  const pts = [
+    { x: 0, y: 0 },
+    { x: frame.w, y: 0 },
+    { x: frame.w, y: frame.h },
+    { x: 0, y: frame.h },
+  ].map((p) => viewport.docToScreen(apply(frame.M, p)));
+  ctx.save();
+  ctx.beginPath();
+  pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+  ctx.closePath();
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = 'rgba(139,124,246,0.85)';
+  ctx.stroke();
+  ctx.restore();
 }
 
 function onDoubleClick(e: ToolPointerEvent) {
@@ -194,6 +234,7 @@ function onActivate() {
 function onDeactivate() {
   gesture = null;
   editPointer = false;
+  hoverId = null;
   // A temporary tool (Space = hand) keeps the edit alive; a real tool switch commits it.
   if (useEditor.getState().previousTool === TYPE_TOOL_ID) return;
   if (isEditing()) commitEditing();
@@ -205,6 +246,7 @@ function renderOverlay(ctx: CanvasRenderingContext2D) {
     return;
   }
   const g = gesture;
+  if (!g) drawHover(ctx);
   if (!g || !g.moved) return;
   const b = boxOf(g);
   const a = viewport.docToScreen({ x: b.x, y: b.y });

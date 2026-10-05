@@ -6,6 +6,7 @@ import { clampZoom, fitZoom, formatZoom, nextZoomStep, normalizePan, wheelZoomFa
 import { boxFromDrag, fitRatio, resizeBox, roundCropRect } from './crop';
 import { averageColor, hexToRgb, rgbToHex } from './color';
 import { colorRangeWeights } from './colorRange';
+import { latchModifiers, marqueeRect, type ModifierLatch } from './marquee';
 
 const close = (a: number, b: number, eps = 1e-6) => expect(Math.abs(a - b)).toBeLessThan(eps);
 
@@ -263,5 +264,35 @@ describe('view normalization', () => {
     const r = normalizePan({ zoom: 1, panX: 4000, panY: 0 }, 40, 40, 800, 600);
     const o = origin({ zoom: 1, ...r }, 40, 40, 800, 600);
     expect(o.x).toBeCloseTo(800 - 20, 6);
+  });
+});
+
+describe('marquee', () => {
+  const base = { shift: false, alt: false, style: 'normal' as const, width: 1, height: 1 };
+  it('drags in any direction', () => {
+    expect(marqueeRect({ x: 10, y: 10 }, { x: 4, y: 30 }, base)).toEqual({ x: 4, y: 10, width: 6, height: 20 });
+  });
+  it('Shift squares, Alt grows from the center', () => {
+    expect(marqueeRect({ x: 0, y: 0 }, { x: 10, y: 4 }, { ...base, shift: true })).toEqual({ x: 0, y: 0, width: 10, height: 10 });
+    expect(marqueeRect({ x: 50, y: 50 }, { x: 60, y: 55 }, { ...base, alt: true })).toEqual({ x: 40, y: 45, width: 20, height: 10 });
+  });
+  it('fixed ratio and fixed size styles', () => {
+    const r = marqueeRect({ x: 0, y: 0 }, { x: 160, y: 10 }, { ...base, style: 'ratio', width: 16, height: 9 });
+    expect(r.width / r.height).toBeCloseTo(16 / 9, 6);
+    expect(marqueeRect({ x: 0, y: 0 }, { x: 100, y: 100 }, { ...base, style: 'size', width: 512, height: 256, alt: true })).toEqual({
+      x: -156,
+      y: -28,
+      width: 512,
+      height: 256,
+    });
+  });
+  it('modifiers held at mouse-down only pick the mode until re-pressed', () => {
+    const m: ModifierLatch = { shift: false, alt: false, shiftLatch: true, altLatch: false };
+    latchModifiers(m, true, false);
+    expect(m.shift).toBe(false); // still the "add" Shift from mouse-down
+    latchModifiers(m, false, false);
+    latchModifiers(m, true, true);
+    expect(m.shift).toBe(true); // pressed again → constrain
+    expect(m.alt).toBe(true);
   });
 });

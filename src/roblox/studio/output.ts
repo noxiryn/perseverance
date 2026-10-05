@@ -31,6 +31,11 @@ export function frameSizeFor(output: StudioOutput): { width: number; height: num
 
 export function commitRender(scene: StudioScene, opts: CommitRenderOptions): boolean {
   let doc = activeDoc();
+  const target = opts.replaceLayerId ? doc?.layers[opts.replaceLayerId] : undefined;
+  if (target && (target.locks.all || target.locks.pixels)) {
+    toast(`“${target.name}” is locked — unlock its pixels to update the render.`, 'warning', 4000);
+    return false;
+  }
   const frame = outputFrameSize(opts.output.size, doc?.width ?? null, doc?.height ?? null);
   const full = scene.renderToCanvas(frame.width, frame.height);
   const b = opaqueBounds(full, 2);

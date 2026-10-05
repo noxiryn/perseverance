@@ -96,8 +96,8 @@ const filmScratches = defineAsset(
       if (bool(p, 'background', true)) {
         const base = rgbOf(str(p, 'baseColor', '#060606'));
         const { fw, fh, s } = fieldDims(W, H, 40_000);
-        const f = noiseField(fw, fh, s / u, { seed, freq: 2.4, octaves: 4 });
-        const g = noiseField(fw, fh, s / u, { seed: seed + 1, freq: 9, octaves: 3 });
+        const f = noiseField(fw, fh, s * u, { seed, freq: 2.4, octaves: 4 });
+        const g = noiseField(fw, fh, s * u, { seed: seed + 1, freq: 9, octaves: 3 });
         const img = paintField(fw, fh, (i, x, _y, px, o) => {
           // mottled emulsion + faint vertical density bands of old prints
           const band = Math.sin((x / fw) * 37 + f[i] * 3) * 0.5 + 0.5;

@@ -3,7 +3,8 @@
  * (pref 'autosaveMinutes', default 2, 0 = off) into IndexedDB 'perseverance-recovery'. Entries are
  * removed when the document is saved or closed. On startup leftover entries are offered for recovery.
  */
-import type { ID } from '../core/types';
+import type { Document, ID } from '../core/types';
+import { renderThumbnail } from '../render/compositor';
 import { useEditor } from '../state/editor';
 import { openDialog, toast } from '../state/ui';
 import { encodeProject, decodeProject } from './project';
@@ -20,6 +21,25 @@ export interface RecoveryEntry {
   width: number;
   height: number;
   data: ArrayBuffer;
+  /** Small JPEG data URL of the composite (for the recovery dialog). */
+  thumb?: string;
+}
+
+/** Small composite preview for the recovery list (never throws). */
+function thumbnailOf(doc: Document): string | undefined {
+  try {
+    const t = renderThumbnail(doc, null, 112);
+    const c = document.createElement('canvas');
+    c.width = t.width;
+    c.height = t.height;
+    const ctx = c.getContext('2d')!;
+    ctx.fillStyle = '#2a2a2a';
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(t, 0, 0);
+    return c.toDataURL('image/jpeg', 0.8);
+  } catch {
+    return undefined;
+  }
 }
 
 /* ---------------- IndexedDB ---------------- */
@@ -111,7 +131,7 @@ async function autosaveTick(force = false) {
       // The document may have been saved or closed while encoding.
       const cur = useEditor.getState().sessions[id];
       if (!cur || !cur.dirty) continue;
-      await putRecovery({ id, name: s.doc.name, time: Date.now(), width: s.doc.width, height: s.doc.height, data });
+      await putRecovery({ id, name: s.doc.name, time: Date.now(), width: s.doc.width, height: s.doc.height, data, thumb: thumbnailOf(s.doc) });
       lastRun.set(id, Date.now());
       lastEntry.set(id, entry);
     }

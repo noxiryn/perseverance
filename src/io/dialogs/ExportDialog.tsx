@@ -126,6 +126,19 @@ export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc:
   const submitOnEnter = useDeferredSubmit(() => void doExport());
   const out = rendered?.key === key ? rendered.canvas : null;
   const preset = SIZE_PRESETS.find((p) => p.id === o.presetId);
+  // What Cover / Fit does when the aspect ratios differ.
+  let fitNote: string | null = null;
+  if (preset) {
+    const srcAspect = doc.width / doc.height;
+    const dstAspect = preset.width / preset.height;
+    if (Math.abs(srcAspect - dstAspect) > 0.01) {
+      const wider = srcAspect > dstAspect;
+      fitNote =
+        o.fit === 'cover'
+          ? `The ${wider ? 'left and right' : 'top and bottom'} edges of the document are cropped.`
+          : `${wider ? 'Top and bottom' : 'Left and right'} bars are added (${o.format === 'jpeg' || o.fillBackground ? 'background color' : 'transparent'}).`;
+    }
+  }
 
   return (
     <Dialog
@@ -204,6 +217,7 @@ export function ExportDialog({ close, doc }: { close: (r?: string) => void; doc:
                   Fit (letterbox)
                 </button>
               </div>
+              {fitNote && <div className="io-note" style={{ marginTop: 4 }}>{fitNote}</div>}
             </>
           ) : (
             <>

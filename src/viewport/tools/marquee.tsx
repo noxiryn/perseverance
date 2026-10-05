@@ -5,6 +5,7 @@
  */
 import { Circle, SquareDashed } from 'lucide-react';
 import type { Point, Rect } from '../../core/types';
+import { latchModifiers, marqueeRect } from '../math/marquee';
 import type { ToolDef, ToolPointerEvent } from '../../registry';
 import { ellipseMask, rectMask, type SelectionMode } from '../../editor/selection';
 import { viewport } from '../../editor/viewport';
@@ -60,38 +61,7 @@ interface MarqueeDrag {
 }
 
 /** Update the constrain modifiers of a drag from the current key state. */
-function applyModifiers(d: MarqueeDrag, shiftKey: boolean, altKey: boolean) {
-  if (d.shiftLatch && !shiftKey) d.shiftLatch = false;
-  if (d.altLatch && !altKey) d.altLatch = false;
-  d.shift = shiftKey && !d.shiftLatch;
-  d.alt = altKey && !d.altLatch;
-}
-
-/** Compute the marquee rectangle from the anchor `a` and current point `b`. Pure. */
-export function marqueeRect(
-  a: Point,
-  b: Point,
-  o: { shift: boolean; alt: boolean; style: 'normal' | 'ratio' | 'size'; width: number; height: number },
-): Rect {
-  if (o.style === 'size') {
-    const w = Math.max(1, o.width);
-    const h = Math.max(1, o.height);
-    return o.alt ? { x: b.x - w / 2, y: b.y - h / 2, width: w, height: h } : { x: b.x, y: b.y, width: w, height: h };
-  }
-  let dx = b.x - a.x;
-  let dy = b.y - a.y;
-  if (o.style === 'ratio' && o.width > 0 && o.height > 0) {
-    const ratio = o.width / o.height;
-    if (Math.abs(dx) / ratio >= Math.abs(dy)) dy = (Math.sign(dy) || 1) * (Math.abs(dx) / ratio);
-    else dx = (Math.sign(dx) || 1) * Math.abs(dy) * ratio;
-  } else if (o.shift) {
-    const s = Math.max(Math.abs(dx), Math.abs(dy));
-    dx = (Math.sign(dx) || 1) * s;
-    dy = (Math.sign(dy) || 1) * s;
-  }
-  if (o.alt) return { x: a.x - Math.abs(dx), y: a.y - Math.abs(dy), width: Math.abs(dx) * 2, height: Math.abs(dy) * 2 };
-  return { x: Math.min(a.x, a.x + dx), y: Math.min(a.y, a.y + dy), width: Math.abs(dx), height: Math.abs(dy) };
-}
+const applyModifiers = (d: MarqueeDrag, shiftKey: boolean, altKey: boolean) => latchModifiers(d, shiftKey, altKey);
 
 function makeMarquee(kind: 'rect' | 'ellipse'): ToolDef {
   const id = kind === 'rect' ? 'marquee-rect' : 'marquee-ellipse';

@@ -32,8 +32,11 @@ export function warpImage(src: Uint8ClampedArray, sw: number, sh: number, dst: U
   const stride = cols + 1;
   const cw = sw / cols;
   const ch = sh / rows;
+  const occ = occupiedCells(src, sw, sh, cols, rows);
   for (let j = 0; j < rows; j++) {
     for (let i = 0; i < cols; i++) {
+      // Cells whose source (incl. the 1px bilinear footprint) is fully transparent stay empty.
+      if (!occ[j * cols + i]) continue;
       const n00 = j * stride + i;
       const n10 = n00 + 1;
       const n01 = n00 + stride;
@@ -103,6 +106,32 @@ function fillTriangle(
       sampleInto(src, sw, sh, u, v, dst, o);
     }
   }
+}
+
+/**
+ * Cells (cols × rows over the source) that a non-transparent source pixel can influence: a
+ * pixel at x contributes to bilinear samples taken anywhere in (x − 0.5, x + 1.5), so it marks
+ * every cell overlapping [x − 1, x + 2) × [y − 1, y + 2).
+ */
+export function occupiedCells(src: Uint8ClampedArray, sw: number, sh: number, cols: number, rows: number): Uint8Array {
+  const occ = new Uint8Array(cols * rows);
+  const cw = sw / cols;
+  const ch = sh / rows;
+  for (let y = 0; y < sh; y++) {
+    let o = y * sw * 4 + 3;
+    const cy0 = Math.max(0, Math.floor((y - 1) / ch));
+    const cy1 = Math.min(rows - 1, Math.floor((y + 2) / ch));
+    let lastMarked = -1;
+    for (let x = 0; x < sw; x++, o += 4) {
+      if (src[o] === 0 || x <= lastMarked) continue;
+      const cx0 = Math.max(0, Math.floor((x - 1) / cw));
+      const cx1 = Math.min(cols - 1, Math.floor((x + 2) / cw));
+      for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) occ[cy * cols + cx] = 1;
+      // Pixels up to the end of cell cx1 (minus the 2px footprint) mark nothing new on this row.
+      lastMarked = Math.floor((cx1 + 1) * cw) - 3;
+    }
+  }
+  return occ;
 }
 
 /** Bilinear premultiplied sample of `src` at (u, v) (source px, pixel centers at +.5) → dst[o..o+3]. */

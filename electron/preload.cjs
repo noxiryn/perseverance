@@ -1,5 +1,5 @@
 /* Perseverance — preload. Exposes a minimal, explicit API to the renderer (contextIsolation on). */
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
 function on(channel, cb) {
   const handler = (_e, ...args) => cb(...args);
@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('desktop', {
   minimize: () => ipcRenderer.send('desktop:minimize'),
   toggleMaximize: () => ipcRenderer.send('desktop:toggle-maximize'),
   close: () => ipcRenderer.send('desktop:close'),
+  setZoomFactor: (f) => webFrame.setZoomFactor(Math.max(0.5, Math.min(2, Number(f) || 1))),
   onOpenFile: (cb) => on('desktop:open-file', cb),
   onCloseRequested: (cb) => on('desktop:close-requested', cb),
   onMaximizeChange: (cb) => on('desktop:maximize', cb),

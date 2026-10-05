@@ -30,7 +30,9 @@ export async function buildTemplate(id: string, opts: BuildOptions = {}): Promis
     // Template registered by someone else: use its own build().
     const def = templates.get(id);
     if (!def) throw new Error(`Unknown template “${id}”`);
-    return { doc: await def.build(), characterId: null };
+    const doc = await def.build();
+    const cid = doc.meta?.characterId;
+    return { doc, characterId: typeof cid === 'string' && doc.layers[cid] ? cid : null };
   }
   await loadFonts(
     (spec.fonts ?? []).map(([f, w, text]) => {
@@ -42,7 +44,8 @@ export async function buildTemplate(id: string, opts: BuildOptions = {}): Promis
   );
   const b = new DocBuilder(spec.name, spec.width, spec.height, spec.background === undefined ? '#ffffff' : spec.background, opts);
   spec.build(b);
-  return { doc: b.finish({ template: id }), characterId: b.characterId };
+  // doc.meta.characterId lets other openers (start screen, palette) select the placeholder too.
+  return { doc: b.finish({ template: id, ...(b.characterId ? { characterId: b.characterId } : {}) }), characterId: b.characterId };
 }
 
 export function hasTemplateSpec(id: string) {

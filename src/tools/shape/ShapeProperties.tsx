@@ -7,9 +7,21 @@ import { KIND_LABEL, dashFor, dashPresetOf, defaultGradient, editShapeLayer, pai
 import { ALIGN_OPTIONS, DashSelect, FillButton, StrokeButton } from './PaintControls';
 import { PresetPicker } from './PresetPicker';
 import { DEFAULT_SHAPE_PRESET } from './presets';
+import { keepAnchor } from '../type/affine';
 import './shape.css';
 
 const KINDS: { value: ShapeKind; label: string }[] = (['rect', 'ellipse', 'polygon', 'star', 'line', 'path'] as ShapeKind[]).map((k) => ({ value: k, label: KIND_LABEL[k] }));
+
+/** Resize the shape box keeping its top-left corner fixed in document space (rotation-aware). */
+function resizeKeepingCorner(l: ShapeLayer, w: number, h: number) {
+  const pos = keepAnchor(l.transform, l.shape.width, l.shape.height, { x: 0, y: 0 }, w, h, { x: 0, y: 0 });
+  l.shape.width = w;
+  l.shape.height = h;
+  if (Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
+    l.transform.x = pos.x;
+    l.transform.y = pos.y;
+  }
+}
 
 const JOINS: { value: CanvasLineJoin; label: string }[] = [
   { value: 'miter', label: 'Miter' },
@@ -100,8 +112,8 @@ export function ShapeProperties({ layerId }: { layerId: string }) {
       )}
       <Field label="Size">
         <div className="shape-props-row">
-          <NumberField value={s.width} min={1} max={30000} step={1} unit="W" width="100%" {...num('Shape Size', (l, v) => (l.shape.width = Math.max(1, v)))} />
-          <NumberField value={s.height} min={1} max={30000} step={1} unit="H" width="100%" {...num('Shape Size', (l, v) => (l.shape.height = Math.max(1, v)))} />
+          <NumberField value={s.width} min={1} max={30000} step={1} unit="W" width="100%" {...num('Shape Size', (l, v) => resizeKeepingCorner(l, Math.max(1, v), l.shape.height))} />
+          <NumberField value={s.height} min={1} max={30000} step={1} unit="H" width="100%" {...num('Shape Size', (l, v) => resizeKeepingCorner(l, l.shape.width, Math.max(1, v)))} />
         </div>
       </Field>
       {(s.kind === 'rect' || s.kind === 'polygon' || s.kind === 'star') && (

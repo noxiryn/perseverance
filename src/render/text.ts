@@ -451,7 +451,9 @@ function warpContent(flat: FlatPixels, t: TextProps, layout: TextLayout): LocalC
   }
   if (!Number.isFinite(minX + minY + maxX + maxY)) {
     const c0 = createCanvas(src.width, src.height);
-    ctx2d(c0).putImageData(new ImageData(flat.data, src.width, src.height), 0, 0);
+    const img0 = new ImageData(src.width, src.height);
+    img0.data.set(flat.data);
+    ctx2d(c0).putImageData(img0, 0, 0);
     return { canvas: c0, k, ox, oy };
   }
   const nox = Math.floor(minX - 2);

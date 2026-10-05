@@ -7,8 +7,11 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { OutlineEffect } from 'three/examples/jsm/effects/OutlineEffect.js';
 import { createCanvas, ctx2d } from '../../core/canvas';
 import { applyPose, buildRig, type PartRole, type RigBuild } from './rig';
-import { buildAccessories, buildFaceTexture, buildHairGeometry, type PartsFactory, type SurfaceKind } from './parts';
-import type { Framing, JointId, LightSpec, ShadingMode, StudioCamera, StudioLighting, StudioShading, StudioState, Vec3, ViewSettings } from './types';
+import { buildAccessories, buildFaceTexture, buildHairGeometry, paintFace, type PartsFactory, type SurfaceKind } from './parts';
+import type { FaceStyle, Framing, JointId, LightSpec, ShadingMode, StudioCamera, StudioLighting, StudioShading, StudioState, Vec3, ViewSettings } from './types';
+
+/** Appearance colors that can be changed in place without rebuilding the character. */
+type ColorSlot = PartRole | 'hair' | 'accent';
 import { GRADIENT_RES, lightDirection, toonGradient, yawOf } from './toon';
 
 const DEG = Math.PI / 180;
@@ -42,6 +45,9 @@ export class StudioScene {
   private content = new THREE.Group();
   private rig: RigBuild | null = null;
   private structureKey = '';
+  private colorKey = '';
+  private slotMaterials: { slot: ColorSlot; material: THREE.Material }[] = [];
+  private face: { tex: THREE.CanvasTexture; style: FaceStyle; skin: string } | null = null;
   private buildResources = new Set<Disposable>();
   private gradientMaps = new Map<number, THREE.DataTexture>();
   private model: { pivot: THREE.Group; root: THREE.Object3D; originals: Map<THREE.Mesh, THREE.Material | THREE.Material[]>; key: string } | null = null;
@@ -181,8 +187,11 @@ export class StudioScene {
     this.content.clear();
     for (const r of this.buildResources) r.dispose();
     this.buildResources.clear();
+    this.slotMaterials = [];
+    this.face = null;
     this.rig = null;
     this.structureKey = '';
+    this.colorKey = '';
   }
 
   private clearModel() {
@@ -206,21 +215,28 @@ export class StudioScene {
     const { appearance: ap, shading } = state;
     const mode = shading.mode;
     const cache = new Map<string, THREE.Material>();
-    const mat = (kind: SurfaceKind | PartRole, color: string, doubleSide = false) => {
-      const key = `${kind}|${color}|${doubleSide}`;
+    /** Materials bound to an appearance color slot are cached per slot so they can be recolored in place. */
+    const mat = (kind: SurfaceKind | PartRole, color: string, doubleSide = false, slot?: ColorSlot) => {
+      const key = `${kind}|${slot ? `@${slot}` : color}|${doubleSide}`;
       let m = cache.get(key);
-      if (!m) cache.set(key, (m = this.makeMaterial(mode, shading, kind, color, { doubleSide })));
+      if (!m) {
+        cache.set(key, (m = this.makeMaterial(mode, shading, kind, color, { doubleSide })));
+        if (slot) this.slotMaterials.push({ slot, material: m });
+      }
       return m;
     };
     const faceTex = mode === 'flat' ? null : buildFaceTexture(ap.face, ap.colors.head);
-    if (faceTex) this.buildResources.add(faceTex);
+    if (faceTex) {
+      this.buildResources.add(faceTex);
+      this.face = { tex: faceTex, style: ap.face, skin: ap.colors.head };
+    }
     const track = <T extends Disposable>(g: T): T => {
       this.buildResources.add(g);
       return g;
     };
     const rig = buildRig(state.rig, {
       part: (role) => {
-        const base = mat(role, ap.colors[role]);
+        const base = mat(role, ap.colors[role], false, role);
         if (role === 'head' && faceTex) {
           const face = this.makeMaterial(mode, shading, 'head', ap.colors.head, { map: faceTex });
           return [base, base, base, base, face, base];
@@ -230,13 +246,13 @@ export class StudioScene {
       track,
     });
     const parts: PartsFactory = {
-      material: (kind, color, o) => mat(kind, color, !!o?.doubleSide),
+      material: (kind, color, o) => mat(kind, color, !!o?.doubleSide, o?.slot),
       track,
     };
     const hairGeo = buildHairGeometry(ap.hair);
     if (hairGeo) {
       track(hairGeo);
-      const hair = new THREE.Mesh(hairGeo, mat('hair', ap.hairColor));
+      const hair = new THREE.Mesh(hairGeo, mat('hair', ap.hairColor, false, 'hair'));
       hair.name = 'Hair';
       hair.userData.joint = 'neck';
       rig.attach.head.add(hair);
@@ -251,14 +267,39 @@ export class StudioScene {
     this.rig = rig;
   }
 
-  /** Update the character from the full studio state (rebuilds meshes only when needed). */
+  /** Recolor slot-bound materials and repaint the face decal (no geometry rebuild). */
+  private applyColors(state: StudioState) {
+    if (state.shading.mode === 'flat') return; // silhouettes use the flat color only
+    const ap = state.appearance;
+    const colorOf = (slot: ColorSlot) => (slot === 'hair' ? ap.hairColor : slot === 'accent' ? ap.accentColor : ap.colors[slot]);
+    for (const { slot, material } of this.slotMaterials) {
+      const m = material as THREE.Material & { color?: THREE.Color };
+      m.color?.set(colorOf(slot));
+    }
+    if (this.face && this.face.skin !== ap.colors.head) {
+      paintFace(this.face.tex.image as HTMLCanvasElement, this.face.style, ap.colors.head);
+      this.face.tex.needsUpdate = true;
+      this.face.skin = ap.colors.head;
+    }
+  }
+
+  /** Update the character from the full studio state (rebuilds meshes only when the structure changes). */
   setCharacter(state: StudioState) {
     if (this.disposed) return;
     const s = state.shading;
-    const key = JSON.stringify([state.rig, state.appearance, s.mode, s.toonSteps, s.mode === 'flat' ? s.flatColor : '']);
+    const ap = state.appearance;
+    // Colors are excluded: they are applied in place (fast enough for live color-picker drags).
+    const key = JSON.stringify([state.rig, ap.hair, ap.face, ap.accessories, s.mode, s.toonSteps, s.mode === 'flat' ? s.flatColor : '']);
     if (key !== this.structureKey || !this.rig) {
       this.buildCharacter(state);
       this.structureKey = key;
+      this.colorKey = JSON.stringify([ap.colors, ap.hairColor, ap.accentColor]);
+    } else {
+      const ck = JSON.stringify([ap.colors, ap.hairColor, ap.accentColor]);
+      if (ck !== this.colorKey) {
+        this.applyColors(state);
+        this.colorKey = ck;
+      }
     }
     applyPose(this.rig!, state.pose);
     this.applyView(state);

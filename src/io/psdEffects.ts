@@ -20,8 +20,9 @@ import type {
   LayerEffectStroke,
   GradientStyle,
   BlendMode as PsdBlendMode,
+  VectorContent,
 } from 'ag-psd';
-import type { BlendMode, Gradient, GradientStop, LayerEffect, ParamValues } from '../core/types';
+import type { BlendMode, FillContent, Gradient, GradientStop, LayerEffect, ParamValues } from '../core/types';
 import { parseColor, toHex } from '../core/color';
 import { uid } from '../core/ids';
 import { fromPsdBlend, normAngle, toPsdBlend } from './math';
@@ -141,7 +142,7 @@ export function fromPsdGradient(
 }
 
 const STYLES: GradientStyle[] = ['linear', 'radial', 'angle', 'reflected', 'diamond'];
-const asStyle = (k: unknown): GradientStyle => (STYLES.includes(k as GradientStyle) ? (k as GradientStyle) : 'linear');
+export const asStyle = (k: unknown): GradientStyle => (STYLES.includes(k as GradientStyle) ? (k as GradientStyle) : 'linear');
 
 function isGradient(v: unknown): v is Gradient {
   return !!v && typeof v === 'object' && Array.isArray((v as Gradient).stops);
@@ -502,6 +503,37 @@ export function effectsFromPsd(info: LayerEffectsInfo | undefined, known: (effec
     });
   }
   return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* fill layers (Photoshop "Solid Color" / "Gradient" fill layers)       */
+/* ------------------------------------------------------------------ */
+
+/** Our fill layer content → PSD vector fill (null for patterns, which stay pixels). */
+export function fillToPsd(fill: FillContent): VectorContent | null {
+  if (fill.type === 'solid') return { type: 'color', color: toPsdColor(fill.color) };
+  if (fill.type === 'gradient') {
+    const g = fill.gradient;
+    return {
+      ...toPsdGradient(g),
+      style: asStyle(g.kind),
+      angle: Math.round(normAngle(-num(g.angle, 90))),
+      scale: Math.max(0.1, num(g.scale, 1)),
+      reverse: !!g.reverse,
+    };
+  }
+  return null;
+}
+
+/** PSD vector fill → our fill layer content (null when it cannot be represented). */
+export function fillFromPsd(v: VectorContent | undefined): FillContent | null {
+  if (!v) return null;
+  if (v.type === 'color') return { type: 'solid', color: fromPsdColor(v.color) };
+  if (v.type === 'solid') {
+    const g = fromPsdGradient(v, asStyle(v.style), normAngle(-num(v.angle, 90)), num(v.scale, 1), !!v.reverse);
+    return { type: 'gradient', gradient: g };
+  }
+  return null;
 }
 
 /** Human-readable names of unsupported effects (for export warnings). */

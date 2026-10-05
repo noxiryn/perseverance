@@ -72,6 +72,25 @@ export function opTransform(op: CanvasOp, t: Transform, lw: number, lh: number, 
 }
 
 /**
+ * Gradient direction after a canvas rotation/flip (gradient angles are y-down: 0° = left → right,
+ * 90° = top → bottom) and its center offset (fractions of the box).
+ */
+export function opGradient(op: CanvasOp, angle: number, offsetX = 0, offsetY = 0): { angle: number; offsetX: number; offsetY: number } {
+  switch (op) {
+    case 'rotate90cw':
+      return { angle: normAngle(angle + 90), offsetX: -offsetY, offsetY: offsetX };
+    case 'rotate90ccw':
+      return { angle: normAngle(angle - 90), offsetX: offsetY, offsetY: -offsetX };
+    case 'rotate180':
+      return { angle: normAngle(angle + 180), offsetX: -offsetX, offsetY: -offsetY };
+    case 'flipH':
+      return { angle: normAngle(180 - angle), offsetX: -offsetX, offsetY };
+    case 'flipV':
+      return { angle: normAngle(-angle), offsetX, offsetY: -offsetY };
+  }
+}
+
+/**
  * Transform of a raster layer after a canvas op when its PIXELS are rotated/flipped the same way
  * (so the transform stays clean — e.g. an untransformed Background stays untransformed).
  * Returns the new local box size too. Returns null when baking is not exact (skewed 90° turns).

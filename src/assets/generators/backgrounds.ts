@@ -181,9 +181,9 @@ const starfield = defineAsset(
       };
       if (neb > 0) {
         const { fw, fh, s } = fieldDims(W, H, 90_000);
-        const f = noiseField(fw, fh, s / u, { seed, freq: 1.4, octaves: 6, warp: 0.45, gain: 0.55 });
-        const g2 = noiseField(fw, fh, s / u, { seed: seed + 5, freq: 4, octaves: 5, gain: 0.6 });
-        const lanes = noiseField(fw, fh, s / u, { seed: seed + 9, freq: 6, octaves: 3, kind: 'ridged' });
+        const f = noiseField(fw, fh, s * u, { seed, freq: 1.4, octaves: 6, warp: 0.45, gain: 0.55 });
+        const g2 = noiseField(fw, fh, s * u, { seed: seed + 5, freq: 4, octaves: 5, gain: 0.6 });
+        const lanes = noiseField(fw, fh, s * u, { seed: seed + 9, freq: 6, octaves: 3, kind: 'ridged' });
         const c1 = rgbOf(str(p, 'nebulaColor', '#6b3fd8'));
         const c2 = rgbOf(str(p, 'nebulaColor2', '#e0458f'));
         const img = paintField(fw, fh, (i, x, y, px, o) => {

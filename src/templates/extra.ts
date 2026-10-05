@@ -208,7 +208,7 @@ export const simulatorBright = defineTemplate({
     b.group('Stars', () => {
       for (const [sx, sy, r] of [
         [380, 230, 40],
-        [1700, 330, 34],
+        [1850, 236, 30],
         [520, 560, 26],
       ] as [number, number, number][])
         b.star(sx, sy, r, 5, 0.48, solid('#ffffff'), { stroke: stroke('#ff7a00', 6), name: 'Star' });

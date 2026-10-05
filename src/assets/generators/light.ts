@@ -20,10 +20,10 @@ const sunburstRays = defineAsset(
     defaultBlendMode: 'screen',
     defaultOpacity: 0.9,
     params: [
-      P.num('rays', 'Rays', 8, 400, 150),
+      P.num('rays', 'Rays', 8, 600, 220),
       P.point('center', 'Center', { x: 0.5, y: 0.42 }),
       P.color('color', 'Color', '#fff1cc'),
-      P.pct('thickness', 'Ray width', 0.32),
+      P.pct('thickness', 'Ray width', 0.28),
       P.pct('fade', 'Fade', 0.6),
       P.select(
         'style',
@@ -43,12 +43,12 @@ const sunburstRays = defineAsset(
     generate(p, { width: W, height: H }) {
       const u = unitOf(W, H);
       const r = makeRand(num(p, 'seed', 61));
-      const n = Math.max(4, Math.round(num(p, 'rays', 150)));
+      const n = Math.max(4, Math.round(num(p, 'rays', 220)));
       const ctr = pointParam(p, 'center', { x: 0.5, y: 0.42 });
       const cx = ctr.x * W;
       const cy = ctr.y * H;
       const color = str(p, 'color', '#fff1cc');
-      const thick = num(p, 'thickness', 0.32);
+      const thick = num(p, 'thickness', 0.28);
       const fade = num(p, 'fade', 0.6);
       const bold = str(p, 'style', 'fine') === 'bold';
       const M = Math.min(W, H);
@@ -57,24 +57,45 @@ const sunburstRays = defineAsset(
       const r0 = M * num(p, 'inner', 0.12);
       const [c, ctx] = newCanvas(W, H);
       const period = TAU / n;
-      const path = new Path2D();
+      const buckets = [new Path2D(), new Path2D(), new Path2D()];
+      let path = buckets[0];
       for (let i = 0; i < n; i++) {
         if (bold && i % 2) continue;
-        const a = i * period + (bold ? 0 : (r() - 0.5) * period * 0.7);
-        const half = (period * thick * (bold ? 1 : 0.5 + r())) / 2;
-        const rs = bold ? r0 : r0 * (1 + r() * 0.35);
-        const re = bold ? R : R * (0.45 + r() * r() * 0.55 + (r() < 0.25 ? 0.25 : 0));
-        // a thin wedge: narrow at the start, wider at the end (perspective lines)
-        const w0 = bold ? half * 0.15 : half * 0.08;
-        path.moveTo(cx + Math.cos(a - w0) * rs, cy + Math.sin(a - w0) * rs);
-        path.lineTo(cx + Math.cos(a - half) * re, cy + Math.sin(a - half) * re);
-        if (bold) path.arc(cx, cy, re, a - half, a + half);
-        else path.lineTo(cx + Math.cos(a + half) * re, cy + Math.sin(a + half) * re);
-        path.lineTo(cx + Math.cos(a + w0) * rs, cy + Math.sin(a + w0) * rs);
+        if (bold) {
+          // comic wedges filling alternate sectors
+          const a = i * period;
+          const half = (period * (0.5 + thick)) / 2;
+          const w0 = half * 0.15;
+          path.moveTo(cx + Math.cos(a - w0) * r0, cy + Math.sin(a - w0) * r0);
+          path.lineTo(cx + Math.cos(a - half) * R, cy + Math.sin(a - half) * R);
+          path.arc(cx, cy, R, a - half, a + half);
+          path.lineTo(cx + Math.cos(a + w0) * r0, cy + Math.sin(a + w0) * r0);
+          path.closePath();
+          continue;
+        }
+        // fine halo lines: thin tapered needles of varied length, slightly irregular spacing
+        path = buckets[Math.floor(r() * 3) % 3];
+        const a = i * period + (r() - 0.5) * period * 0.8;
+        const rs = r0 * (1 + r() * 0.45);
+        const re = R * (0.42 + r() * r() * 0.5 + (r() < 0.3 ? 0.12 : 0));
+        const wEnd = u * (0.6 + thick * (2 + r() * r() * 9));
+        const wStart = u * 0.25;
+        const ca = Math.cos(a);
+        const sa = Math.sin(a);
+        const nx = -sa;
+        const ny = ca;
+        path.moveTo(cx + ca * rs - nx * wStart, cy + sa * rs - ny * wStart);
+        path.lineTo(cx + ca * re - nx * wEnd, cy + sa * re - ny * wEnd);
+        path.lineTo(cx + ca * re + nx * wEnd, cy + sa * re + ny * wEnd);
+        path.lineTo(cx + ca * rs + nx * wStart, cy + sa * rs + ny * wStart);
         path.closePath();
       }
       ctx.fillStyle = color;
-      ctx.fill(path);
+      buckets.forEach((b, i) => {
+        ctx.globalAlpha = bold ? 1 : [1, 0.72, 0.45][i];
+        ctx.fill(b);
+      });
+      ctx.globalAlpha = 1;
       // concentric rings (broken arcs) like printed halo graphics
       const rings = Math.round(num(p, 'rings', 4));
       if (rings > 0) {

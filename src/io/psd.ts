@@ -10,7 +10,7 @@ import { readPsd, writePsd, type Layer as PsdLayer, type Psd, type AdjustmentLay
 import type { CurvePoints, CurvesValue, Document, ID, Layer, LayerMask, ParamValues } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
 import { createCanvas, ctx2d, opaqueBounds } from '../core/canvas';
-import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeGroupLayer, makeRasterLayer } from '../core/document';
+import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeFillLayer, makeGroupLayer, makeRasterLayer } from '../core/document';
 import { renderDocument, renderLayerToDoc } from '../render/compositor';
 import { effects as effectRegistry, filters } from '../registry';
 import { resolveParams } from '../filters/engine';
@@ -18,7 +18,7 @@ import { saveFile, type OpenedFile } from '../platform';
 import { activeSession, useEditor } from '../state/editor';
 import { openDialog, toast } from '../state/ui';
 import { formatBytes, fromPsdBlend, safeFileName, toPsdBlend } from './math';
-import { effectLabel, effectsFromPsd, effectsToPsd } from './psdEffects';
+import { effectLabel, effectsFromPsd, effectsToPsd, fillFromPsd, fillToPsd } from './psdEffects';
 import { baseName, ensureFontsFor } from './util';
 
 /* ------------------------------------------------------------------ */
@@ -205,6 +205,12 @@ export function buildPsd(doc: Document, opts: PsdExportOptions): { psd: Psd } & 
         report.baked.push(`${l.name} (${fx.unsupported.map((e) => effectLabel(e.effectId)).join(', ')})`);
       } else if (fx.info) common.effects = fx.info;
     }
+    if (l.type === 'fill' && !bake) {
+      // Solid/gradient fills stay editable Photoshop fill layers (pixels are written too). Not when
+      // styles are baked: Photoshop re-renders fill layers from this data and would drop them.
+      const vf = fillToPsd(l.fill);
+      if (vf) common.vectorFill = vf;
+    }
     if (!bake && l.fillOpacity < 1) {
       // The renderer applies Fill to the content: export it at full fill and let Photoshop apply it.
       common.fillOpacity = l.fillOpacity;
@@ -320,6 +326,14 @@ export function psdToDocument(psd: Psd, name: string): { doc: Document; unsuppor
         const a = makeAdjustmentLayer({ name: l.name || m.name, filterId: m.filterId, params: m.params });
         applyCommon(a, l, false);
         insertLayerDraft(doc, a, { parentId });
+        continue;
+      }
+      // Photoshop Solid Color / Gradient fill layers (without a vector mask = not a shape layer).
+      const fill = !l.vectorMask ? fillFromPsd(l.vectorFill) : null;
+      if (fill) {
+        const f = makeFillLayer({ name: l.name || undefined, fill });
+        applyCommon(f, l, false);
+        insertLayerDraft(doc, f, { parentId });
         continue;
       }
       let layer;

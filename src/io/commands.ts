@@ -40,7 +40,6 @@ import { openDialog, toast } from '../state/ui';
 import { IMAGE_EXTS, openFile, placeImageBlob } from './open';
 import { saveDocument } from './save';
 import { quickExportPng } from './exportRender';
-import { showExportPsdDialog } from './psd';
 import { copy, cut, clear, paste } from './clipboard';
 import { canRedo, canUndo, redo, redoLabel, turnLayers, undo, undoLabel } from './editOps';
 import { showFillDialog, showStrokeDialog } from './fillStroke';
@@ -72,6 +71,13 @@ async function openCommand() {
 async function placeCommand() {
   const files = await openFiles({ title: 'Place Image', filters: PLACE_FILTERS, multiple: true });
   for (const f of files) await placeImageBlob(new Blob([f.data]), f.name);
+}
+
+/** ag-psd is large: load the PSD module only when it is used. */
+async function exportPsdCommand() {
+  if (!requireSession('export a PSD')) return;
+  const { showExportPsdDialog } = await import('./psd');
+  await showExportPsdDialog();
 }
 
 async function exportCommand() {
@@ -120,7 +126,7 @@ export const ioCommands: CommandDef[] = [
   cmd({ id: 'file.place', label: 'Place Image…', menu: 'File', group: '30-place', order: 10, shortcut: 'Shift+Ctrl+P', icon: ImagePlus, keywords: ['import', 'embed', 'picture', 'photo', 'insert'], run: placeCommand }),
   cmd({ id: 'file.export', label: 'Export As…', menu: 'File', group: '40-export', order: 10, shortcut: 'Alt+Shift+Ctrl+W', icon: Download, keywords: ['png', 'jpg', 'jpeg', 'webp', 'save image', 'thumbnail', 'icon'], enabled: hasDoc, run: exportCommand }),
   cmd({ id: 'file.quickExportPng', label: 'Quick Export as PNG', menu: 'File', group: '40-export', order: 20, shortcut: 'Alt+Shift+Ctrl+S', icon: ImageDown, keywords: ['png', 'save image'], enabled: hasDoc, run: quickExportPng }),
-  cmd({ id: 'file.exportPsd', label: 'Export as PSD…', menu: 'File', group: '40-export', order: 30, icon: FileDown, keywords: ['photoshop', 'psd', 'layers'], enabled: hasDoc, run: showExportPsdDialog }),
+  cmd({ id: 'file.exportPsd', label: 'Export as PSD…', menu: 'File', group: '40-export', order: 30, icon: FileDown, keywords: ['photoshop', 'psd', 'layers'], enabled: hasDoc, run: exportPsdCommand }),
   cmd({ id: 'file.close', label: 'Close', menu: 'File', group: '90-close', order: 10, shortcut: 'Ctrl+W', icon: X, keywords: ['document', 'tab'], enabled: hasDoc, run: closeActive }),
   cmd({ id: 'file.closeAll', label: 'Close All', menu: 'File', group: '90-close', order: 20, shortcut: 'Alt+Ctrl+W', icon: Files, keywords: ['documents', 'tabs'], enabled: hasDoc, run: async () => void (await closeAll()) }),
   cmd({ id: 'file.exit', label: 'Exit', menu: 'File', group: '90-close', order: 90, shortcut: 'Ctrl+Q', icon: LogOut, keywords: ['quit', 'close app'], run: exitApp }),

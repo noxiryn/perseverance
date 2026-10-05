@@ -13,6 +13,7 @@ import {
   turnPoint,
   type LayerTurn,
   opBakedTransform,
+  opGradient,
   opDocSize,
   opMapPoint,
   opTransform,
@@ -281,4 +282,28 @@ describe('layer flips / rotations (Edit ▸ Transform)', () => {
     expect(r.y).toBeCloseTo(50, 9);
     expect(r.rotation).toBe(105);
   });
+});
+
+describe('gradient fills under canvas rotation', () => {
+  /** Unit direction of a y-down gradient angle. */
+  const dir = (a: number) => ({ x: Math.cos((a * Math.PI) / 180), y: Math.sin((a * Math.PI) / 180) });
+  for (const op of ['rotate90cw', 'rotate90ccw', 'rotate180', 'flipH', 'flipV'] as CanvasOp[])
+    for (const angle of [0, 30, 90, -135])
+      it(`${op} turns a ${angle}° gradient with the pixels`, () => {
+        // Direction vector mapped like any doc vector (map two points, subtract).
+        const W = 10,
+          H = 10;
+        const d = dir(angle);
+        const a = opMapPoint(op, 5, 5, W, H);
+        const b = opMapPoint(op, 5 + d.x, 5 + d.y, W, H);
+        const want = { x: b.x - a.x, y: b.y - a.y };
+        const got = dir(opGradient(op, angle).angle);
+        expect(got.x).toBeCloseTo(want.x, 9);
+        expect(got.y).toBeCloseTo(want.y, 9);
+        // Offsets are vectors too.
+        const o = opGradient(op, angle, 0.3, -0.2);
+        const oa = opMapPoint(op, 5 + 0.3, 5 - 0.2, W, H);
+        expect(o.offsetX).toBeCloseTo(oa.x - a.x, 9);
+        expect(o.offsetY).toBeCloseTo(oa.y - a.y, 9);
+      });
 });

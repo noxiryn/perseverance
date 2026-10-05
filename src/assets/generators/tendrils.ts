@@ -6,7 +6,7 @@
  * style samples the spiral coarsely so it reads as hand-cut paper with sharp corners. The rim is
  * a slightly larger copy of the same polygons, offset towards the light, drawn behind the black.
  */
-import { cubic, taperedOutline } from '../lib/geom';
+import { cubic, positiveWinding, taperedOutline } from '../lib/geom';
 import { P, defineAsset } from '../lib/params';
 import type { Pt, Rand } from '../lib/util';
 import { TAU, makeRand, newCanvas, num, str, tracePoly, unitOf } from '../lib/util';
@@ -312,7 +312,7 @@ export const swirlTendrils = defineAsset(
       // back-most first: lower curls (larger index) are in front
       for (const g of groups) {
         const path = new Path2D();
-        for (const poly of g.polys) tracePoly(path, poly);
+        for (const poly of g.polys) tracePoly(path, positiveWinding(poly));
         if (ow > 0) {
           ctx.save();
           ctx.translate(ox, oy);

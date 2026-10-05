@@ -173,13 +173,25 @@ export function cut() {
     return;
   }
   if (!copy(false)) return;
-  if (s.doc.selection) clearSelectedPixels(activeSession()!, 'Cut');
-  else if (l && l.type === 'raster') {
-    if (l.locks.all || l.locks.pixels) return void toast(`“${l.name}” is locked — copied only.`, 'warning');
-    const patch = bitmaps.edit(l.bitmapId, (ctx, c) => ctx.clearRect(0, 0, c.width, c.height));
-    useEditor.getState().commit('Cut', undefined, { patches: [patch] });
-    viewport.requestRender();
+  if (s.doc.selection) {
+    clearSelectedPixels(activeSession()!, 'Cut');
+    return;
   }
+  if (!l) return;
+  if (l.locks.all || l.locks.pixels) return void toast(`“${l.name}” is locked — copied only.`, 'warning');
+  // No selection: cut everything from the edited mask (hide all) or from the pixel layer.
+  const editingMask = s.editTarget === 'mask' && !!l.mask && bitmaps.has(l.mask.bitmapId);
+  const patch = editingMask
+    ? bitmaps.edit(l.mask!.bitmapId, (ctx, c) => {
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, c.width, c.height);
+      })
+    : l.type === 'raster'
+      ? bitmaps.edit(l.bitmapId, (ctx, c) => ctx.clearRect(0, 0, c.width, c.height))
+      : null;
+  if (!patch) return;
+  useEditor.getState().commit('Cut', undefined, { patches: [patch] });
+  viewport.requestRender();
 }
 
 /** Delete: clear selected pixels, or delete the selected layer(s) when nothing is selected. */

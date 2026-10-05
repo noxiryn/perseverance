@@ -2,7 +2,7 @@
 import { Camera, FileImage, Glasses, Monitor, Rows3, ScanLine, Tv, Bug } from 'lucide-react';
 import type { FilterDef } from '../../../registry';
 import type { Img } from '../util';
-import { anchor, autoEdge, blurPlane, bool, clamp, fbmValue, hash, hashGauss, isEmpty, num, prng, pt, rgb, sc, smoothstep, str } from '../util';
+import { anchor, autoEdge, blurPlane, bool, clamp, coarseField, fbmValue, hash, hashGauss, isEmpty, num, prng, pt, rgb, sc, smoothstep, str } from '../util';
 import { blurPlaneMultires, lineBoxBlur } from '../ops';
 import { vignetteAt } from './light';
 import { angleP, boolP, colorP, numP, pctP, pointP, pxP, seedP, selectP } from '../params';
@@ -24,8 +24,19 @@ function bil(pl: Float32Array, w: number, h: number, fx: number, fy: number, cla
       (pl[y0 * w + x0] * (1 - tx) + pl[y0 * w + x1] * tx) * (1 - ty) + (pl[y1 * w + x0] * (1 - tx) + pl[y1 * w + x1] * tx) * ty
     );
   }
-  const v = (x: number, y: number) => (x < 0 || y < 0 || x >= w || y >= h ? 0 : pl[y * w + x]);
-  return (v(x0, y0) * (1 - tx) + v(x1, y0) * tx) * (1 - ty) + (v(x0, y1) * (1 - tx) + v(x1, y1) * tx) * ty;
+  if (x0 >= 0 && y0 >= 0 && x1 < w && y1 < h) {
+    const i = y0 * w + x0;
+    return (pl[i] * (1 - tx) + pl[i + 1] * tx) * (1 - ty) + (pl[i + w] * (1 - tx) + pl[i + w + 1] * tx) * ty;
+  }
+  const inX0 = x0 >= 0 && x0 < w,
+    inX1 = x1 >= 0 && x1 < w,
+    inY0 = y0 >= 0 && y0 < h,
+    inY1 = y1 >= 0 && y1 < h;
+  const a = inX0 && inY0 ? pl[y0 * w + x0] : 0,
+    b = inX1 && inY0 ? pl[y0 * w + x1] : 0,
+    c = inX0 && inY1 ? pl[y1 * w + x0] : 0,
+    d = inX1 && inY1 ? pl[y1 * w + x1] : 0;
+  return (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty;
 }
 
 /** Premultiplied channel planes 0..1. */
@@ -823,47 +834,80 @@ export const oldPhoto: FilterDef = {
       str: 0.35 + rnd() * 0.5,
     }));
     const inv = 1 / s;
+    const ox = ctx.offsetX,
+      oy = ctx.offsetY;
+    // smooth, low-frequency fields on a coarse grid (blotches, vignette)
+    const step = Math.max(1, Math.min(8, Math.round(6 * s)));
+    const blotch = coarseField(w, h, step, (x, y) => (fbmValue((ox + (x + 0.5) * inv) * 0.004, (oy + (y + 0.5) * inv) * 0.004, seed + 1, 3) - 0.5) * 0.35 * age);
+    const vigF = vig > 0 ? coarseField(w, h, step, (x, y) => vignetteAt(ox + (x + 0.5) * inv, oy + (y + 0.5) * inv, vo) * vig * 0.8) : null;
+    // sepia toning ramp as a LUT
+    const LUT_N = 1024;
+    const sep = new Float32Array((LUT_N + 1) * 3);
+    if (tone === 'sepia') {
+      for (let k = 0; k <= LUT_N; k++) {
+        const c = sepiaTone(k / LUT_N, 0.4 + age * 0.3);
+        sep[k * 3] = c[0] / 255;
+        sep[k * 3 + 1] = c[1] / 255;
+        sep[k * 3 + 2] = c[2] / 255;
+      }
+    }
+    // dust specks: one optional speck per 36 px document cell, precomputed for the covered area
     const cell = 36;
     const dustP = dust * 0.22;
+    const cx0 = Math.floor(ox / cell) - 1,
+      cy0 = Math.floor(oy / cell) - 1;
+    const ncx = Math.floor((ox + w * inv) / cell) - cx0 + 2,
+      ncy = Math.floor((oy + h * inv) / cell) - cy0 + 2;
+    const spX = new Float32Array(ncx * ncy),
+      spY = new Float32Array(ncx * ncy),
+      spR = new Float32Array(ncx * ncy),
+      spK = new Int8Array(ncx * ncy); // 0 none, 1 light, -1 dark
+    if (dustP > 0) {
+      for (let j = 0; j < ncy; j++)
+        for (let i = 0; i < ncx; i++) {
+          const hx = i + cx0,
+            hy = j + cy0;
+          if (hash(hx, hy, seed + 41) > dustP) continue;
+          const q = j * ncx + i;
+          spX[q] = (hx + hash(hx, hy, seed + 42)) * cell;
+          spY[q] = (hy + hash(hx, hy, seed + 43)) * cell;
+          spR[q] = 0.6 + hash(hx, hy, seed + 44) * 2.4;
+          spK[q] = hash(hx, hy, seed + 45) > 0.5 ? 1 : -1;
+        }
+    }
+    const fadeA = 0.08 * age,
+      fadeK = 1 - 0.2 * age;
+    const satF = 1 - 0.55 * age;
     for (let y = 0; y < h; y++) {
-      const Y = ctx.offsetY + (y + 0.5) * inv;
+      const Y = oy + (y + 0.5) * inv;
+      const cyI = Math.floor(Y / cell) - cy0;
       for (let x = 0; x < w; x++) {
-        const j = (y * w + x) * 4;
+        const i = y * w + x,
+          j = i * 4;
         if (data[j + 3] === 0) continue;
-        const X = ctx.offsetX + (x + 0.5) * inv;
+        const X = ox + (x + 0.5) * inv;
         let r = data[j] / 255,
           g = data[j + 1] / 255,
           b = data[j + 2] / 255;
-        let l = r * 0.2126 + g * 0.7152 + b * 0.0722;
-        // uneven exposure / chemical blotches
-        const blotch = (fbmValue(X * 0.004, Y * 0.004, seed + 1, 3) - 0.5) * 0.35 * age;
-        // fading: lifted blacks, dulled whites, reduced contrast
-        const fadeL = (v: number) => 0.08 * age + v * (1 - 0.2 * age) + blotch * 0.5;
+        const l = r * 0.2126 + g * 0.7152 + b * 0.0722;
+        // fading: lifted blacks, dulled whites, reduced contrast, chemical blotches
+        const bl = blotch[i] * 0.5;
         if (tone === 'faded') {
-          const sat = 1 - 0.55 * age;
-          r = l + (r - l) * sat;
-          g = l + (g - l) * sat;
-          b = l + (b - l) * sat;
-          r = fadeL(r) + 0.04 * age;
-          g = fadeL(g) + 0.02 * age;
-          b = fadeL(b) - 0.03 * age;
+          r = fadeA + (l + (r - l) * satF) * fadeK + bl + 0.04 * age;
+          g = fadeA + (l + (g - l) * satF) * fadeK + bl + 0.02 * age;
+          b = fadeA + (l + (b - l) * satF) * fadeK + bl - 0.03 * age;
         } else {
-          l = fadeL(l);
+          const lf = fadeA + l * fadeK + bl;
           if (tone === 'sepia') {
-            const c = sepiaTone(l, 0.4 + age * 0.3);
-            r = c[0] / 255;
-            g = c[1] / 255;
-            b = c[2] / 255;
-          } else r = g = b = l;
+            const k = (lf <= 0 ? 0 : lf >= 1 ? LUT_N : (lf * LUT_N + 0.5) | 0) * 3;
+            r = sep[k];
+            g = sep[k + 1];
+            b = sep[k + 2];
+          } else r = g = b = lf;
         }
-        let m = 1; // multiplicative darkening
+        let m = vigF ? 1 - vigF[i] : 1; // multiplicative darkening
         let add = 0; // additive lightening
-        if (vig > 0) m *= 1 - vignetteAt(X, Y, vo) * vig * 0.8;
-        if (grain > 0) {
-          const gx = Math.floor(X),
-            gy = Math.floor(Y);
-          add += hashGauss(gx, gy, seed + 3) * 0.07 * grain;
-        }
+        if (grain > 0) add += hashGauss(Math.floor(X), Math.floor(Y), seed + 3) * 0.07 * grain;
         for (let k = 0; k < scratches.length; k++) {
           const S = scratches[k];
           if (Y < S.y0 || Y > S.y0 + S.len) continue;
@@ -877,22 +921,25 @@ export const oldPhoto: FilterDef = {
           else m *= 1 - v * 0.6;
         }
         if (dustP > 0) {
-          const cxI = Math.floor(X / cell),
-            cyI = Math.floor(Y / cell);
-          for (let oy = -1; oy <= 1; oy++)
-            for (let ox = -1; ox <= 1; ox++) {
-              const hx = cxI + ox,
-                hy = cyI + oy;
-              if (hash(hx, hy, seed + 41) > dustP) continue;
-              const sx = (hx + hash(hx, hy, seed + 42)) * cell,
-                sy = (hy + hash(hx, hy, seed + 43)) * cell;
-              const rad = 0.6 + hash(hx, hy, seed + 44) * 2.4;
-              const dd = Math.hypot(X - sx, Y - sy);
-              if (dd > rad + inv) continue;
-              const cov = clamp(rad + 0.5 * inv - dd, 0, inv) / inv;
-              if (hash(hx, hy, seed + 45) > 0.5) add += cov * 0.55;
+          const cxI = Math.floor(X / cell) - cx0;
+          for (let dy = -1; dy <= 1; dy++) {
+            const jj = cyI + dy;
+            if (jj < 0 || jj >= ncy) continue;
+            for (let dx = -1; dx <= 1; dx++) {
+              const ii = cxI + dx;
+              if (ii < 0 || ii >= ncx) continue;
+              const q = jj * ncx + ii;
+              const kind = spK[q];
+              if (!kind) continue;
+              const ex = X - spX[q],
+                ey = Y - spY[q];
+              const rad = spR[q] + inv;
+              if (ex * ex + ey * ey > rad * rad) continue;
+              const cov = clamp(spR[q] + 0.5 * inv - Math.sqrt(ex * ex + ey * ey), 0, inv) / inv;
+              if (kind > 0) add += cov * 0.55;
               else m *= 1 - cov * 0.7;
             }
+          }
         }
         data[j] = (r * m + add) * 255;
         data[j + 1] = (g * m + add) * 255;

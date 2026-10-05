@@ -255,7 +255,9 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
         <span>
           <kbd className="shell-kbd">Tab</kbd> filter
         </span>
-        <span className="shell-pal-foot-count">{flat.length} results</span>
+        <span className="shell-pal-foot-count">
+          {flat.length} {flat.length === 1 ? 'result' : 'results'}
+        </span>
       </div>
     </div>
   );

@@ -82,6 +82,10 @@ export function ModelImportDialog({ close, files: initialFiles, layerId }: Model
   const frame = frameSizeFor(state.view.output);
   const aspect = frame.width / frame.height;
   const loadSeq = useRef(0);
+  // Remember the view settings however the dialog closes.
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  useEffect(() => () => void (lastImportState = stateRef.current), []);
 
   /* ---------------- loading ---------------- */
 

@@ -18,6 +18,7 @@ import {
   clampRect,
   opBakedTransform,
   opDocSize,
+  opGradient,
   opMapPoint,
   opTransform,
   scaleTransform,
@@ -60,7 +61,7 @@ function resample(src: HTMLCanvasElement, w: number, h: number, method: Resample
   return out;
 }
 
-const STYLE_SIZE_KEYS = ['size', 'distance', 'length'];
+const STYLE_SIZE_KEYS = ['size', 'distance', 'length', 'soften'];
 
 function scaleEffects(effects: LayerEffect[], k: number): LayerEffect[] {
   return effects.map((e) => {
@@ -406,6 +407,15 @@ export function rotateCanvas(op: CanvasOp) {
       } else if (l.type === 'text' || l.type === 'shape') {
         const sz = getLayerSize(l);
         l.transform = opTransform(op, l.transform, sz.width, sz.height, W, H);
+      }
+      if (l.type === 'fill' && l.fill.type === 'gradient') {
+        // Gradient fills turn with the canvas.
+        const g = l.fill.gradient;
+        const turned = opGradient(op, g.angle, g.offsetX ?? 0, g.offsetY ?? 0);
+        l.fill = {
+          ...l.fill,
+          gradient: { ...g, angle: turned.angle, ...(g.offsetX || g.offsetY ? { offsetX: turned.offsetX, offsetY: turned.offsetY } : {}) },
+        };
       }
       if (l.mask) l.mask = { ...l.mask, bitmapId: newMasks.get(l.mask.bitmapId) ?? l.mask.bitmapId };
     }

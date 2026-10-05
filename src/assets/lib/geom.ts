@@ -209,3 +209,22 @@ export function rotateAround(p: Pt, c: Pt, a: number): Pt {
   const dy = p.y - c.y;
   return { x: c.x + dx * cs - dy * sn, y: c.y + dx * sn + dy * cs };
 }
+
+/** Signed area of a polygon (shoelace; sign depends on winding). Pure. */
+export function signedArea(pts: Pt[]): number {
+  let a = 0;
+  for (let i = 0, n = pts.length; i < n; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % n];
+    a += p.x * q.y - q.x * p.y;
+  }
+  return a / 2;
+}
+
+/**
+ * Returns the polygon with positive signed area (reversed copy if needed). Filling many
+ * overlapping polygons with the nonzero rule only unions them when they share a winding.
+ */
+export function positiveWinding(pts: Pt[]): Pt[] {
+  return signedArea(pts) < 0 ? pts.slice().reverse() : pts;
+}

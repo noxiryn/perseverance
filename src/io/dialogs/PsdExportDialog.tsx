@@ -35,9 +35,9 @@ export function PsdExportDialog({ close }: { close: (r?: PsdExportOptions) => vo
       </div>
       <div className="io-sep" />
       <div className="io-note">
-        Layers, groups, names, opacity, fill, blend modes, visibility, clipping masks and layer masks are preserved. Text and shape layers are
-        exported as pixel layers (smart filters applied). Brightness/Contrast, Levels, Curves, Exposure, Vibrance, Hue/Saturation, Invert,
-        Posterize and Threshold stay editable adjustment layers.
+        Layers, groups, names, opacity, fill, blend modes, visibility, clipping masks and layer masks are preserved. Solid and gradient fill
+        layers stay editable fill layers; text and shape layers are exported as pixel layers (smart filters applied). Brightness/Contrast,
+        Levels, Curves, Exposure, Vibrance, Hue/Saturation, Invert, Posterize and Threshold stay editable adjustment layers.
       </div>
     </Dialog>
   );

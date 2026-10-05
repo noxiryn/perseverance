@@ -10,7 +10,6 @@
  */
 import type { FilterContext } from '../../registry';
 import { parseColor } from '../../core/color';
-import { blurChannel, boxBlurImageData } from '../../core/blur';
 
 export interface Img {
   data: Uint8ClampedArray;
@@ -212,8 +211,98 @@ export function blurPlane(buf: Float32Array, w: number, h: number, sigma: number
   }
   // 3 box passes of radius r ≈ gaussian sigma sqrt(r(r+1)).
   const r = Math.max(1, Math.round((-1 + Math.sqrt(1 + 4 * sigma * sigma)) / 2));
-  blurChannel(buf, w, h, Math.min(r, Math.max(w, h)));
+  boxBlurPlane(buf, w, h, Math.min(r, Math.max(w, h)), 3);
   return buf;
+}
+
+/**
+ * Repeated box blur of a float plane in place (clamp-to-edge). Running sums make it O(1) per
+ * pixel; the vertical pass walks rows (one running sum per column) so memory stays sequential.
+ */
+export function boxBlurPlane(buf: Float32Array, w: number, h: number, r: number, passes = 3): Float32Array {
+  return boxBlurInterleaved(buf, w, h, 1, r, passes);
+}
+
+/**
+ * Box blur of interleaved data (`ch` floats per pixel) in place, `passes` times (3 ≈ gaussian
+ * with sigma = sqrt(r(r+1))). Exactly normalized: a constant image stays constant.
+ * (Used instead of core/blur's box blurs, whose windows are one tap wider than their divisor.)
+ */
+export function boxBlurInterleaved(buf: Float32Array, w: number, h: number, ch: number, r: number, passes = 3): Float32Array {
+  if (r < 1 || w < 1 || h < 1) return buf;
+  const inv = 1 / (2 * r + 1);
+  const stride = w * ch;
+  const tmp = new Float32Array(buf.length);
+  const sums = new Float64Array(stride);
+  for (let p = 0; p < passes; p++) {
+    // horizontal: buf → tmp
+    for (let y = 0; y < h; y++) {
+      const row = y * stride;
+      for (let c = 0; c < ch; c++) {
+        let sum = 0;
+        for (let k = -r; k <= r; k++) sum += buf[row + (k < 0 ? 0 : k >= w ? w - 1 : k) * ch + c];
+        for (let x = 0; x < w; x++) {
+          tmp[row + x * ch + c] = sum * inv;
+          const add = x + r + 1,
+            rem = x - r;
+          sum += buf[row + (add < w ? add : w - 1) * ch + c] - buf[row + (rem > 0 ? rem : 0) * ch + c];
+        }
+      }
+    }
+    // vertical: tmp → buf
+    sums.fill(0);
+    for (let k = -r; k <= r; k++) {
+      const rk = (k < 0 ? 0 : k >= h ? h - 1 : k) * stride;
+      for (let q = 0; q < stride; q++) sums[q] += tmp[rk + q];
+    }
+    for (let y = 0; y < h; y++) {
+      const o = y * stride;
+      const addRow = (y + r + 1 < h ? y + r + 1 : h - 1) * stride;
+      const remRow = (y - r > 0 ? y - r : 0) * stride;
+      for (let q = 0; q < stride; q++) {
+        buf[o + q] = sums[q] * inv;
+        sums[q] += tmp[addRow + q] - tmp[remRow + q];
+      }
+    }
+  }
+  return buf;
+}
+
+/**
+ * Evaluate a smooth field `fn(x, y)` (image px) on a coarse grid every `step` px and upsample
+ * it bilinearly — for low-frequency noise (blotches, wobble, displacement) that would otherwise
+ * be evaluated per pixel.
+ */
+export function coarseField(w: number, h: number, step: number, fn: (x: number, y: number) => number): Float32Array {
+  const out = new Float32Array(w * h);
+  const st = Math.max(1, Math.floor(step));
+  if (st <= 1) {
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) out[y * w + x] = fn(x, y);
+    return out;
+  }
+  const gw = Math.ceil((w - 1) / st) + 1,
+    gh = Math.ceil((h - 1) / st) + 1;
+  const g = new Float32Array(gw * gh);
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) g[j * gw + i] = fn(i * st, j * st);
+  const inv = 1 / st;
+  for (let y = 0; y < h; y++) {
+    const fy = y * inv;
+    const j0 = fy | 0;
+    const j1 = j0 < gh - 1 ? j0 + 1 : j0;
+    const ty = fy - j0;
+    const r0 = j0 * gw,
+      r1 = j1 * gw;
+    for (let x = 0; x < w; x++) {
+      const fx = x * inv;
+      const i0 = fx | 0;
+      const i1 = i0 < gw - 1 ? i0 + 1 : i0;
+      const tx = fx - i0;
+      const a = g[r0 + i0] + (g[r0 + i1] - g[r0 + i0]) * tx;
+      const b = g[r1 + i0] + (g[r1 + i1] - g[r1 + i0]) * tx;
+      out[y * w + x] = a + (b - a) * ty;
+    }
+  }
+  return out;
 }
 
 export function blurPlanes(p: Planes, w: number, h: number, sigma: number) {
@@ -256,13 +345,19 @@ export function unpremultiplyInPlace(d: Uint8ClampedArray) {
 
 /**
  * Gaussian blur of an RGBA image in place with premultiplied alpha (no dark fringes at
- * transparent edges). `sigma` in image px. Uses the shared box blur for large radii.
+ * transparent edges). `sigma` in image px: exact gaussian for small radii, 3 box passes above.
  */
 export function blurImage<T extends Img>(img: T, sigma: number): T {
   if (!(sigma > 0.2)) return img;
   premultiplyInPlace(img.data);
   if (sigma < 1.5) gaussSmallRGBA(img, sigma);
-  else boxBlurImageData(img as unknown as ImageData, sigma * 2);
+  else {
+    const { width: w, height: h } = img;
+    const r = Math.max(1, Math.round((-1 + Math.sqrt(1 + 4 * sigma * sigma)) / 2));
+    const f = Float32Array.from(img.data);
+    boxBlurInterleaved(f, w, h, 4, Math.min(r, Math.max(w, h)), 3);
+    img.data.set(f);
+  }
   unpremultiplyInPlace(img.data);
   return img;
 }
