@@ -81,13 +81,11 @@ function rememberState(s: StudioState) {
   }
 }
 
-/** R15-only joints map to the nearest R6 joint. */
+/** R15-only joints map to the nearest R6 joint (R6 wrists exist: they turn the held sword). */
 const R6_EQUIVALENT: Partial<Record<JointId, JointId>> = {
   waist: 'root',
   rightElbow: 'rightShoulder',
-  rightWrist: 'rightShoulder',
   leftElbow: 'leftShoulder',
-  leftWrist: 'leftShoulder',
   rightKnee: 'rightHip',
   rightAnkle: 'rightHip',
   leftKnee: 'leftHip',

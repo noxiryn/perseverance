@@ -71,7 +71,9 @@ export function traceContours(src: MaskSource, threshold = 127.5, simplify = tru
   const thr = threshold;
   const nEdges = GW * GH * 2;
   const next = new Int32Array(nEdges).fill(-1);
-  const starts: number[] = [];
+  // Edges that start a segment, in scan order (typed + grown on demand: halftone masks have ~1M).
+  let starts = new Int32Array(4096);
+  let nStarts = 0;
 
   const H_ = (i: number, j: number) => (j * GW + i) * 2; // horizontal edge (i,j)-(i+1,j)
   const V_ = (i: number, j: number) => (j * GW + i) * 2 + 1; // vertical edge (i,j)-(i,j+1)
@@ -80,7 +82,14 @@ export function traceContours(src: MaskSource, threshold = 127.5, simplify = tru
     code === T ? H_(i, j) : code === B ? H_(i, j + 1) : code === L ? V_(i, j) : V_(i + 1, j);
 
   const link = (from: number, to: number) => {
-    if (next[from] === -1) starts.push(from);
+    if (next[from] === -1) {
+      if (nStarts === starts.length) {
+        const grown = new Int32Array(starts.length * 2);
+        grown.set(starts);
+        starts = grown;
+      }
+      starts[nStarts++] = from;
+    }
     next[from] = to;
   };
 
@@ -119,7 +128,9 @@ export function traceContours(src: MaskSource, threshold = 127.5, simplify = tru
 
   const visited = new Uint8Array(nEdges);
   const out: Float32Array[] = [];
-  const pts: number[] = [];
+  // Reusable point buffer for the polyline being traced.
+  let pts = new Float64Array(1024);
+  let n = 0;
 
   const pointOf = (e: number) => {
     const vertical = e & 1;
@@ -134,13 +145,24 @@ export function traceContours(src: MaskSource, threshold = 127.5, simplify = tru
     // sample (i, j) sits at pixel center (i - 1 + 0.5, j - 1 + 0.5)
     const sx = i - 0.5 + ox;
     const sy = j - 0.5 + oy;
-    if (vertical) pts.push(sx, sy + t);
-    else pts.push(sx + t, sy);
+    if (n + 2 > pts.length) {
+      const grown = new Float64Array(pts.length * 2);
+      grown.set(pts);
+      pts = grown;
+    }
+    if (vertical) {
+      pts[n++] = sx;
+      pts[n++] = sy + t;
+    } else {
+      pts[n++] = sx + t;
+      pts[n++] = sy;
+    }
   };
 
-  for (const s of starts) {
+  for (let si = 0; si < nStarts; si++) {
+    const s = starts[si];
     if (visited[s]) continue;
-    pts.length = 0;
+    n = 0;
     let cur = s;
     let guard = 0;
     while (cur >= 0 && !visited[cur] && guard++ < nEdges) {
@@ -148,34 +170,44 @@ export function traceContours(src: MaskSource, threshold = 127.5, simplify = tru
       pointOf(cur);
       cur = next[cur];
     }
-    if (pts.length >= 6) out.push(simplify ? simplifyClosed(pts) : Float32Array.from(pts));
+    if (n >= 6) out.push(simplify ? simplifyClosed(pts, 1e-3, n) : Float32Array.from(pts.subarray(0, n)));
   }
   return out;
 }
 
-/** Remove collinear points from a closed polyline (keeps shape exactly for axis-aligned runs). */
-export function simplifyClosed(pts: ArrayLike<number>, eps = 1e-3): Float32Array {
-  const n = pts.length / 2;
-  if (n <= 3) return Float32Array.from(pts as ArrayLike<number>);
-  const keep: number[] = [];
+/**
+ * Remove collinear points from a closed polyline (keeps shape exactly for axis-aligned runs).
+ * `len` = number of values of `pts` to use (default: all).
+ */
+export function simplifyClosed(pts: ArrayLike<number>, eps = 1e-3, len = pts.length): Float32Array {
+  const n = len >> 1;
+  const copy = () => {
+    const c = new Float32Array(n * 2);
+    for (let i = 0; i < n * 2; i++) c[i] = pts[i];
+    return c;
+  };
+  if (n <= 3) return copy();
+  const out = new Float32Array(n * 2);
+  let m = 0;
   for (let k = 0; k < n; k++) {
-    const p = (k + n - 1) % n;
-    const q = (k + 1) % n;
-    const ax = pts[k * 2] - pts[p * 2];
-    const ay = pts[k * 2 + 1] - pts[p * 2 + 1];
-    const bx = pts[q * 2] - pts[k * 2];
-    const by = pts[q * 2 + 1] - pts[k * 2 + 1];
+    const p = k === 0 ? n - 1 : k - 1;
+    const q = k === n - 1 ? 0 : k + 1;
+    const kx = pts[k * 2];
+    const ky = pts[k * 2 + 1];
+    const ax = kx - pts[p * 2];
+    const ay = ky - pts[p * 2 + 1];
+    const bx = pts[q * 2] - kx;
+    const by = pts[q * 2 + 1] - ky;
     const cross = ax * by - ay * bx;
     const dot = ax * bx + ay * by;
-    if (Math.abs(cross) > eps * Math.max(1, Math.hypot(ax, ay) * Math.hypot(bx, by)) || dot < 0) keep.push(k);
+    const lens = Math.sqrt((ax * ax + ay * ay) * (bx * bx + by * by));
+    if (Math.abs(cross) > eps * (lens > 1 ? lens : 1) || dot < 0) {
+      out[m++] = kx;
+      out[m++] = ky;
+    }
   }
-  if (keep.length < 3) return Float32Array.from(pts as ArrayLike<number>);
-  const out = new Float32Array(keep.length * 2);
-  keep.forEach((k, i) => {
-    out[i * 2] = pts[k * 2];
-    out[i * 2 + 1] = pts[k * 2 + 1];
-  });
-  return out;
+  if (m < 6) return copy();
+  return m === out.length ? out : out.slice(0, m);
 }
 
 /** Signed area of a closed polyline (positive = clockwise in y-down screen space). */

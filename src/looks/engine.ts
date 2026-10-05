@@ -374,7 +374,7 @@ export function describeTargetSkips(built: BuiltLook, target: Layer | null | und
   if (!names.length) return '';
   const list = listNames(names);
   const many = new Set(names).size > 1;
-  if (!target) return `${list} ${many ? 'need' : 'needs'} a layer target — switch Looks to “Active layer” and select your character to include ${many ? 'them' : 'it'}`;
+  if (!target) return `${list} ${many ? 'need' : 'needs'} a layer: choose “Active layer” and select your character to include ${many ? 'them' : 'it'}`;
   if (target.type === 'group') return `${list} skipped: groups can’t hold smart filters — select the character layer itself`;
   return `${list} skipped: a ${target.type} layer can’t hold ${many ? 'them' : 'it'}`;
 }
@@ -416,7 +416,7 @@ export async function applyLook(lookId: string, targetLayerId: ID | null): Promi
   const target = targetId ? s.doc.layers[targetId] : null;
   const where = target ? ` to “${target.name}”` : ' to the whole document';
   const skips = describeTargetSkips(built, target);
-  toast(`Applied look “${look.name}”${where}${note ? ` (${note})` : ''}${skips ? ` — ${skips}` : ''}.`, skips ? 'info' : 'success', skips ? 5600 : note ? 3600 : 2600);
+  toast(`Applied look “${look.name}”${where}${note ? ` (${note})` : ''}.${skips ? ` ${skips}.` : ''}`, skips ? 'info' : 'success', skips ? 5600 : note ? 3600 : 2600);
 }
 
 /**

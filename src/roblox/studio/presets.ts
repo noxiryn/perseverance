@@ -173,6 +173,7 @@ export const POSE_PRESETS: PosePreset[] = [
         neck: [0, -30, 0],
         rightShoulder: [-100, 52, 0],
         rightElbow: [0, 0, 0],
+        rightWrist: [0, 0, 0],
         leftShoulder: [30, 0, 35],
         leftElbow: [0, 0, 0],
         rightHip: [-38, 0, -10],

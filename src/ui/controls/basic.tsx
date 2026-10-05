@@ -232,6 +232,8 @@ export function NumberField({
               e.preventDefault();
               const d = (e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 10 : 1) * (step / displayScale);
               const nv = clampV(value + d);
+              // Keep the visible text in sync, otherwise the stale text is re-committed on blur.
+              setText(fmt(nv * displayScale, step));
               onChange(nv);
               onCommit?.(nv);
             }

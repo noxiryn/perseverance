@@ -224,6 +224,9 @@ export function applyPose(rig: RigBuild, pose: StudioPose) {
   set('neck', jointQuaternion(j.neck));
   set('rightShoulder', blendInto(new THREE.Quaternion(), j.rightShoulder, j.rightElbow, 0.5));
   set('leftShoulder', blendInto(new THREE.Quaternion(), j.leftShoulder, j.leftElbow, 0.5));
+  // Rigid R6 arms: the wrist turns only what the hand holds (e.g. the sword grip).
+  rig.attach.rightHand.quaternion.copy(jointQuaternion(j.rightWrist));
+  rig.attach.leftHand.quaternion.copy(jointQuaternion(j.leftWrist));
   const qWaistInv = _qi.copy(qWaist).invert();
   const rh = blendInto(new THREE.Quaternion(), j.rightHip, j.rightKnee, 0.5);
   set('rightHip', rh.premultiply(qWaistInv));

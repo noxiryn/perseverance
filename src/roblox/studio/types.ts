@@ -25,7 +25,8 @@ export const JOINTS_R15 = [
 ] as const;
 export type JointId = (typeof JOINTS_R15)[number];
 
-export const JOINTS_R6: JointId[] = ['root', 'neck', 'rightShoulder', 'leftShoulder', 'rightHip', 'leftHip'];
+/** R6 joints. R6 arms are rigid: the wrists only turn what the hands hold (sword grip). */
+export const JOINTS_R6: JointId[] = ['root', 'neck', 'rightShoulder', 'rightWrist', 'leftShoulder', 'leftWrist', 'rightHip', 'leftHip'];
 
 export const JOINT_LABELS: Record<JointId, string> = {
   root: 'Body',
