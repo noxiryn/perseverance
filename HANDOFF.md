@@ -22,7 +22,7 @@ ARCHITECTURE.md §3 for each module's full feature list).
 | paint (brush engine, paint tools, brushes panel) | `src/tools/paint` | **done** |
 | adjustments | `src/filters/adjustments` | **done** |
 | fonts-color (86 bundled fonts, swatches/color/fonts panels) | `src/fonts`, `src/presets` | **done** |
-| renderer (compositor, text, shapes, layer styles) | `src/render` | in review |
+| renderer (compositor, text, shapes, layer styles) | `src/render` | **done** |
 | viewport-select (canvas, selection/transform/crop tools, Select/View menus) | `src/viewport` | **done** |
 | roblox (Pose Studio, remove bg, styler, safe zones, preview) | `src/roblox` | **done** |
 | io (projects, export, PSD, clipboard, autosave, File/Edit/Image menus) | `src/io` | in review |
@@ -53,6 +53,8 @@ starting point; don't rewrite modules from scratch.
      `renderLayer`) so layers-panels' Rasterize Layer Style is exact for non-Normal blend layers.
    - (done) shell start screen / palette open templates via openTemplate(id) from src/templates (character
      selected); palette looks use currentTargetId().
+   - PERF: hue/saturation (src/filters/adjustments/defs/color.ts) ~100 ms and vignette (fx-filters) ~120-160 ms per
+     1080p pass dominate full composites — LUT / per-row precompute. Renderer already exports invalidateTextLayout.
    - Optional: editor store `beforeCommit` hook so Free Transform can commit itself before another command
      (viewport currently repairs history via transform/historySplit.ts).
    - Optional: FilterContext.contentRect so edge-sensitive filters (rim-light, toon) know the real layer box.

@@ -189,7 +189,13 @@ export async function renderExportPreview(doc: Document, o: ExportOptions): Prom
   const canvas = drawPlan(doc, o, plan, k);
   // Effective preview scale from the actual (rounded) canvas size.
   const previewScale = plan.scale * Math.sqrt((canvas.width * canvas.height) / px);
-  return { canvas, width: plan.width, height: plan.height, reduced: k < 1, estimateFactor: k < 1 ? sizeEstimateFactor(previewScale, plan.scale) : 1 };
+  return {
+    canvas,
+    width: plan.width,
+    height: plan.height,
+    reduced: k < 1,
+    estimateFactor: k < 1 ? sizeEstimateFactor(previewScale, plan.scale) : 1,
+  };
 }
 
 /** Wait until the browser has painted (so a toast / busy state shows before a long synchronous render). */

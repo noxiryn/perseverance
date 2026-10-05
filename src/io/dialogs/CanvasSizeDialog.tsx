@@ -175,8 +175,7 @@ export function CanvasSizeDialog({ close, doc }: { close: (r?: CanvasSizeResult)
         <b>
           {w} × {h} px
         </b>
-        .{' '}
-        {extensionNote(doc, hasBackground)}
+        . {extensionNote(doc, hasBackground)}
       </div>
     </Dialog>
   );
