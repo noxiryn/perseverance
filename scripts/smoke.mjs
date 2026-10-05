@@ -51,6 +51,59 @@ await page.goto(url, { waitUntil: 'networkidle' });
 await wait(1500);
 await shot('01-start');
 
+/* ---------- render checks: pixel cases (renderDocument, no editor state) ---------- */
+const renderFails = await run('render-checks', () => {
+  const { bitmaps, documentUtils: D, renderDocument } = window.__app;
+  const fails = [];
+  /** RGBA (straight alpha) at the centre of a transparent 100×100 render of `layers` (bottom first). */
+  const centre = (layers) => {
+    const doc = D.createDocument({ width: 100, height: 100, background: null });
+    for (const l of layers) doc.layers[l.id] = l;
+    doc.rootIds = layers.map((l) => l.id);
+    return Array.from(renderDocument(doc, { background: false }).getContext('2d').getImageData(50, 50, 1, 1).data);
+  };
+  const expect = (name, got, want, tol) => {
+    if (got.some((v, i) => Math.abs(v - want[i]) > tol[i])) fails.push(`${name}: got ${got.join(',')}, want ${want.map(Math.round).join(',')}`);
+  };
+
+  // Adjustment layers with a blend mode keep the alpha of what they adjust (semi-transparent pixels,
+  // clipped or over a transparent document), like Photoshop: invert over rgba(200,120,60,0.5) is
+  // B(backdrop, inverted) of the unpremultiplied colours at alpha 128. (Was (2α − α²)·α = 96.)
+  const lum = (c) => 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
+  const setLum = (c, l) => {
+    const d = l - lum(c);
+    const o = c.map((v) => v + d);
+    const L = lum(o);
+    const n = Math.min(...o);
+    const x = Math.max(...o);
+    if (n < 0) return o.map((v) => L + ((v - L) * L) / (L - n));
+    if (x > 255) return o.map((v) => L + ((v - L) * (255 - L)) / (x - L));
+    return o;
+  };
+  const blends = {
+    normal: (b, s) => s,
+    multiply: (b, s) => b.map((v, i) => (v * s[i]) / 255),
+    overlay: (b, s) => b.map((v, i) => (v <= 127.5 ? (2 * v * s[i]) / 255 : 255 - (2 * (255 - v) * (255 - s[i])) / 255)),
+    color: (b, s) => setLum(s, lum(b)),
+  };
+  const backdrop = [200, 120, 60];
+  const inverted = backdrop.map((v) => 255 - v);
+  for (const [mode, B] of Object.entries(blends)) {
+    for (const clipped of [true, false]) {
+      const bmp = bitmaps.create(100, 100, `rgba(${backdrop.join(',')},0.5)`);
+      const base = D.makeRasterLayer({ bitmapId: bmp, width: 100, height: 100 });
+      const adj = D.makeAdjustmentLayer({ filterId: 'invert' });
+      adj.clipped = clipped;
+      adj.blendMode = mode;
+      // Colours of a half-transparent pixel are quantized by premultiplied storage: ±3.
+      expect(`invert ${mode}${clipped ? ' clipped' : ''} over 50% alpha`, centre([base, adj]), [...B(backdrop, inverted), 128], [3, 3, 3, 0]);
+    }
+  }
+  return fails;
+});
+for (const f of renderFails ?? []) errors.push(`[render-checks] ${f}`);
+console.log(`render checks: ${renderFails ? `${renderFails.length} failed` : 'did not run'}`);
+
 /* ---------- registry inventory ---------- */
 const inventory = await run('inventory', () => {
   const a = window.__app;

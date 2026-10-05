@@ -380,6 +380,16 @@ async function rendererPart(opts) {
     d.__base = d.layers[d.rootIds[0]].bitmapId;
     return d;
   }, { strokes: (d) => [{ target: d.__paint }, { target: d.__base, erase: true }] });
+  // Adjustments with a blend mode over semi-transparent pixels (they keep the alpha they adjust):
+  // clipped to a soft base, and top-level over a transparent document. Separable modes only: the
+  // non-separable ones (hue, color…) are not partial == full exact on GPU canvases, for any layer.
+  await run('blended-adj-transparent', () => {
+    const d = doc0(null);
+    d.__paint = addRaster(d, { name: 'base', seed: 6 }).bitmapId;
+    addAdj(d, 'invert', {}, { clipped: true, blendMode: 'multiply' });
+    addAdj(d, 'hue-saturation', { hue: 120, saturation: 40 }, { opacity: 0.7, blendMode: 'overlay' });
+    return d;
+  }, { strokes: [{}, { erase: true }] });
   await run('masked', () => {
     const d = doc0();
     d.__paint = addRaster(d, { mask: { feather: 0 } }).bitmapId;
