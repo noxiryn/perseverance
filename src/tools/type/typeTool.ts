@@ -10,8 +10,7 @@ import { toast } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
 import { isMac } from '../../platform';
 import { textLayerAt } from './apply';
-import { apply } from './affine';
-import { textFrame } from './frame';
+import { frameOutline, textFrame } from './frame';
 import { TYPE_DEFAULTS, TYPE_TOOL_ID } from './options';
 import {
   beginEditLayer,
@@ -153,12 +152,7 @@ function drawHover(ctx: CanvasRenderingContext2D) {
   const l = hoverId ? s?.doc.layers[hoverId] : null;
   if (!l || l.type !== 'text') return;
   const frame = textFrame(l);
-  const pts = [
-    { x: 0, y: 0 },
-    { x: frame.w, y: 0 },
-    { x: frame.w, y: frame.h },
-    { x: 0, y: frame.h },
-  ].map((p) => viewport.docToScreen(apply(frame.M, p)));
+  const pts = frameOutline(frame).map((p) => viewport.docToScreen(p));
   ctx.save();
   ctx.beginPath();
   pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));

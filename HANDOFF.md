@@ -20,7 +20,7 @@ ARCHITECTURE.md §3 for each module's full feature list).
 | shell (chrome, menus, dock, palette, start screen) | `src/ui/shell`, `src/App.tsx` | **done** (implement + review + fix) |
 | layers-panels (Layers/Properties/Effects/History/Navigator, Layer menu) | `src/panels` | fixing review findings |
 | paint (brush engine, paint tools, brushes panel) | `src/tools/paint` | fixing review findings |
-| adjustments | `src/filters/adjustments` | fixing review findings |
+| adjustments | `src/filters/adjustments` | **done** |
 | fonts-color (86 bundled fonts, swatches/color/fonts panels) | `src/fonts`, `src/presets` | **done** |
 | renderer (compositor, text, shapes, layer styles) | `src/render` | in review |
 | viewport-select (canvas, selection/transform/crop tools, Select/View menus) | `src/viewport` | in review |
@@ -46,6 +46,10 @@ starting point; don't rewrite modules from scratch.
      imports `resetTextCaches` from `src/render/text.ts`); optionally pass a text sample to `ensureFont`.
    - type tool / store: expose "is on-canvas text editing active" + a way to refocus the text editor
      (fonts `apply.ts` currently peeks at the textarea class).
+   - fx-filters `src/filters/ui/apply.ts resolveTarget`: allow editTarget==='mask' on adjustment/fill layers.
+   - Optional: FilterDef custom params editor so Levels/Curves/Color Balance/Selective Color/Exposure can use
+     openFilterDialog (adjustments currently uses its own AdjustmentDialog for those 5).
+   - macOS: Edit-menu roles intercept Cmd+C/V — canvas copy/paste on mac should also listen to DOM copy/paste events.
 3. **End-to-end smoke test**: `npx vite --port 5300 &` then `node scripts/smoke.mjs --url http://localhost:5300`
    (exercises templates, every command, tool and panel; screenshots in `screenshots-tmp/`).
    Make sure the viewport element carries `data-viewport` so the smoke test drags on the canvas.

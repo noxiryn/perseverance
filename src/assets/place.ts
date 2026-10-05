@@ -71,7 +71,8 @@ export function createAssetLayer(
         ? { x: 0, y: 0 }
         : { x: opts.x ?? Math.round((docWidth - canvas.width) / 2), y: opts.y ?? Math.round((docHeight - canvas.height) / 2) },
   });
-  layer.generator = { kind: `asset:${assetId}`, params: p };
+  // imported images are plain pixels: nothing to regenerate (and the source may be deleted later)
+  layer.generator = def.category === USER_CATEGORY ? null : { kind: `asset:${assetId}`, params: p };
   layer.blendMode = opts.blendMode ?? def.defaultBlendMode ?? 'normal';
   layer.opacity = opts.opacity ?? def.defaultOpacity ?? 1;
   return layer;

@@ -49,7 +49,7 @@ export const BUILTIN_PRESETS: PaintBrushPreset[] = [
   { id: 'hard-pencil', name: 'Hard Pencil', category: 'Basic', size: 4, hardness: 0.95, spacing: 0.08, flow: 1, pressureOpacity: true, description: 'Thin sketching line' },
   { id: 'ink-pen', name: 'Ink Pen', category: 'Basic', size: 10, hardness: 0.97, spacing: 0.06, flow: 1, pressureSize: true, smoothing: 45, description: 'Smooth inking with pressure taper' },
   { id: 'calligraphy', name: 'Calligraphy', category: 'Basic', size: 30, hardness: 0.92, spacing: 0.04, flow: 1, angle: 45, roundness: 0.18, smoothing: 30, description: 'Flat angled nib' },
-  { id: 'marker', name: 'Marker', category: 'Basic', size: 40, hardness: 0.8, spacing: 0.06, flow: 0.55, angle: 20, tip: markerTip, description: 'Semi-transparent chisel marker' },
+  { id: 'marker', name: 'Marker', category: 'Basic', size: 40, hardness: 0.8, spacing: 0.06, flow: 0.35, opacity: 0.8, angle: 20, tip: markerTip, description: 'Semi-transparent chisel marker — overlapping strokes build up' },
   { id: 'square', name: 'Square', category: 'Basic', size: 30, hardness: 1, spacing: 0.08, flow: 1, tip: squareTip, description: 'Hard square tip for blocky pixel-ish strokes' },
 
   // ---- Dry media ----

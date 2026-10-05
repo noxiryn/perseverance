@@ -4,10 +4,12 @@
  * sub-objects identical) plus bitmap versions, and are scheduled off the interaction path.
  */
 import { memo, useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { Document, ID, Layer } from '../core/types';
+import type { Document, ID, Layer, Rect } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
 import { cloneCanvas } from '../core/canvas';
-import { renderThumbnail } from '../render/compositor';
+import { getLayerSize, renderLayerToDoc, renderThumbnail, shapeLocalBounds } from '../render/compositor';
+import { layerContentBounds, localRectToDoc } from './bounds';
+import type { ThumbContent } from './panelState';
 
 /* ------------------------------------------------------------------ */
 /* Bitmap version subscription (throttled)                             */
@@ -100,8 +102,68 @@ interface CacheEntry {
 }
 const layerCache = new Map<string, CacheEntry>();
 
-function cacheKey(doc: Document, id: ID, size: number) {
-  return `${doc.id}:${id}:${size}`;
+function cacheKey(doc: Document, id: ID, size: number, content: ThumbContent) {
+  return `${doc.id}:${id}:${size}:${content}`;
+}
+
+/** In 'auto' mode, layers covering less than this share of the canvas get a cropped thumbnail. */
+const AUTO_CROP_AREA = 0.25;
+
+/**
+ * Document rect a layer thumbnail should show, or null for the whole document. Only pixel and
+ * shape layers are cropped (text shows a "T" tile, fills / adjustments / groups an icon or swatch).
+ */
+export function thumbCrop(doc: Document, l: Layer, content: ThumbContent): Rect | null {
+  if (content === 'document' || (l.type !== 'raster' && l.type !== 'shape')) return null;
+  let b: Rect | null = null;
+  if (l.type === 'raster') b = layerContentBounds(doc, l.id, false);
+  else {
+    const size = getLayerSize(l);
+    b = localRectToDoc(l.transform, size.width, size.height, shapeLocalBounds(l.shape));
+  }
+  if (!b) return null;
+  // Visible part only, with a little breathing room.
+  const pad = Math.max(1, Math.max(b.width, b.height) * 0.04);
+  const x0 = Math.max(0, Math.floor(b.x - pad));
+  const y0 = Math.max(0, Math.floor(b.y - pad));
+  const x1 = Math.min(doc.width, Math.ceil(b.x + b.width + pad));
+  const y1 = Math.min(doc.height, Math.ceil(b.y + b.height + pad));
+  if (x1 - x0 < 1 || y1 - y0 < 1) return null;
+  if (content === 'auto' && (x1 - x0) * (y1 - y0) >= AUTO_CROP_AREA * doc.width * doc.height) return null;
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+}
+
+/**
+ * Render a layer's content (+ smart filters, no effects / mask — like renderThumbnail) limited to
+ * `crop`, at about `px` pixels on the long side: the layer is rendered into a temporary document
+ * the size of the crop, shifted so the crop's corner is the origin.
+ */
+function renderCropped(doc: Document, l: Layer, crop: Rect, px: number): HTMLCanvasElement | null {
+  if (l.type !== 'raster' && l.type !== 'shape') return null;
+  const s = Math.min(8, px / Math.max(crop.width, crop.height));
+  const t = l.transform;
+  const temp = {
+    ...l,
+    effects: [],
+    mask: null,
+    clipped: false,
+    visible: true,
+    opacity: 1,
+    fillOpacity: 1,
+    blendMode: 'normal',
+    transform: { ...t, x: t.x - crop.x, y: t.y - crop.y },
+  } as Layer;
+  const tempDoc: Document = {
+    ...doc,
+    width: crop.width,
+    height: crop.height,
+    background: null,
+    selection: null,
+    guides: [],
+    layers: { [l.id]: temp },
+    rootIds: [l.id],
+  };
+  return renderLayerToDoc(tempDoc, temp, { scale: s, effects: false, mask: false });
 }
 
 function drawFitted(target: HTMLCanvasElement | null, src: HTMLCanvasElement | null) {
@@ -123,25 +185,30 @@ function drawFitted(target: HTMLCanvasElement | null, src: HTMLCanvasElement | n
 
 const DPR = () => Math.min(2, window.devicePixelRatio || 1);
 
-/** Thumbnail of one layer's pixels (renderThumbnail), drawn on a checkerboard tile. */
+/**
+ * Thumbnail of one layer's pixels, drawn on a checkerboard tile: the whole document scaled down
+ * (renderThumbnail), or cropped to the layer's bounds depending on `content` (see ThumbContent).
+ */
 export const LayerThumbCanvas = memo(function LayerThumbCanvas({
   doc,
   layer,
   size,
+  content = 'document',
   className,
   style,
 }: {
   doc: Document;
   layer: Layer;
   size: number;
+  content?: ThumbContent;
   className?: string;
   style?: CSSProperties;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const tick = useBitmapVersions([layer.type === 'raster' ? layer.bitmapId : null]);
   const px = Math.round(size * DPR());
-  const key = layerThumbKey(doc, layer);
-  const ck = cacheKey(doc, layer.id, px);
+  const key = [...layerThumbKey(doc, layer), content];
+  const ck = cacheKey(doc, layer.id, px, content);
   // Collapse the key into a version number so the effect deps keep a constant size.
   const keyRef = useRef<unknown[]>([]);
   const verRef = useRef(0);
@@ -161,8 +228,10 @@ export const LayerThumbCanvas = memo(function LayerThumbCanvas({
     const keySnap = key;
     schedule(() => {
       if (cancelled) return;
+      const live = docSnap.layers[layer.id] ?? layer;
+      const crop = thumbCrop(docSnap, live, content);
       // renderThumbnail returns a shared cached canvas: keep our own copy.
-      const c = cloneCanvas(renderThumbnail(docSnap, layer.id, px));
+      const c = (crop && renderCropped(docSnap, live, crop, px)) || cloneCanvas(renderThumbnail(docSnap, layer.id, px));
       layerCache.set(ck, { key: keySnap, canvas: c });
       if (layerCache.size > 600) layerCache.delete(layerCache.keys().next().value as string);
       drawFitted(ref.current, c);

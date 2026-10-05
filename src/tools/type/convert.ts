@@ -8,7 +8,7 @@
  */
 import type { Document, ID, LayerBase, Paint, RasterLayer, ShapeLayer, ShapeProps, TextLayer } from '../../core/types';
 import { bitmaps } from '../../core/bitmaps';
-import { ctxRead } from '../../core/canvas';
+import { createCanvas, ctx2d, ctxRead, opaqueBounds } from '../../core/canvas';
 import { uid } from '../../core/ids';
 import { makeRasterLayer, makeShapeLayer, siblingsOf } from '../../core/document';
 import { invalidateRenderCache, measureText, renderLayerToDoc, textLocalBounds } from '../../render/compositor';
@@ -18,6 +18,7 @@ import { viewport } from '../../editor/viewport';
 import { apply, keepAnchor, layerMatrix } from './affine';
 import { commitEditing, isEditing } from './session';
 import { simplifyClosed, smoothClosedPath, traceGrid } from '../shape/trace';
+import { remapGradient } from './gradientRemap';
 
 /** Base layer properties carried over to the converted layer. */
 function carryBase(from: TextLayer, to: Omit<LayerBase, 'type'> & { type: string }) {
@@ -89,16 +90,43 @@ export function textDocRect(layer: TextLayer): { x: number; y: number; width: nu
 
 const MAX_SIDE = 12000;
 
-/** Raster layer equivalent of a text layer (pure w.r.t. the document; allocates a bitmap). */
-export function rasterizeTextLayer(doc: Document, layer: TextLayer): RasterLayer | null {
+type RasterizeResult = { ok: true; layer: RasterLayer } | { ok: false; reason: 'large' | 'failed' };
+
+/** Crop a canvas to its non-transparent pixels (null when fully transparent). */
+function cropToContent(canvas: HTMLCanvasElement): { canvas: HTMLCanvasElement; x: number; y: number } | null {
+  const b = opaqueBounds(canvas);
+  if (!b) return null;
+  if (b.x === 0 && b.y === 0 && b.width === canvas.width && b.height === canvas.height) return { canvas, x: 0, y: 0 };
+  const out = createCanvas(b.width, b.height);
+  ctx2d(out).drawImage(canvas, b.x, b.y, b.width, b.height, 0, 0, b.width, b.height);
+  return { canvas: out, x: b.x, y: b.y };
+}
+
+function rasterize(doc: Document, layer: TextLayer): RasterizeResult {
   const r = textDocRect(layer);
-  if (r.width > MAX_SIDE || r.height > MAX_SIDE) return null;
+  if (r.width > MAX_SIDE || r.height > MAX_SIDE) return { ok: false, reason: 'large' };
   const canvas = renderScratch(doc, layer, r, 1);
-  if (!canvas) return null;
-  const raster = makeRasterLayer({ name: layer.name, bitmapId: bitmaps.add(canvas), width: canvas.width, height: canvas.height, transform: { x: r.x, y: r.y } });
+  if (!canvas) return { ok: false, reason: 'failed' };
+  // The render covers the text's overflow padding: keep only the pixels it actually drew, so the
+  // layer's box (transform handles, align, snapping, W/H) hugs the glyphs.
+  const crop = cropToContent(canvas);
+  // Empty / whitespace-only text becomes an empty document-sized layer (like New Layer).
+  const bmp = crop ? crop.canvas : createCanvas(Math.max(1, doc.width), Math.max(1, doc.height));
+  const x = crop ? r.x + crop.x : 0;
+  const y = crop ? r.y + crop.y : 0;
+  const raster = makeRasterLayer({ name: layer.name, bitmapId: bitmaps.add(bmp), width: bmp.width, height: bmp.height, transform: { x, y } });
   carryBase(layer, raster);
   raster.id = uid('ly_');
-  return raster;
+  return { ok: true, layer: raster };
+}
+
+/**
+ * Raster layer equivalent of a text layer (pure w.r.t. the document; allocates a bitmap), cropped
+ * to the drawn pixels. Null when the text is too large to rasterize.
+ */
+export function rasterizeTextLayer(doc: Document, layer: TextLayer): RasterLayer | null {
+  const res = rasterize(doc, layer);
+  return res.ok ? res.layer : null;
 }
 
 function replaceInTree(d: Document, oldId: ID, layer: RasterLayer | ShapeLayer) {
@@ -125,11 +153,14 @@ export function rasterizeSelectedText() {
   const layers = selectedTextLayers().filter((l) => !l.locks.all);
   if (!layers.length) return void toast('Select a text layer to rasterize', 'info');
   const out: { from: ID; to: RasterLayer }[] = [];
+  let tooLarge = 0;
   for (const l of layers) {
-    const r = rasterizeTextLayer(s.doc, l);
-    if (r) out.push({ from: l.id, to: r });
+    const r = rasterize(s.doc, l);
+    if (r.ok) out.push({ from: l.id, to: r.layer });
+    else if (r.reason === 'large') tooLarge++;
   }
-  if (!out.length) return void toast('The text is too large to rasterize', 'error');
+  if (!out.length) return void toast(tooLarge ? 'The text is too large to rasterize — reduce its size or scale first' : 'Could not rasterize the text layer', 'error');
+  if (tooLarge) toast(`${tooLarge} text layer${tooLarge > 1 ? 's were' : ' was'} too large to rasterize and left unchanged`, 'warning');
   const ids = out.map((o) => o.to.id);
   useEditor.getState().commit(
     out.length > 1 ? 'Rasterize Type Layers' : 'Rasterize Type',
@@ -166,30 +197,54 @@ export function textToShape(doc: Document, layer: TextLayer): ShapeLayer | null 
   const data = ctxRead(canvas).getImageData(0, 0, cw, ch).data;
   const loops = traceGrid(cw, ch, (x, y) => data[(y * cw + x) * 4 + 3] >= 128);
   if (!loops.length) return null;
-  const f = (n: number) => String(Math.round(n * 100) / 100);
-  let d = '';
+  // Simplified loops in scratch units (local - lb origin), and their tight bounds.
+  const polys: [number, number][][] = [];
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
   for (const loop of loops) {
     const simple = simplifyClosed(loop, 0.65);
     if (simple.length < 3) continue;
     const local = simple.map(([x, y]) => [x / k, y / k] as [number, number]);
-    d += smoothClosedPath(local, 58, f);
+    for (const [x, y] of local) {
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+    polys.push(local);
   }
+  if (!polys.length || !(maxX > minX) || !(maxY > minY)) return null;
+  // The quadratic smoothing stays inside each polygon's hull, so these bounds hold the outline.
+  const w = maxX - minX;
+  const h = maxY - minY;
+  const f = (n: number) => String(Math.round(n * 100) / 100);
+  let d = '';
+  for (const poly of polys) d += smoothClosedPath(poly.map(([x, y]) => [x - minX, y - minY] as [number, number]), 58, f);
   if (!d) return null;
-  const fill: Paint = structuredClone(t.fill);
+  // Tight box origin in the text's layout coordinates.
+  const ox = lb.x + minX;
+  const oy = lb.y + minY;
+  // Text paints its gradient over the layout box; the shape over its own box → remap so the colours stay put.
+  const fill: Paint =
+    t.fill.type === 'gradient'
+      ? { type: 'gradient', gradient: remapGradient(t.fill.gradient, { x: 0, y: 0, width: L.width, height: L.height }, { x: ox, y: oy, width: w, height: h }) }
+      : structuredClone(t.fill);
   const shape: ShapeProps = {
     kind: 'path',
-    width: lb.width,
-    height: lb.height,
+    width: w,
+    height: h,
     cornerRadius: 0,
     sides: 5,
     innerRatio: 0.5,
     lineWidth: 1,
     path: d,
-    viewBox: [0, 0, lb.width, lb.height],
+    viewBox: [0, 0, w, h],
     fill,
     stroke: t.stroke && t.stroke.width > 0 ? { paint: { type: 'solid', color: t.stroke.color }, width: t.stroke.width, align: 'outside', join: 'round', cap: 'round' } : null,
   };
-  const pos = keepAnchor(layer.transform, L.width, L.height, { x: lb.x, y: lb.y }, lb.width, lb.height, { x: 0, y: 0 });
+  const pos = keepAnchor(layer.transform, L.width, L.height, { x: ox, y: oy }, w, h, { x: 0, y: 0 });
   const out = makeShapeLayer({ name: layer.name, shape });
   carryBase(layer, out);
   out.id = uid('ly_');

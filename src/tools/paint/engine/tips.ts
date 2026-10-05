@@ -24,8 +24,9 @@ class Lru<V> {
     this.map.set(k, v);
     if (this.map.size > this.limit) this.map.delete(this.map.keys().next().value as string);
   }
-  clear() {
-    this.map.clear();
+  /** Remove every entry whose key starts with `prefix`. */
+  deletePrefix(prefix: string) {
+    for (const k of [...this.map.keys()]) if (k.startsWith(prefix)) this.map.delete(k);
   }
 }
 
@@ -131,6 +132,12 @@ export function grayToAlpha(src: HTMLCanvasElement, n: number): HTMLCanvasElemen
   return c;
 }
 
+/**
+ * Largest size a textured tip generator is asked for. Procedural noise tips take ~1 s at 1024
+ * px; bigger buckets are upscaled from the 512 stamp instead (they upscale cleanly).
+ */
+export const MAX_GENERATED_TIP = 512;
+
 /** Textured tip of a preset at (at least) `size` px, alpha stamp. */
 export function textureTip(preset: BrushPresetDef, size: number): HTMLCanvasElement | null {
   if (!preset.tip) return null;
@@ -139,20 +146,74 @@ export function textureTip(preset: BrushPresetDef, size: number): HTMLCanvasElem
   const hit = textureCache.get(key);
   if (hit) return hit;
   let out: HTMLCanvasElement;
-  try {
-    const raw = preset.tip(n);
-    out = grayToAlpha(raw, n);
-  } catch (err) {
-    console.error(`[paint] tip generator for ${preset.id} failed`, err);
-    out = roundTip(n, 1);
+  if (n > MAX_GENERATED_TIP) {
+    const base = textureTip(preset, MAX_GENERATED_TIP)!;
+    out = createCanvas(n, n);
+    const ctx = ctx2d(out);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(base, 0, 0, n, n);
+  } else {
+    try {
+      const raw = preset.tip(n);
+      out = grayToAlpha(raw, n);
+    } catch (err) {
+      console.error(`[paint] tip generator for ${preset.id} failed`, err);
+      out = roundTip(n, 1);
+    }
   }
   textureCache.set(key, out);
   return out;
 }
 
-/** Drop cached textured tips for one preset (e.g. after a user preset is deleted). */
-export function forgetTexture() {
-  textureCache.clear();
+/** Drop the cached textured tips of one preset (e.g. after a user preset is deleted). */
+export function forgetTexture(presetId: string) {
+  textureCache.deletePrefix(`${presetId}|`);
+}
+
+/* ---------------- idle pre-warming ---------------- */
+
+/** Latest requested bucket per preset id. */
+const warmQueue = new Map<string, { preset: BrushPresetDef; size: number }>();
+let warmTimer = 0;
+
+type IdleWindow = Window & {
+  requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+};
+
+function whenIdle(cb: () => void) {
+  const w = window as IdleWindow;
+  if (w.requestIdleCallback) w.requestIdleCallback(cb, { timeout: 1500 });
+  else window.setTimeout(cb, 0);
+}
+
+function warmNext() {
+  const next = warmQueue.entries().next();
+  if (next.done) return;
+  const [id, job] = next.value;
+  warmQueue.delete(id);
+  textureTip(job.preset, job.size);
+  if (warmQueue.size) whenIdle(warmNext);
+}
+
+/**
+ * Generate a textured tip ahead of time (when the browser is idle) so the first dab of a stroke
+ * doesn't wait for it. Debounced, so scrubbing the size slider only warms the bucket it settles
+ * on. Cheap no-op for round tips and already-cached buckets.
+ */
+export function prewarmTexture(preset: BrushPresetDef | undefined, size: number) {
+  if (!preset?.tip) return;
+  const n = textureBucket(size);
+  if (textureCache.get(`${preset.id}|${n}`)) {
+    warmQueue.delete(preset.id);
+    return;
+  }
+  warmQueue.set(preset.id, { preset, size: n });
+  window.clearTimeout(warmTimer);
+  warmTimer = window.setTimeout(() => {
+    warmTimer = 0;
+    whenIdle(warmNext);
+  }, 250);
 }
 
 const tintCache = new WeakMap<HTMLCanvasElement, Map<string, HTMLCanvasElement>>();

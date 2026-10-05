@@ -65,9 +65,25 @@ function applyTo(l: TextLayer, change: TextChange) {
 }
 
 /**
- * Apply a change to the current targets. `toolPatch` is also written to the type tool defaults
- * (always when there is no target; on commit otherwise so the next text matches).
- * Returns where the change went.
+ * Tool option keys that describe one layer's look (fill, outline, warp, style preset). Changing
+ * them on a selected layer never changes what the next new text looks like.
+ */
+const PER_LAYER_KEYS = new Set<keyof TypeToolOptions>(['warp', 'strokeOn', 'strokeColor', 'strokeWidth', 'fillType', 'gradient', 'stylePreset']);
+
+/** The part of a tool patch that carries over to new text after editing a layer (typography only). */
+export function typographicPatch(patch: Partial<TypeToolOptions>): Partial<TypeToolOptions> {
+  const out: Partial<TypeToolOptions> = {};
+  for (const k of Object.keys(patch) as (keyof TypeToolOptions)[]) {
+    if (!PER_LAYER_KEYS.has(k)) (out as Record<string, unknown>)[k] = patch[k];
+  }
+  return out;
+}
+
+/**
+ * Apply a change to the current targets. `toolPatch` is written to the type tool defaults when
+ * there is no target; when layers are changed only its typographic part (font, size, spacing,
+ * alignment…) is written on commit so the next text matches — fill, outline and warp stay per
+ * layer. Returns where the change went.
  */
 export function applyTextChange(change: TextChange, phase: Phase, label: string, toolPatch?: Partial<TypeToolOptions>): 'layers' | 'tool' | 'none' {
   if (isEditing()) {
@@ -100,7 +116,7 @@ export function applyTextChange(change: TextChange, phase: Phase, label: string,
   if (phase === 'live') st.preview(recipe);
   else {
     st.commit(label, recipe, { coalesce: true });
-    if (toolPatch) writeTypeOptions(toolPatch);
+    if (toolPatch) writeTypeOptions(typographicPatch(toolPatch));
   }
   viewport.requestRender();
   return 'layers';

@@ -39,7 +39,7 @@ import { isTypingTarget } from '../ui/shortcuts';
 import type { SelectionMode } from '../editor/selection';
 import * as ops from './layerOps';
 import { canMoveInto, isFilterActive, panelRows, resolveDrop, type DropZone, type LayerKind, type PanelRow } from './treeOps';
-import { THUMB_PX, useLayersPanel, type ThumbSize } from './panelState';
+import { THUMB_PX, useLayersPanel, type ThumbContent, type ThumbSize } from './panelState';
 import { LayerThumbCanvas, MaskThumbCanvas } from './thumbs';
 import { adjustmentMenuItems, effectContextMenu, effectMenuItems, filterContextMenu, labelCss, layerContextMenu, showFx, showProps } from './menus';
 import { effectName } from './effectPresets';
@@ -388,7 +388,7 @@ function LayersPanelBody({ doc }: { doc: Document }) {
   const activeId = useEditor((st) => (st.activeDocId ? (st.sessions[st.activeDocId]?.activeLayerId ?? null) : null));
   const selectedIds = useEditor((st) => (st.activeDocId ? st.sessions[st.activeDocId]?.selectedLayerIds : undefined));
   const editTarget = useEditor((st) => (st.activeDocId ? (st.sessions[st.activeDocId]?.editTarget ?? 'content') : 'content'));
-  const { kinds, query, thumbSize, expanded, toggleExpanded } = useLayersPanel();
+  const { kinds, query, thumbSize, thumbContent, expanded, toggleExpanded } = useLayersPanel();
   const filter = useMemo(() => ({ kinds, query }), [kinds, query]);
   const filtering = isFilterActive(filter);
   const rows = useMemo(() => panelRows(doc, filter), [doc, filter]);
@@ -704,6 +704,7 @@ function LayersPanelBody({ doc }: { doc: Document }) {
             { label: 'Flatten Image', run: ops.flattenImage },
             { separator: true },
             { label: 'Thumbnail Size', submenu: thumbSizeItems(thumbSize) },
+            { label: 'Thumbnail Content', submenu: thumbContentItems(thumbContent) },
           ];
           showContextMenu(e, items);
         }}
@@ -743,6 +744,7 @@ function LayersPanelBody({ doc }: { doc: Document }) {
               selected={selected.has(r.id)}
               editTarget={isActive ? editTarget : 'content'}
               thumbPx={thumbPx}
+              thumbContent={thumbContent}
               expanded={open}
               renaming={renaming === r.id}
               clipBase={clipBases.has(r.id)}
@@ -756,6 +758,17 @@ function LayersPanelBody({ doc }: { doc: Document }) {
       <LayersFooter />
     </div>
   );
+}
+
+const THUMB_CONTENT_LABELS: Record<ThumbContent, string> = {
+  auto: 'Auto (crop small layers)',
+  document: 'Entire Document',
+  bounds: 'Layer Bounds',
+};
+
+function thumbContentItems(current: ThumbContent): MenuItem[] {
+  const set = useLayersPanel.getState().setThumbContent;
+  return (['auto', 'document', 'bounds'] as ThumbContent[]).map((c) => ({ label: THUMB_CONTENT_LABELS[c], checked: current === c, run: () => set(c) }));
 }
 
 function thumbSizeItems(current: ThumbSize): MenuItem[] {
@@ -780,6 +793,7 @@ interface RowProps {
   selected: boolean;
   editTarget: EditTarget;
   thumbPx: number;
+  thumbContent: ThumbContent;
   expanded: boolean;
   renaming: boolean;
   clipBase: boolean;
@@ -809,7 +823,7 @@ const LayerRowBlock = memo(function LayerRowBlock(p: RowProps) {
   );
 }, rowPropsEqual);
 
-function LayerRow({ doc, layer, depth, dim, active, selected, editTarget, thumbPx, expanded, renaming, clipBase, effectivelyVisible, dropZone, h }: RowProps) {
+function LayerRow({ doc, layer, depth, dim, active, selected, editTarget, thumbPx, thumbContent, expanded, renaming, clipBase, effectivelyVisible, dropZone, h }: RowProps) {
   const label = labelCss(layer.label);
   const locked = layer.locks.all || layer.locks.pixels || layer.locks.position || layer.locks.transparency;
   const isGroup = layer.type === 'group';
@@ -856,7 +870,7 @@ function LayerRow({ doc, layer, depth, dim, active, selected, editTarget, thumbP
           </button>
         ) : null}
         {thumbPx > 0 || isGroup ? (
-          <LayerThumb doc={doc} layer={layer} px={thumbPx} target={active && !!layer.mask && editTarget === 'content'} />
+          <LayerThumb doc={doc} layer={layer} px={thumbPx} content={thumbContent} target={active && !!layer.mask && editTarget === 'content'} />
         ) : null}
         {layer.mask && thumbPx > 0 && (
           <div
@@ -915,7 +929,7 @@ function LayerRow({ doc, layer, depth, dim, active, selected, editTarget, thumbP
   );
 }
 
-function LayerThumb({ doc, layer, px, target }: { doc: Document; layer: Layer; px: number; target: boolean }) {
+function LayerThumb({ doc, layer, px, content, target }: { doc: Document; layer: Layer; px: number; content: ThumbContent; target: boolean }) {
   const size = Math.max(px, 18);
   const base = cls('layers-thumb', target && 'target', `type-${layer.type}`);
   if (layer.type === 'group') {
@@ -946,7 +960,7 @@ function LayerThumb({ doc, layer, px, target }: { doc: Document; layer: Layer; p
   }
   return (
     <div className={cls(base, 'checker')} data-part="thumb">
-      <LayerThumbCanvas doc={doc} layer={layer} size={size} />
+      <LayerThumbCanvas doc={doc} layer={layer} size={size} content={content} />
     </div>
   );
 }
@@ -1062,7 +1076,7 @@ function FilterRows({ layer, indent, h }: { layer: Layer; indent: number; h: Row
   );
 }
 
-/** Panel ⋯ menu. */
+/** Panel ⋯ menu (flat items: the panel registry's menu has no separators or submenus). */
 export function layersPanelMenu() {
   const st = useLayersPanel.getState();
   const has = ops.hasDoc();
@@ -1074,10 +1088,15 @@ export function layersPanelMenu() {
     { label: 'Delete Layer', run: () => void ops.deleteLayers(), disabled: !hasL },
     { label: 'Merge Down', run: ops.mergeDown, disabled: !hasL },
     { label: 'Flatten Image', run: ops.flattenImage, disabled: !has },
-    { label: 'Thumbnails: None', checked: st.thumbSize === 'none', run: () => st.setThumbSize('none') },
-    { label: 'Thumbnails: Small', checked: st.thumbSize === 'small', run: () => st.setThumbSize('small') },
-    { label: 'Thumbnails: Medium', checked: st.thumbSize === 'medium', run: () => st.setThumbSize('medium') },
-    { label: 'Thumbnails: Large', checked: st.thumbSize === 'large', run: () => st.setThumbSize('large') },
+    ...(['none', 'small', 'medium', 'large'] as ThumbSize[]).map((size) => ({
+      label: `Thumbnails: ${size[0].toUpperCase()}${size.slice(1)}`,
+      checked: st.thumbSize === size,
+      run: () => st.setThumbSize(size),
+    })),
+    ...(['auto', 'document', 'bounds'] as ThumbContent[]).map((c) => ({
+      label: `Thumbnail Content: ${THUMB_CONTENT_LABELS[c]}`,
+      checked: st.thumbContent === c,
+      run: () => st.setThumbContent(c),
+    })),
   ];
 }
-

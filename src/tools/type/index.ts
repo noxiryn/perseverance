@@ -10,7 +10,7 @@ import { activeDoc, activeSession, useEditor } from '../../state/editor';
 import { useUI } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
 import { hitTestLayer } from '../../render/compositor';
-import { activeTransform } from '../../viewport';
+import * as viewportModule from '../../viewport';
 import { applyTextChange, primaryTextTarget } from './apply';
 import { CharacterPanel } from './CharacterPanel';
 import { typeCommands } from './commands';
@@ -99,12 +99,27 @@ function textLayerForDoubleClick(doc: Document, p: Point, activeId: string | nul
   return null;
 }
 
+/**
+ * Is the move tool's free transform running? `activeTransform` is not a documented cross-module
+ * contract, so it is looked up defensively: if the viewport module renames or drops it, the
+ * double-click simply edits text (instead of breaking the build or throwing).
+ */
+function freeTransformActive(): boolean {
+  const fn = (viewportModule as unknown as Record<string, unknown>).activeTransform;
+  if (typeof fn !== 'function') return false;
+  try {
+    return !!(fn as () => unknown)();
+  } catch {
+    return false;
+  }
+}
+
 function onMoveDoubleClick(e: MouseEvent) {
   const st = useEditor.getState();
   if (st.activeTool !== 'move') return;
   const host = viewport.element();
   if (!host || !(e.target instanceof Node) || !host.contains(e.target)) return;
-  if (activeTransform()) return; // the move tool commits its free transform on double-click
+  if (freeTransformActive()) return; // the move tool commits its free transform on double-click
   const s = activeSession();
   if (!s || !s.view.zoom) return;
   const r = host.getBoundingClientRect();

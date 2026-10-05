@@ -16,7 +16,6 @@ import type {
   Layer,
   LayerEffect,
   LayerMask,
-  ParamDef,
   ParamValues,
   RasterLayer,
   Rect,
@@ -147,15 +146,8 @@ function revealAdjustmentEditor() {
 /* Generic live editing (preview while dragging, coalesced commit)     */
 /* ------------------------------------------------------------------ */
 
-/**
- * How an edit reaches the document:
- *  - 'preview'  — live change without a history step (call on every move of a drag);
- *  - 'commit'   — one discrete history step (buttons, toggles, selects, menu commands);
- *  - 'coalesce' — a history step that merges into the previous one when it has the same label and
- *                 is < 1 s old. Only for the END of continuous controls (slider / scrub release,
- *                 typed values, arrow-key nudges), so a burst of small adjustments is one step.
- */
-export type Phase = 'preview' | 'commit' | 'coalesce';
+export { paramCommitPhase, paramLabel, type Phase } from './phase';
+import type { Phase } from './phase';
 
 function applyPhase(label: string, recipe: (d: Document) => void, phase: Phase) {
   if (phase === 'preview') ed().preview(recipe);
@@ -186,22 +178,6 @@ export function editSelected(label: string, fn: (l: Layer) => void, phase: Phase
 export function editDoc(label: string, recipe: (d: Document) => void, phase: Phase = 'commit') {
   if (!activeSession()) return;
   applyPhase(label, recipe, phase);
-}
-
-/**
- * Phase for the onCommit of a generated ParamEditor control: continuous controls (sliders,
- * angles, colors, gradients, curves, points, text) coalesce; discrete ones (checkboxes, selects,
- * fonts, seed randomize) are their own history step.
- */
-export function paramCommitPhase(defs: readonly ParamDef[] | undefined, key: string): Phase {
-  const t = defs?.find((d) => d.key === key)?.type;
-  return t === 'boolean' || t === 'select' || t === 'font' ? 'commit' : 'coalesce';
-}
-
-/** History label for a ParamEditor edit, e.g. "Stroke Size" — distinct per parameter. */
-export function paramLabel(prefix: string, defs: readonly ParamDef[] | undefined, key: string): string {
-  const d = defs?.find((x) => x.key === key);
-  return d?.label ? `${prefix} ${d.label}` : prefix;
 }
 
 /* ------------------------------------------------------------------ */

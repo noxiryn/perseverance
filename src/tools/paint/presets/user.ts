@@ -4,6 +4,7 @@
 import { brushPresets } from '../../../registry';
 import { uid } from '../../../core/ids';
 import { useEditor } from '../../../state/editor';
+import { forgetTexture } from '../engine/tips';
 import { TIP_TOOLS, setOpts, type BrushSettings } from '../options';
 import type { PaintBrushPreset } from './presets';
 
@@ -92,6 +93,7 @@ export function deleteUserPreset(id: string) {
   const removed = brushPresets.get(id) as PaintBrushPreset | undefined;
   writeStore(readStore().filter((p) => p.id !== id));
   brushPresets.unregister(id);
+  forgetTexture(id);
   // Tools still pointing at the deleted preset keep its tip via the preset it was based on.
   const fallback = removed?.tipFrom && removed.tipFrom !== id && brushPresets.get(removed.tipFrom) ? removed.tipFrom : 'round-hard';
   const opts = useEditor.getState().toolOptions;
@@ -107,8 +109,4 @@ export function renameUserPreset(id: string, name: string) {
   s.name = name.trim() || s.name;
   writeStore(list);
   brushPresets.register(toPreset(s));
-}
-
-export function isUserPreset(id: string): boolean {
-  return !!(brushPresets.get(id) as PaintBrushPreset | undefined)?.user;
 }

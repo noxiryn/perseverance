@@ -174,12 +174,15 @@ export function AssetPropertiesSection({ layerId }: { layerId: ID }) {
   );
 }
 
-/** The section shows for raster layers produced by a registered, adjustable library asset. */
+/**
+ * The section shows for raster layers whose generator kind is 'asset:<id>' — adjustable assets,
+ * or assets missing from this build (to explain why the layer cannot be re-edited).
+ */
 export function appliesToAssetLayer(layerId: ID): boolean {
   const st = useEditor.getState();
   const l = st.activeDocId ? st.sessions[st.activeDocId]?.doc.layers[layerId] : undefined;
   const id = assetIdOfLayer(l);
   if (!id) return false;
   const def = assets.get(id);
-  return !!def && def.params.length > 0;
+  return !def || def.params.length > 0;
 }

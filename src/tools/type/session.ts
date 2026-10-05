@@ -23,7 +23,7 @@ import { viewport } from '../../editor/viewport';
 import { isMac } from '../../platform';
 import { matchShortcut } from '../../ui/shortcuts';
 import { apply, keepAnchor } from './affine';
-import { anchorLocal, baselineNear, mutateKeepingAnchor, shear, textFrame, unshear, type TextFrame } from './frame';
+import { anchorLocal, baselineNear, frameContains, frameOutline, mutateKeepingAnchor, shear, textFrame, unshear, type TextFrame } from './frame';
 import { TYPE_TOOL_ID, autoLayerName, optionsFromText, readTypeOptions, textPropsFromOptions, writeTypeOptions, type TypeToolOptions } from './options';
 import { getTextStyle, presetEffects } from './styles';
 import { caseMap, paragraphRangeAt, sanitizeTypedText, toDisplay, toSource, wordRangeAt, type CaseMap } from './textIndex';
@@ -374,7 +374,13 @@ export function beginEditLayer(layerId: string, opts: EditOptions = {}): boolean
   if (opts.at) {
     const idx = indexAtDoc(l, opts.at);
     setSelection(idx, idx);
-    if (opts.pointerId !== undefined) (ses as Session).drag = { kind: 'select', anchor: idx, pointerId: opts.pointerId };
+    resetPressCount();
+    if (opts.pointerId !== undefined) {
+      (ses as Session).drag = { kind: 'select', anchor: idx, pointerId: opts.pointerId };
+      // This press starts a click sequence (a second click right after selects a word).
+      const sp = viewport.docToScreen(opts.at);
+      countPress(sp.x, sp.y);
+    }
   } else if (opts.selectAll) setSelection(0, n);
   else setSelection(n, n);
   return true;
@@ -748,24 +754,19 @@ export function sessionHit(e: Pick<ToolPointerEvent, 'docX' | 'docY' | 'screenX'
   const frame = frameOf(l);
   if (l.text.boxWidth) {
     for (const edge of ['left', 'right'] as const) {
-      const lx = edge === 'left' ? 0 : frame.w;
-      const p = viewport.docToScreen(apply(frame.M, { x: lx, y: frame.h / 2 }));
+      const p = viewport.docToScreen(handleDoc(frame, edge));
       if (Math.abs(p.x - e.screenX) <= HANDLE_PX && Math.abs(p.y - e.screenY) <= HANDLE_PX) return edge;
     }
   }
   const z = viewport.zoom();
   const scale = Math.max(1e-6, Math.hypot(frame.M[0], frame.M[1]));
   const pad = 10 / (z * scale);
-  const loc = frame.inv ? apply(frame.inv, { x: e.docX, y: e.docY }) : null;
-  if (!loc) return 'outside';
-  if (frame.warp) {
-    const wl = frame.toLocal({ x: e.docX, y: e.docY });
-    if (wl.x >= -pad && wl.y >= -pad && wl.x <= frame.w + pad && wl.y <= frame.h + pad) return 'inside';
-    return 'outside';
-  }
-  const italic = l.text.fauxItalic ? 0.21 * (frame.layout.fontAscent + frame.layout.fontDescent) : 0;
-  if (loc.x >= -pad - italic * 0.3 && loc.y >= -pad && loc.x <= frame.w + pad + italic && loc.y <= frame.h + pad) return 'inside';
-  return 'outside';
+  return frameContains(frame, l.text, { x: e.docX, y: e.docY }, pad) ? 'inside' : 'outside';
+}
+
+/** Document position of a paragraph box side handle (follows the warp). */
+function handleDoc(frame: TextFrame, edge: 'left' | 'right'): Point {
+  return frame.toDoc(edge === 'left' ? 0 : frame.w, frame.h / 2);
 }
 
 export function sessionCursor(e: ToolPointerEvent): string {
@@ -870,12 +871,7 @@ function toScreen(frame: TextFrame, x: number, y: number): Point {
 }
 
 function boxPath(ctx: CanvasRenderingContext2D, frame: TextFrame, w: number, h: number) {
-  const pts = [
-    { x: 0, y: 0 },
-    { x: w, y: 0 },
-    { x: w, y: h },
-    { x: 0, y: h },
-  ].map((p) => viewport.docToScreen(apply(frame.M, p)));
+  const pts = frameOutline(frame, w, h).map((p) => viewport.docToScreen(p));
   ctx.beginPath();
   pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
   ctx.closePath();
@@ -922,8 +918,8 @@ export function drawSessionOverlay(ctx: CanvasRenderingContext2D) {
   ctx.stroke();
   ctx.setLineDash([]);
   if (paragraph) {
-    for (const lx of [0, frame.w]) {
-      const p = viewport.docToScreen(apply(frame.M, { x: lx, y: frame.h / 2 }));
+    for (const edge of ['left', 'right'] as const) {
+      const p = viewport.docToScreen(handleDoc(frame, edge));
       ctx.fillStyle = '#ffffff';
       ctx.strokeStyle = ACCENT;
       ctx.fillRect(Math.round(p.x) - 3.5, Math.round(p.y) - 3.5, 7, 7);
@@ -932,7 +928,7 @@ export function drawSessionOverlay(ctx: CanvasRenderingContext2D) {
   } else {
     // Point text: small anchor mark at the start of the first baseline.
     const a = anchorLocal(t, layout);
-    const p = viewport.docToScreen(apply(frame.M, a));
+    const p = viewport.docToScreen(frame.toDoc(a.x, a.y));
     ctx.fillStyle = ACCENT;
     ctx.fillRect(Math.round(p.x) - 2.5, Math.round(p.y) - 2.5, 5, 5);
   }

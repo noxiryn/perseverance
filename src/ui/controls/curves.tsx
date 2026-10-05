@@ -78,6 +78,9 @@ export const IDENTITY_CURVES: CurvesValue = {
   ],
 };
 
+/** Inner padding (px) so the 0/255 endpoint handles are fully visible. */
+const CURVE_PAD = 6;
+
 const CH_COLORS = { rgb: '#e6e6e6', r: '#ff5a5a', g: '#5aff8c', b: '#5a9bff' } as const;
 
 /** Interactive curves editor (click to add points, drag to move, drag out to delete). */
@@ -109,38 +112,41 @@ export function CurvesEditor({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = '#151515';
     ctx.fillRect(0, 0, size, size);
+    const inner = size - CURVE_PAD * 2;
+    const X = (v: number) => CURVE_PAD + (v / 255) * inner;
+    const Y = (v: number) => CURVE_PAD + (1 - v / 255) * inner;
     if (histogram) {
       const max = Math.max(...histogram, 1);
       ctx.fillStyle = '#2c2c2c';
       for (let i = 0; i < 256; i++) {
-        const h = (histogram[i] / max) * size;
-        ctx.fillRect((i / 256) * size, size - h, size / 256 + 0.5, h);
+        const h = (histogram[i] / max) * inner;
+        ctx.fillRect(CURVE_PAD + (i / 256) * inner, CURVE_PAD + inner - h, inner / 256 + 0.5, h);
       }
     }
     ctx.strokeStyle = '#2a2a2a';
     ctx.lineWidth = 1;
+    ctx.strokeRect(CURVE_PAD, CURVE_PAD, inner, inner);
     for (let i = 1; i < 4; i++) {
+      const t = CURVE_PAD + (i * inner) / 4;
       ctx.beginPath();
-      ctx.moveTo((i * size) / 4, 0);
-      ctx.lineTo((i * size) / 4, size);
-      ctx.moveTo(0, (i * size) / 4);
-      ctx.lineTo(size, (i * size) / 4);
+      ctx.moveTo(t, CURVE_PAD);
+      ctx.lineTo(t, CURVE_PAD + inner);
+      ctx.moveTo(CURVE_PAD, t);
+      ctx.lineTo(CURVE_PAD + inner, t);
       ctx.stroke();
     }
     ctx.strokeStyle = '#3a3a3a';
     ctx.beginPath();
-    ctx.moveTo(0, size);
-    ctx.lineTo(size, 0);
+    ctx.moveTo(X(0), Y(0));
+    ctx.lineTo(X(255), Y(255));
     ctx.stroke();
     const lut = curveLUT(pts);
     ctx.strokeStyle = CH_COLORS[ch];
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     for (let x = 0; x < 256; x++) {
-      const px = (x / 255) * size,
-        py = size - (lut[x] / 255) * size;
-      if (x === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
+      if (x === 0) ctx.moveTo(X(x), Y(lut[x]));
+      else ctx.lineTo(X(x), Y(lut[x]));
     }
     ctx.stroke();
     for (const [x, y] of pts) {
@@ -148,7 +154,7 @@ export function CurvesEditor({
       ctx.strokeStyle = '#fff';
       ctx.lineWidth = 1.2;
       ctx.beginPath();
-      ctx.rect((x / 255) * size - 3.5, size - (y / 255) * size - 3.5, 7, 7);
+      ctx.rect(X(x) - 3.5, Y(y) - 3.5, 7, 7);
       ctx.fill();
       ctx.stroke();
     }
@@ -156,9 +162,12 @@ export function CurvesEditor({
 
   const onDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const r = e.currentTarget.getBoundingClientRect();
+    // Map client coords → 0..255 inside the padded plot area.
+    const padX = (CURVE_PAD / size) * r.width;
+    const padY = (CURVE_PAD / size) * r.height;
     const toPt = (cx: number, cy: number): [number, number] => [
-      Math.round(Math.max(0, Math.min(255, ((cx - r.left) / r.width) * 255))),
-      Math.round(Math.max(0, Math.min(255, (1 - (cy - r.top) / r.height) * 255))),
+      Math.round(Math.max(0, Math.min(255, ((cx - r.left - padX) / (r.width - padX * 2)) * 255))),
+      Math.round(Math.max(0, Math.min(255, (1 - (cy - r.top - padY) / (r.height - padY * 2)) * 255))),
     ];
     const p = toPt(e.clientX, e.clientY);
     let idx = pts.findIndex(([x, y]) => Math.abs(x - p[0]) < 10 && Math.abs(y - p[1]) < 10);

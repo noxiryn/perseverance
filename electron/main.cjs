@@ -181,8 +181,41 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
-    // The app ships its own in-window menu bar.
-    if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
+    // The app ships its own in-window menu bar. On macOS a minimal native menu is still needed for
+    // the app menu and text-field editing (Cmd+C/V/X/A/Z inside inputs), but without accelerators
+    // that steal Photoshop shortcuts (e.g. Cmd+M → Curves, Cmd+H → Extras, Cmd+W handled in-app).
+    if (process.platform === 'darwin') {
+      Menu.setApplicationMenu(
+        Menu.buildFromTemplate([
+          {
+            label: app.name,
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' },
+            ],
+          },
+          {
+            label: 'Edit',
+            submenu: [
+              { role: 'undo' },
+              { role: 'redo' },
+              { type: 'separator' },
+              { role: 'cut' },
+              { role: 'copy' },
+              { role: 'paste' },
+              { role: 'selectAll' },
+            ],
+          },
+          { label: 'Window', submenu: [{ label: 'Minimize', click: () => win && win.minimize() }, { role: 'zoom' }, { role: 'front' }] },
+        ]),
+      );
+    } else {
+      Menu.setApplicationMenu(null);
+    }
 
     // Allow the Local Font Access API (system fonts in the font picker) and clipboard reads.
     session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => {
