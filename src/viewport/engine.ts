@@ -14,6 +14,7 @@ import { renderDocument } from '../render/compositor';
 import { activeSession, useEditor } from '../state/editor';
 import { useUI } from '../state/ui';
 import { isTypingTarget } from '../ui/shortcuts';
+import { getPref, subscribePrefs } from '../ui/shell/prefs';
 import { antsAnimatedThisFrame, resetAntsAnimationFlag } from './outline';
 import { drawGrid, drawPixelGrid, drawSelection } from './overlays';
 import { drawRulers, rulerAt } from './rulers';
@@ -29,6 +30,7 @@ type Drag =
   | { kind: 'tool'; pointerId: number; tool: ToolDef }
   | { kind: 'override'; pointerId: number; override: InputOverride };
 
+/** Default transparency checkerboard square (CSS px); the shell's 'checkerSize' preference overrides it. */
 const CHECKER_CELL = 8;
 const CHECKER_LIGHT = '#ffffff';
 const CHECKER_DARK = '#dedede';
@@ -65,7 +67,7 @@ export class ViewportEngine {
   private cursorOverride: string | null = null;
   private appliedCursor = '';
   private antsTimer = 0;
-  private checker: { pattern: CanvasPattern; dpr: number } | null = null;
+  private checker: { pattern: CanvasPattern; dpr: number; cell: number } | null = null;
   private drag: Drag | null = null;
   private hoverGuide: 'vertical' | 'horizontal' | null = null;
   private lastNative: PointerEvent | null = null;
@@ -156,6 +158,15 @@ export class ViewportEngine {
     );
     this.disposers.push(tools.subscribe(() => this.requestOverlay()));
     this.disposers.push(viewOverlays.subscribe(() => this.requestOverlay()));
+    this.disposers.push(
+      subscribePrefs(() => {
+        // Preferences changed (e.g. checkerboard size): rebuild the pattern if it differs.
+        if (this.checker && this.checker.cell !== this.checkerCell()) {
+          this.checker = null;
+          this.requestDoc();
+        }
+      }),
+    );
     this.disposers.push(
       onInputOverrideChange(() => {
         // An override installed/removed mid-gesture: finish the gesture cleanly.
@@ -269,8 +280,12 @@ export class ViewportEngine {
     const w = Math.max(0, cssW);
     const h = Math.max(0, cssH);
     const ratio = window.devicePixelRatio || 1;
-    const devW = Math.max(1, dev ? dev.w : Math.round(w * ratio));
-    const devH = Math.max(1, dev ? dev.h : Math.round(h * ratio));
+    // The exact device-pixel box is preferred (no blur from rounding at fractional DPRs), but it
+    // is only trusted when it agrees with devicePixelRatio — some environments (e.g. emulated
+    // device scale factors) report CSS-sized boxes, which would render everything at 1x.
+    const devOk = !!dev && w > 0 && h > 0 && Math.abs(dev.w / w - ratio) <= 0.25 && Math.abs(dev.h / h - ratio) <= 0.25;
+    const devW = Math.max(1, devOk && dev ? dev.w : Math.round(w * ratio));
+    const devH = Math.max(1, devOk && dev ? dev.h : Math.round(h * ratio));
     const dpr = w > 0 ? devW / w : ratio;
     if (w === this.cssW && h === this.cssH && devW === this.docCanvas.width && devH === this.docCanvas.height) return;
     this.cssW = w;
@@ -334,9 +349,21 @@ export class ViewportEngine {
     return c;
   }
 
+  /** Checkerboard square size in CSS px (shell preference 'checkerSize', default 8). */
+  private checkerCell(): number {
+    let v = CHECKER_CELL;
+    try {
+      v = Number(getPref<number>('checkerSize', CHECKER_CELL));
+    } catch {
+      v = CHECKER_CELL;
+    }
+    return Number.isFinite(v) && v >= 2 ? Math.min(64, v) : CHECKER_CELL;
+  }
+
   private checkerPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
-    if (this.checker && this.checker.dpr === this.dpr) return this.checker.pattern;
-    const cell = Math.max(2, Math.round(CHECKER_CELL * this.dpr));
+    const css = this.checkerCell();
+    if (this.checker && this.checker.dpr === this.dpr && this.checker.cell === css) return this.checker.pattern;
+    const cell = Math.max(2, Math.round(css * this.dpr));
     const c = document.createElement('canvas');
     c.width = cell * 2;
     c.height = cell * 2;
@@ -349,7 +376,7 @@ export class ViewportEngine {
     g.fillRect(cell, cell, cell, cell);
     const p = ctx.createPattern(c, 'repeat');
     if (!p) return null;
-    this.checker = { pattern: p, dpr: this.dpr };
+    this.checker = { pattern: p, dpr: this.dpr, cell: css };
     return p;
   }
 
@@ -796,6 +823,7 @@ export class ViewportEngine {
   };
 
   private onDoubleClick = (e: MouseEvent) => {
+    if (e.defaultPrevented) return; // handled elsewhere (e.g. a capture-phase listener)
     const s = activeSession();
     if (!s || !s.view.zoom) return;
     const screen = this.screenOf(e);
@@ -807,6 +835,34 @@ export class ViewportEngine {
     safe(`${tool.id} dblclick`, () => tool.onDoubleClick!(te));
   };
 
+  private altReleaseGuard: ((e: KeyboardEvent) => void) | null = null;
+
+  /**
+   * Alt+wheel zooms; releasing Alt afterwards must not count as a lone Alt press (which focuses
+   * the menu bar). The shell's keyboard handler does not see the wheel, so the next Alt keyup is
+   * kept from reaching it — unless a temporary tool (Alt → eyedropper) needs it to end.
+   */
+  private swallowNextAltRelease() {
+    if (this.altReleaseGuard) return;
+    const guard = (ev: KeyboardEvent) => {
+      if (ev.type === 'keyup' && ev.key !== 'Alt') return;
+      window.removeEventListener('keyup', guard, true);
+      window.removeEventListener('blur', guard as unknown as EventListener, true);
+      if (this.altReleaseGuard === guard) this.altReleaseGuard = null;
+      if (ev.type !== 'keyup') return;
+      const st = useEditor.getState();
+      if (st.previousTool !== null && st.activeTool !== st.previousTool) return; // temporary tool held
+      ev.stopPropagation();
+    };
+    this.altReleaseGuard = guard;
+    window.addEventListener('keyup', guard, true);
+    window.addEventListener('blur', guard as unknown as EventListener, true);
+    this.disposers.push(() => {
+      window.removeEventListener('keyup', guard, true);
+      window.removeEventListener('blur', guard as unknown as EventListener, true);
+    });
+  }
+
   private onWheel = (e: WheelEvent) => {
     // Floating UI inside the viewport (e.g. the Color Range panel) scrolls normally.
     if ((e.target as HTMLElement | null)?.closest?.('[data-viewport-ui]')) return;
@@ -815,6 +871,7 @@ export class ViewportEngine {
     if (!s || !s.view.zoom) return;
     const anchor = this.screenOf(e);
     if (e.ctrlKey || e.metaKey || e.altKey) {
+      if (e.altKey) this.swallowNextAltRelease();
       viewport.zoomBy(wheelZoomFactor(e.deltaY || e.deltaX, e.deltaMode), anchor);
       return;
     }
