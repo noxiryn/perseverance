@@ -6,7 +6,7 @@
  * layer/selection bounds); lengths (wavelength, amplitude…) are document px × ctx.scale and
  * periodic patterns are anchored to the document.
  */
-import { AudioWaveform, CircleDashed, Globe, MoveDiagonal, Shrink, Tornado, Waves } from 'lucide-react';
+import { AudioWaveform, CircleDashed, Globe, MoveDiagonal, Radar, Shrink, Tornado, Waves } from 'lucide-react';
 import { createNoise2D } from '../../../core/noise';
 import type { FilterDef } from '../../../registry';
 import type { Edge, Img } from '../util';
@@ -346,7 +346,7 @@ export const polarCoordinates: FilterDef = {
   id: 'polar-coordinates',
   name: 'Polar Coordinates',
   category: 'Distort',
-  icon: Globe,
+  icon: Radar,
   description: 'Rectangular → polar (tiny planet / circular bands) or polar → rectangular.',
   keywords: ['tiny planet', 'circular', 'radial', 'unwrap', 'swirl'],
   params: [

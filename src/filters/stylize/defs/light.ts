@@ -13,30 +13,44 @@ const blurFn = (b: Float32Array, w: number, h: number, s: number) => void blurPl
 /* Vignette (document anchored)                                        */
 /* ------------------------------------------------------------------ */
 
-/**
- * Vignette strength 0..1 at document point (X, Y). Exported for unit tests.
- * Shape: ellipse fitted to the document (roundness 0), circle (1) or rounded rectangle (-1).
- */
-export function vignetteAt(
-  X: number,
-  Y: number,
-  o: { docW: number; docH: number; cx: number; cy: number; size: number; roundness: number; feather: number },
-): number {
+export interface VignetteShape {
+  docW: number;
+  docH: number;
+  cx: number;
+  cy: number;
+  size: number;
+  roundness: number;
+  feather: number;
+}
+
+/** Per-call constants of the vignette shape (hoisted out of the pixel loop). */
+function vignettePrep(o: VignetteShape) {
   const rc = Math.hypot(o.docW, o.docH) / (2 * Math.SQRT2);
   const rnd = clamp(o.roundness, -1, 1);
   const k = Math.max(0, rnd);
   const rx = o.docW / 2 + (rc - o.docW / 2) * k;
   const ry = o.docH / 2 + (rc - o.docH / 2) * k;
-  const u = Math.abs(X - o.cx) / rx,
-    v = Math.abs(Y - o.cy) / ry;
-  let d: number;
-  if (rnd < 0) {
-    const pw = 2 + -rnd * 8;
-    d = Math.pow(Math.pow(u, pw) + Math.pow(v, pw), 1 / pw);
-  } else d = Math.sqrt(u * u + v * v);
   const c = 0.2 + clamp(o.size, 0, 1) * 1.05;
   const fw = 0.04 + clamp(o.feather, 0, 1) * 1.4;
-  return smoothstep(c - fw * 0.5, c + fw * 0.5, d);
+  return { irx: 1 / rx, iry: 1 / ry, rnd, pw: 2 + -rnd * 8, e0: c - fw * 0.5, e1: c + fw * 0.5 };
+}
+type VPrep = ReturnType<typeof vignettePrep>;
+
+function vignetteEval(u: number, v: number, P: VPrep): number {
+  const d = P.rnd < 0 ? Math.pow(Math.pow(u, P.pw) + Math.pow(v, P.pw), 1 / P.pw) : Math.sqrt(u * u + v * v);
+  if (d <= P.e0) return 0;
+  if (d >= P.e1) return 1;
+  const t = (d - P.e0) / (P.e1 - P.e0);
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * Vignette strength 0..1 at document point (X, Y). Exported for unit tests.
+ * Shape: ellipse fitted to the document (roundness 0), circle (1) or rounded rectangle (-1).
+ */
+export function vignetteAt(X: number, Y: number, o: VignetteShape): number {
+  const P = vignettePrep(o);
+  return vignetteEval(Math.abs(X - o.cx) * P.irx, Math.abs(Y - o.cy) * P.iry, P);
 }
 
 export const vignette: FilterDef = {
@@ -62,23 +76,27 @@ export const vignette: FilterDef = {
     const s = sc(ctx);
     const col = rgb(p.color, '#000000');
     const c = pt(p.center);
-    const o = {
+    const cx = c.x * ctx.docWidth,
+      cy = c.y * ctx.docHeight;
+    const P = vignettePrep({
       docW: ctx.docWidth,
       docH: ctx.docHeight,
-      cx: c.x * ctx.docWidth,
-      cy: c.y * ctx.docHeight,
+      cx,
+      cy,
       size: num(p.size, 0.6),
       roundness: num(p.roundness, 0),
       feather: num(p.feather, 0.5),
-    };
+    });
     const inv = 1 / s;
+    // u per column is the same for every row
+    const U = new Float32Array(w);
+    for (let x = 0; x < w; x++) U[x] = Math.abs(ctx.offsetX + (x + 0.5) * inv - cx) * P.irx;
     for (let y = 0; y < h; y++) {
-      const Y = ctx.offsetY + (y + 0.5) * inv;
-      for (let x = 0; x < w; x++) {
-        const j = (y * w + x) * 4;
+      const v = Math.abs(ctx.offsetY + (y + 0.5) * inv - cy) * P.iry;
+      let j = y * w * 4;
+      for (let x = 0; x < w; x++, j += 4) {
         if (data[j + 3] === 0) continue;
-        const X = ctx.offsetX + (x + 0.5) * inv;
-        const t = vignetteAt(X, Y, o) * amount;
+        const t = vignetteEval(U[x], v, P) * amount;
         if (t <= 0.0005) continue;
         data[j] += (col[0] - data[j]) * t;
         data[j + 1] += (col[1] - data[j + 1]) * t;
@@ -131,6 +149,37 @@ function screenLight(img: Img, gr: Float32Array, gg: Float32Array, gb: Float32Ar
     d[j + 2] = (nb / na) * 255;
     d[j + 3] = na * 255;
   }
+}
+
+/**
+ * Screen one pixel with light (lr, lg, lb ≥ 0, clamped to 1). Opaque pixels brighten; with
+ * `spill`, transparent ones receive the light as new coverage (premultiplied screen), so light
+ * effects also work on an empty layer.
+ */
+function screenPixel(d: Uint8ClampedArray, j: number, lr: number, lg: number, lb: number, spill: boolean) {
+  lr = lr > 1 ? 1 : lr;
+  lg = lg > 1 ? 1 : lg;
+  lb = lb > 1 ? 1 : lb;
+  const a8 = d[j + 3];
+  if (a8 === 255 || (!spill && a8 > 0)) {
+    d[j] += (255 - d[j]) * lr;
+    d[j + 1] += (255 - d[j + 1]) * lg;
+    d[j + 2] += (255 - d[j + 2]) * lb;
+    return;
+  }
+  if (!spill) return;
+  const a = a8 / 255;
+  const pr = (d[j] / 255) * a,
+    pg = (d[j + 1] / 255) * a,
+    pb = (d[j + 2] / 255) * a;
+  const lm = lr > lg ? (lr > lb ? lr : lb) : lg > lb ? lg : lb;
+  const na = a + lm * (1 - a);
+  if (na <= 0.002) return;
+  const k = 255 / na;
+  d[j] = (pr + lr * (1 - pr)) * k;
+  d[j + 1] = (pg + lg * (1 - pg)) * k;
+  d[j + 2] = (pb + lb * (1 - pb)) * k;
+  d[j + 3] = na * 255;
 }
 
 /** Soft-knee bright pass → premultiplied light planes. */
@@ -295,10 +344,12 @@ export const lightRays: FilterDef = {
     numP('intensity', 'Intensity', 0, 2, 0.8, { step: 0.01 }),
     pctP('spread', 'Beam width', 0.5),
     colorP('color', 'Color', '#fff1c9'),
+    boolP('spill', 'Rays on transparent areas', true),
     seedP(3),
   ],
   apply(img, p, ctx) {
-    if (isEmpty(img)) return img;
+    const spill = bool(p.spill, true);
+    if (!spill && isEmpty(img)) return img;
     const { width: w, height: h, data } = img;
     const s = sc(ctx);
     const c = pt(p.center, { x: 0.5, y: 0.12 });
@@ -319,15 +370,19 @@ export const lightRays: FilterDef = {
     const amp2 = new Float32Array(amp2N);
     for (let i = 0; i < amp2N; i++) amp2[i] = hash(i, 7, seed + 11);
     const inv = 1 / s;
+    const invDiag = 1 / diag;
+    // beyond this distance (diag units) the falloff makes every beam invisible (L < 0.002)
+    const maxDist = Math.max(len * 0.55 * Math.log(Math.max(1, (k * 1.2) / 0.002)), 0.035 * Math.log(Math.max(1, (k * 0.75) / 0.002)));
     for (let y = 0; y < h; y++) {
       const Y = ctx.offsetY + (y + 0.5) * inv;
+      const dy = Y - cy;
       for (let x = 0; x < w; x++) {
         const j = (y * w + x) * 4;
-        if (data[j + 3] === 0) continue;
+        if (!spill && data[j + 3] === 0) continue;
         const X = ctx.offsetX + (x + 0.5) * inv;
-        const dx = X - cx,
-          dy = Y - cy;
-        const dist = Math.sqrt(dx * dx + dy * dy) / diag;
+        const dx = X - cx;
+        const dist = Math.sqrt(dx * dx + dy * dy) * invDiag;
+        if (dist > maxDist) continue;
         const th = (Math.atan2(dy, dx) / (Math.PI * 2) + 1) % 1;
         // primary beams
         const u = th * rays;
@@ -346,9 +401,7 @@ export const lightRays: FilterDef = {
         const core = Math.exp(-dist / 0.035) * 0.6;
         const L = (beam * fall + core) * k;
         if (L < 0.002) continue;
-        data[j] += (255 - data[j]) * Math.min(1, L * col[0]);
-        data[j + 1] += (255 - data[j + 1]) * Math.min(1, L * col[1]);
-        data[j + 2] += (255 - data[j + 2]) * Math.min(1, L * col[2]);
+        screenPixel(data, j, L * col[0], L * col[1], L * col[2], spill);
       }
     }
     return img;
@@ -445,9 +498,11 @@ export const lensFlare: FilterDef = {
     numP('size', 'Size', 0.2, 3, 1, { step: 0.01 }),
     colorP('color', 'Tint', '#ffd7a8'),
     selectP('style', 'Style', [['classic', 'Classic (ghosts)'], ['anamorphic', 'Anamorphic streak'], ['star', 'Star burst']], 'classic'),
+    boolP('spill', 'Flare on transparent areas', true),
   ],
   apply(img, p, ctx) {
-    if (isEmpty(img)) return img;
+    const spill = bool(p.spill, true);
+    if (!spill && isEmpty(img)) return img;
     const { width: w, height: h, data } = img;
     const s = sc(ctx);
     const pos = pt(p.position, { x: 0.28, y: 0.25 });
@@ -473,54 +528,77 @@ export const lensFlare: FilterDef = {
           ];
     const gx = ghosts.map((g) => fx + (mx - fx) * g.t),
       gy = ghosts.map((g) => fy + (my - fy) * g.t);
+    // ghost reach in document px (squared), compared before any sqrt
+    const gReach2 = ghosts.map((g) => (g.r * 1.3 * S) ** 2);
     const inv = 1 / s;
     const starRays = style === 'star' ? 8 : 6;
+    const starPow = style === 'star' ? 120 : 260;
+    const starFall = style === 'star' ? 0.22 : 0.12;
+    const streak = style === 'anamorphic' || style === 'classic';
+    const stY = 1 / (S * (style === 'anamorphic' ? 0.0025 : 0.0015)),
+      stX = 1 / (S * (style === 'anamorphic' ? 0.5 : 0.18)),
+      stK = style === 'anamorphic' ? 0.9 : 0.35;
+    // distances (in S units) beyond which a term is below visibility (< 0.002 after brightness)
+    const vis = 0.002 / Math.max(1e-3, B);
+    const coreMax = 0.25 * Math.log(Math.max(1, 0.08 / vis)) + 0.05;
+    const starMax = starFall * Math.log(Math.max(1, 0.75 / vis));
+    const hr = 0.16;
+    const invS = 1 / S;
     for (let y = 0; y < h; y++) {
       const Y = ctx.offsetY + (y + 0.5) * inv;
+      const dy = Y - fy;
+      const ady = Math.abs(dy);
+      // the streak only exists within a few px of the flare's row
+      const stRow = streak ? Math.exp(-ady * stY) * stK : 0;
       for (let x = 0; x < w; x++) {
         const j = (y * w + x) * 4;
-        if (data[j + 3] === 0) continue;
+        if (!spill && data[j + 3] === 0) continue;
         const X = ctx.offsetX + (x + 0.5) * inv;
-        const dx = X - fx,
-          dy = Y - fy;
-        const d = Math.sqrt(dx * dx + dy * dy) / S;
+        const dx = X - fx;
+        const d = Math.sqrt(dx * dx + dy * dy) * invS;
         let lr = 0,
           lg = 0,
           lb = 0;
-        // hot core + wide glow
-        const core = Math.exp(-(d * d) / 0.00018) * 1.4 + Math.exp(-d / 0.06) * 0.45 + Math.exp(-d / 0.25) * 0.08;
-        lr += core;
-        lg += core * 0.92;
-        lb += core * 0.8;
-        // star streaks
-        const th = Math.atan2(dy, dx);
-        const star = Math.pow(Math.abs(Math.cos((th * starRays) / 2)), style === 'star' ? 120 : 260) * Math.exp(-d / (style === 'star' ? 0.22 : 0.12));
-        lr += star * 0.7;
-        lg += star * 0.7;
-        lb += star * 0.75;
-        // anamorphic horizontal streak
-        if (style === 'anamorphic' || style === 'classic') {
-          const st =
-            Math.exp(-Math.abs(dy) / (S * (style === 'anamorphic' ? 0.0025 : 0.0015))) *
-            Math.exp(-Math.abs(dx) / (S * (style === 'anamorphic' ? 0.5 : 0.18))) *
-            (style === 'anamorphic' ? 0.9 : 0.35);
+        if (d < coreMax) {
+          // hot core + wide glow
+          const core = Math.exp(-(d * d) / 0.00018) * 1.4 + Math.exp(-d / 0.06) * 0.45 + Math.exp(-d / 0.25) * 0.08;
+          lr += core;
+          lg += core * 0.92;
+          lb += core * 0.8;
+        }
+        if (d < starMax) {
+          // star streaks
+          const th = Math.atan2(dy, dx);
+          const star = Math.pow(Math.abs(Math.cos((th * starRays) / 2)), starPow) * Math.exp(-d / starFall);
+          lr += star * 0.7;
+          lg += star * 0.7;
+          lb += star * 0.75;
+        }
+        if (stRow > vis * 0.5) {
+          // anamorphic horizontal streak
+          const st = stRow * Math.exp(-Math.abs(dx) * stX);
           lr += st * 0.55;
           lg += st * 0.75;
           lb += st * 1.1;
         }
-        // halo ring with chromatic edge
-        const hr = 0.16;
-        const ringR = Math.exp(-((d - hr * 1.02) ** 2) / 0.00009),
-          ringG = Math.exp(-((d - hr) ** 2) / 0.00009),
-          ringB = Math.exp(-((d - hr * 0.98) ** 2) / 0.00009);
-        lr += ringR * 0.12;
-        lg += ringG * 0.1;
-        lb += ringB * 0.12;
+        const dr = d - hr;
+        if (dr > -0.05 && dr < 0.05) {
+          // halo ring with chromatic edge
+          const ringR = Math.exp(-((d - hr * 1.02) ** 2) / 0.00009),
+            ringG = Math.exp(-(dr * dr) / 0.00009),
+            ringB = Math.exp(-((d - hr * 0.98) ** 2) / 0.00009);
+          lr += ringR * 0.12;
+          lg += ringG * 0.1;
+          lb += ringB * 0.12;
+        }
         // ghosts along the axis through the image center
         for (let g = 0; g < ghosts.length; g++) {
+          const ex = X - gx[g],
+            ey = Y - gy[g];
+          const e2 = ex * ex + ey * ey;
+          if (e2 > gReach2[g]) continue;
           const G = ghosts[g];
-          const gd = Math.hypot(X - gx[g], Y - gy[g]) / S;
-          if (gd > G.r * 1.3) continue;
+          const gd = Math.sqrt(e2) * invS;
           const disc = G.ring ? Math.exp(-((gd - G.r * 0.9) ** 2) / (G.r * G.r * 0.012)) : smoothstep(G.r, G.r * 0.75, gd) * (0.6 + 0.4 * (gd / G.r));
           const v = disc * G.a;
           lr += v * G.col[0];
@@ -531,9 +609,7 @@ export const lensFlare: FilterDef = {
         lg *= B * tint[1];
         lb *= B * tint[2];
         if (lr < 0.002 && lg < 0.002 && lb < 0.002) continue;
-        data[j] += (255 - data[j]) * Math.min(1, lr);
-        data[j + 1] += (255 - data[j + 1]) * Math.min(1, lg);
-        data[j + 2] += (255 - data[j + 2]) * Math.min(1, lb);
+        screenPixel(data, j, lr, lg, lb, spill);
       }
     }
     return img;

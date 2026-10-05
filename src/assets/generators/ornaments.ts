@@ -506,8 +506,11 @@ const ornateCorners = defineAsset(
 /* crosses                                                             */
 /* ------------------------------------------------------------------ */
 
-function crossPath(style: string, w: number, h: number): Path2D {
+function crossPath(style: string, w0: number, h0: number): Path2D {
   const p = new Path2D();
+  // tiny/degenerate boxes would produce negative arc radii (Path2D.arc throws on those)
+  const w = Math.max(1, w0);
+  const h = Math.max(1, h0);
   const cx = w / 2;
   const bar = w * 0.17;
   const armY = h * 0.3;
@@ -587,10 +590,11 @@ function crossPath(style: string, w: number, h: number): Path2D {
       p.rect(cx - span / 2, armY, span, bar);
       const cy = armY + bar / 2;
       const R = w * 0.27;
+      const Ri = Math.max(0.1, R - bar * 0.45);
       p.moveTo(cx + R, cy);
       p.arc(cx, cy, R, 0, TAU);
-      p.moveTo(cx + R - bar * 0.45, cy);
-      p.arc(cx, cy, R - bar * 0.45, 0, TAU, true);
+      p.moveTo(cx + Ri, cy);
+      p.arc(cx, cy, Ri, 0, TAU, true);
       break;
     }
     default: {
@@ -635,13 +639,15 @@ const crosses = defineAsset(
       const style = str(p, 'style', 'gothic');
       const ow = num(p, 'outlineWidth', 0) * (Math.min(W, H) / 520);
       const [c, ctx] = newCanvas(W, H);
-      const pad = ow + 4;
+      // the outline/margin can't take more than a third of the box (tiny layers)
+      const pad = Math.min(ow + 4, Math.min(W, H) / 3);
       for (let i = 0; i < n; i++) {
         const scale = n === 1 ? 1 : 0.55 + r() * 0.35 - (i === Math.floor(n / 2) ? -0.15 : 0.05);
         const cw = ((W - pad * 2) / Math.max(1, n * 0.62)) * scale;
         const ch = (H - pad * 2) * scale;
         const fw = Math.min(cw, (ch * 520) / 760);
         const fh = (fw * 760) / 520;
+        if (!(fw >= 1 && fh >= 1)) continue;
         const x = n === 1 ? (W - fw) / 2 : pad + (i / (n - 1)) * (W - pad * 2 - fw);
         const y = H - pad - fh;
         const path = crossPath(style, fw, fh);

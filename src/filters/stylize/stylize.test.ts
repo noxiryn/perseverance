@@ -12,7 +12,7 @@ import { vignetteAt } from './defs/light';
 import { cutoutQuantize, fromOklab, toOklab } from './defs/artistic';
 import { separateInks } from './defs/comic';
 import { boxIntegral, quantTable } from './defs/retro';
-import { blurPlane, boundedDistance, boxBlurInterleaved, boxBlurPlane, coarseField, distanceTransform, insideDistance } from './util';
+import { blurPlane, boundedDistance, boxBlurInterleaved, boxBlurPlane, boxForSigma, coarseField, distanceTransform, insideDistance } from './util';
 import { spotLUT } from './screen';
 
 type Img = { data: Uint8ClampedArray; width: number; height: number };
@@ -247,6 +247,27 @@ describe('cel shade', () => {
     expect(reps[0]).toBeLessThan(0.07);
   });
 
+  it('keeps the tonal range: blacks stay black and highlights stay bright', () => {
+    const img = makeImg(64, 8, (x) => {
+      const v = Math.round((x / 63) * 255);
+      return [v, v, v, 255];
+    });
+    const out = run('cel-shade', clone(img), { outline: false, saturation: 0 });
+    let lo = 255,
+      hi = 0;
+    for (let j = 0; j < out.data.length; j += 4) {
+      lo = Math.min(lo, luma(out.data, j));
+      hi = Math.max(hi, luma(out.data, j));
+    }
+    expect(lo).toBeLessThan(12);
+    expect(hi).toBeGreaterThan(243);
+    // a bright warm highlight keeps its brightness
+    const warm = makeImg(32, 8, (x) => (x < 16 ? [40, 30, 20, 255] : [251, 242, 206, 255]));
+    const o2 = run('cel-shade', clone(warm), { outline: false, saturation: 0 });
+    const jh = (4 * 32 + 28) * 4;
+    expect(luma(o2.data, jh)).toBeGreaterThan(232);
+  });
+
   it('keeps hue and alpha, and outlines the silhouette', () => {
     const img = makeImg(40, 40, (x, y) => {
       const inside = x > 8 && x < 32 && y > 8 && y < 32;
@@ -332,11 +353,11 @@ describe('blur & alpha', () => {
     expect(grew).toBe(true);
   });
 
-  it('rough edges only erode alpha, deterministically per seed', () => {
+  it('rough edges: erode-only mode only removes alpha, deterministically per seed', () => {
     const img = makeImg(64, 64, (x, y) => (x > 6 && x < 58 && y > 6 && y < 58 ? [180, 90, 30, 255] : [0, 0, 0, 0]));
-    const a = run('rough-edges', clone(img), { amount: 8, scale: 12, seed: 3 });
-    const b = run('rough-edges', clone(img), { amount: 8, scale: 12, seed: 3 });
-    const c = run('rough-edges', clone(img), { amount: 8, scale: 12, seed: 4 });
+    const a = run('rough-edges', clone(img), { amount: 8, scale: 12, seed: 3, mode: 'erode' });
+    const b = run('rough-edges', clone(img), { amount: 8, scale: 12, seed: 3, mode: 'erode' });
+    const c = run('rough-edges', clone(img), { amount: 8, scale: 12, seed: 4, mode: 'erode' });
     expect(Buffer.from(a.data).equals(Buffer.from(b.data))).toBe(true);
     expect(Buffer.from(a.data).equals(Buffer.from(c.data))).toBe(false);
     let eroded = 0;
@@ -348,6 +369,26 @@ describe('blur & alpha', () => {
     expect(eroded).toBeGreaterThan(50);
     // the center stays solid
     expect(a.data[(32 * 64 + 32) * 4 + 3]).toBe(255);
+  });
+
+  it('rough edges: torn mode displaces the edge both ways with interior colors', () => {
+    const img = makeImg(64, 64, (x, y) => (x > 12 && x < 52 && y > 12 && y < 52 ? [180, 90, 30, 255] : [0, 0, 0, 0]));
+    const a = run('rough-edges', clone(img), { amount: 10, scale: 10, seed: 5 });
+    let grown = 0,
+      eroded = 0;
+    for (let j = 0; j < a.data.length; j += 4) {
+      if (a.data[j + 3] > img.data[j + 3]) {
+        grown++;
+        // new coverage takes the color from inside the shape
+        expect(Math.abs(a.data[j] - 180)).toBeLessThanOrEqual(2);
+        expect(Math.abs(a.data[j + 1] - 90)).toBeLessThanOrEqual(2);
+      }
+      if (a.data[j + 3] < img.data[j + 3]) eroded++;
+    }
+    expect(grown).toBeGreaterThan(30);
+    expect(eroded).toBeGreaterThan(30);
+    expect(a.data[(32 * 64 + 32) * 4 + 3]).toBe(255);
+    expect(a.data[3]).toBe(0);
   });
 });
 
@@ -468,8 +509,61 @@ describe('fast planes', () => {
     for (let i = 0; i < c.length; i++) expect(c[i]).toBeCloseTo(0.7, 5);
   });
 
+  it('extended box (fractional end taps) matches a naive implementation', () => {
+    for (const [w, h, ch, r, al] of [[29, 13, 1, 2, 0.37], [4, 6, 1, 3, 0.8], [17, 9, 4, 1, 0.25], [11, 5, 1, 0, 0.3], [7, 4, 4, 0, 0.6]]) {
+      const a = new Float32Array(w * h * ch);
+      for (let i = 0; i < a.length; i++) a[i] = ((i * 6007) % 89) / 88;
+      let ref = Float32Array.from(a);
+      const at = (b: Float32Array, x: number, y: number, c: number) => b[(Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))) * ch + c];
+      const N = 2 * r + 1 + 2 * al;
+      for (let p = 0; p < 2; p++) {
+        const hp = new Float32Array(ref.length);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let c = 0; c < ch; c++) { let s0 = 0; for (let k = -r - 1; k <= r + 1; k++) s0 += at(ref, x + k, y, c) * (Math.abs(k) > r ? al : 1); hp[(y * w + x) * ch + c] = s0 / N; }
+        const vp = new Float32Array(ref.length);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let c = 0; c < ch; c++) { let s0 = 0; for (let k = -r - 1; k <= r + 1; k++) s0 += at(hp, x, y + k, c) * (Math.abs(k) > r ? al : 1); vp[(y * w + x) * ch + c] = s0 / N; }
+        ref = vp;
+      }
+      boxBlurInterleaved(a, w, h, ch, r, 2, al);
+      for (let i = 0; i < a.length; i++) expect(a[i]).toBeCloseTo(ref[i], 4);
+    }
+  });
+
+  it('blurPlane has the requested sigma (smoothly, not in whole-pixel steps)', () => {
+    const w = 161;
+    for (const sigma of [1, 1.3, 2, 2.4, 3.3, 5.7, 9.2, 14.5]) {
+      const a = new Float32Array(w * 3);
+      for (let y = 0; y < 3; y++) a[y * w + 80] = 1;
+      blurPlane(a, w, 3, sigma);
+      let m = 0,
+        v = 0,
+        t = 0;
+      for (let x = 0; x < w; x++) t += a[w + x];
+      for (let x = 0; x < w; x++) m += (a[w + x] * x) / t;
+      for (let x = 0; x < w; x++) v += (a[w + x] * (x - m) ** 2) / t;
+      expect(Math.sqrt(v)).toBeCloseTo(sigma, 1);
+    }
+  });
+
+  it('reduced-resolution big blurs stay close to the full-resolution blur and keep constants', () => {
+    const w = 120,
+      h = 90;
+    const a = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) a[y * w + x] = (x > 40 && x < 80 && y > 30 && y < 60 ? 1 : 0) + Math.sin(x * 0.05) * 0.2;
+    const ref = Float32Array.from(a);
+    const { r, alpha } = boxForSigma(12, 3);
+    boxBlurInterleaved(ref, w, h, 1, r, 3, alpha);
+    const m = Float32Array.from(a);
+    blurPlane(m, w, h, 12);
+    let maxErr = 0;
+    for (let i = 0; i < m.length; i++) maxErr = Math.max(maxErr, Math.abs(m[i] - ref[i]));
+    expect(maxErr).toBeLessThan(0.02);
+    const c = new Float32Array(w * h).fill(0.3);
+    blurPlane(c, w, h, 20);
+    for (let i = 0; i < c.length; i++) expect(c[i]).toBeCloseTo(0.3, 4);
+  });
+
   it('small-sigma blurPlane is an exact clamped gaussian', () => {
-    for (const [w, h, sigma] of [[31, 17, 1], [4, 5, 1.6], [40, 3, 0.7]]) {
+    for (const [w, h, sigma] of [[31, 17, 0.9], [4, 5, 0.6], [40, 3, 0.7]]) {
       const a = new Float32Array(w * h);
       for (let i = 0; i < a.length; i++) a[i] = ((i * 4421) % 97) / 96;
       const r = Math.max(1, Math.ceil(sigma * 3));

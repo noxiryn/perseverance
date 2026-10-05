@@ -478,13 +478,33 @@ export const watercolor: FilterDef = {
     const wstep = Math.max(1, Math.min(4, Math.floor(2 * s)));
     const fx = amp > 0.2 ? coarseField(w, h, wstep, (x, y) => fbmValue(((x + ax) / s) * 0.03, ((y + ay) / s) * 0.03, seed, 3) - 0.5) : null;
     const fy = amp > 0.2 ? coarseField(w, h, wstep, (x, y) => fbmValue(((x + ax) / s) * 0.03 + 9.1, ((y + ay) / s) * 0.03 - 4.7, seed + 1, 3) - 0.5) : null;
+    // paper: granulation (2 smooth octaves on a coarse grid + per-pixel tooth for the finest grain)
+    // and fibers (long in x, thin in y), combined into one multiplier field
+    const tstep = Math.max(1, Math.min(3, Math.floor(2 * s)));
+    const paperF =
+      tex > 0
+        ? coarseField(w, h, tstep, (x, y) => {
+            const X = (x + ax) / s,
+              Y = (y + ay) / s;
+            const gran = (fbmValue(X * 0.12, Y * 0.12, seed + 5, 2) - 0.5) * 2;
+            const fibers = fbmValue(X * 0.02, Y * 0.35, seed + 7, 2) - 0.5;
+            return 1 + gran * tex * 0.45 + fibers * tex * 0.2;
+          })
+        : null;
+    const P0 = Math.max(1, paper[0]),
+      P1 = Math.max(1, paper[1]),
+      P2 = Math.max(1, paper[2]);
+    const iP0 = 1 / P0,
+      iP1 = 1 / P1,
+      iP2 = 1 / P2;
+    const toothK = 0.05 * tex;
+    const is = 1 / s;
     for (let y = 0; y < h; y++) {
+      const Yf = Math.floor((y + ay) * is);
       for (let x = 0; x < w; x++) {
         const i = y * w + x,
           j = i * 4;
         if (orig[j + 3] === 0) continue;
-        const X = (x + ax) / s,
-          Y = (y + ay) / s;
         let R: number, G: number, B: number;
         if (fx && fy) {
           sampleBilinear(wd, w, h, x + fx[i] * amp * 2, y + fy[i] * amp * 2, tmp, 0, 'clamp');
@@ -496,24 +516,25 @@ export const watercolor: FilterDef = {
           G = wd[j + 1];
           B = wd[j + 2];
         }
-        // pigment density (absorbance relative to the paper)
-        const gran = (fbmValue(X * 0.12, Y * 0.12, seed + 5, 3) - 0.5) * 2;
-        const fibers = fbmValue(X * 0.02, Y * 0.35, seed + 7, 2) - 0.5;
-        const dog = Math.max(0, L2[i] - L1[i]) * 6 + Math.abs(L2[i] - L1[i]) * 2;
+        // pigment density (absorbance relative to the paper), pooled at edges, modulated by paper
+        const dl = L2[i] - L1[i];
+        const dog = (dl > 0 ? dl : 0) * 6 + (dl < 0 ? -dl : dl) * 2;
         const pool = 1 + dog * edgeK * 1.6;
-        const g = 1 + gran * tex * 0.45 + fibers * tex * 0.2;
-        const out = [R, G, B];
-        for (let c = 0; c < 3; c++) {
-          const P = Math.max(1, paper[c]);
-          let dens = clamp(1 - out[c] / P, 0, 1);
-          dens = clamp(dens * pool * g * 0.92, 0, 1);
-          out[c] = P * (1 - dens);
-        }
-        // paper tooth shows through lightly everywhere
-        const tooth = 1 - (hash(Math.floor(X), Math.floor(Y), seed + 9) - 0.5) * 0.05 * tex;
-        data[j] = out[0] * tooth;
-        data[j + 1] = out[1] * tooth;
-        data[j + 2] = out[2] * tooth;
+        const g = (paperF ? paperF[i] : 1) * pool * 0.92;
+        let d0 = 1 - R * iP0,
+          d1 = 1 - G * iP1,
+          d2 = 1 - B * iP2;
+        d0 = d0 < 0 ? 0 : d0 > 1 ? 1 : d0;
+        d1 = d1 < 0 ? 0 : d1 > 1 ? 1 : d1;
+        d2 = d2 < 0 ? 0 : d2 > 1 ? 1 : d2;
+        d0 *= g;
+        d1 *= g;
+        d2 *= g;
+        // paper tooth shows through lightly everywhere (per document pixel)
+        const tooth = toothK > 0 ? 1 - (hash(Math.floor((x + ax) * is), Yf, seed + 9) - 0.5) * toothK : 1;
+        data[j] = P0 * (1 - (d0 > 1 ? 1 : d0)) * tooth;
+        data[j + 1] = P1 * (1 - (d1 > 1 ? 1 : d1)) * tooth;
+        data[j + 2] = P2 * (1 - (d2 > 1 ? 1 : d2)) * tooth;
       }
     }
     return img;
@@ -581,9 +602,11 @@ export const charcoal: FilterDef = {
       let cov = clamp((tone - st[i] * 0.85 + 0.2) * 2.4, 0, 1) * (0.55 + tone * 0.45);
       // bold edges
       cov = Math.max(cov, clamp(mag[i] * (6 + detail * 10) - 0.15, 0, 1) * 0.95);
-      // paper tooth: charcoal skips the valleys
-      const tooth = fbmValue((x + ax) / s * 0.45, (y + ay) / s * 0.45, seed + 3, 2);
-      cov *= 0.7 + 0.3 * smoothstep(0.25, 0.6, tooth);
+      // paper tooth: charcoal skips the valleys (only where charcoal is deposited)
+      if (cov > 0.002) {
+        const tooth = fbmValue(((x + ax) / s) * 0.45, ((y + ay) / s) * 0.45, seed + 3, 2);
+        cov *= 0.7 + 0.3 * smoothstep(0.25, 0.6, tooth);
+      }
       for (let c = 0; c < 3; c++) data[j + c] = paper[c] + (ink[c] - paper[c]) * cov;
     }
     return img;
@@ -704,13 +727,14 @@ export const inkWash: FilterDef = {
     const bx = bleed > 0.3 ? coarseField(w, h, bstep, (x, y) => (fbmValue(((x + ax) / s) * 0.05, ((y + ay) / s) * 0.05, seed, 2) - 0.5) * bleed * 1.5) : null;
     const by = bleed > 0.3 ? coarseField(w, h, bstep, (x, y) => (fbmValue(((x + ax) / s) * 0.05 + 5.3, ((y + ay) / s) * 0.05 + 1.7, seed + 1, 2) - 0.5) * bleed * 1.5) : null;
     const loadF = coarseField(w, h, Math.max(1, Math.min(8, Math.floor(8 * s))), (x, y) => 0.82 + 0.3 * (fbmValue(((x + ax) / s) * 0.008, ((y + ay) / s) * 0.008, seed + 2, 2) - 0.5));
+    // low-frequency noise fields on coarse grids: dry-brush breakup and paper texture
+    const dryF = line ? coarseField(w, h, Math.max(1, Math.floor(3 * s)), (x, y) => smoothstep(0.25, 0.55, fbmValue(((x + ax) / s) * 0.06, ((y + ay) / s) * 0.02, seed + 3, 3))) : null;
+    const texF = tex > 0 ? coarseField(w, h, Math.max(1, Math.floor(2 * s)), (x, y) => 1 - (fbmValue(((x + ax) / s) * 0.25, ((y + ay) / s) * 0.25, seed + 4, 2) - 0.5) * 0.12 * tex) : null;
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x,
           j = i * 4;
         if (data[j + 3] === 0) continue;
-        const X = (x + ax) / s,
-          Y = (y + ay) / s;
         // wet bleed: sample the wash with a noisy offset, uneven ink load
         let d = D[i];
         if (bx && by) {
@@ -719,12 +743,11 @@ export const inkWash: FilterDef = {
           d = D[yy * w + xx];
         }
         d = clamp(d * loadF[i], 0, 1);
-        if (line) {
+        if (line && dryF) {
           // dry brush: the outline breaks up where the brush runs out of ink
-          const dry = smoothstep(0.25, 0.55, fbmValue(X * 0.06, Y * 0.02, seed + 3, 3));
-          d = Math.max(d, line[i] * edges * (0.45 + 0.55 * dry));
+          d = Math.max(d, line[i] * edges * (0.45 + 0.55 * dryF[i]));
         }
-        const paperTex = 1 - (fbmValue(X * 0.25, Y * 0.25, seed + 4, 2) - 0.5) * 0.12 * tex;
+        const paperTex = texF ? texF[i] : 1;
         for (let c = 0; c < 3; c++) data[j + c] = (paper[c] + (ink[c] - paper[c]) * d) * paperTex;
       }
     }
@@ -814,6 +837,9 @@ export const stamp: FilterDef = {
     }
     if (sm > 0.2) blurPlane(L, w, h, sm);
     const aa = 0.5 / Math.max(1, sm + 1); // ~1px soft threshold
+    // rough edge wobble and ink voids are smooth noise: evaluate them on coarse grids
+    const edgeF = rough > 0 ? coarseField(w, h, Math.max(1, Math.floor(2 * s)), (x, y) => (fbmValue(((x + ax) / s) * 0.08, ((y + ay) / s) * 0.08, seed, 3) - 0.5) * 0.18 * rough) : null;
+    const voidF = rough > 0 ? coarseField(w, h, Math.max(1, Math.floor(6 * s)), (x, y) => smoothstep(0.62 - rough * 0.12, 0.75, fbmValue(((x + ax) / s) * 0.012, ((y + ay) / s) * 0.012, seed + 1, 4))) : null;
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x,
@@ -822,11 +848,11 @@ export const stamp: FilterDef = {
         if (a === 0) continue;
         const X = (x + ax) / s,
           Y = (y + ay) / s;
-        const edgeNoise = (fbmValue(X * 0.08, Y * 0.08, seed, 3) - 0.5) * 0.18 * rough;
+        const edgeNoise = edgeF ? edgeF[i] : 0;
         let cov = clamp((bal - L[i] + edgeNoise) / (aa * 2) + 0.5, 0, 1);
-        if (rough > 0 && cov > 0) {
+        if (voidF && cov > 0) {
           // patchy ink: low-frequency voids + fine speckle
-          const voids = smoothstep(0.62 - rough * 0.12, 0.75, fbmValue(X * 0.012, Y * 0.012, seed + 1, 4));
+          const voids = voidF[i];
           const speck = hash(Math.floor(X), Math.floor(Y), seed + 2) < rough * 0.12 ? 1 : 0;
           cov *= 1 - Math.max(voids * 0.85, speck * 0.9);
         }

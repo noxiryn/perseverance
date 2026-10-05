@@ -7,6 +7,7 @@
  *  - `downsamplePlane` / `sampleUp`: cheap multi-resolution glow pipelines (bloom, glow).
  */
 import type { Edge, Planes } from './util';
+import { blurPlane } from './util';
 
 const DEG = Math.PI / 180;
 
@@ -256,17 +257,12 @@ export function upsamplePlane(buf: Float32Array, w2: number, h2: number, f: numb
 }
 
 /**
- * Gaussian-ish blur of a plane at reduced resolution for big radii (σ in full-res px).
- * Returns a full-res plane. Cheap: the blur runs on a (1/f)² sized buffer.
+ * Gaussian-ish blur of a copy of a plane (σ in px). Big radii run at reduced resolution inside
+ * blurPlane; `blur` is kept for callers that pass a custom small-radius blur.
  */
 export function blurPlaneMultires(src: Float32Array, w: number, h: number, sigma: number, blur: (b: Float32Array, w: number, h: number, s: number) => void): Float32Array {
-  const f = Math.max(1, Math.min(8, Math.floor(sigma / 6)));
-  if (f <= 1) {
-    const c = Float32Array.from(src);
-    blur(c, w, h, sigma);
-    return c;
-  }
-  const d = downsamplePlane(src, w, h, f);
-  blur(d.buf, d.w, d.h, sigma / f);
-  return upsamplePlane(d.buf, d.w, d.h, f, w, h);
+  const c = Float32Array.from(src);
+  if (sigma >= 8) blurPlane(c, w, h, sigma);
+  else blur(c, w, h, sigma);
+  return c;
 }

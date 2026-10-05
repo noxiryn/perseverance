@@ -78,6 +78,103 @@ export function gooShape(
   return out;
 }
 
+/** Channel fill colors of `gooShapes` (one gooey field per RGB channel). */
+const GOO_CHANNELS = ['#ff0000', '#00ff00', '#0000ff'];
+
+/**
+ * Up to three independent gooey fields in ONE blur + readback pass: layer k's shapes are drawn
+ * into colour channel k (additively, over opaque black, so every channel holds plain coverage),
+ * blurred once, then thresholded per channel and composited in layer order (layer 0 at the
+ * bottom) with each layer's colour. Same look as stacking three `gooShape` calls at a third of
+ * the cost. `draw` callbacks get a context whose fill/stroke style is already set.
+ */
+export function gooShapes(
+  W: number,
+  H: number,
+  layers: { color: string; draw: (ctx: CanvasRenderingContext2D) => void }[],
+  blur: number,
+  o: { lo?: number; hi?: number; maxPx?: number } = {},
+): HTMLCanvasElement {
+  const n = Math.min(3, layers.length);
+  const s = Math.min(1, Math.sqrt((o.maxPx ?? 2_400_000) / Math.max(1, W * H)));
+  const w = Math.max(1, Math.round(W * s));
+  const h = Math.max(1, Math.round(H * s));
+  const br = blur * s;
+  const q = br > 3 ? Math.max(0.25, 3 / br) : 1;
+  const bw = Math.max(1, Math.round(w * q));
+  const bh = Math.max(1, Math.round(h * q));
+  const [src, sctx] = newCanvas(bw, bh);
+  sctx.fillStyle = '#000';
+  sctx.fillRect(0, 0, bw, bh);
+  sctx.globalCompositeOperation = 'lighter';
+  sctx.scale(s * q, s * q);
+  for (let k = 0; k < n; k++) {
+    sctx.fillStyle = GOO_CHANNELS[k];
+    sctx.strokeStyle = GOO_CHANNELS[k];
+    layers[k].draw(sctx);
+  }
+  sctx.globalCompositeOperation = 'source-over';
+  let field: HTMLCanvasElement = src;
+  if (br > 0) {
+    const [bl, bctx] = newCanvas(bw, bh);
+    bctx.filter = `blur(${Math.max(0.4, br * q)}px)`;
+    bctx.drawImage(src, 0, 0);
+    bctx.filter = 'none';
+    field = bl;
+  }
+  // re-flatten over black: the blur lets transparency in at the canvas border, and un-premultiplied
+  // reads would otherwise inflate the channel values there
+  const [dst, dctx] = newReadCanvas(w, h);
+  dctx.fillStyle = '#000';
+  dctx.fillRect(0, 0, w, h);
+  dctx.imageSmoothingEnabled = true;
+  dctx.imageSmoothingQuality = 'medium';
+  dctx.drawImage(field, 0, 0, w, h);
+  const img = dctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  const cols = layers.slice(0, n).map((l) => rgbOf(l.color));
+  const lo = (o.lo ?? 0.42) * 255;
+  const inv = 1 / Math.max(1, (o.hi ?? 0.58) * 255 - lo);
+  // smoothstep LUT over the channel value
+  const lut = new Float32Array(256);
+  for (let v = 0; v < 256; v++) {
+    let t = (v - lo) * inv;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    lut[v] = t * t * (3 - 2 * t);
+  }
+  for (let i = 0; i < d.length; i += 4) {
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let a = 0;
+    for (let k = 0; k < n; k++) {
+      const t = lut[d[i + k]];
+      if (t <= 0) continue;
+      const c = cols[k];
+      // premultiplied source-over
+      r = c.r * t + r * (1 - t);
+      g = c.g * t + g * (1 - t);
+      b = c.b * t + b * (1 - t);
+      a = t + a * (1 - t);
+    }
+    if (a <= 0) {
+      d[i + 3] = 0;
+      continue;
+    }
+    const ia = 1 / a;
+    d[i] = r * ia;
+    d[i + 1] = g * ia;
+    d[i + 2] = b * ia;
+    d[i + 3] = a * 255;
+  }
+  dctx.putImageData(img, 0, 0);
+  if (s === 1) return dst;
+  const [out, octx] = newCanvas(W, H);
+  octx.imageSmoothingQuality = 'high';
+  octx.drawImage(dst, 0, 0, W, H);
+  return out;
+}
+
 /* ------------------------------------------------------------------ */
 /* Sprites                                                             */
 /* ------------------------------------------------------------------ */

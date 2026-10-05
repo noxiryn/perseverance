@@ -8,6 +8,7 @@ import {
   blurPlanes,
   bool,
   clamp,
+  coarseField,
   contrastFactor,
   fbmValue,
   hash,
@@ -431,19 +432,19 @@ export const newsprint: FilterDef = {
       }
     }
     const fs = 1 / Math.max(1, 3 * s);
+    // fibrous paper + uneven ink density: smooth noise, evaluated on coarse grids
+    const fibF = grain > 0 ? coarseField(w, h, Math.max(1, Math.floor(2 * s)), (x, y) => fbmValue(((x + ax) / s) * 0.02, ((y + ay) / s) * 0.11, seed + 3, 3) - 0.5) : null;
+    const densF = coarseField(w, h, Math.max(1, Math.floor(16 * s)), (x, y) => 0.82 + 0.18 * fbmValue(((x + ax) / s) * 0.004, ((y + ay) / s) * 0.004, seed + 5, 2));
     for (let y = 0; y < h; y++) {
-      const gy = (y + ay) / s;
       for (let x = 0; x < w; x++) {
         const i = y * w + x,
           j = i * 4;
         const a = data[j + 3];
         if (a === 0) continue;
-        const gx = (x + ax) / s;
-        // fibrous paper + uneven ink density
-        const fib = fbmValue(gx * 0.02, gy * 0.11, seed + 3, 3) - 0.5;
+        const fib = fibF ? fibF[i] : 0;
         const spec = hash(Math.floor(x + ax), Math.floor(y + ay), seed + 11) - 0.5;
         const pt = 1 + (fib * 0.16 + spec * 0.08 * fs * 3) * grain;
-        const dens = 0.82 + 0.18 * fbmValue(gx * 0.004, gy * 0.004, seed + 5, 2);
+        const dens = densF[i];
         const v = cov[i] * dens;
         for (let ch = 0; ch < 3; ch++) data[j + ch] = paper[ch] * pt + (ink[ch] - paper[ch] * pt) * v;
       }
@@ -664,24 +665,26 @@ function printProcess<T extends Img>(img: T, o: PrintOpts, ctx: FilterContext): 
     } else if (c === cov) c = Float32Array.from(cov);
     if (o.grain > 0) {
       const gs = Math.max(0.5, o.grainSize * s);
+      const soft = coarseField(w, h, Math.max(1, Math.floor(gs)), (x, y) => valueNoise01(((x + ax) / gs) * 0.5, ((y + ay) / gs) * 0.5, o.seed + k));
       for (let y = 0; y < h; y++)
         for (let x = 0; x < w; x++) {
           const i = y * w + x;
           const gx = (x + ax) / gs,
             gy = (y + ay) / gs;
-          const t = hash(Math.floor(gx), Math.floor(gy), o.seed + 31 * k) * 0.7 + valueNoise01(gx * 0.5, gy * 0.5, o.seed + k) * 0.3;
+          const t = hash(Math.floor(gx), Math.floor(gy), o.seed + 31 * k) * 0.7 + soft[i] * 0.3;
           const v = c[i];
           const d = clamp((v - t) * 6 + 0.5, 0, 1);
           c[i] = v + (d - v) * o.grain;
         }
     }
     if (o.texture > 0) {
+      const tex = coarseField(w, h, Math.max(1, Math.floor(2 * s)), (x, y) => fbmValue(((x + ax) / s) * 0.08, ((y + ay) / s) * 0.08, o.seed + 101 * k, 3));
       for (let y = 0; y < h; y++)
         for (let x = 0; x < w; x++) {
           const i = y * w + x;
           const gx = (x + ax) / s,
             gy = (y + ay) / s;
-          const t = fbmValue(gx * 0.08, gy * 0.08, o.seed + 101 * k, 3);
+          const t = tex[i];
           const voids = clamp((t - (1 - o.texture * 0.35)) * 8, 0, 1);
           c[i] *= 1 - voids * 0.9 - (hash(Math.floor(gx), Math.floor(gy), o.seed + k) - 0.5) * 0.12 * o.texture;
         }

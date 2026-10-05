@@ -2,6 +2,8 @@
  * oil paint, pixelate, mosaic, crystallize, rough edges, sketch. */
 import {
   Brush,
+  Eclipse,
+  LayoutGrid,
   Gem,
   Grid2x2Check,
   Hexagon,
@@ -10,7 +12,6 @@ import {
   Paintbrush,
   Scan,
   ScissorsLineDashed,
-  Sun,
   Zap,
   PencilLine,
 } from 'lucide-react';
@@ -29,11 +30,13 @@ import {
   lumaPlane,
   num,
   rgb,
+  sampleBilinear,
   samplePlane,
   saturateInPlace,
   sc,
   smoothstep,
   sobel,
+  str,
   toPlanes,
   blurPlanes,
   valueNoise,
@@ -41,7 +44,7 @@ import {
 } from '../util';
 import { outlineCoverage } from '../edges';
 import { kuwahara } from '../kuwahara';
-import { angleP, boolP, colorP, numP, pctP, pxP, seedP } from '../params';
+import { angleP, boolP, colorP, numP, pctP, pxP, seedP, selectP } from '../params';
 
 /* ------------------------------------------------------------------ */
 /* Cel shade                                                           */
@@ -64,26 +67,72 @@ export function quantizeSmooth(L: number, levels: number, smoothness: number, re
 }
 
 /**
- * Representative tone of each band: the mean luminance of the opaque pixels falling in it, so
- * flat bands keep the image's own tonality (blacks stay black, highlights stay bright).
+ * Tonal range of the opaque pixels: the `pLo` / `pHi` luminance percentiles (alpha-weighted), at
+ * least 0.1 wide. Bands are spread over this range and its ends become the darkest / lightest
+ * tones, so cel shading keeps the input's crisp blacks and bright highlights.
  */
-export function bandRepresentatives(lum: Float32Array, data: Uint8ClampedArray, levels: number): Float32Array {
-  const sum = new Float64Array(levels),
-    cnt = new Float64Array(levels);
+export function toneRange(lum: Float32Array, data: Uint8ClampedArray, pLo = 0.02, pHi = 0.98): { lo: number; hi: number } {
+  const N = 1024;
+  const hist = new Float64Array(N);
+  let total = 0;
   for (let i = 0, j = 3; i < lum.length; i++, j += 4) {
     const a = data[j];
     if (a === 0) continue;
     const L = lum[i];
-    const b = L <= 0 ? 0 : L >= 1 ? levels - 1 : Math.min(levels - 1, Math.floor(L * levels));
+    hist[L <= 0 ? 0 : L >= 1 ? N - 1 : (L * N) | 0] += a;
+    total += a;
+  }
+  if (total <= 0) return { lo: 0, hi: 1 };
+  const find = (q: number) => {
+    const target = total * q;
+    let acc = 0;
+    for (let b = 0; b < N; b++) {
+      acc += hist[b];
+      if (acc >= target) return (b + 0.5) / N;
+    }
+    return 1;
+  };
+  let lo = find(pLo),
+    hi = find(pHi);
+  if (hi - lo < 0.1) {
+    const m = (lo + hi) / 2;
+    lo = Math.max(0, Math.min(m - 0.05, 0.9));
+    hi = lo + 0.1;
+  }
+  return { lo, hi };
+}
+
+/**
+ * Representative tone of each band (actual luminance). Bands split the tonal range [lo, hi]
+ * evenly; the darkest band is pinned to `lo` and the lightest to `hi` (no squashed tonal range),
+ * the middle ones sit between their pixels' mean luminance and an even spacing.
+ */
+export function bandRepresentatives(lum: Float32Array, data: Uint8ClampedArray, levels: number, lo = 0, hi = 1): Float32Array {
+  const sum = new Float64Array(levels),
+    cnt = new Float64Array(levels);
+  const span = Math.max(1e-4, hi - lo);
+  for (let i = 0, j = 3; i < lum.length; i++, j += 4) {
+    const a = data[j];
+    if (a === 0) continue;
+    const L = lum[i];
+    const t = (L - lo) / span;
+    const b = t <= 0 ? 0 : t >= 1 ? levels - 1 : Math.min(levels - 1, Math.floor(t * levels));
     sum[b] += L * a;
     cnt[b] += a;
   }
   const reps = new Float32Array(levels);
+  const gap = span / (levels * 4);
   for (let b = 0; b < levels; b++) {
-    const center = (b + 0.5) / levels;
-    // lean slightly towards the band center so neighbouring bands stay distinct
-    reps[b] = cnt[b] > 0 ? (sum[b] / cnt[b]) * 0.8 + center * 0.2 : center;
+    const even = lo + (span * b) / (levels - 1);
+    if (b === 0) reps[b] = lo;
+    else if (b === levels - 1) reps[b] = hi;
+    else {
+      const mean = cnt[b] > 0 ? sum[b] / cnt[b] : even;
+      reps[b] = clamp(mean * 0.5 + even * 0.5, lo, hi);
+    }
   }
+  // keep neighbouring bands distinct and monotonic
+  for (let b = 1; b < levels - 1; b++) reps[b] = clamp(reps[b], reps[b - 1] + gap, hi - gap * (levels - 1 - b));
   return reps;
 }
 
@@ -119,10 +168,13 @@ export function applyCelShade<T extends Img>(img: T, p: ParamValues, ctx: Filter
   const lumS = Float32Array.from(lum0);
   blurPlane(lumS, w, h, Math.max(0.5, 0.9 * s));
   const n = w * h;
-  const reps = bandRepresentatives(lumS, data, levels);
+  const { lo, hi } = toneRange(lumS, data);
+  const reps = bandRepresentatives(lumS, data, levels, lo, hi);
+  const invSpan = 1 / (hi - lo);
   for (let i = 0, j = 0; i < n; i++, j += 4) {
     if (data[j + 3] === 0) continue;
-    const Lq = quantizeSmooth(lumS[i], levels, smooth, reps);
+    const t = (lumS[i] - lo) * invSpan;
+    const Lq = quantizeSmooth(t < 0 ? 0 : t > 1 ? 1 : t, levels, smooth, reps);
     relight(data, j, lum0[i], Lq);
   }
   saturateInPlace(data, sat);
@@ -317,14 +369,20 @@ function maxFilter(buf: Float32Array, w: number, h: number, r: number) {
       tmp[row + x] = m;
     }
   }
-  for (let y = 0; y < h; y++)
-    for (let x = 0; x < w; x++) {
-      let m = 0;
-      const y0 = Math.max(0, y - r),
-        y1 = Math.min(h - 1, y + r);
-      for (let k = y0; k <= y1; k++) if (tmp[k * w + x] > m) m = tmp[k * w + x];
-      buf[y * w + x] = m;
+  // vertical: row by row (sequential memory)
+  for (let y = 0; y < h; y++) {
+    const o = y * w;
+    const y0 = Math.max(0, y - r),
+      y1 = Math.min(h - 1, y + r);
+    buf.set(tmp.subarray(y0 * w, y0 * w + w), o);
+    for (let k = y0 + 1; k <= y1; k++) {
+      const ro = k * w;
+      for (let x = 0; x < w; x++) {
+        const v = tmp[ro + x];
+        if (v > buf[o + x]) buf[o + x] = v;
+      }
     }
+  }
   return buf;
 }
 
@@ -362,7 +420,7 @@ export const solarize: FilterDef = {
   id: 'solarize',
   name: 'Solarize',
   category: 'Stylize',
-  icon: Sun,
+  icon: Eclipse,
   description: 'Sabattier effect: tones above the threshold are inverted.',
   keywords: ['invert', 'darkroom', 'psychedelic'],
   params: [numP('threshold', 'Threshold', 0, 255, 128, { step: 1 }), boolP('normalize', 'Normalize', true)],
@@ -551,7 +609,7 @@ export const mosaic: FilterDef = {
   id: 'mosaic',
   name: 'Mosaic Tiles',
   category: 'Stylize',
-  icon: Grid2x2Check,
+  icon: LayoutGrid,
   description: 'Beveled square tiles with grout lines, like a tile mosaic.',
   keywords: ['tiles', 'pixel', 'bathroom', 'grout'],
   params: [
@@ -777,6 +835,7 @@ export const roughEdges: FilterDef = {
     pxP('amount', 'Amount', 0, 100, 14),
     pxP('scale', 'Scale', 1, 200, 30),
     pctP('detail', 'Detail', 0.6),
+    selectP('mode', 'Edge', [['both', 'Torn (in and out)'], ['erode', 'Erode only']], 'both'),
     pxP('rim', 'Paper rim', 0, 20, 0),
     colorP('rimColor', 'Rim color', '#f3efe6', { showIf: (v) => num(v.rim, 0) > 0 }),
     seedP(1),
@@ -784,27 +843,57 @@ export const roughEdges: FilterDef = {
   apply(img, p, ctx) {
     if (isEmpty(img)) return img;
     const { width: w, height: h, data } = img;
+    const n = w * h;
     const { ax, ay, s } = anchor(ctx);
     const amt = num(p.amount, 14) * s;
     if (amt <= 0.05) return img;
     const scale = Math.max(1, num(p.scale, 30));
     const detail = clamp(num(p.detail, 0.6), 0, 1);
+    const both = str(p.mode, 'both') !== 'erode';
     const rim = num(p.rim, 0) * s;
     const rc = rgb(p.rimColor, '#f3efe6');
     const seed = num(p.seed, 1) | 0;
     const nz = simplex(seed);
     const octaves = 2 + Math.round(detail * 4);
     const gain = 0.35 + detail * 0.3;
-    const dIn = insideDistance(img, true, amt + rim + 2);
-    const reach = amt + rim + 1.5;
+    // the edge moves by disp ∈ [-amt/2, amt/2] (torn) or [-amt, 0] (erode only); the image border
+    // can't grow outward, so where it is the nearest edge the tear always goes inward
+    const grow = both ? amt * 0.5 : 0;
+    const reachE = amt + rim + 1.5;
+    // signed distance to the edge (+ inside, − outside), exact within the band; `fromBorder`
+    // marks inside pixels whose nearest edge is the image border
+    const dA = insideDistance(img, false, reachE + 1);
+    let dOut: Float32Array | null = null;
+    if (grow > 0) {
+      const seedIn = new Uint8Array(n);
+      for (let i = 0, j = 3; i < n; i++, j += 4) seedIn[i] = data[j] >= 128 ? 1 : 0;
+      dOut = boundedDistance(seedIn, w, h, grow + 2);
+    }
+    const sd = new Float32Array(n);
+    const fromBorder = new Uint8Array(n);
+    for (let y = 0; y < h; y++) {
+      const by = Math.min(y + 1, h - y);
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        const da = dA[i];
+        if (da > 0) {
+          const db = Math.min(by, x + 1, w - x);
+          if (db < da) fromBorder[i] = 1;
+          sd[i] = Math.min(da, db) - 0.5;
+        } else sd[i] = dOut ? -(dOut[i] - 0.5) : -0.5;
+      }
+    }
+    const src = grow > 0 ? new Uint8ClampedArray(data) : data;
+    const tmp = new Uint8ClampedArray(4);
     for (let y = 0; y < h; y++) {
       const dy = (y + 0.5 + ay) / s / scale;
       for (let x = 0; x < w; x++) {
         const i = y * w + x,
           j = i * 4;
-        if (data[j + 3] === 0) continue;
-        const d = dIn[i];
-        if (d > reach) continue;
+        const d = sd[i];
+        const torn = both && !fromBorder[i];
+        if (d > (torn ? grow : amt) + rim + 1.5) continue;
+        if (d < 0 && (grow <= 0 || -d > grow + 0.5) && src[j + 3] === 0) continue;
         const dx = (x + 0.5 + ax) / s / scale;
         let sum = 0,
           norm = 0,
@@ -819,11 +908,34 @@ export const roughEdges: FilterDef = {
         let nv = clamp((sum / norm) * 1.25 + 0.5, 0, 1);
         // fine fibrous jaggedness
         nv = clamp(nv + (valueNoise((x + ax) / Math.max(1, 1.6 * s), (y + ay) / Math.max(1, 1.6 * s), seed + 9) - 0.5) * 0.25 * detail, 0, 1);
-        const e = d - amt * nv; // distance to the torn edge
+        const disp = torn ? (0.5 - nv) * amt : -nv * amt;
+        const e = d + disp; // signed distance to the torn edge (+ inside)
         const cov = clamp(e + 0.5, 0, 1);
-        if (cov < 1) data[j + 3] *= cov;
-        if (rim > 0 && e < rim + 0.5) {
-          const t = clamp(rim + 0.5 - e, 0, 1);
+        if (d >= 0) {
+          if (cov < 1) data[j + 3] *= cov;
+        } else if (cov > 0) {
+          // the edge moved outward over this pixel: take the color just inside along the gradient
+          const l = d;
+          const gx = (x < w - 1 ? sd[i + 1] : l) - (x > 0 ? sd[i - 1] : l),
+            gy = (y < h - 1 ? sd[i + w] : l) - (y > 0 ? sd[i - w] : l);
+          const gl = Math.hypot(gx, gy);
+          if (gl > 1e-6) {
+            const t = -d + 0.75;
+            sampleBilinear(src, w, h, x + (gx / gl) * t, y + (gy / gl) * t, tmp, 0, 'transparent');
+            const na = Math.max(src[j + 3], cov * tmp[3]);
+            if (na > src[j + 3]) {
+              data[j] = tmp[0];
+              data[j + 1] = tmp[1];
+              data[j + 2] = tmp[2];
+              data[j + 3] = na;
+            }
+          }
+        } else if (src[j + 3] > 0) {
+          // soft anti-aliasing fringe outside the edge: fades as the edge retreats
+          data[j + 3] *= clamp(1 + e + 0.5, 0, 1);
+        }
+        if (rim > 0 && data[j + 3] > 0 && e < rim + 0.5) {
+          const t = clamp(rim + 0.5 - Math.max(0, e), 0, 1);
           data[j] += (rc[0] - data[j]) * t;
           data[j + 1] += (rc[1] - data[j + 1]) * t;
           data[j + 2] += (rc[2] - data[j + 2]) * t;

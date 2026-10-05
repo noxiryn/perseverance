@@ -5,7 +5,7 @@ import type { AssetDef } from '../../registry';
 import { createNoise2D } from '../../core/noise';
 import { arcFractions, blob, catmullRom, resample } from '../lib/geom';
 import { P, defineAsset } from '../lib/params';
-import { gooShape } from '../lib/raster';
+import { gooShape, gooShapes } from '../lib/raster';
 import type { Pt, Rand } from '../lib/util';
 import { TAU, makeRand, newCanvas, num, rgba, str, traceSmooth, unitOf } from '../lib/util';
 
@@ -222,30 +222,31 @@ const paintSplatter = defineAsset(
       const spread = num(p, 'spread', 0.5);
       const dripAmt = num(p, 'drips', 0.5);
       const all = placeSplats(W, H, Math.round(num(p, 'count', 5)), num(p, 'size', 200) * u, str(p, 'placement', 'scattered'), r);
-      const [c, ctx] = newCanvas(W, H);
-      cols.forEach((col, k) => {
-        const mine = all.filter((_, i) => i % 3 === k);
-        if (!mine.length) return;
-        const avg = mine.reduce((a, s) => a + s.size, 0) / mine.length;
-        const body = gooShape(
-          W,
-          H,
-          col,
-          Math.max(2 * u, avg * 0.022),
-          (g) => {
-            for (const s of mine) {
+      // the three colours' gooey bodies share one blur/threshold pass (one RGB channel each)
+      const groups = cols.map((col, k) => ({ col, mine: all.filter((_, i) => i % 3 === k), spray: new Path2D() })).filter((g) => g.mine.length);
+      const avg = all.reduce((a, s) => a + s.size, 0) / Math.max(1, all.length);
+      const body = gooShapes(
+        W,
+        H,
+        groups.map((grp) => ({
+          color: grp.col,
+          draw: (g: CanvasRenderingContext2D) => {
+            for (const s of grp.mine) {
               splatBody(g, s, r, spread);
               if (dripAmt > 0) drips(g, s, r, dripAmt, H);
             }
+            for (const s of grp.mine) splatSpray(grp.spray, s, r, spread * 0.8, u);
           },
-          { lo: 0.46, hi: 0.54, maxPx: 1_600_000 },
-        );
-        ctx.drawImage(body, 0, 0);
-        const spray = new Path2D();
-        for (const s of mine) splatSpray(spray, s, r, spread * 0.8, u);
-        ctx.fillStyle = col;
-        ctx.fill(spray);
-      });
+        })),
+        Math.max(2 * u, avg * 0.022),
+        { lo: 0.46, hi: 0.54, maxPx: 1_600_000 },
+      );
+      const [c, ctx] = newCanvas(W, H);
+      ctx.drawImage(body, 0, 0);
+      for (const grp of groups) {
+        ctx.fillStyle = grp.col;
+        ctx.fill(grp.spray);
+      }
       // wet gloss highlights on the paint: a soft, offset copy (blurred at 1/3 resolution)
       const gs = 1 / 3;
       const [gl, gctx] = newCanvas(Math.max(1, Math.round(W * gs)), Math.max(1, Math.round(H * gs)));

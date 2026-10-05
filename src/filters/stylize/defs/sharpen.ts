@@ -1,5 +1,5 @@
 /** Sharpen filters: sharpen, unsharp mask, high pass. */
-import { Contrast, Triangle, Zap } from 'lucide-react';
+import { Contrast, ScanEye, Triangle } from 'lucide-react';
 import type { FilterDef } from '../../../registry';
 import type { Img } from '../util';
 import { blurImage, bool, clamp, isEmpty, num, sc } from '../util';
@@ -40,6 +40,78 @@ export function unsharp(img: Img, sigma: number, amount: number, threshold: numb
   return img;
 }
 
+/**
+ * Sharpen with a fused 3×3 (separable [ws, wc, ws]) gaussian approximation: one row-ring pass,
+ * no full-size float buffers. Neighbours are alpha-weighted (premultiplied) so transparent pixels
+ * never bleed into cut-out edges. Used for small sigmas (≤ 1), where a 3-tap kernel covers ±3σ
+ * well enough; larger ones go through `unsharp`.
+ */
+export function sharpen3(img: Img, sigma: number, amount: number): Img {
+  const { width: w, height: h, data: d } = img;
+  if (amount <= 0 || w < 1 || h < 1) return img;
+  const k1 = Math.exp(-1 / (2 * sigma * sigma));
+  const wc = 1 / (1 + 2 * k1),
+    ws = k1 * wc;
+  const stride = w * 4;
+  // horizontally blurred premultiplied rows (0..255·255 scale for color, 0..255 alpha), ring of 3
+  const rows = [new Float32Array(stride), new Float32Array(stride), new Float32Array(stride)];
+  const hrow = (y: number, out: Float32Array) => {
+    const ro = y * stride;
+    for (let x = 0; x < w; x++) {
+      const jc = ro + x * 4;
+      const jl = x > 0 ? jc - 4 : jc,
+        jr = x < w - 1 ? jc + 4 : jc;
+      const al = d[jl + 3] * ws,
+        ac = d[jc + 3] * wc,
+        ar = d[jr + 3] * ws;
+      const o = x * 4;
+      out[o] = d[jl] * al + d[jc] * ac + d[jr] * ar;
+      out[o + 1] = d[jl + 1] * al + d[jc + 1] * ac + d[jr + 1] * ar;
+      out[o + 2] = d[jl + 2] * al + d[jc + 2] * ac + d[jr + 2] * ar;
+      out[o + 3] = al + ac + ar;
+    }
+  };
+  hrow(0, rows[1]);
+  rows[0].set(rows[1]); // row -1 clamps to row 0
+  if (h > 1) hrow(1, rows[2]);
+  else rows[2].set(rows[1]);
+  // rows[0] = y-1, rows[1] = y, rows[2] = y+1
+  const cur = new Uint8ClampedArray(stride);
+  for (let y = 0; y < h; y++) {
+    const up = rows[0],
+      mid = rows[1],
+      dn = rows[2];
+    const ro = y * stride;
+    cur.set(d.subarray(ro, ro + stride));
+    for (let x = 0, o = 0; x < w; x++, o += 4) {
+      const a = cur[o + 3];
+      if (a === 0) continue;
+      const A = up[o + 3] * ws + mid[o + 3] * wc + dn[o + 3] * ws;
+      if (A <= 1e-6) continue;
+      const inv = 1 / A;
+      const j = ro + o;
+      const c0 = cur[o],
+        c1 = cur[o + 1],
+        c2 = cur[o + 2];
+      const b0 = (up[o] * ws + mid[o] * wc + dn[o] * ws) * inv,
+        b1 = (up[o + 1] * ws + mid[o + 1] * wc + dn[o + 1] * ws) * inv,
+        b2 = (up[o + 2] * ws + mid[o + 2] * wc + dn[o + 2] * ws) * inv;
+      d[j] = c0 + (c0 - b0) * amount;
+      d[j + 1] = c1 + (c1 - b1) * amount;
+      d[j + 2] = c2 + (c2 - b2) * amount;
+    }
+    // advance the ring: the next row's neighbours come from the ORIGINAL pixels, computed before
+    // this row was written (rows y and y+1 are already buffered; y+2 is still untouched)
+    const recycled = rows[0];
+    rows[0] = rows[1];
+    rows[1] = rows[2];
+    rows[2] = recycled;
+    if (y + 2 < h) hrow(y + 2, rows[2]);
+    else rows[2].set(rows[1]);
+  }
+  return img;
+}
+
 export const sharpen: FilterDef = {
   id: 'sharpen',
   name: 'Sharpen',
@@ -50,7 +122,9 @@ export const sharpen: FilterDef = {
   params: [numP('amount', 'Amount', 0, 500, 100, { unit: '%', step: 1 })],
   apply(img, p, ctx) {
     if (isEmpty(img)) return img;
-    return unsharp(img, Math.max(0.5, 0.8 * sc(ctx)), clamp(num(p.amount, 100), 0, 500) / 100, 0) as ImageData;
+    const sigma = Math.max(0.5, 0.8 * sc(ctx));
+    const amount = clamp(num(p.amount, 100), 0, 500) / 100;
+    return (sigma <= 1 ? sharpen3(img, sigma, amount) : unsharp(img, sigma, amount, 0)) as ImageData;
   },
 };
 
@@ -58,7 +132,7 @@ export const unsharpMask: FilterDef = {
   id: 'unsharp-mask',
   name: 'Unsharp Mask',
   category: 'Sharpen',
-  icon: Zap,
+  icon: ScanEye,
   description: 'Classic controllable sharpening: amount, radius and threshold.',
   keywords: ['usm', 'sharpen', 'clarity', 'detail'],
   params: [

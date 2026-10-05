@@ -91,7 +91,8 @@ const halftoneDots = defineAsset(
     generate(p, { width: W, height: H }) {
       const u = unitOf(W, H);
       const r = makeRand(num(p, 'seed', 83));
-      const cell = Math.max(2, num(p, 'size', 14) * u);
+      // never below 2.5px: finer screens only moiré and cost time
+      const cell = Math.max(2.5, num(p, 'size', 14) * u);
       const ang = (num(p, 'angle', 45) * Math.PI) / 180;
       const dir = str(p, 'direction', 'edges');
       const cov = num(p, 'coverage', 0.6);
@@ -106,8 +107,17 @@ const halftoneDots = defineAsset(
       const cx = W / 2;
       const cy = H / 2;
       const [c, ctx] = newCanvas(W, H);
-      const path = new Path2D();
       const rMax = cell * 0.5 * 1.42 * maxDot;
+      // Draw in the rotated screen frame: squares/lines become axis-aligned rects and every dot
+      // sits at (i·cell, j·cell). Paths are flushed in chunks — one giant path of tens of
+      // thousands of polygons makes the rasterizer's fill time explode at small cell sizes.
+      ctx.fillStyle = str(p, 'color', '#111111');
+      ctx.translate(cx, cy);
+      // diamonds are squares in a frame turned another 45° (rects are the rasterizer's fast path)
+      ctx.rotate(shape === 'diamond' ? ang + Math.PI / 4 : ang);
+      const CHUNK = 1500;
+      let path = new Path2D();
+      let pending = 0;
       for (let j = -n; j <= n; j++) {
         for (let i = -n; i <= n; i++) {
           const lx = i * cell;
@@ -122,37 +132,29 @@ const halftoneDots = defineAsset(
           if (rad < 0.25) continue;
           if (shape === 'square') {
             const k = rad * 0.8;
-            const pts: Pt[] = [
-              { x: x + (-k * cs + k * sn), y: y + (-k * sn - k * cs) },
-              { x: x + (k * cs + k * sn), y: y + (k * sn - k * cs) },
-              { x: x + (k * cs - k * sn), y: y + (k * sn + k * cs) },
-              { x: x + (-k * cs - k * sn), y: y + (-k * sn + k * cs) },
-            ];
-            tracePoly(path, pts);
+            path.rect(lx - k, ly - k, 2 * k, 2 * k);
           } else if (shape === 'diamond') {
-            tracePoly(path, [
-              { x: x + cs * rad, y: y + sn * rad },
-              { x: x - sn * rad, y: y + cs * rad },
-              { x: x - cs * rad, y: y - sn * rad },
-              { x: x + sn * rad, y: y - cs * rad },
-            ]);
+            const h = rad * Math.SQRT1_2;
+            const qx = (lx + ly) * Math.SQRT1_2;
+            const qy = (ly - lx) * Math.SQRT1_2;
+            path.rect(qx - h, qy - h, 2 * h, 2 * h);
           } else if (shape === 'line') {
             const hw = Math.min(cell / 2, rad * 0.7);
             const hl = cell / 2 + 0.5;
-            tracePoly(path, [
-              { x: x - cs * hl - sn * hw, y: y - sn * hl + cs * hw },
-              { x: x + cs * hl - sn * hw, y: y + sn * hl + cs * hw },
-              { x: x + cs * hl + sn * hw, y: y + sn * hl - cs * hw },
-              { x: x - cs * hl + sn * hw, y: y - sn * hl - cs * hw },
-            ]);
+            path.rect(lx - hl, ly - hw, 2 * hl, 2 * hw);
           } else {
-            path.moveTo(x + rad, y);
-            path.arc(x, y, rad, 0, TAU);
+            path.moveTo(lx + rad, ly);
+            path.arc(lx, ly, rad, 0, TAU);
+          }
+          if (++pending >= CHUNK) {
+            ctx.fill(path);
+            path = new Path2D();
+            pending = 0;
           }
         }
       }
-      ctx.fillStyle = str(p, 'color', '#111111');
-      ctx.fill(path);
+      if (pending) ctx.fill(path);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       return c;
     },
   },
