@@ -293,15 +293,19 @@ function insertionPoint(s: DocSession): { aboveId?: ID | null; parentId?: ID | n
   return { aboveId: active.id };
 }
 
+/** A layer created directly above a clipped layer joins the same clipping group (like Photoshop). */
+function joinClipGroup(s: DocSession, layer: Layer, at: { aboveId?: ID | null }): Layer {
+  const above = at.aboveId ? s.doc.layers[at.aboveId] : null;
+  return above?.clipped && layer.type !== 'group' ? ({ ...layer, clipped: true } as Layer) : layer;
+}
+
 /** Insert a new layer at the standard insertion point (one commit) and make it active. */
 export function insertNewLayer(layer: Layer, label: string) {
   const s = activeSession();
   if (!s) return;
   const at = insertionPoint(s);
-  // A layer created above a clipped layer joins the same clipping group (like Photoshop).
-  const above = at.aboveId ? s.doc.layers[at.aboveId] : null;
-  if (above?.clipped && layer.type !== 'group') layer = { ...layer, clipped: true } as Layer;
-  ed().commit(label, (d) => insertLayerDraft(d, layer, at), { activeLayerId: layer.id });
+  const l = joinClipGroup(s, layer, at);
+  ed().commit(label, (d) => insertLayerDraft(d, l, at), { activeLayerId: l.id });
 }
 
 /** Insert a layer as a live preview (for dialogs). Idempotent. Commit with commitPreview(). */
@@ -309,8 +313,9 @@ export function previewInsertLayer(layer: Layer) {
   const s = activeSession();
   if (!s) return;
   const at = insertionPoint(s);
+  const l = joinClipGroup(s, layer, at);
   ed().preview((d) => {
-    if (!d.layers[layer.id]) insertLayerDraft(d, layer, at);
+    if (!d.layers[l.id]) insertLayerDraft(d, l, at);
   });
 }
 
@@ -376,22 +381,16 @@ export function newAdjustmentLayer(filterId: string, params?: ParamValues): ID |
 const newId = (prefix: string) => uid(prefix);
 
 /**
- * Layer ▸ Duplicate (Ctrl+J): deep copies (groups recursively, bitmaps and masks duplicated).
- * With `viaCopy` (the Ctrl+J command) and a pixel selection on a single raster layer, it makes a
- * "Layer via Copy" of the selected pixels instead, like Photoshop.
+ * Layer ▸ Duplicate Layer (Ctrl+J): deep copies named "<name> copy" (groups recursively, bitmaps
+ * and masks duplicated), always — whether or not a pixel selection exists (see layerViaCopy).
  */
-export function duplicateLayers(opts: { viaCopy?: boolean; ids?: ID[] } = {}): ID[] {
+export function duplicateLayers(opts: { ids?: ID[] } = {}): ID[] {
   const s = needDoc();
   if (!s) return [];
   const ids = opts.ids ? orderedTopLevel(s.doc, opts.ids) : selectedTopLevel(s);
   if (!ids.length) {
     toast('Select a layer to duplicate', 'info');
     return [];
-  }
-  const active = s.activeLayerId ? s.doc.layers[s.activeLayerId] : null;
-  if (opts.viaCopy && s.doc.selection && ids.length === 1 && active?.type === 'raster' && ids[0] === active.id) {
-    const id = layerViaCopy(s, active);
-    return id ? [id] : [];
   }
 
   const clones = ids.map((id) => ({ id, ...cloneLayerTree(s.doc, id, { newId, dupBitmap: (b) => (bitmaps.has(b) ? bitmaps.duplicate(b) : b) }) }));

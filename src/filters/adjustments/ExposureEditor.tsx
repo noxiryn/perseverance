@@ -20,7 +20,7 @@ export const gammaToSlider = (g: number) => clamp((Math.log(Math.max(1e-6, g)) /
 export function sliderToGamma(p: number, min = 0.01, max = 9.99): number {
   const g = Math.exp((clamp(p, 0, 1) * 2 - 1) * LOG_SPAN);
   const r = Math.round(g * 100) / 100;
-  return clamp(Math.abs(r - 1) <= 0.02 ? 1 : r, min, max);
+  return clamp(Math.abs(r - 1) < 0.025 ? 1 : r, min, max);
 }
 
 /** A `.ui-slider`-styled range on a log scale around 1, with a numeric field. Double-click resets to 1. */

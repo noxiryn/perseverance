@@ -134,14 +134,20 @@ describe('createAdjustmentLayer', () => {
   });
 
   it('follows "Clip to Layer by Default" unless told to ignore it', () => {
-    const { doc, backdrop } = clipStackDoc();
-    open(doc, backdrop.id);
     useAdjustmentsPrefs.setState({ clipByDefault: true });
+    const first = clipStackDoc();
+    open(first.doc, first.backdrop.id);
     const a = createAdjustmentLayer('levels')!;
     expect(docNow().layers[a].clipped).toBe(true);
-    useEditor.getState().setActiveLayer(backdrop.id);
+    // Below a clipped layer the new layer must join the group even when ignoring the preference…
+    useEditor.getState().setActiveLayer(first.backdrop.id);
     const b = createAdjustmentLayer('levels', { ignoreClipPref: true })!;
-    expect(docNow().layers[b].clipped).toBe(false);
+    expect(docNow().layers[b].clipped).toBe(true);
+    // …and outside a clipping group the preference is ignored (Auto commands).
+    const second = clipStackDoc();
+    open(second.doc, second.backdrop.id);
+    const c = createAdjustmentLayer('levels', { ignoreClipPref: true })!;
+    expect(docNow().layers[c].clipped).toBe(false);
   });
 
   it('inserts at the top of an expanded active group', () => {
