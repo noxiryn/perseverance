@@ -29,7 +29,7 @@ ARCHITECTURE.md §3 for each module's full feature list).
 | type-shape (type tool, character panel, shapes + presets) | `src/tools/type`, `src/tools/shape` | **done** |
 | looks-templates (looks engine, templates, doc presets) | `src/looks`, `src/templates` | **done** |
 | fx-filters (creative filters, filter dialog, gallery) | `src/filters/stylize`, `src/filters/ui` | **done** |
-| assets (procedural asset library, Libraries panel) | `src/assets` | implementing |
+| assets (procedural asset library, Libraries panel) | `src/assets` | **done** |
 
 If a module wasn't marked done, re-run its review + fix pass: have an agent audit the module
 against its spec in ARCHITECTURE.md §3/§5, then fix what it finds. The code on disk is the
@@ -40,7 +40,8 @@ starting point; don't rewrite modules from scratch.
 - `scripts/smoke.mjs` against `vite preview`: SMOKE OK (23 templates, 14 panels, all tools dragged, 293 commands, 0 errors).
 - `xvfb-run -a node scripts/electron-smoke.mjs`: the real Electron app boots from dist/ with the desktop bridge, 0 errors.
 - Reference templates visually match the four reference styles.
-- In progress: perf (dirty-rect painting, hot filter LUTs) + Electron hardening workflow; assets module polish.
+- All 13 modules done. In progress: perf (dirty-rect painting, hot filter LUTs) + Electron hardening workflow.
+- Next: final whole-app review → fixes → installer → README.
 
 ## Remaining steps after the modules
 1. **Integrate**: `npm run typecheck` (whole tree) + `npx vite build`; fix cross-module mismatches.
