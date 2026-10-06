@@ -21,7 +21,8 @@ Installers are built by GitHub Actions (*Build installers*, `.github/workflows/r
 
 - **Releases** — [github.com/noxiryn/perseverance/releases](https://github.com/noxiryn/perseverance/releases).
   Each version tag (e.g. `v0.1.0`) publishes the Windows installer + portable `.exe`, the macOS
-  `.dmg` and the Linux `.AppImage` there, and no GitHub account is needed to download them. (If the
+  `.dmg` and the Linux `.AppImage` there, and no GitHub account is needed to download them
+  while the repository is public. (If the
   page is still empty, no version has been tagged yet — use the next option.)
 - **Latest build** — every push builds the Windows installer: **Actions** tab → *Build installers*
   → the newest run with a green check → *Artifacts* → **`perseverance-Windows`**. You must be signed
@@ -43,7 +44,9 @@ the `.pgfx` file type (double-clicking projects won't open them); use **File →
   launch is blocked: on macOS 15 Sequoia and later open **System Settings → Privacy & Security**,
   scroll to the message about Perseverance and click **Open Anyway** (on macOS 14 and older,
   Control-click the app → **Open**).
-- Linux: `chmod +x Perseverance-<version>.AppImage` and run it.
+- Linux: `chmod +x Perseverance-<version>.AppImage` and run it. AppImages need FUSE 2; on Ubuntu
+  22.04 and later install it with `sudo apt install libfuse2` (or run the AppImage with
+  `--appimage-extract-and-run`).
 
 **New here?** Open **Help → Make Your First Roblox Thumbnail…** (or click **Make a Roblox
 thumbnail** on the start screen): it walks you from a template to your own character to the
