@@ -13,7 +13,7 @@ import { blobToCanvas } from '../../core/canvas';
 import { readClipboardImage } from '../../io/clipboard';
 import type { RasterLayer } from '../../core/types';
 import '../roblox.css';
-import { IMAGE_FILE_EXTS, decodeImageFile, imageBaseName, isCharacterLayer, isPlaceholder, replaceLayerContents } from './replace';
+import { IMAGE_FILE_EXTS, decodeImageFile, imageBaseName, isCharacterLayer, isPlaceholder, isReplaceableImage, replaceLayerContents } from './replace';
 
 const PREF_KEY = 'perseverance.replace.cutout';
 
@@ -114,7 +114,7 @@ export function ReplaceDialog({ close, layerId, mode }: ReplaceDialogProps & { c
     // preventDefault also tells the window-level drop handler that the drop is taken care of.
     e.preventDefault();
     setDragOver(false);
-    const file = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith('image/') || IMAGE_FILE_EXTS.some((x) => f.name.toLowerCase().endsWith(`.${x}`)));
+    const file = Array.from(e.dataTransfer.files).find((f) => isReplaceableImage(f.name, f.type));
     if (!file) {
       toast('Drop an image file (PNG, JPEG, WebP, GIF or BMP).', 'warning');
       return;

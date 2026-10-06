@@ -3,11 +3,13 @@ import { createPortal } from 'react-dom';
 import { create } from 'zustand';
 import { Check, ChevronRight } from 'lucide-react';
 import { formatShortcut } from '../shortcuts';
+import { escapeFromInside, insideLaterLayer, pushEscapeLayer, type EscapeLayer } from './escapeLayers';
 
 /* ---------------- Popover ---------------- */
 
 /**
- * A floating panel anchored to an element (or a point). Closes on outside click / Escape.
+ * A floating panel anchored to an element (or a point). Closes on outside click / Escape (only
+ * the innermost open popover / menu / dialog reacts to Escape — escapeLayers.ts).
  * Renders into document.body.
  */
 export function Popover({
@@ -60,23 +62,63 @@ export function Popover({
     setPos({ left, top });
   }, [anchor, placement]);
 
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  const anchorRef = useRef(anchor);
+  anchorRef.current = anchor;
+  const layerRef = useRef<EscapeLayer | null>(null);
+  const open = !!anchor;
+
+  // Escape: registered once per opening (a re-render must not move this popover above one opened
+  // from inside it). Only the innermost surface closes; see escapeLayers.ts.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const el = ref.current;
+    const openedFrom = anchorRef.current;
+    let byEscape = false;
+    const layer: EscapeLayer = {
+      kind: 'floating',
+      close: () => {
+        byEscape = true;
+        closeRef.current();
+      },
+      contains: (node) => !!ref.current?.contains(node),
+    };
+    layerRef.current = layer;
+    const pop = pushEscapeLayer(layer);
+    const key = (e: KeyboardEvent) => escapeFromInside(layer, e);
+    el?.addEventListener('keydown', key);
+    return () => {
+      pop();
+      el?.removeEventListener('keydown', key);
+      if (layerRef.current === layer) layerRef.current = null;
+      // Closed with Escape while one of its fields had focus: give focus back to the control that
+      // opened it (inside a dialog, Enter / Tab / a second Escape keep working) instead of <body>.
+      const opener = anchorRef.current ?? openedFrom;
+      if (byEscape && el && el.contains(document.activeElement) && opener instanceof HTMLElement) {
+        requestAnimationFrame(() => {
+          const now = document.activeElement;
+          if ((!now || now === document.body) && opener.isConnected && !opener.closest('[inert]')) opener.focus({ preventScroll: true });
+        });
+      }
+    };
+  }, [open]);
+
   useEffect(() => {
     const down = (e: PointerEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) {
         if (anchor instanceof HTMLElement && anchor.contains(e.target as Node)) return;
+        // A click in a popover / menu opened from this one (a colour picker inside the gradient
+        // editor) is not outside.
+        if (layerRef.current && insideLaterLayer(layerRef.current, e.target)) return;
         onClose();
       }
     };
-    const key = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
     // Defer so the opening click does not immediately close.
     const t = window.setTimeout(() => window.addEventListener('pointerdown', down, true), 0);
-    window.addEventListener('keydown', key);
     return () => {
       window.clearTimeout(t);
       window.removeEventListener('pointerdown', down, true);
-      window.removeEventListener('keydown', key);
     };
   }, [onClose, anchor]);
 
@@ -219,17 +261,21 @@ export function MenuHost() {
   useEffect(() => {
     if (!menu) return;
     const down = () => close();
-    const key = (e: KeyboardEvent) => e.key === 'Escape' && close();
+    // Escape closes the menu only (not the dialog / popover it was opened from): escapeLayers.ts.
+    const pop = pushEscapeLayer({
+      kind: 'floating',
+      close,
+      contains: (node) => !!(node instanceof Element ? node : node.parentElement)?.closest('.ui-menu'),
+    });
     const t = window.setTimeout(() => {
       window.addEventListener('pointerdown', down);
       window.addEventListener('blur', down);
     }, 0);
-    window.addEventListener('keydown', key);
     return () => {
+      pop();
       window.clearTimeout(t);
       window.removeEventListener('pointerdown', down);
       window.removeEventListener('blur', down);
-      window.removeEventListener('keydown', key);
     };
   }, [menu, close]);
   if (!menu) return null;

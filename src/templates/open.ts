@@ -5,6 +5,8 @@ import { useEditor } from '../state/editor';
 import { toast } from '../state/ui';
 import { buildTemplate } from './define';
 import { docFonts, loadFonts } from '../looks/shared';
+import { reportProjectFonts } from '../io/projectFonts';
+import { isUserTemplate } from './userTemplates';
 
 /**
  * Build template `id` and open it as a new document (active layer = the placeholder character,
@@ -20,6 +22,8 @@ export async function openTemplate(id: string): Promise<ID | null> {
     const { doc, characterId } = await buildTemplate(id);
     void loadFonts(docFonts(doc));
     const docId = useEditor.getState().openDocument(doc, { label: `New from “${def.name}”`, activeLayerId: characterId });
+    // My Templates carry their user fonts (registered while building); warn about any still missing.
+    if (isUserTemplate(id)) void reportProjectFonts(doc, []).catch(() => undefined);
     toast(
       characterId
         ? `Created “${def.name}”. Swap in your character: drop your render on the canvas or use Roblox ▸ Replace Character… (keeps the template’s styling).`

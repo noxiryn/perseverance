@@ -1,10 +1,11 @@
 /**
  * Replace Character / Replace Contents: swap a raster layer's pixels for another image while the
  * layer keeps its place in the composition — the new image is fitted into the old box (aspect
- * kept, centered; characters keep their feet planted) with the same rotation and flip, and the
- * layer keeps its smart filters, layer effects, mask, blend mode, clipping and name. A template's
- * placeholder becomes "your character" (renamed after the image, placeholder flag cleared).
- * Opaque images can have their background removed automatically on the way in.
+ * kept, centered; whole characters keep their feet planted, busts / head and waist-up renders fill
+ * the part of the box on the canvas with their cut edge on the canvas edge) with the same rotation
+ * and flip, and the layer keeps its smart filters, layer effects, mask, blend mode, clipping and
+ * name. A template's placeholder becomes "your character" (renamed after the image, placeholder
+ * flag cleared). Opaque images can have their background removed automatically on the way in.
  */
 import type { Document, GeneratorSource, ID, Layer, RasterLayer } from '../../core/types';
 import type { OpenedFile } from '../../platform';
@@ -20,12 +21,12 @@ import { adoptTemplateStylingDraft } from '../../looks/characterStyling';
 import { autoCutout, type AutoCutoutOutcome } from '../bg/core';
 import { alphaBounds } from '../pixels';
 import { canvasHasOpaqueBorder, clearMaskDraft, hasRemoveBgMask } from './cutout';
-import { fitIntoBox, fitIntoBoxAtScale, type FitAlign } from './fit';
+import { fitIntoBox, fitIntoBoxAtScale, isCutOffAtBottom, type FitAlign } from './fit';
 
 /** Name given to a replaced placeholder when the image has no usable name (clipboard). */
 export const REPLACED_PLACEHOLDER_NAME = 'Your Character';
 
-export const IMAGE_FILE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
+export { IMAGE_FILE_EXTS, isReplaceableImage, sniffImageBytes } from './imageFiles';
 
 const MIME: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp' };
 
@@ -94,6 +95,8 @@ export type CutoutOutcome = AutoCutoutOutcome | 'not-needed' | 'off';
 export interface PreparedImage {
   canvas: HTMLCanvasElement;
   cutout: CutoutOutcome;
+  /** The image is cut off at the bottom (bust / waist-up / head-and-shoulders), see isCutOffAtBottom. */
+  cutOff?: boolean;
 }
 
 /**
@@ -118,13 +121,15 @@ export function prepareReplacement(src: HTMLCanvasElement, opts: { cutout: boole
     // Auto mode with the default settings, applied in place only when the result can be trusted.
     cutout = autoCutout(img).outcome;
   }
+  // Judged after the cut-out and before trimming: a bust reaches the image's bottom edge.
+  const cutOff = isCutOffAtBottom(img);
   const b = alphaBounds(img, 0);
-  if (!b) return { canvas, cutout };
+  if (!b) return { canvas, cutout, cutOff };
   const w = b.x1 - b.x0 + 1,
     h = b.y1 - b.y0 + 1;
   const out = createCanvas(w, h);
   ctx2d(out).putImageData(img, -b.x0, -b.y0, b.x0, b.y0, w, h);
-  return { canvas: out, cutout };
+  return { canvas: out, cutout, cutOff };
 }
 
 export interface ReplaceOptions {
@@ -143,6 +148,13 @@ export interface ReplaceOptions {
   generator?: GeneratorSource | null;
   /** Extra layer meta merged in (e.g. { roblox: { kind: 'character', source: 'rig' } }). */
   meta?: Record<string, unknown>;
+  /**
+   * The image is cut off at the bottom (a bust, headshot or head / waist-up render): replacing a
+   * character, it fills the on-canvas part of the box with its cut edge on the canvas edge instead
+   * of standing on the box bottom (fit.ts `cut`). Default: detected from the image (keepResolution
+   * renders: false).
+   */
+  cutOff?: boolean;
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -171,18 +183,26 @@ export function replaceLayerContents(layerId: ID, src: HTMLCanvasElement, opts: 
   const wasPlaceholder = isPlaceholder(layer);
   const dispW = layer.width * Math.abs(layer.transform.scaleX || 1);
   const dispH = layer.height * Math.abs(layer.transform.scaleY || 1);
-  const align: FitAlign = character ? 'bottom' : 'center';
+  // Characters: a whole figure keeps its feet planted on the box bottom; a bust / head / waist-up
+  // image fills the part of the box that is on the canvas, its cut edge on the canvas edge.
+  const alignFor = (cutOff: boolean | undefined): FitAlign => (!character ? 'center' : cutOff ? 'cut' : 'bottom');
+  const canvasSize = { width: doc.width, height: doc.height };
   let prepared: PreparedImage;
   let fit: { width: number; height: number; transform: RasterLayer['transform'] };
   let bitmap: HTMLCanvasElement;
   if (opts.keepResolution) {
-    prepared = { canvas: src, cutout: 'off' };
+    prepared = { canvas: src, cutout: 'off', cutOff: !!opts.cutOff };
     bitmap = src;
-    fit = { width: src.width, height: src.height, transform: fitIntoBoxAtScale(layer.transform, layer.width, layer.height, src.width, src.height, align) };
+    fit = {
+      width: src.width,
+      height: src.height,
+      transform: fitIntoBoxAtScale(layer.transform, layer.width, layer.height, src.width, src.height, alignFor(opts.cutOff), canvasSize),
+    };
   } else {
     // Work at no more than twice the size the image will be shown at (keeps the cut-out quick).
     prepared = prepareReplacement(src, { cutout: !!opts.cutout, maxSide: Math.max(256, Math.ceil(Math.max(dispW, dispH) * 2)) });
-    fit = fitIntoBox(layer.transform, layer.width, layer.height, prepared.canvas.width, prepared.canvas.height, align);
+    const align = alignFor(opts.cutOff ?? prepared.cutOff);
+    fit = fitIntoBox(layer.transform, layer.width, layer.height, prepared.canvas.width, prepared.canvas.height, align, canvasSize);
     bitmap = prepared.canvas.width === fit.width && prepared.canvas.height === fit.height ? prepared.canvas : resampleCanvas(prepared.canvas, fit.width, fit.height);
   }
   const bitmapId = bitmaps.add(bitmap);

@@ -7,7 +7,7 @@ import { useEditor } from '../state/editor';
 import { toast } from '../state/ui';
 import { safeFileName } from './math';
 import { encodeProject } from './project';
-import { addRecentFile } from './recent';
+import { addRecentFile, readRecentFiles } from './recent';
 import { removeRecovery } from './autosave';
 import { baseName, currentEntryId, markSavedAt, renameDocSilently } from './util';
 
@@ -31,6 +31,18 @@ const PROBLEM_TEXT = {
   missing: "can't be saved where it was — its folder or drive is no longer available",
   full: "can't be saved — the disk is full",
 } as const;
+
+/**
+ * Where Save As starts for a document that has no file yet (new, from a template, or a project dropped
+ * from somewhere without a path): the folder of the most recent project in Open Recent, so the dialog
+ * doesn't open in an unrelated folder. Pure: `recent` is newest first.
+ */
+export function defaultProjectSavePath(name: string, recent: readonly { path: string }[]): string {
+  const file = `${safeFileName(name)}.pgfx`;
+  const last = recent.find((r) => /\.pgfx$/i.test(r.path) && /[\\/]/.test(r.path));
+  // Keep the folder with its own trailing separator ("C:\Art\" or "/home/me/art/").
+  return last ? last.path.replace(/[^\\/]+$/, '') + file : file;
+}
 
 let saving = false;
 
@@ -81,14 +93,28 @@ export async function saveDocument(docId?: ID, opts: { saveAs?: boolean } = {}):
         return true;
       }
     }
-    const defaultPath = s.filePath && isDesktop ? s.filePath : `${safeFileName(committed.name)}.pgfx`;
+    const defaultPath = !isDesktop ? `${safeFileName(committed.name)}.pgfx` : (s.filePath ?? defaultProjectSavePath(committed.name, readRecentFiles()));
     const result = await saveFile({ title: 'Save As', defaultPath, filters: PROJECT_FILTERS, data });
     if (!result) return false; // cancelled
     if (isDesktop) useEditor.getState().setFilePath(id, result, false);
     // Before the silent rename: it gives every step a renamed copy of its document.
     markSavedAt(id, saved);
     if (isDesktop) {
-      renameDocSilently(id, baseName(fileNameOf(result)));
+      // The document takes the file's name (like Photoshop), and so does the copy inside the file:
+      // it was encoded before the dialog, under the old name (e.g. the template's).
+      const name = baseName(fileNameOf(result));
+      renameDocSilently(id, name);
+      const cur = useEditor.getState().sessions[id];
+      // Only while the tab still shows the saved step: its pixels are then exactly the ones written
+      // (bitmaps change in place; encodeProject snapshots them when called).
+      if (cur && !cur.dirty && name && name !== committed.name) {
+        try {
+          await writeFile(result, await encodeProject(cur.history.entries[cur.history.index]?.doc ?? cur.doc));
+        } catch (e) {
+          // The file is complete under the old name; opening it names the document after the file anyway.
+          console.warn('[io] could not store the new name in the project file', e);
+        }
+      }
       addRecentFile(result);
     }
     void removeRecovery(id);

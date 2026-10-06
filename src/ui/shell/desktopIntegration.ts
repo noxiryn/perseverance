@@ -4,6 +4,7 @@
  */
 import { desktop, setWindowTitle, type OpenedFile } from '../../platform';
 import { useEditor } from '../../state/editor';
+import { autosaveBeforeClose, discardRecoveryFor } from '../../io/autosave';
 import { askChoice } from './dialogs/ChoiceDialog';
 import { dirtySessions, openFileWithIo, saveSession } from './documents';
 import { windowTitle } from './docInfo';
@@ -39,7 +40,12 @@ export async function confirmQuit(): Promise<boolean> {
     ],
   });
   if (!choice || choice === 'cancel') return false;
-  if (choice === 'discard') return true;
+  if (choice === 'discard') {
+    // The user threw the changes away: their autosaved copies go too, before the window closes. Every
+    // other way out (Quit Anyway, a crash, Windows shutting down) keeps them for recovery next time.
+    await discardRecoveryFor(dirty.map((s) => s.doc.id));
+    return true;
+  }
   for (const s of dirty) {
     if (!(await saveSession(s.doc.id))) return false;
   }
@@ -78,13 +84,19 @@ export function installDesktopIntegration(): () => void {
       desktop.onCloseRequested(async () => {
         if (closing) return;
         closing = true;
+        // While the prompt is open, bring the autosaved copies up to date: if the user ends up forcing
+        // the quit ("Quit Anyway" from the main process), the next start offers the latest state.
+        if (dirtySessions().length) autosaveBeforeClose();
         let ok = false;
         try {
           ok = await confirmQuit();
         } catch (e) {
           // Always answer the main process: a broken prompt must not leave the window unclosable.
           console.error('[shell] close prompt failed', e);
-          ok = window.confirm('Perseverance could not show the unsaved-changes prompt. Quit anyway? Unsaved changes will be lost.');
+          // Not the user's Discard: the autosaved copies stay and are offered the next time.
+          ok = window.confirm(
+            'Perseverance could not show the unsaved-changes prompt. Quit anyway? Unsaved changes are lost (autosave may offer to recover them on the next launch).',
+          );
         } finally {
           closing = false;
           desktop!.confirmClose(ok);

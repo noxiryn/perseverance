@@ -18,7 +18,7 @@ import { openFile } from '../../io/open';
 import { registerPlacedImageHandler } from '../../io/placeHooks';
 import { requireDoc } from '../util';
 import { trimRasterLayer } from './cutout';
-import { IMAGE_FILE_EXTS, characterTarget, contentsTarget, decodeImageFile, imageBaseName, isCharacterLayer, isPlaceholder, replaceLayerContents } from './replace';
+import { characterTarget, contentsTarget, decodeImageFile, imageBaseName, isCharacterLayer, isPlaceholder, isReplaceableImage, replaceLayerContents } from './replace';
 import { autoCutoutPref, openReplaceDialog } from './ReplaceDialog';
 
 function replaceCharacter() {
@@ -120,7 +120,6 @@ export const characterCommands: CommandDef[] = [
 
 /* ---------------- drop an image on a selected character ---------------- */
 
-const isImageFile = (f: File) => f.type.startsWith('image/') || IMAGE_FILE_EXTS.some((x) => f.name.toLowerCase().endsWith(`.${x}`));
 
 function dropTarget() {
   const s = activeSession();
@@ -136,7 +135,8 @@ registerFileDropHandler({
     return t ? `Drop one image to replace “${t.name}” (you'll be asked)` : null;
   },
   claim: (ctx) => {
-    if (!ctx.hasDoc || ctx.shift || ctx.count !== 1 || !isImageFile(ctx.file)) return false;
+    // Only renders the decoder reads: a PSD / project / SVG falls through to the normal open path.
+    if (!ctx.hasDoc || ctx.shift || ctx.count !== 1 || !isReplaceableImage(ctx.file.name, ctx.file.type, ctx.data)) return false;
     const target = dropTarget();
     if (!target) return false;
     const file = { path: null, name: ctx.file.name, data: ctx.data };

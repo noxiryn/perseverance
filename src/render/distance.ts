@@ -4,8 +4,9 @@
  *
  * Input is an 8-bit coverage (alpha) map. "Inside" = coverage ≥ 50%. For every pixel we return
  * the distance (px) from its center to the estimated shape edge, with a sub-pixel correction
- * from the coverage of the nearest site and of the pixel itself — giving smooth edges after a
- * 1px ramp.
+ * from the coverage of the nearest site and, for anti-aliasing pixels right next to the edge, of
+ * the pixel itself — giving smooth edges after a 1px ramp. Values below `maxDist` do not depend on
+ * `maxDist` (a field computed deeper gives the same values), also on semi-transparent content.
  *
  * Memory traffic is kept low (this runs on every stroke/bevel render): one Int32 map holding,
  * per pixel, the row of the nearest site in its column; site tests are recomputed from the
@@ -266,8 +267,14 @@ function envelope(
     } else {
       d -= 0.5;
     }
-    // A partially covered pixel bounds the distance from above by its own coverage.
-    if (outside ? a > 0 : a < 255) {
+    // An anti-aliasing pixel (partially covered, right next to the edge: its nearest site is an
+    // 8-neighbour) bounds the distance from above by its own coverage. Only there: applied to
+    // every soft pixel within reach, uniformly semi-transparent content (a 70% fill, smoke, a
+    // feather) would read ~0.2 px from the edge as deep as the field goes — strokes / bevels as
+    // wide as the field depth, and values that change with the depth a field was computed to.
+    // With the bound limited to d2 ≤ 2 (always < md2), every value below maxDist is the same
+    // whatever depth the field was computed to (cached / deeper fields are reusable).
+    if (d2 <= 2 && (outside ? a > 0 : a < 255)) {
       const own = outside ? 0.5 - a / 255 : a / 255 - 0.5;
       if (own < d) d = own;
     }

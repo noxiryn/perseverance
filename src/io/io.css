@@ -463,6 +463,14 @@
   color: var(--text-muted);
   font-size: var(--fs-xs);
   margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.io-recover-item .io-recover-open {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  margin-top: 3px;
 }
 
 /* ---------- fill / stroke ---------- */

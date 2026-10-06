@@ -28,6 +28,7 @@ import { TYPE_TOOL_ID, autoLayerName, optionsFromText, readTypeOptions, textProp
 import { getTextStyle, presetEffects } from './styles';
 import { caseMap, paragraphRangeAt, sanitizeTypedText, toDisplay, toSource, wordRangeAt, type CaseMap } from './textIndex';
 import { ClickCounter } from './clicks';
+import { shortcutDuringTextEdit } from './editKeys';
 
 /* ------------------------------------------------------------------ */
 /* Public reactive state (for the options bar / panels)                */
@@ -645,11 +646,29 @@ function onTextareaKeyDown(e: KeyboardEvent) {
     const cmd = commandForKey(e);
     if (cmd) {
       handled();
-      // Type commands apply to the edited text; anything else commits first.
-      if (cmd.id.startsWith('type.')) void runCommand(cmd.id);
-      else {
-        commitEditing();
-        void runCommand(cmd.id);
+      // Per command, see editKeys.ts: Type commands and view changes (zoom, fit, rulers…) keep
+      // editing; anything else commits the typed text first, then runs.
+      switch (shortcutDuringTextEdit(cmd.id)) {
+        case 'text':
+          void runCommand(cmd.id);
+          break;
+        case 'view':
+          void Promise.resolve(runCommand(cmd.id)).finally(() => {
+            if (ses === s) focusTextarea();
+          });
+          break;
+        case 'undo':
+          s.ta.focus({ preventScroll: true });
+          document.execCommand('undo');
+          break;
+        case 'deselect': {
+          const f = focusEnd(s.ta);
+          setSelection(f, f);
+          break;
+        }
+        default:
+          commitEditing();
+          void runCommand(cmd.id);
       }
       return;
     }

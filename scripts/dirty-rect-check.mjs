@@ -781,6 +781,12 @@ async function benchPart(opts) {
   } catch {
     C = null;
   }
+  let CACHE = null;
+  try {
+    CACHE = await import('/src/render/cache.ts');
+  } catch {
+    CACHE = null;
+  }
   const info = () => (C && C.renderCacheInfo ? C.renderCacheInfo() : {});
   const longTasks = [];
   try {
@@ -809,11 +815,49 @@ async function benchPart(opts) {
     D.insertLayerDraft(doc, l, { parentId: null });
     return st().openDocument(doc, { label: 'Bench' });
   }
+  /**
+   * Render-cache working set larger than the slot budget (release review render-paint-diff-3): N
+   * document-sized layers (Layer ▸ New ▸ Layer, a painted blob, Drop Shadow + Stroke — ≈ 6M px of
+   * renders each at 1080p, ≈ 4× at 4K) under an empty paint layer. Past the old fixed 64M px budget
+   * every brush frame re-rendered every layer (≈ 1.1 s per frame at 1080p with 8 such layers).
+   */
+  function openFx(w, h, n) {
+    const doc = D.createDocument({ name: `Bench ${w}×${h} ×${n} fx`, width: w, height: h, background: '#ffffff' });
+    for (let i = 0; i < n; i++) {
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      const g = c.getContext('2d');
+      g.fillStyle = `hsl(${i * 40},70%,50%)`;
+      g.beginPath();
+      g.ellipse(w * (n > 1 ? 0.1 + (0.8 * i) / (n - 1) : 0.5), h * (0.35 + 0.3 * (i % 2)), w * 0.06, h * 0.18, 0, 0, 7);
+      g.fill();
+      const l = D.makeRasterLayer({ name: `FX ${i + 1}`, bitmapId: bitmaps.add(c), width: w, height: h });
+      l.effects = [
+        { id: `ds${i}`, effectId: 'drop-shadow', enabled: true, params: { distance: 12, size: 10 } },
+        { id: `st${i}`, effectId: 'stroke', enabled: true, params: { size: 5, position: 'outside', color: '#ffffff' } },
+      ];
+      D.insertLayerDraft(doc, l, { parentId: null });
+    }
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const l = D.makeRasterLayer({ name: 'Paint', bitmapId: bitmaps.add(c), width: w, height: h });
+    D.insertLayerDraft(doc, l, { parentId: null });
+    return st().openDocument(doc, { label: 'Bench' });
+  }
   let demoId = null;
+  // `guard`: perf regression limits (the run fails past them): mean ms per pointermove on the
+  // software / GPU canvas, and layers re-rendered from scratch during the stroke (the painted layer
+  // is updated in place; nothing else may re-render).
   const cases = [
     { name: 'demo: Red Glow (raster under adjustments)', open: () => demoId ?? (demoId = app.openDemoDocument()), layer: 'Red Glow' },
     { name: 'demo: Roblox Character (effects, in group)', open: () => demoId ?? (demoId = app.openDemoDocument()), layer: 'Roblox Character' },
     { name: '1080p: one raster layer', open: open1080, layer: 'Paint' },
+    { name: '1080p: 8 full-canvas layers with Drop Shadow + Stroke', open: () => openFx(1920, 1080, 8), layer: 'Paint', guard: { sw: 30, gpu: 120, renders: 0 } },
+    { name: '4K: 2 full-canvas layers with Drop Shadow + Stroke', open: () => openFx(3840, 2160, 2), layer: 'Paint', guard: { sw: 30, gpu: 120, renders: 0 } },
+    // ≈ 100M px of renders: well past the soft budget (the working set must stay cached).
+    { name: '1080p: 16 full-canvas layers with Drop Shadow + Stroke', open: () => openFx(1920, 1080, 16), layer: 'Paint', guard: { sw: 30, gpu: 120, renders: 0 } },
   ];
   const results = [];
   for (const cs of cases) {
@@ -862,6 +906,15 @@ async function benchPart(opts) {
     let settleCall = 0;
     const unSettle = C && C.onRenderSettle ? C.onRenderSettle(() => (tSettle = performance.now())) : null;
     const i0 = info();
+    // Layer renders stored during the stroke for layers OTHER than the painted one: they never
+    // change, so any is a re-render after an eviction (cache thrash).
+    let others = 0;
+    const slotSet = CACHE?.slots?.set;
+    if (slotSet)
+      CACHE.slots.set = function (key, ...rest) {
+        if (typeof key === 'string' && key.startsWith('L|') && !key.startsWith(`L|${layer.id}|`)) others++;
+        return slotSet.call(this, key, ...rest);
+      };
     const per = [];
     let x = b.x,
       y = b.y,
@@ -883,6 +936,7 @@ async function benchPart(opts) {
         await nextFrame();
         per.push(handler + work);
       }
+      const othersStroke = slotSet ? others : null;
       longTasks.length = 0;
       const tUp = performance.now();
       fire('pointerup', x, y, 0);
@@ -893,6 +947,9 @@ async function benchPart(opts) {
       const i1 = info();
       results.push({
         name: cs.name,
+        guard: cs.guard ?? null,
+        layerRenders: othersStroke,
+        slotMpx: i1.slotPixels !== undefined ? +(i1.slotPixels / 1e6).toFixed(1) : null,
         frames: per.length,
         work: stats(per.slice(5)),
         afterTask: after.length ? +Math.max(...after.map((e) => e.d)).toFixed(0) : 0,
@@ -904,8 +961,12 @@ async function benchPart(opts) {
     } finally {
       window.requestAnimationFrame = origRaf;
       unSettle?.();
+      if (slotSet) CACHE.slots.set = slotSet;
     }
     st().undo();
+    await sleep(300);
+    // Bench documents of their own are closed again (their renders leave the cache).
+    if (docId !== demoId && st().closeDocument) st().closeDocument(docId);
     await sleep(300);
   }
   return results;
@@ -937,18 +998,32 @@ try {
   console.log(`dirty-rect check — ${gpu ? 'GPU (accelerated canvas)' : 'software canvas'}`);
   if (args.bench === 'true') {
     const res = await page.evaluate(benchPart, { benchFrames: Number(args['bench-frames'] ?? 90) });
-    console.log('\nbrush 200 px, fit zoom: main-thread ms per pointermove (handler + frame)   mean   p50    p90    max    settle frame  longest task*  region updates');
-    for (const r of res)
+    console.log('\nbrush 200 px, fit zoom: main-thread ms per pointermove (handler + frame)   mean   p50    p90    max    settle frame  longest task*  region updates  other renders† cache Mpx');
+    let benchFailed = false;
+    for (const r of res) {
+      // Perf regression guard (render-cache working set over budget, see openFx).
+      let verdict = '';
+      if (r.guard) {
+        const limit = gpu ? r.guard.gpu : r.guard.sw;
+        const bad = [];
+        if (r.work.mean > limit) bad.push(`mean ${r.work.mean} ms > ${limit} ms`);
+        if (r.layerRenders !== null && r.layerRenders > r.guard.renders) bad.push(`${r.layerRenders} re-renders of other layers during the stroke`);
+        verdict = bad.length ? `  ✗ ${bad.join(', ')}` : '  ok';
+        if (bad.length) benchFailed = true;
+      }
       console.log(
-        `  ${r.name.padEnd(68)}${String(r.work.mean).padEnd(7)}${String(r.work.p50).padEnd(7)}${String(r.work.p90).padEnd(7)}${String(r.work.max).padEnd(7)}${(r.settleFrame !== null && r.settleFrame !== undefined ? `${r.settleFrame} ms` : '-').padEnd(14)}${(r.afterTask ? `${r.afterTask} ms` : '-').padEnd(15)}${r.regionUpdates ?? '-'}`,
+        `  ${r.name.padEnd(68)}${String(r.work.mean).padEnd(7)}${String(r.work.p50).padEnd(7)}${String(r.work.p90).padEnd(7)}${String(r.work.max).padEnd(7)}${(r.settleFrame !== null && r.settleFrame !== undefined ? `${r.settleFrame} ms` : '-').padEnd(14)}${(r.afterTask ? `${r.afterTask} ms` : '-').padEnd(15)}${String(r.regionUpdates ?? '-').padEnd(16)}${String(r.layerRenders ?? '-').padEnd(15)}${r.slotMpx ?? '-'}${verdict}`,
       );
+    }
     console.log('  settle frame: the frame re-rendering approximate GPU work exactly after the stroke (- = nothing to settle)');
     console.log('  * longest main-thread task within 1.5 s after the stroke (any work: history, thumbnails, settle…)');
+    console.log('  † renders of layers other than the painted one stored during the stroke (re-renders after cache evictions)');
     if (res[0]?.cropExact !== undefined) console.log(`  (canvas backend crop-exact: ${res[0].cropExact})`);
     await browser.close();
     const realB = errors.filter((e) => !/Failed to load resource/.test(e));
     if (realB.length) console.log('\nPAGE ERRORS:\n' + realB.slice(0, 20).join('\n'));
-    process.exit(realB.length ? 1 : 0);
+    console.log(benchFailed || realB.length ? '\nBENCH FAILED' : '\nBENCH OK');
+    process.exit(realB.length || benchFailed ? 1 : 0);
   }
   const part1 = args['e2e-only'] === 'true' ? { rows: [], cropExact: null } : await page.evaluate(rendererPart, opts);
   const rows = part1.rows;

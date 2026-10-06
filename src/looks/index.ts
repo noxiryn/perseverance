@@ -4,7 +4,7 @@ import { commands, looks, panels } from '../registry';
 import { activeDoc } from '../state/editor';
 import { useUI } from '../state/ui';
 import { BUILTIN_LOOKS } from './defs';
-import { hasLook, lookTargets, removeLook } from './engine';
+import { canRemoveLook, removeLook } from './engine';
 import { LooksPanel } from './LooksPanel';
 import { currentTargetId, useLooksUI } from './store';
 import { loadUserLooks, saveCurrentLook } from './userLooks';
@@ -17,12 +17,6 @@ looks.registerMany(BUILTIN_LOOKS);
 // The user's saved looks (My Looks).
 loadUserLooks();
 
-/** The effective target of the Looks panel right now (same resolution the panel uses). */
-function resolvedTargetId() {
-  const doc = activeDoc();
-  return doc ? lookTargets(doc, currentTargetId()).targetId : null;
-}
-
 panels.register({
   id: 'looks',
   title: 'Looks',
@@ -34,10 +28,10 @@ panels.register({
     const st = useLooksUI.getState();
     const doc = activeDoc();
     return [
-      { label: 'Apply to Active Layer', checked: st.target === 'layer', run: () => st.setTarget('layer') },
       { label: 'Apply to Whole Document', checked: st.target === 'doc', run: () => st.setTarget('doc') },
+      { label: 'Apply to Active Layer Only', checked: st.target === 'layer', run: () => st.setTarget('layer') },
       { label: 'Live Previews', checked: st.previews, run: () => st.setPreviews(!st.previews) },
-      { label: 'Remove Look', disabled: !doc || !hasLook(doc, resolvedTargetId()), run: () => removeLook(resolvedTargetId()) },
+      { label: 'Remove Look', disabled: !canRemoveLook(doc, currentTargetId()), run: () => removeLook(currentTargetId()) },
       { label: 'Save as Look…', disabled: !doc, run: () => void saveCurrentLook(currentTargetId()) },
     ];
   },
@@ -49,7 +43,7 @@ commands.register({
   icon: Eraser,
   keywords: ['look', 'style', 'preset', 'clear'],
   enabled: () => !!activeDoc(),
-  run: () => removeLook(resolvedTargetId()),
+  run: () => removeLook(currentTargetId()),
 });
 
 commands.register({

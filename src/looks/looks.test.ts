@@ -296,7 +296,7 @@ describe('group targets', () => {
     const { doc } = makeDoc();
     const b = buildLook(LOOK, doc, null, fakeOverlay);
     expect(b.targetSkipped).toEqual(['Rim', 'Shadow']);
-    expect(describeTargetSkips(b, null)).toMatch(/Rim and Shadow need a layer: choose/);
+    expect(describeTargetSkips(b, null)).toMatch(/Rim and Shadow need a character: add yours with Roblox/);
     const none = buildLook({ ...LOOK, layerFilters: [], layerEffects: [] }, doc, null, fakeOverlay);
     expect(describeTargetSkips(none, null)).toBe('');
   });

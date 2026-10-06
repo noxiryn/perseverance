@@ -132,6 +132,10 @@
     "name": "noxiryn"
   },
   "homepage": "https://github.com/noxiryn/perseverance",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/noxiryn/perseverance.git"
+  },
   "main": "electron/main.cjs",
   "build": {
     "appId": "com.noxiryn.perseverance",
@@ -216,6 +220,7 @@
       "category": "Graphics",
       "icon": "build/icon.png",
       "artifactName": "Perseverance-${version}.${ext}"
-    }
+    },
+    "publish": null
   }
 }

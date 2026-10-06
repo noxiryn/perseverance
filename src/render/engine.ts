@@ -56,6 +56,7 @@ import {
   maxSides,
   release,
   sameRect,
+  uniformSides,
   unionRect,
   type PxRect,
   type Sides,
@@ -847,7 +848,7 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
         approxUses++;
         markApprox(rc, l.id, moved.region);
       }
-      slots.set(key, sig, moved, 0, { layerId: l.id, max: 2, res: renderResources(moved) });
+      slots.set(key, sig, moved, 0, { layerId: l.id, scale: scaleKey(rc.s), max: 2, res: renderResources(moved) });
       return moved;
     }
   }
@@ -872,7 +873,7 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
     const grow = addSides(flags.effects ? effectsSidesOf(l, rc.s) : NO_SIDES, flags.filters ? filterPad(l.filters, rc.s) : 0);
     const b = boundsOfMatrixRect(geom.m, geom.local);
     const full = expandSides(coverRect(b.x, b.y, b.w, b.h), grow);
-    const clip = flipSides(grow);
+    const clip = docClipSides(l, flags, rc.s, grow);
     const expected = intersectRect(full, expandSides({ x: 0, y: 0, w: rc.W, h: rc.H }, clip));
     if (expected && sameRect(expected, r.region)) r.move = { sig: tfull, base: r, e: geom.m.e, f: geom.m.f, full, clip };
   }
@@ -880,7 +881,7 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
     r.ssig = structSig(rc, l);
     r.deps = depList(rc, l);
   }
-  slots.set(key, sig, r, 0, { layerId: l.id, max: 2, res: renderResources(r) });
+  slots.set(key, sig, r, 0, { layerId: l.id, scale: scaleKey(rc.s), max: 2, res: renderResources(r) });
   return r;
 }
 
@@ -1404,7 +1405,7 @@ function regionReuse(rc: RC, l: Layer, flags: RenderFlags, key: string, sig: str
   p.deps = depList(rc, l);
   p.move = undefined;
   // max 1: the other cached version of this layer may share the canvases just modified.
-  slots.set(key, sig, p, 0, { layerId: l.id, max: 1, res: renderResources(p) });
+  slots.set(key, sig, p, 0, { layerId: l.id, scale: scaleKey(rc.s), max: 1, res: renderResources(p) });
   return p;
 }
 
@@ -1429,6 +1430,8 @@ function groupExtent(rc: RC, g: GroupLayer): PxRect | null {
 
 interface Reuse {
   C: HTMLCanvasElement | null;
+  /** A previous render with the same content signature exists (effects / opacity / blending are being edited). */
+  hit: boolean;
   fields: FieldEntry[];
   fx: FxEntry[];
   /** Opaque content bounds known from the previous render (undefined = unknown). */
@@ -1445,17 +1448,17 @@ function reuseContent(prevs: (LayerRender | null)[], csig: string, region: PxRec
     const fx = p.fx ?? [];
     const tight = p.tight;
     const approx = p.approx;
-    if (!p.shape) return { C: null, fields, fx, tight, approx };
+    if (!p.shape) return { C: null, hit: true, fields, fx, tight, approx };
     // Every content pixel the new canvas (and its smart filters' footprint) needs must be in
     // the previous canvas (known opaque bounds lie inside it by construction).
     const need = tight !== undefined ? null : intersectRect(extent, expandRect(region, fpad));
-    if (need && !containsRect(p.region, need)) return { C: null, fields, fx, tight, approx };
-    if (sameRect(p.region, region) && !borrowed.has(p.shape)) return { C: p.shape, fields, fx, tight, approx };
+    if (need && !containsRect(p.region, need)) return { C: null, hit: true, fields, fx, tight, approx };
+    if (sameRect(p.region, region) && !borrowed.has(p.shape)) return { C: p.shape, hit: true, fields, fx, tight, approx };
     const C = fresh(region.w, region.h);
     ctx2d(C).drawImage(p.shape, p.region.x - region.x, p.region.y - region.y);
-    return { C, fields, fx, tight, approx };
+    return { C, hit: true, fields, fx, tight, approx };
   }
-  return { C: null, fields: [], fx: [], tight: undefined };
+  return { C: null, hit: false, fields: [], fx: [], tight: undefined };
 }
 
 /** Cache key of an effect instance's output (content identity is checked separately). */
@@ -1669,10 +1672,33 @@ function drawContent(rc: RC, l: Layer, C: HTMLCanvasElement, region: PxRect, geo
     }
     case 'group': {
       const acc: Acc = { canvas: C, ctx: cctx, x: region.x, y: region.y, w: region.w, h: region.h, bounds: null, root: false, clip };
-      compositeList(rc, l.childIds, acc);
+      // The group's own render stops at the `below` layer, but that must not leak into the
+      // caller: renderLayer() runs from planning (itemRegion), changeOf, groupExtent… on the same
+      // RC, and a leaked stop would make the caller's composite skip everything (a hole showing
+      // just the background). The caller's compositeList stops after a group holding `below`.
+      const stopped = rc.stopped;
+      rc.stopped = false;
+      try {
+        compositeList(rc, l.childIds, acc);
+      } finally {
+        rc.stopped = stopped;
+      }
       break;
     }
   }
+}
+
+/**
+ * How far beyond the document (output px, per side) a layer's padded region keeps its content:
+ * content farther out than an effect can pull it in (`grow` flipped: a shadow cast to the right
+ * needs the content beyond the left edge) or than effects can see it from inside the document
+ * (their influence: inside strokes, inner bevels and satin declare no reach, but their distance
+ * fields / blurs must not see the canvas border as a content edge) is never visible. Translation
+ * reuse clips the same way (MoveInfo.clip).
+ */
+function docClipSides(l: Layer, flags: RenderFlags, s: number, grow: Sides): Sides {
+  const infl = flags.effects ? Math.ceil(effectsInfluenceOf(l, s)) : 0;
+  return infl > 0 ? maxSides(flipSides(grow), uniformSides(infl)) : flipSides(grow);
 }
 
 function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRender | null)[]): LayerRender | null {
@@ -1718,10 +1744,11 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
   const grow = addSides(sides, fpad);
   const cover = coverRect(box.x, box.y, box.w, box.h);
   const extent = expandRect(cover, fpad);
-  const region = intersectRect(expandSides(cover, grow), expandSides(docR, flipSides(grow)));
+  const clip = docClipSides(l, flags, s, grow);
+  const region = intersectRect(expandSides(cover, grow), expandSides(docR, clip));
   if (!region) return null;
   if (region.w > MAX_SIDE || region.h > MAX_SIDE) {
-    const clipped = intersectRect(region, expandRect(docR, Math.min(maxSide(grow), 64)));
+    const clipped = intersectRect(region, expandRect(docR, Math.min(maxSide(clip), 64)));
     if (!clipped) return null;
     region.x = clipped.x;
     region.y = clipped.y;
@@ -1770,7 +1797,15 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
   }
 
   const fxr = runEffects(rc, fx, C, region, extent, layoutBox, fill, l.opacity, reuse);
-  return { region, core: fxr.core, shape: C, behind: fxr.behind, bounds: layoutBox, csig, extent, fields: fxr.fields, fx: fxr.fx, tight: fxr.tight, approx: reuse.approx || undefined };
+  // Distance fields (a Float32 per pixel, as large as the content canvas) and the kept outputs of
+  // above-stage effects (extra canvases; behind pieces are the render's own) only pay off while
+  // the layer's effects are being edited (a stroke size drag re-maps the fields instead of
+  // recomputing the transform, other effects are not re-run): kept by renders made from a previous
+  // render of the same content, dropped from fresh renders — a layer that just sits in the
+  // document holds a quarter to a half less memory.
+  const keep = reuse.hit;
+  const fxKept = keep ? fxr.fx : fxr.fx?.filter((f) => f.pieces.every((pc) => fxr.behind.some((b) => b.canvas === pc.canvas)));
+  return { region, core: fxr.core, shape: C, behind: fxr.behind, bounds: layoutBox, csig, extent, fields: keep ? fxr.fields : undefined, fx: fxKept?.length ? fxKept : undefined, tight: fxr.tight, approx: reuse.approx || undefined };
 }
 
 /* ================================================================== */
@@ -1922,13 +1957,13 @@ function clipBaseFor(rc: RC, base: Layer, R: LayerRender): ClipBase {
     if (computeClipBase(hit, st, false)) return hit;
     // The core now reaches beyond the shape: recompute everything with coverage canvases.
     computeClipBase(hit, whole, true);
-    slots.set(key, sig, hit, 0, { layerId: base.id, max: 2, res: [hit.norm, hit.cover, hit.share] });
+    slots.set(key, sig, hit, 0, { layerId: base.id, scale: scaleKey(rc.s), max: 2, res: [hit.norm, hit.cover, hit.share] });
     return hit;
   }
   const cb: ClipBase = { shape, core: R.core, w: shape.width, h: shape.height, norm: null, cover: null, share: null, stale: null };
   if (base.type === 'raster' && borrowed.has(shape) && bitmaps.tryGet(base.bitmapId) === shape) cb.bitmap = { id: base.bitmapId, v: bitmaps.version(base.bitmapId) };
   computeClipBase(cb, whole, true);
-  slots.set(key, sig, cb, 0, { layerId: base.id, max: 2, res: [cb.norm, cb.cover, cb.share] });
+  slots.set(key, sig, cb, 0, { layerId: base.id, scale: scaleKey(rc.s), max: 2, res: [cb.norm, cb.cover, cb.share] });
   return cb;
 }
 
@@ -2325,7 +2360,7 @@ function storeSnapshot(rc: RC, acc: Acc, adj: Layer, kind: 'pre' | 'post', sig: 
   if (slots.get<Snapshot>(key, sig)) return;
   const copy = fresh(acc.w, acc.h);
   ctx2d(copy).drawImage(acc.canvas, 0, 0);
-  slots.set(key, sig, { canvas: copy, bounds: acc.bounds } satisfies Snapshot, 0, { composite: true, max: 1, layerId: docTag(rc.doc.id), res: [copy] });
+  slots.set(key, sig, { canvas: copy, bounds: acc.bounds } satisfies Snapshot, 0, { composite: true, max: 1, layerId: docTag(rc.doc.id), scale: scaleKey(rc.s), res: [copy] });
 }
 
 /** Resume from the highest cached adjustment snapshot. Returns the index to continue from. */
@@ -2489,8 +2524,27 @@ function hasAdjustmentInline(rc: RC, g: GroupLayer): boolean {
 }
 
 /**
+ * Whether shown layers are clipped to ids[i] — compositeList then composites it as the isolated
+ * base of a clip stack instead of inlining it (it gathers the shown clipped layers above it, up
+ * to the `below` stop).
+ */
+function hasShownClipped(rc: RC, ids: ID[], i: number): boolean {
+  for (let j = i + 1; j < ids.length; j++) {
+    if (ids[j] === rc.below) return false;
+    const c = rc.doc.layers[ids[j]];
+    if (!c || !c.clipped) return false;
+    if (isShown(rc, c)) return true;
+  }
+  return false;
+}
+
+/**
  * Flattened composite items: pass-through groups (opacity 100%, no mask) composite exactly like
- * their children inlined, so they are expanded and changes are tracked per leaf.
+ * their children inlined, so they are expanded and changes are tracked per leaf — unless they
+ * take part in a clip stack (clipped themselves, or the base of shown clipped layers): then
+ * compositeList renders them isolated, and they are one item. The decision is exactly
+ * compositeList's, so any flip of it (Create / Release Clipping Mask, showing or hiding the only
+ * clipped layer) changes the item list and forces a full composite.
  */
 function docItems(rc: RC, ids: ID[], st: { stopped: boolean }, out: RawItem[], root = -1) {
   for (let i = 0; i < ids.length; i++) {
@@ -2504,7 +2558,7 @@ function docItems(rc: RC, ids: ID[], st: { stopped: boolean }, out: RawItem[], r
     }
     const l = rc.doc.layers[id];
     if (!l) continue;
-    if (l.type === 'group' && isShown(rc, l) && inlinePassThrough(l)) {
+    if (l.type === 'group' && isShown(rc, l) && inlinePassThrough(l) && !l.clipped && !hasShownClipped(rc, ids, i)) {
       out.push({ id, sig: `G${objId(l)}`, layer: null, root: r });
       docItems(rc, l.childIds, st, out, r);
       out.push({ id, sig: 'g', layer: null, root: r });
@@ -2655,7 +2709,7 @@ function belowCache(st: DocState, index: number, prefix: string[]): BelowCache |
   const tilesX = Math.ceil(st.rc.W / BELOW_TILE);
   const tilesY = Math.ceil(st.rc.H / BELOW_TILE);
   const b: BelowCache = { index, canvas: fresh(st.rc.W, st.rc.H), valid: new Uint8Array(tilesX * tilesY), tilesX, tilesY, bounds: null };
-  slots.set(key, sig, b, 0, { composite: true, max: 1, layerId: docTag(st.doc.id), res: [b.canvas] });
+  slots.set(key, sig, b, 0, { composite: true, max: 1, layerId: docTag(st.doc.id), scale: scaleKey(st.rc.s), res: [b.canvas] });
   return b;
 }
 
@@ -2751,7 +2805,7 @@ function recomposite(st: DocState, plan: DocPlan, canvas: HTMLCanvasElement) {
 }
 
 function storeDoc(st: DocState, canvas: HTMLCanvasElement, items: DocItem[]) {
-  slots.set(st.key, st.sig, { canvas, items } satisfies DocEntry, 0, { composite: true, max: 1, layerId: docTag(st.doc.id), res: [canvas] });
+  slots.set(st.key, st.sig, { canvas, items } satisfies DocEntry, 0, { composite: true, max: 1, layerId: docTag(st.doc.id), scale: scaleKey(st.rc.s), res: [canvas] });
 }
 
 /** Composite the document (cached; the returned canvas must be treated as read-only). */
@@ -2823,6 +2877,10 @@ interface LiveState {
   docId: ID;
   /** Render scale key (see scaleKey). */
   sk: string;
+  /** Layer ids of the document + its composite tag: the slots this live composite needs (keepAlive). */
+  ids: Set<ID>;
+  /** Last update (ms): displayed documents keep their renders cached while over budget. */
+  t: number;
   /** Area (output px) holding approximate pixels to re-composite exactly (see settleApproximations). */
   pending: PxRect | null;
   canvas: HTMLCanvasElement;
@@ -2850,6 +2908,43 @@ function touchLive(key: string, cur: LiveState) {
 }
 
 /**
+ * How long (ms) after its last live update a document still counts as displayed: its renders at
+ * the live scale stay cached while the cache is over budget (an idle editor resumes without
+ * re-rendering everything; a document switched away from lets its renders go after a while).
+ */
+const LIVE_KEEP_MS = 60_000;
+
+const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+/** Ids a live composite of `doc` keeps alive (every layer + the document's composites), per layers object. */
+const liveIdsMemo = new WeakMap<Document['layers'], Set<ID>>();
+function liveIds(doc: Document): Set<ID> {
+  let ids = liveIdsMemo.get(doc.layers);
+  if (!ids) {
+    ids = new Set(Object.keys(doc.layers));
+    liveIdsMemo.set(doc.layers, ids);
+  }
+  const tag = docTag(doc.id);
+  if (!ids.has(tag)) ids.add(tag);
+  return ids;
+}
+
+/*
+ * The renders displayed documents depend on stay cached while the cache is over its budget (see
+ * SlotCache): while painting, the layers below the painted one are only touched when the stroke
+ * reaches tiles of the below cache not filled yet, and between strokes nothing is touched at all —
+ * plain LRU would evict them first and every new tile (or the next structural edit) would
+ * re-render them. Bounded by the cache's hard cap.
+ */
+slots.setKeepAlive((layerId, scale) => {
+  const t = now();
+  for (const live of liveStates.values()) {
+    if (live.sk === scale && t - live.t < LIVE_KEEP_MS && live.ids.has(layerId)) return true;
+  }
+  return false;
+});
+
+/**
  * Composite the document into a canvas owned by the renderer that is updated IN PLACE: when only
  * part of the document changed (a brush frame), only that area is re-composited and reported as
  * `dirty`, so the caller (the viewport) can redraw just that part. The canvas keeps its identity
@@ -2864,6 +2959,10 @@ export function compositeDocumentLive(doc: Document, o: DocRenderOptions, since?
     const dirty = since === undefined ? own : changesSince(c.log, c.seq, since);
     return { canvas: c.canvas, dirty, changed: !dirty || (dirty.w > 0 && dirty.h > 0), seq: c.seq };
   };
+  if (cur) {
+    cur.ids = liveIds(doc);
+    cur.t = now();
+  }
   const pending = cur?.pending ? intersectRect(cur.pending, st.docR) : null;
   if (cur && cur.sig === st.sig && !pending) {
     if (cur.pending) cur.pending = null;
@@ -2907,7 +3006,7 @@ export function compositeDocumentLive(doc: Document, o: DocRenderOptions, since?
   k.restore();
   const known = entry && entry.sig === st.sig;
   const seq = ++liveSeq;
-  const next: LiveState = { docId: doc.id, sk: scaleKey(st.rc.s), pending: null, canvas, sig: known ? st.sig : '', items: known ? entry.value.items : [], seq, log: [{ seq, rect: null }] };
+  const next: LiveState = { docId: doc.id, sk: scaleKey(st.rc.s), ids: liveIds(doc), t: now(), pending: null, canvas, sig: known ? st.sig : '', items: known ? entry.value.items : [], seq, log: [{ seq, rect: null }] };
   touchLive(st.key, next);
   return result(next, null);
 }

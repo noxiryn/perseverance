@@ -5,6 +5,7 @@
  */
 import { useEffect } from 'react';
 import { FileUp } from 'lucide-react';
+import { desktop } from '../../platform';
 import { useEditor } from '../../state/editor';
 import { toast } from '../../state/ui';
 import { dropMode, isSupportedDrop } from './docInfo';
@@ -13,6 +14,17 @@ import { useShell } from './shellStore';
 import { claimFileDrop, fileDropHints } from './dropHooks';
 
 const ASSET_MIME = 'application/x-perseverance-asset';
+
+/** The dropped file's path, granted to the app like a file opened from the OS (desktop only), or null. */
+async function droppedFilePath(file: File, data: ArrayBuffer): Promise<string | null> {
+  if (!desktop?.grantDroppedFile) return null;
+  try {
+    return await desktop.grantDroppedFile(file, data);
+  } catch (e) {
+    console.warn('[shell] no path for the dropped file', e);
+    return null;
+  }
+}
 
 function isFileDrag(e: DragEvent): boolean {
   const types = e.dataTransfer?.types;
@@ -72,7 +84,12 @@ export function useFileDrop() {
           const data = await f.arrayBuffer();
           // Feature hooks (e.g. Replace Character on a selected placeholder) may claim the file.
           if (await claimFileDrop({ file: f, data, count: files.length, hasDoc, shift, clientX: e.clientX, clientY: e.clientY })) continue;
-          await openFileWithIo({ path: null, name: f.name, data }, { asNewDocument: dropMode(f.name, hasDoc, shift) === 'new' });
+          const asNewDocument = dropMode(f.name, hasDoc, shift) === 'new';
+          // Desktop: a file dragged from Explorer/Finder opens exactly like File ▸ Open — with its path, so
+          // an open project switches to its tab, Save writes back to it and it joins Open Recent.
+          // (Images placed as layers need no path.)
+          const path = asNewDocument ? await droppedFilePath(f, data) : null;
+          await openFileWithIo({ path, name: f.name, data }, { asNewDocument });
         } catch (err) {
           console.error(err);
           toast(`Could not read “${f.name}”`, 'error');

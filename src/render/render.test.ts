@@ -357,7 +357,8 @@ describe('shape geometry', () => {
 
 describe('caches & masks & rects', () => {
   it('slot cache keeps a few versions per key and evicts by budget', () => {
-    const c = new SlotCache(100, 2);
+    // No recency window: only the budget decides (the soft budget is tested in renderCache.test.ts).
+    const c = new SlotCache(100, 2, { recentMs: 0 });
     c.set('a', '1', 'A1', 10);
     c.set('a', '2', 'A2', 10);
     c.set('a', '3', 'A3', 10);

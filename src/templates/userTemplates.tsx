@@ -181,7 +181,9 @@ export async function saveAsTemplate() {
   const id = `${USER_TEMPLATE_PREFIX}${uid('t_')}`;
   try {
     const tdoc = templateDocument(doc, id, res.options.placeholder ? charId : null);
-    const data = await encodeProject(tdoc, { background: true });
+    // Every user font the text uses goes into the template: it outlives this session, and a font later
+    // removed from My Fonts (or one that came embedded in a friend's project) would otherwise be gone.
+    const data = await encodeProject(tdoc, { background: true, fonts: 'all' });
     await idb('readwrite', (st) => st.put(data, id));
     const meta: UserTemplateMeta = { id, name: res.name, width: doc.width, height: doc.height, created: Date.now(), swatch: doc.background ? [doc.background, '#1e1e1e'] : undefined };
     writeMetas([...readMetas(), meta]);

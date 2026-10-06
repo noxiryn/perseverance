@@ -1,6 +1,7 @@
-import { createContext, useContext, useEffect, useId, useRef, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { closeDialog, useUI } from '../../state/ui';
+import { isTopEscapeLayer, pushEscapeLayer, type EscapeLayer } from './escapeLayers';
 
 /** Entry id of the dialog being rendered (provided by DialogHost). */
 const DialogIdContext = createContext<string | null>(null);
@@ -77,8 +78,8 @@ function initialFocusTarget(root: HTMLElement): HTMLElement {
   );
 }
 
-/** Popovers / menus opened from inside a dialog live in portals outside it: leave Tab to them. */
-const inFloatingUi = (el: Element | null) => !!el?.closest('.ui-popover, .ui-menu, [data-shell-menu]');
+/** Popovers / menus opened from inside a dialog live in portals outside it: leave Tab / Enter to them. */
+const inFloatingUi = (el: Element | null) => !!el?.closest?.('.ui-popover, .ui-menu, [data-shell-menu]');
 
 /**
  * Standard dialog frame. Use inside a component opened with `openDialog(Component, props)`:
@@ -87,7 +88,9 @@ const inFloatingUi = (el: Element | null) => !!el?.closest('.ui-popover, .ui-men
  *     return <Dialog title="Hello" onClose={() => close()} footer={<Button onClick={() => close('ok')}>OK</Button>}>…</Dialog>;
  *   }
  *
- * Keyboard: Escape → onClose, Enter → onSubmit (not from textareas). Only the topmost dialog reacts.
+ * Keyboard: Escape → onClose, Enter → onSubmit (not from textareas). Only the topmost dialog reacts,
+ * and Escape only when no popover / menu was opened on top of it (the first Escape closes that, a
+ * second one the dialog: escapeLayers.ts); Enter in a popover's field belongs to the popover.
  * Enter first blurs a focused text field so its typed value is committed before onSubmit runs.
  * A click on the backdrop calls onClose too (unless the dialog was opened with closeOnBackdrop:false).
  *
@@ -150,6 +153,14 @@ export function Dialog({
     };
   }, [entryId, onClose]);
 
+  // Escape layer (see escapeLayers.ts): popovers / menus opened later sit above it.
+  const layerRef = useRef<EscapeLayer | null>(null);
+  useLayoutEffect(() => {
+    const layer: EscapeLayer = { kind: 'dialog', close: () => {}, contains: (node) => !!ref.current?.contains(node) };
+    layerRef.current = layer;
+    return pushEscapeLayer(layer);
+  }, []);
+
   useEffect(() => {
     const isTopmost = () => {
       const all = document.querySelectorAll('.ui-dialog');
@@ -182,9 +193,16 @@ export function Dialog({
         return;
       }
       if (e.key === 'Escape') {
+        // A popover / menu above the dialog closes first (it handles the key itself).
+        if (layerRef.current && !isTopEscapeLayer(layerRef.current)) return;
         e.stopPropagation();
         onClose();
-      } else if (e.key === 'Enter' && onSubmit && !enterBelongsToTarget(e.target as HTMLElement | null)) {
+      } else if (
+        e.key === 'Enter' &&
+        onSubmit &&
+        !enterBelongsToTarget(e.target as HTMLElement | null) &&
+        !inFloatingUi(e.target as Element | null)
+      ) {
         e.stopPropagation();
         e.preventDefault();
         // Let a focused NumberField/TextInput commit its typed text first (it commits on blur),

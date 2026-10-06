@@ -83,8 +83,13 @@ export function isFamilyAvailable(family: string): boolean {
 
 /* ---------------- save ---------------- */
 
-/** User-added font files used by the document, ready to embed in a project file. */
-export async function embeddableFonts(doc: Document): Promise<ContainerFont[]> {
+/**
+ * User-added font files used by the document, ready to embed in a project file. `sessionOnly`: only
+ * the files this machine has for the current session alone (fonts embedded in an opened project,
+ * fonts added while font storage was unavailable) — the ones a recovery entry must carry, since
+ * they are gone after a restart.
+ */
+export async function embeddableFonts(doc: Document, opts: { sessionOnly?: boolean } = {}): Promise<ContainerFont[]> {
   const families = documentFamilies(doc).filter((f) => {
     const def = fonts.list().find((d) => norm(d.family) === norm(f));
     // Unregistered families may still be embedded-for-the-session files (re-saving a shared
@@ -93,7 +98,7 @@ export async function embeddableFonts(doc: Document): Promise<ContainerFont[]> {
   });
   if (!families.length) return [];
   try {
-    const files = await userFontFiles(families);
+    const files = await userFontFiles(families, { sessionOnly: opts.sessionOnly });
     return files.map((f) => ({ family: f.family, weight: f.weight, style: f.style, fileName: f.fileName, format: f.format, data: f.data }));
   } catch (err) {
     console.warn('[io] could not read user fonts to embed', err);

@@ -314,14 +314,17 @@ Reference images (PNG) are on disk at `docs/reference/` (not committed): `ref1-b
   `userData/file-access.json`, writes only for projects and Save targets, crash-safe temp+rename;
   other paths are refused before they are opened); the page itself may only load file:// URLs inside
   its own `dist/` folder (session webRequest filter — Electron's file:// privileges would otherwise let
-  it fetch any local file), and the CSP allows network access only to `*.roblox.com` / `*.rbxcdn.com` and
+  it fetch any local file; the filter only sees the page's own requests, so `worker-src 'none'`: no
+  workers, whose requests bypass it), and the CSP allows network access only to `*.roblox.com` / `*.rbxcdn.com` and
   scripts only from the bundle (`script-src 'self' 'wasm-unsafe-eval'`: WebAssembly compilation for the blur kernels,
-  never `'unsafe-eval'`).
+  never `'unsafe-eval'`). The page loads from `lib.fileUrlOf(index.html)` (escaped: '%'/'#'/'?' in the install
+  folder), never `loadFile`; VITE_DEV_SERVER_URL is ignored when packaged. The Save dialog gets the page's
+  `defaultPath` only if it is a granted file (else just its file name) and only pgfx/png/jpg/jpeg/webp/psd filters.
   Save As appends the filter's extension; writes keep the replaced file's mode and refuse read-only files;
   Save in place falls back to Save As for read-only/locked files, a missing folder/drive or a full disk;
   a project that is already open (OS hand-over, File ▸ Open, Open Recent — io `focusOpenProject`)
-  switches to its tab; `openExternal` / `window.open` / navigation hand only
-  http(s) to the browser; permissions: local fonts, clipboard, fullscreen. Single instance (argv
+  switches to its tab; `openExternal` / `window.open` hand only https www.roblox.com / roblox.com and the
+  project's GitHub page to the browser (navigations are blocked, never handed on); permissions: local fonts, clipboard, fullscreen. Single instance (argv
   forwarded, files queued until the page has loaded), close guard (the renderer must acknowledge
   `onCloseRequested`, else "Quit Anyway"; closing again while its prompt is open also offers it),
   crash/unresponsive prompts with Reload (a hung renderer is killed first and reloaded once its process

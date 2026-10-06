@@ -94,22 +94,100 @@ describe('effect math with shared fields', () => {
   it('stroke and bevel give identical results from a deeper cached field', () => {
     const w = 60,
       h = 44;
-    const a = matte(w, h, 11);
-    for (const pos of ['outside', 'inside', 'center'] as const) {
-      const direct = strokeCoverage(a, w, h, 5, pos);
-      // a field computed deeper than asked (as the compositor caches them) must not change anything
-      const cached = strokeCoverage(a, w, h, 5, pos, (mode) => edgeDistance(a, w, h, mode, 20));
-      expect(Array.from(cached)).toEqual(Array.from(direct));
+    // Binary and semi-transparent content: a field's values must not depend on its depth (the
+    // compositor reuses deeper cached fields, and computes headroom while a size is dragged up).
+    for (const [name, a] of [
+      ['binary', matte(w, h, 11)],
+      ['70% block', softBlock(w, h, 0.7)],
+      ['85% anti-aliased disc', aaDisc(w, h, 0.85, 0)],
+      ['6 px feathered disc', aaDisc(w, h, 1, 6)],
+      ['soft random', softMatte(w, h, 5)],
+    ] as const) {
+      for (const pos of ['outside', 'inside', 'center'] as const) {
+        for (const size of [2, 5, 14]) {
+          const direct = strokeCoverage(a, w, h, size, pos);
+          // a field computed deeper than asked (as the compositor caches them) must not change anything
+          const cached = strokeCoverage(a, w, h, size, pos, (mode) => edgeDistance(a, w, h, mode, 30));
+          expect(Array.from(cached), `${name} ${pos} ${size}`).toEqual(Array.from(direct));
+        }
+      }
+      for (const style of ['inner', 'emboss'] as const) {
+        const o = { size: 7, depth: 1, angle: 120, altitude: 30, style, soften: 0 };
+        const d1 = bevelMaps(a, w, h, o);
+        const d2 = bevelMaps(a, w, h, o, (mode) => edgeDistance(a, w, h, mode, 25));
+        expect(Array.from(d2.hi), `${name} ${style}`).toEqual(Array.from(d1.hi));
+        expect(Array.from(d2.sh), `${name} ${style}`).toEqual(Array.from(d1.sh));
+      }
     }
-    for (const style of ['inner', 'emboss'] as const) {
-      const o = { size: 7, depth: 1, angle: 120, altitude: 30, style, soften: 0 };
-      const d1 = bevelMaps(a, w, h, o);
-      const d2 = bevelMaps(a, w, h, o, (mode) => edgeDistance(a, w, h, mode, 25));
-      expect(Array.from(d2.hi)).toEqual(Array.from(d1.hi));
-      expect(Array.from(d2.sh)).toEqual(Array.from(d1.sh));
+  });
+
+  it('inside strokes / bevels on semi-transparent content are as wide as asked (not as the field depth)', () => {
+    const w = 120,
+      h = 80;
+    /** Stroke pixels (coverage > 50%) along row 40, from the block's left edge inwards. */
+    const band = (cov: Uint8Array) => {
+      let n = 0;
+      for (let x = 20; x < w && cov[40 * w + x] > 127; x++) n++;
+      return n;
+    };
+    for (const alpha of [1, 0.85, 0.7, 0.55]) {
+      const a = softBlock(w, h, alpha, { x0: 20, y0: 10, x1: 100, y1: 70 });
+      for (const size of [2, 7, 14]) {
+        expect(band(strokeCoverage(a, w, h, size, 'inside')), `alpha ${alpha} size ${size}`).toBe(size);
+        expect(band(strokeCoverage(a, w, h, size, 'inside', (mode) => edgeDistance(a, w, h, mode, 40))), `alpha ${alpha} size ${size} (deep field)`).toBe(size);
+      }
+      // Bevel: shading reaches as deep on 70% content as on opaque content.
+      const shaded = (m: { hi: Uint8Array; sh: Uint8Array }) => {
+        let n = 0;
+        for (let x = 20; x < 60; x++) if (m.hi[40 * w + x] > 0 || m.sh[40 * w + x] > 0) n = x - 20 + 1;
+        return n;
+      };
+      const o = { size: 6, depth: 1, angle: 180, altitude: 30, style: 'inner' as const, soften: 0 };
+      const opaque = shaded(bevelMaps(softBlock(w, h, 1, { x0: 20, y0: 10, x1: 100, y1: 70 }), w, h, o));
+      expect(shaded(bevelMaps(a, w, h, o)), `bevel alpha ${alpha}`).toBe(opaque);
     }
   });
 });
+
+/** Uniformly semi-transparent block (alpha × 255) inside an otherwise empty map. */
+function softBlock(w: number, h: number, alpha: number, r = { x0: 8, y0: 6, x1: w - 12, y1: h - 9 }): Uint8Array {
+  const a = new Uint8Array(w * h);
+  for (let y = r.y0; y < r.y1; y++) for (let x = r.x0; x < r.x1; x++) a[y * w + x] = Math.round(alpha * 255);
+  return a;
+}
+
+/** Anti-aliased disc at `alpha`, optionally feathered over `feather` px. */
+function aaDisc(w: number, h: number, alpha: number, feather: number): Uint8Array {
+  const a = new Uint8Array(w * h);
+  const rad = Math.min(w, h) * 0.35;
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const d = Math.hypot(x + 0.5 - w / 2, y + 0.5 - h / 2) - rad;
+      const c = Math.max(0, Math.min(1, 0.5 - d / Math.max(1, feather)));
+      a[y * w + x] = Math.round(c * alpha * 255);
+    }
+  return a;
+}
+
+/** Random soft matte: overlapping discs of random opacity with soft edges. */
+function softMatte(w: number, h: number, seed: number): Uint8Array {
+  const r = rng(seed);
+  const a = new Float32Array(w * h);
+  for (let k = 0; k < 7; k++) {
+    const cx = r() * w,
+      cy = r() * h,
+      rad = 3 + r() * 10,
+      op = 0.3 + r() * 0.7,
+      soft = 0.5 + r() * 4;
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const c = Math.max(0, Math.min(1, 0.5 - (Math.hypot(x + 0.5 - cx, y + 0.5 - cy) - rad) / soft)) * op;
+        const i = y * w + x;
+        a[i] = a[i] + c * (1 - a[i]);
+      }
+  }
+  return Uint8Array.from(a, (v) => Math.round(v * 255));
+}
 
 describe('effect regions', () => {
   it('pixel work covers the raster extent (overflow beyond the layout box), not the layout box', () => {

@@ -39,6 +39,13 @@ interface DesktopBridge {
   /** Files passed on the command line / double-clicked in Explorer / dropped on the dock icon. */
   onOpenFile(cb: (file: OpenedFile) => void): () => void;
   /**
+   * A file dropped on the window (from Explorer/Finder): its absolute path, granted like a file the OS
+   * handed over (projects may be saved back in place) — or null (dragged from a browser or an archive,
+   * or `data` is not the file's content). The path comes from Electron's own File object, so page
+   * script can't name arbitrary files.
+   */
+  grantDroppedFile?(file: File, data: ArrayBuffer): Promise<string | null>;
+  /**
    * Main process asks before closing; respond with confirmClose(true|false). The preload acknowledges
    * the request at once; if the page is hung (no acknowledgement within a few seconds) the main
    * process offers "Quit Anyway", so a busy or crashed renderer never traps the user.

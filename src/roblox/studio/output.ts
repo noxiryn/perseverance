@@ -11,7 +11,7 @@ import { isPlaceholder, replaceLayerContents } from '../character/replace';
 import type { Document, Layer } from '../../core/types';
 
 /** The active layer when it is a template placeholder (renders replace it), else null. */
-function activePlaceholder(doc: Document): Layer | null {
+export function activePlaceholder(doc: Document): Layer | null {
   const st = useEditor.getState();
   const s = st.activeDocId ? st.sessions[st.activeDocId] : null;
   if (!s || s.doc.id !== doc.id || !s.activeLayerId) return null;
@@ -38,6 +38,11 @@ export interface CommitRenderOptions {
 export function frameSizeFor(output: StudioOutput): { width: number; height: number } {
   const doc = activeDoc();
   return outputFrameSize(output.size, doc?.width ?? null, doc?.height ?? null);
+}
+
+/** Whether a render's visible pixels reach the bottom edge of its frame (the figure is cut there). */
+export function rendersCutOff(opaque: { y: number; height: number }, frameH: number): boolean {
+  return opaque.y + opaque.height >= frameH - 1;
 }
 
 export function commitRender(scene: StudioScene, opts: CommitRenderOptions): boolean {
@@ -93,6 +98,9 @@ export function commitRender(scene: StudioScene, opts: CommitRenderOptions): boo
       generator,
       meta: { roblox: { kind: 'character', source: opts.kind } },
       label: `Replace Character (${what})`,
+      // Head / waist-up framings (or a close camera) cut the figure at the frame's bottom edge:
+      // it then fills the placeholder's on-canvas part with the cut on the canvas edge (fit.ts).
+      cutOff: rendersCutOff(b, frame.height),
     });
   } else {
     const layer = makeRasterLayer({

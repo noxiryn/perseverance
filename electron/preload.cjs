@@ -1,5 +1,5 @@
 /* Perseverance — preload. Exposes a minimal, explicit API to the renderer (contextIsolation on, sandboxed). */
-const { contextBridge, ipcRenderer, webFrame } = require('electron');
+const { contextBridge, ipcRenderer, webFrame, webUtils } = require('electron');
 
 function on(channel, cb) {
   if (typeof cb !== 'function') throw new TypeError('callback must be a function');
@@ -105,6 +105,22 @@ contextBridge.exposeInMainWorld('desktop', {
     webFrame.setZoomFactor(z);
     // The native caption buttons (titleBarOverlay) follow the title bar's zoomed height.
     ipcRenderer.send('desktop:zoom-changed', z);
+  },
+  /**
+   * A file dropped on the window: its path, granted by the main process like a file the OS handed over,
+   * or null. The path is read here, from Electron's own File object — a File built by page script has
+   * none, and the page never passes a path — and main also checks `data` is exactly the file's content.
+   */
+  grantDroppedFile: async (file, data) => {
+    let p = '';
+    try {
+      p = webUtils.getPathForFile(file);
+    } catch {
+      return null;
+    }
+    if (typeof p !== 'string' || !p) return null;
+    if (!(data instanceof ArrayBuffer)) throw new TypeError('data must be an ArrayBuffer');
+    return ipcRenderer.invoke('desktop:grant-dropped', p, data);
   },
   onOpenFile: (cb) => {
     if (typeof cb !== 'function') throw new TypeError('callback must be a function');

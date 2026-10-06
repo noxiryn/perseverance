@@ -13,7 +13,7 @@ import type { RasterLayer } from '../../core/types';
 import '../roblox.css';
 import { StudioStage } from './StudioStage';
 import type { StudioScene } from './scene';
-import { commitRender, frameSizeFor } from './output';
+import { activePlaceholder, commitRender, frameSizeFor } from './output';
 import { documentBackdrop } from './backdrop';
 import {
   BODY_COLOR_PRESETS,
@@ -132,6 +132,11 @@ export function PoseStudioDialog({ close, layerId }: PoseStudioProps & { close: 
   const [editing] = useState<RasterLayer | null>(() => {
     const l = layerId ? activeDoc()?.layers[layerId] : null;
     return l && l.type === 'raster' && l.generator?.kind === 'rig' ? l : null;
+  });
+  // A selected template placeholder is replaced by the render (see commitRender).
+  const [placeholder] = useState(() => {
+    const d = activeDoc();
+    return d && !editing ? activePlaceholder(d) : null;
   });
   const [state, setState] = useState<StudioState>(() =>
     editing ? normalizeStudioState(editing.generator!.params) : (loadLastState() ?? defaultStudioState()),
@@ -420,7 +425,9 @@ export function PoseStudioDialog({ close, layerId }: PoseStudioProps & { close: 
                 ? `No document open — a ${frame.width}×${frame.height} document will be created`
                 : editing
                   ? `Transparent render at ${frame.width}×${frame.height} → replaces “${editing.name}” (keeps its position, filters and effects)`
-                  : `Transparent render at ${frame.width}×${frame.height} → new layer`}
+                  : placeholder
+                    ? `Transparent render at ${frame.width}×${frame.height} → replaces “${placeholder.name}” (fitted to its spot, keeps its filters and effects)`
+                    : `Transparent render at ${frame.width}×${frame.height} → new layer`}
             </span>
           )}
           <Button onClick={cancel}>Cancel</Button>

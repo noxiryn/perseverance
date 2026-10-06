@@ -2,13 +2,16 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, session, Menu, nativeTheme, screen } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs/promises');
-const { fileURLToPath } = require('node:url');
 const lib = require('./lib.cjs');
 
 const { PROJECT_EXT, THEME } = lib;
-const isDev = !!process.env.VITE_DEV_SERVER_URL;
+/** Vite dev server (scripts/electron-dev.cjs). Never in a packaged app, and only on this machine. */
+const DEV_URL = lib.devServerUrl(process.env.VITE_DEV_SERVER_URL, app.isPackaged);
+const isDev = !!DEV_URL;
 const isMac = process.platform === 'darwin';
 const INDEX_HTML = path.join(__dirname, '..', 'dist', 'index.html');
+/** The page URL, '%', '#', '?' and non-ASCII in the install folder escaped (see lib.fileUrlOf: not loadFile). */
+const INDEX_URL = lib.fileUrlOf(INDEX_HTML);
 /** The only folder the page may load file:// resources from (its own bundle, inside app.asar). */
 const DIST_DIR = path.dirname(INDEX_HTML);
 /** The renderer must acknowledge a close request within this time, or the user is offered a force quit. */
@@ -86,17 +89,19 @@ function liveWindow() {
 
 function isAppUrl(url) {
   if (typeof url !== 'string' || !url) return false;
+  if (!isDev) return lib.fileUrlIs(url, INDEX_HTML);
   try {
-    if (isDev) {
-      const dev = new URL(process.env.VITE_DEV_SERVER_URL);
-      return new URL(url).origin === dev.origin;
-    }
-    const u = new URL(url);
-    if (u.protocol !== 'file:') return false;
-    return lib.pathKey(fileURLToPath(u)) === lib.pathKey(INDEX_HTML);
+    return new URL(url).origin === new URL(DEV_URL).origin;
   } catch {
     return false;
   }
+}
+
+/** Load the editor page (first load, and "Try Again" after a failed load). */
+function loadApp(w) {
+  w.loadURL(isDev ? DEV_URL : INDEX_URL).catch(() => {
+    /* reported by 'did-fail-load' */
+  });
 }
 
 /** IPC must come from the app page in our window (not an iframe, not a navigated-away page). */
@@ -117,6 +122,7 @@ function str(v, max = 1000) {
   return typeof v === 'string' ? v.slice(0, max) : undefined;
 }
 
+/** Open a link in the user's browser: only the allow-listed https pages (lib.isExternalUrl), else logged. */
 function openExternalSafe(url) {
   if (lib.isExternalUrl(url)) shell.openExternal(url).catch((e) => log.warn('openExternal failed', e));
   else log.warn('blocked external url', String(url).slice(0, 200));
@@ -389,6 +395,29 @@ function reloadHungRenderer(w) {
   w.webContents.forcefullyCrashRenderer();
 }
 
+/**
+ * The editor page itself failed to load (blocked, missing or unreadable bundle). Never leave a blank
+ * window without a word: say what failed and where the log is, and offer to try again or quit.
+ */
+async function onLoadFailed(w, code, desc, url) {
+  if (!w.isVisible()) w.show();
+  const r = await prompt({
+    type: 'error',
+    title: 'Perseverance',
+    message: 'The editor could not be loaded',
+    detail:
+      `${desc || 'Load failed'} (${code}) for ${String(url).slice(0, 300)}.` +
+      (log.file ? `\n\nDetails are in the log file:\n${log.file}` : '') +
+      '\n\nReinstalling Perseverance may help.',
+    buttons: ['Try Again', 'Quit'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (liveWindow() !== w) return;
+  if (r === 0) loadApp(w);
+  else if (r === 1) closeNow();
+}
+
 async function onUnresponsive() {
   log.warn('renderer unresponsive');
   if (closeReq.fallbackShown || expectedKill) return; // already offering "Quit Anyway" / already reloading
@@ -521,7 +550,10 @@ function createWindow() {
   wc.on('preload-error', (_e, p, error) => log.error('preload error', p, error));
   wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
     // -3 (ERR_ABORTED) only means a newer navigation/reload superseded this one.
-    if (isMainFrame && code !== -3) log.error('did-fail-load', code, desc, url);
+    if (!isMainFrame || code === -3) return;
+    log.error('did-fail-load', code, desc, url);
+    // A renderer we are killing/reloading, or a window that is closing, reports its own way.
+    if (!forceClose && !expectedKill && !rendererGone) void onLoadFailed(w, code, desc, url);
   });
   let consoleLines = 0;
   wc.on('console-message', (...args) => {
@@ -536,14 +568,15 @@ function createWindow() {
     log.warn('renderer console error', `${message} (${source}:${line})`);
   });
 
-  if (isDev) w.loadURL(process.env.VITE_DEV_SERVER_URL);
-  else w.loadFile(INDEX_HTML);
+  loadApp(w);
 }
 
 /* ---------------- web contents policy ---------------- */
 
 app.on('web-contents-created', (_e, contents) => {
-  // Never navigate away from the app; open external links in the browser.
+  // Never navigate away from the app and never open a window. A popup (window.open / target=_blank) goes
+  // to the browser only when it is one of the allow-listed pages; a navigation of the app window is never
+  // handed on (the app opens links with desktop.openExternal, which has the same allowlist).
   contents.setWindowOpenHandler(({ url }) => {
     openExternalSafe(url);
     return { action: 'deny' };
@@ -551,8 +584,7 @@ app.on('web-contents-created', (_e, contents) => {
   contents.on('will-navigate', (e, url) => {
     if (isAppUrl(url)) return;
     e.preventDefault();
-    if (lib.isExternalUrl(url)) openExternalSafe(url);
-    else log.warn('blocked navigation', String(url).slice(0, 200));
+    log.warn('blocked navigation', String(url).slice(0, 200));
   });
   contents.on('will-redirect', (e, url) => {
     if (!isAppUrl(url)) e.preventDefault();
@@ -605,9 +637,14 @@ handle('desktop:open-files', async (_e, opts) => {
 handle('desktop:save-file', async (_e, opts) => {
   if (!opts || typeof opts !== 'object') throw new TypeError('saveFile options required');
   const data = lib.toBuffer(opts.data); // validate before showing the dialog
-  const filters = lib.sanitizeFilters(opts.filters);
+  // Only project / image / PSD types, and always at least one: ensureExtension() then guarantees the
+  // written file has one of them, even when the user types "x.bat".
+  const filters = lib.saveFilters(opts.filters);
+  if (!filters) throw new TypeError(`saveFile can only save ${lib.SAVE_EXTS.join('/')} files`);
   const w = liveWindow();
-  const dlg = { title: str(opts.title, 200), defaultPath: str(opts.defaultPath, 32767), filters };
+  // The page's defaultPath never reaches the dialog as an arbitrary path (UNC probe / NTLM leak, a
+  // pre-filled startup folder): a file the user chose before, or else just a file name.
+  const dlg = { title: str(opts.title, 200), defaultPath: lib.saveDefaultPath(opts.defaultPath, grants), filters };
   const res = w ? await dialog.showSaveDialog(w, dlg) : await dialog.showSaveDialog(dlg);
   if (res.canceled || !res.filePath) return null;
   // GTK/macOS dialogs may return "name" without the filter's extension: fix it before writing.
@@ -650,6 +687,31 @@ handle('desktop:read-file', async (_e, p) => {
   if (!grants.canRead(p)) throw denied(`reading ${path.basename(p)} was not chosen via a dialog`);
   const buf = await fs.readFile(p);
   return lib.toArrayBuffer(buf);
+});
+
+/** Files a drop on the window may open with their path (projects, PSDs, images: what File ▸ Open takes). */
+const DROP_OPEN_EXTS = new Set([PROJECT_EXT, 'psd', 'psb', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']);
+
+/**
+ * A file dropped on the window from Explorer/Finder: grant it like a file the OS handed over, so it
+ * opens like File ▸ Open (Save in place, Open Recent, an open project switches to its tab). The path
+ * comes from the preload (webUtils.getPathForFile on the dropped File — page script can't forge it);
+ * as a second line of defence the file must be a regular local file holding exactly the bytes the page
+ * read, so even a compromised renderer can't gain access to a file it doesn't already have. Returns the
+ * path, or null.
+ */
+handle('desktop:grant-dropped', async (_e, p, data) => {
+  assertPath(p); // absolute, no UNC/network paths — checked before the file is touched
+  const dropped = lib.toBuffer(data);
+  const st = await fs.stat(p).catch(() => null);
+  if (!st || !st.isFile() || st.size !== dropped.length) return null; // no FIFOs/devices/folders
+  const buf = await fs.readFile(p);
+  const ext = path.extname(p).slice(1).toLowerCase();
+  if (!buf.equals(dropped) || !(DROP_OPEN_EXTS.has(ext) || lib.hasPgfxMagic(buf))) return null;
+  // The same grant as an Explorer double-click (readOpened): write access only for projects.
+  grants.grant(p, { write: ext === PROJECT_EXT || lib.hasPgfxMagic(buf) });
+  if (ext === PROJECT_EXT) app.addRecentDocument(p);
+  return p;
 });
 
 handle('desktop:user-data', () => app.getPath('userData'));
@@ -741,6 +803,7 @@ if (!gotLock) {
     grants = new lib.FileGrants(path.join(userData, 'file-access.json'));
     windowStateFile = path.join(userData, 'window-state.json');
     log.info(`start v${app.getVersion()} ${process.platform} electron ${process.versions.electron}`);
+    if (process.env.VITE_DEV_SERVER_URL && !isDev) log.warn('ignoring VITE_DEV_SERVER_URL (packaged app, or not a server on this machine)');
 
     // The app ships its own in-window menu bar. On macOS a minimal native menu is still needed for
     // the app menu and text-field editing (Cmd+C/V/X/A/Z inside inputs), but without accelerators

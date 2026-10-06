@@ -24,6 +24,8 @@ export function AvatarDialog({ close }: { close: (r?: unknown) => void }) {
   const [result, setResult] = useState<AvatarResult | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
+  /** Kind of the fetched result (the selector may have changed since). */
+  const resultKind = useRef<AvatarKind>(kind);
 
   useEffect(() => () => abort.current?.abort(), []);
   useEffect(() => {
@@ -48,7 +50,10 @@ export function AvatarDialog({ close }: { close: (r?: unknown) => void }) {
     lastKind = kind;
     try {
       const r = await fetchAvatar(name, kind, { signal: ctrl.signal, onStatus: setStatus });
-      if (!ctrl.signal.aborted) setResult(r);
+      if (!ctrl.signal.aborted) {
+        resultKind.current = kind;
+        setResult(r);
+      }
     } catch (err) {
       if (!ctrl.signal.aborted) setError(describeAvatarError(err, validateUsername(name) ?? name.trim()));
     } finally {
@@ -59,13 +64,16 @@ export function AvatarDialog({ close }: { close: (r?: unknown) => void }) {
   const place = async () => {
     if (!result) return;
     try {
-      const label = `${result.displayName} (${AVATAR_KINDS.find((k) => k.value === kind)?.label ?? 'Avatar'})`;
+      const label = `${result.displayName} (${AVATAR_KINDS.find((k) => k.value === resultKind.current)?.label ?? 'Avatar'})`;
       // A template's placeholder is selected: the avatar takes its place (and its styling).
       const s = activeSession();
       const target = s ? contentsTarget(s.doc, s.activeLayerId) : null;
       if (target && isPlaceholder(target)) {
         const canvas = await blobToCanvas(result.blob);
-        if (replaceLayerContents(target.id, canvas, { name: label, cutout: false })) {
+        // Bust / headshot thumbnails are cut off at the bottom: they fill the placeholder's
+        // on-canvas part with the cut on the canvas edge instead of standing on its (often
+        // off-canvas) bottom.
+        if (replaceLayerContents(target.id, canvas, { name: label, cutout: false, cutOff: resultKind.current !== 'full' ? true : undefined })) {
           close(true);
           return;
         }

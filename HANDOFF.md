@@ -154,12 +154,25 @@ starting point; don't rewrite modules from scratch.
   itself can only load file:// URLs inside its own `dist/` folder: Electron's file:// privileges (the
   GrantFileProtocolExtraPrivileges fuse) would otherwise let it fetch()/XHR/<img> any local file, so a
   session webRequest filter cancels every other file:// request (logged as "blocked file request").
-  http(s)-only external links, navigation/popups blocked, permissions limited to local
+  That filter only sees requests from the page itself: Dedicated/Shared Worker requests never reach it
+  (and on file:// CSP 'self' matches every local file), so the CSP has `worker-src 'none'` — the app
+  uses no workers; keep it 'none' (never blob:, and 'self' only after an app:// migration). The page is
+  loaded with `loadURL(lib.fileUrlOf(index.html))`, not `loadFile` (which left '%' unescaped: an install
+  folder like `C:\Users\100%Real\…` gave a blank window with IPC refused); a failed page load shows a
+  native error naming main.log (Try Again / Quit). Save dialog: the page's `defaultPath` is kept only
+  when it is a granted file, else cut to a file name (no UNC/absolute paths from the page: Windows probes
+  them before the user acts), and only pgfx/png/jpg/jpeg/webp/psd filters (none left → refused).
+  External links: `openExternal` / `window.open` hand only https www.roblox.com / roblox.com and the
+  project's GitHub page to the browser (lib.isExternalUrl); navigations of the window are blocked and
+  never handed on. VITE_DEV_SERVER_URL is ignored by a packaged app (and unpackaged only honoured for
+  localhost). Permissions limited to local
   fonts/clipboard/fullscreen, CSP clean in the packaged app with network access only to
   `*.roblox.com` / `*.rbxcdn.com`, electron-builder fuses (no RunAsNode / NODE_OPTIONS / inspect, app
-  only from asar, embedded asar integrity validation on Windows/macOS). Possible later step: serve the
+  only from asar, embedded asar integrity validation on Windows/macOS), `build.publish: null` (no updater;
+  local builds without a GitHub remote no longer exit 1 when a GH_TOKEN is set). Packaged-only checks:
+  `scripts/electron-packaged-check.mjs --bin release/linux-unpacked/perseverance`. Possible later step: serve the
   app from a privileged `app://` scheme and turn the file:// privileges fuse off (changes the page
-  origin, so localStorage prefs / recent files would need a migration).
+  origin, so localStorage prefs / recent files would need a migration; keep the '%' install-folder test).
 - Behaviour: single instance + .pgfx association (argv and cwd forwarded; files wait for the page to
   load — a cold start with a file argument used to spin the main process at 100% CPU and never load),
   macOS open-file, close guard with ack timeout / "Quit Anyway" / repeated-close way out / forced

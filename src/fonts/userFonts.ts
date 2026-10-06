@@ -159,12 +159,19 @@ export function userFontsReady(): Promise<void> {
 /**
  * Font files (with data) of the given families that came from the user — installed with
  * "Add font file…" or embedded in an opened project. Used to embed them in saved projects.
+ * `sessionOnly`: only files known for this session alone (not installed in IndexedDB), which are gone
+ * after a restart unless a file carries them (autosave / crash recovery).
  */
-export async function userFontFiles(families: Iterable<string>): Promise<StoredFont[]> {
+export async function userFontFiles(families: Iterable<string>, opts: { sessionOnly?: boolean } = {}): Promise<StoredFont[]> {
   const wanted = new Set([...families].map(normFamily));
   if (!wanted.size) return [];
   await userFontsReady();
   const out = new Map<string, StoredFont>();
+  if (opts.sessionOnly) {
+    // sessionFiles holds exactly the files IndexedDB doesn't (installing one there removes it).
+    for (const rec of sessionFiles.values()) if (wanted.has(normFamily(rec.family))) out.set(rec.id, rec);
+    return [...out.values()];
+  }
   for (const m of useUserFonts.getState().files) {
     if (!wanted.has(normFamily(m.family))) continue;
     const rec = sessionFiles.get(m.id) ?? (await tx<StoredFont | undefined>('readonly', (st) => st.get(m.id) as IDBRequest<StoredFont | undefined>));

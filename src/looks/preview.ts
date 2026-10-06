@@ -170,8 +170,9 @@ function maskIds(layers: Layer[]): ID[] {
 }
 
 /**
- * Render `doc` with `look` applied (to `targetId` or the whole document) into a canvas whose
- * longest side is `size` px. Returns null if the look cannot be previewed (custom apply()).
+ * Render `doc` with `look` applied as applyLook(look, targetId) would (only to the layer `targetId`,
+ * or to the whole document when null) into a canvas whose longest side is `size` px. Returns null
+ * if the look cannot be previewed (custom apply()).
  */
 export function renderLookPreview(doc: Document, look: LookDef, targetId: ID | null, size: number): HTMLCanvasElement | null {
   if (look.apply) return null;
@@ -182,9 +183,10 @@ export function renderLookPreview(doc: Document, look: LookDef, targetId: ID | n
   const genScale = Math.min(1, scale * 2);
   let built: ReturnType<typeof buildLook> | null = null;
   try {
-    built = buildLook(look, doc, tid, previewOverlayFactory(genScale, created), { maskScale: genScale, documentWide: !!character });
+    // Same resolution as applyLook: a requested layer gets the look on that layer only.
+    built = buildLook(look, doc, tid, previewOverlayFactory(genScale, created), { maskScale: genScale, documentWide: !!character, confine: !!tid && !character });
     const bl = built;
-    if (!bl.filters.length && !bl.effects.length && !bl.behindLayers?.length) {
+    if (!bl.confined && !bl.filters.length && !bl.effects.length && !bl.behindLayers?.length) {
       // Target untouched: composite the look group over the cached base render.
       const base = baseFor(doc, tid, scale);
       const mini = createDocument({ name: 'Look preview', width: doc.width, height: doc.height, background: null });

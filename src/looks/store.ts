@@ -15,15 +15,27 @@ interface LooksUIState {
 }
 
 const KEY = 'perseverance.looks';
+/**
+ * Stored settings version. v2: 'layer' means "this layer only" (grades and textures clipped to
+ * it) and 'doc' is the default. Before, 'layer' (then the default, saved with any other setting)
+ * gave the whole-image look that 'doc' gives now, so older settings start in 'doc'.
+ */
+const VERSION = 2;
+
+/** Persisted Looks settings → state (pure; exported for tests). */
+export function parseLooksSettings(raw: unknown): Partial<Pick<LooksUIState, 'target' | 'previews' | 'category'>> {
+  const v = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const current = v.v === VERSION;
+  return {
+    target: current && v.target === 'layer' ? 'layer' : 'doc',
+    previews: v.previews !== false,
+    category: typeof v.category === 'string' ? v.category : 'All',
+  };
+}
 
 function load(): Partial<Pick<LooksUIState, 'target' | 'previews' | 'category'>> {
   try {
-    const v = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Record<string, unknown>;
-    return {
-      target: v.target === 'doc' ? 'doc' : 'layer',
-      previews: v.previews !== false,
-      category: typeof v.category === 'string' ? v.category : 'All',
-    };
+    return parseLooksSettings(JSON.parse(localStorage.getItem(KEY) ?? '{}'));
   } catch {
     return {};
   }
@@ -31,14 +43,14 @@ function load(): Partial<Pick<LooksUIState, 'target' | 'previews' | 'category'>>
 
 function save(s: Pick<LooksUIState, 'target' | 'previews' | 'category'>) {
   try {
-    localStorage.setItem(KEY, JSON.stringify({ target: s.target, previews: s.previews, category: s.category }));
+    localStorage.setItem(KEY, JSON.stringify({ v: VERSION, target: s.target, previews: s.previews, category: s.category }));
   } catch {
     /* storage unavailable — keep in memory only */
   }
 }
 
 export const useLooksUI = create<LooksUIState>()((set, get) => ({
-  target: 'layer',
+  target: 'doc',
   previews: true,
   category: 'All',
   ...load(),
@@ -56,7 +68,7 @@ export const useLooksUI = create<LooksUIState>()((set, get) => ({
   },
 }));
 
-/** The layer id looks should target right now (null = whole document). */
+/** The layer id looks should target right now: the active layer in Layer mode, null = whole document. */
 export function currentTargetId(): ID | null {
   if (useLooksUI.getState().target === 'doc') return null;
   return activeSession()?.activeLayerId ?? null;

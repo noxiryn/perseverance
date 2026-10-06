@@ -89,10 +89,10 @@ export function fieldBucket(maxDist: number): number {
 }
 
 /**
- * How far an edge can change a distance field asked for `maxDist` (output px). Besides exact
- * distances up to the field depth, the transform bounds partially covered pixels by their own
- * coverage whenever an edge lies within depth + 2 (see distance.ts), so an edge appearing — or a
- * crop boundary — that far away still changes a soft pixel's value.
+ * How far an edge can change a distance field asked for `maxDist` (output px): the transform
+ * computes exact distances for every pixel with an edge site closer than depth + 2 and clamps the
+ * others (see distance.ts), so an edge appearing — or a crop boundary — up to that far away still
+ * changes a value (+1 for rounding).
  */
 export function fieldReach(maxDist: number): number {
   return fieldBucket(maxDist) + 3;

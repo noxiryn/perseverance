@@ -8,7 +8,7 @@ import { bitmaps } from '../core/bitmaps';
 import { canvasToBlob, createCanvas, ctx2d } from '../core/canvas';
 import { uid } from '../core/ids';
 import { DEFAULT_LOCKS } from '../core/document';
-import { appVersion, type OpenedFile } from '../platform';
+import { appVersion, fileNameOf, type OpenedFile } from '../platform';
 import { useEditor } from '../state/editor';
 import { packContainer, PGFX_VERSION, unpackContainer, type ContainerFont } from './container';
 import { PngCache, startEncodes, type SnapshotItem } from './pngCache';
@@ -44,10 +44,14 @@ function prunePngCache() {
  * (which takes seconds for big documents) can therefore never leak into the file. Callers must
  * pass the document state they will mark as saved, and call this synchronously after reading it.
  *
- * `background: true` (autosave, templates) yields to idle time before packing and does not embed
- * fonts (recovery files and templates stay on this machine, which has the fonts).
+ * Fonts (`fonts`): 'all' embeds every user-added font file the text uses (the default: project files
+ * travel to other computers); 'session' only those this machine has for the current session alone —
+ * fonts that came embedded in an opened project, or were added while font storage was unavailable —
+ * which are gone after a restart unless the file carries them (the default with `background`:
+ * recovery entries, whose installed fonts stay on this machine). `background: true` (autosave,
+ * templates) also yields to idle time before packing.
  */
-export async function encodeProject(doc: Document, opts: { background?: boolean } = {}): Promise<ArrayBuffer> {
+export async function encodeProject(doc: Document, opts: { background?: boolean; fonts?: 'all' | 'session' } = {}): Promise<ArrayBuffer> {
   // ---- synchronous snapshot (no await above this line) ----
   const savedAt = new Date().toISOString();
   const items: SnapshotItem<HTMLCanvasElement>[] = [];
@@ -57,7 +61,7 @@ export async function encodeProject(doc: Document, opts: { background?: boolean 
   }
   const jobs = startEncodes(pngCache, items, encodePng);
   // ---- asynchronous part: works only on the snapshot ----
-  const fontsP: Promise<ContainerFont[]> = opts.background ? Promise.resolve([]) : embeddableFonts(doc);
+  const fontsP: Promise<ContainerFont[]> = embeddableFonts(doc, { sessionOnly: (opts.fonts ?? (opts.background ? 'session' : 'all')) === 'session' });
   const blobs = await Promise.all(jobs.map(async (j) => ({ id: j.id, width: j.width, height: j.height, data: await j.data })));
   const embedded = await fontsP;
   prunePngCache();
@@ -191,10 +195,14 @@ export async function decodeProjectWithFonts(buf: ArrayBuffer | Uint8Array): Pro
   return { doc, embeddedFonts };
 }
 
-/** Open a .pgfx file as a new document session. */
+/**
+ * Open a .pgfx file as a new document session. The document is named after the file (like
+ * Photoshop): copies, renamed files and projects made from one template stay distinguishable.
+ */
 export async function loadProject(file: OpenedFile): Promise<Document> {
   const { doc, embeddedFonts } = await decodeProjectWithFonts(file.data);
-  if (!doc.name || doc.name === 'Untitled') doc.name = baseName(file.name);
+  const fromFile = baseName(fileNameOf(file.name ?? '')).trim();
+  if (fromFile) doc.name = fromFile;
   useEditor.getState().openDocument(doc, { filePath: file.path, label: 'Open' });
   // Missing / embedded font notes (never blocks or fails the open).
   void reportProjectFonts(doc, embeddedFonts).catch(() => undefined);

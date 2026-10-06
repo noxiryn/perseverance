@@ -5,7 +5,7 @@
 const nodePath = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
-const { fileURLToPath } = require('node:url');
+const { fileURLToPath, pathToFileURL } = require('node:url');
 
 const PROJECT_EXT = 'pgfx';
 /** Files the app opens from the command line / Explorer / Finder. */
@@ -58,23 +58,67 @@ function pathKey(p, platform = process.platform) {
 }
 
 /**
+ * The file:// URL of a local file, every URL-special character in the path escaped ('%' → %25, '#',
+ * '?', spaces, non-ASCII). The app page must be loaded from this URL, not with `loadFile()`: Electron
+ * builds that URL without escaping '%', so an install folder such as "C:\Users\100%Real\…" or
+ * "D:\Sale 25%ad\…" gave a URL that no longer names the real file (Chromium decodes "%ad", Node refuses
+ * "%Re"), the file:// filter below refused the app's own index.html and the user got a blank window.
+ * With this URL every request the page makes (relative chunks keep the escapes) decodes back to the
+ * real path in fileUrlPath().
+ */
+function fileUrlOf(file, platform = process.platform) {
+  return pathToFileURL(file, { windows: platform === 'win32' }).href;
+}
+
+/** The local path a file:// URL names (percent-escapes decoded), or null for anything else / malformed. */
+function fileUrlPath(url, platform = process.platform) {
+  if (typeof url !== 'string' || !/^file:/i.test(url)) return null;
+  try {
+    return fileURLToPath(url, { windows: platform === 'win32' });
+  } catch {
+    return null; // encoded separators, a host on POSIX, invalid escapes
+  }
+}
+
+/**
  * True when `url` is a file:// URL naming `root` itself or something inside it. The app page loads
  * from file:// with Electron's extra file privileges, which would let it fetch() or <img> ANY local
  * file (file:///C:/Users/…, file://server/share UNC paths); the main process cancels every file://
- * request outside the app's own dist folder with this check. Malformed URLs (encoded separators, a
- * host on POSIX) are refused.
+ * request outside the app's own dist folder with this check. Both sides are compared as decoded,
+ * normalized paths (pathKey: resolved, case-folded where the file system is). Malformed URLs (encoded
+ * separators, a host on POSIX, a stray '%') are refused.
  */
 function fileUrlInside(url, root, platform = process.platform) {
-  if (typeof url !== 'string' || !/^file:/i.test(url) || typeof root !== 'string' || !root) return false;
-  let p;
-  try {
-    p = fileURLToPath(url, { windows: platform === 'win32' });
-  } catch {
-    return false;
-  }
+  if (typeof root !== 'string' || !root) return false;
+  const p = fileUrlPath(url, platform);
+  if (p === null) return false;
   const k = pathKey(p, platform);
   const r = pathKey(root, platform);
   return k === r || k.startsWith(r + pathApi(platform).sep);
+}
+
+/** True when `url` is a file:// URL naming exactly `file` (query and hash ignored). */
+function fileUrlIs(url, file, platform = process.platform) {
+  const p = fileUrlPath(url, platform);
+  return p !== null && typeof file === 'string' && !!file && pathKey(p, platform) === pathKey(file, platform);
+}
+
+/**
+ * The Vite dev server URL to load instead of the bundled page, or null. Only an unpackaged app (`electron .`
+ * from scripts/electron-dev.cjs) honours VITE_DEV_SERVER_URL, and only for a server on this machine: a
+ * packaged app that obeyed it would load any page the environment names, with the full desktop bridge.
+ */
+function devServerUrl(value, isPackaged) {
+  if (isPackaged || typeof value !== 'string' || !value || value.length > 2048) return null;
+  try {
+    const u = new URL(value);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    if (u.username || u.password) return null;
+    if (!['localhost', '127.0.0.1', '[::1]'].includes(u.hostname.toLowerCase())) return null;
+    return u.href;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -125,6 +169,52 @@ function ensureExtension(filePath, filters, platform = process.platform) {
   if (ext && all.includes(ext)) return filePath;
   const base = filePath.replace(/\.+$/, '');
   return `${base}.${list[0].extensions[0].toLowerCase()}`;
+}
+
+/**
+ * The only file types the page may save through the native Save dialog: projects, image exports and
+ * PSD exports. A page-chosen .bat / .lnk / .hta pre-filled into a startup folder would run at the next
+ * login after a single Enter press.
+ */
+const SAVE_EXTS = Object.freeze(['pgfx', 'png', 'jpg', 'jpeg', 'webp', 'psd']);
+
+/**
+ * Save-dialog filters from the renderer, reduced to SAVE_EXTS ('*' and anything else dropped). Undefined
+ * when nothing usable is left: the caller must refuse the save, because without a filter ensureExtension()
+ * can't guarantee the extension the file is written with.
+ */
+function saveFilters(filters) {
+  const out = [];
+  for (const f of sanitizeFilters(filters) ?? []) {
+    const extensions = f.extensions.map((e) => e.toLowerCase()).filter((e, i, a) => SAVE_EXTS.includes(e) && a.indexOf(e) === i);
+    if (extensions.length) out.push({ name: f.name, extensions });
+  }
+  return out.length ? out : undefined;
+}
+
+/**
+ * The Save dialog's starting path from a renderer-supplied defaultPath. The dialog touches that path on
+ * disk before the user does anything (Windows checks whether it or its folder exists and opens that
+ * folder), so a page-chosen "\\attacker\share\x" would make Windows connect out and offer the user's
+ * NTLM hash. Only a path the user chose before (an opened/saved file: `grants.get()`) is kept as is,
+ * which also keeps the folder for projects on a NAS. Anything else is cut down to a plain file name and
+ * the OS picks the folder (the one last used): no absolute, UNC or drive-relative path from the page.
+ */
+function saveDefaultPath(defaultPath, grants, platform = process.platform) {
+  if (typeof defaultPath !== 'string' || !defaultPath || defaultPath.length > 32767) return undefined;
+  const granted = isSafeAbsPath(defaultPath, platform) && grants && typeof grants.get === 'function' ? grants.get(defaultPath) : null;
+  if (granted) return granted.path;
+  // Last path segment (either slash: a Windows path is cut on POSIX too), then the characters no file
+  // system accepts in a name (as src/io safeFileName does; ':' would also name an NTFS stream).
+  const name = defaultPath
+    .split(/[\\/]/)
+    .pop()
+    .replace(/^[a-zA-Z]:/, '')
+    .replace(/[:*?"<>|\u0000-\u001f\u007f]+/g, '_')
+    .trim()
+    .replace(/^\.+/, '')
+    .replace(/[. ]+$/, '');
+  return name ? name.slice(0, 255) : undefined;
 }
 
 /** Bytes to write from an IPC payload (string → UTF-8). Never copies an ArrayBuffer. */
@@ -452,15 +542,33 @@ function safeJson(v) {
   }
 }
 
-/** True when `url` may be opened in the user's browser. */
+/** The project's page (package.json "homepage"; desktopMain.test.ts keeps the two in sync). */
+const PROJECT_HOMEPAGE = 'https://github.com/noxiryn/perseverance';
+/** Hosts whose pages the app links to: the Roblox profile button in the avatar dialog. */
+const EXTERNAL_HOSTS = Object.freeze(['www.roblox.com', 'roblox.com']);
+
+/**
+ * True when `url` may be opened in the user's browser: https only, and only the Roblox site or the
+ * project's own GitHub page. Anything the page asks to open is a way to send data out of the app (a
+ * compromised page could put stolen file contents in the query string of any other site), so the list
+ * holds exactly what the app links to.
+ */
 function isExternalUrl(url) {
   if (typeof url !== 'string' || url.length > 8192) return false;
+  let u;
   try {
-    const u = new URL(url);
-    return u.protocol === 'https:' || u.protocol === 'http:';
+    u = new URL(url);
   } catch {
     return false;
   }
+  if (u.protocol !== 'https:' || u.username || u.password || u.port) return false;
+  const host = u.hostname.toLowerCase();
+  if (EXTERNAL_HOSTS.includes(host)) return true;
+  const home = new URL(PROJECT_HOMEPAGE);
+  if (host !== home.hostname) return false;
+  const p = u.pathname.toLowerCase().replace(/\/+$/, '');
+  const h = home.pathname.toLowerCase();
+  return p === h || p.startsWith(`${h}/`);
 }
 
 module.exports = {
@@ -472,10 +580,17 @@ module.exports = {
   overlayHeight,
   isSafeAbsPath,
   pathKey,
+  fileUrlOf,
+  fileUrlPath,
   fileUrlInside,
+  fileUrlIs,
+  devServerUrl,
   fileArgs,
   sanitizeFilters,
   ensureExtension,
+  SAVE_EXTS,
+  saveFilters,
+  saveDefaultPath,
   toBuffer,
   toArrayBuffer,
   hasPgfxMagic,
@@ -488,5 +603,6 @@ module.exports = {
   parseWindowState,
   initialBounds,
   createLogger,
+  PROJECT_HOMEPAGE,
   isExternalUrl,
 };

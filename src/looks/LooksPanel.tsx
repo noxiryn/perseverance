@@ -4,7 +4,7 @@ import type { Document, ID, Layer } from '../core/types';
 import { commands, looks, runCommand, useRegistry, type LookDef } from '../registry';
 import { useActiveDoc, useEditor } from '../state/editor';
 import { Button, ChipRow, IconButton, SearchInput, showContextMenu } from '../ui/controls';
-import { applyLook, currentLookId, hasLook, lookTargets, lookTouchesTarget, removeLook, type LookTargets } from './engine';
+import { applyLook, canRemoveLook, currentLookFor, lookTargets, lookTouchesTarget, removeLook, type LookTargets } from './engine';
 import { clearLookPreviewBases, contentSignature, renderLookPreviewURL } from './preview';
 import { IdleQueue, isPointerDown, nextPaint } from './shared';
 import { useLooksUI } from './store';
@@ -56,8 +56,10 @@ function pruneClosedDocs(open: Record<ID, unknown>) {
   for (const k of [...previewCache.keys()]) if (!open[k.slice(0, k.indexOf('|'))]) previewCache.delete(k);
 }
 
-function previewKey(docId: ID, look: LookDef, target: Layer | null) {
-  return `${docId}|${target && lookTouchesTarget(look, target) ? target.id : '*'}|${look.id}`;
+/** `layerOnly`: Layer mode, where the whole look (grades and textures too) depends on the target. */
+function previewKey(docId: ID, look: LookDef, target: Layer | null, layerOnly: boolean) {
+  const t = target && layerOnly ? `only:${target.id}` : target && lookTouchesTarget(look, target) ? target.id : '*';
+  return `${docId}|${t}|${look.id}`;
 }
 
 /** Track which look cards are on screen (inside the scroll container, panel tab visible). */
@@ -107,7 +109,12 @@ function useVisibleIds(rootRef: React.RefObject<HTMLElement | null>) {
   return [visible, register] as const;
 }
 
-function useLookPreviews(doc: Document | null, target: Layer | null, enabled: boolean, wanted: LookDef[], historyKey: string | null) {
+/**
+ * Live card previews. `requested` is what Apply would be called with (the active layer in Layer
+ * mode, null in Document mode) so a preview shows exactly what Apply does; `target` is the layer it
+ * resolves to (cache key).
+ */
+function useLookPreviews(doc: Document | null, requested: ID | null, target: Layer | null, layerOnly: boolean, enabled: boolean, wanted: LookDef[], historyKey: string | null) {
   const [, bump] = useReducer((x: number) => x + 1, 0);
   const wantedKey = wanted.map((l) => l.id).join(',');
   const targetId = target?.id ?? null;
@@ -123,21 +130,21 @@ function useLookPreviews(doc: Document | null, target: Layer | null, enabled: bo
     if (!enabled || !doc || !wanted.length) return;
     let cancelled = false;
     const sig = contentSignature(doc);
-    const stale = wanted.filter((l) => cacheGet(previewKey(doc.id, l, target))?.sig !== sig);
+    const stale = wanted.filter((l) => cacheGet(previewKey(doc.id, l, target, layerOnly))?.sig !== sig);
     if (!stale.length) return;
     // First previews come quickly; refreshes after an edit wait until the user pauses.
-    const refresh = stale.some((l) => previewCache.has(previewKey(doc.id, l, target)));
+    const refresh = stale.some((l) => previewCache.has(previewKey(doc.id, l, target, layerOnly)));
     const keys: string[] = [];
     const timer = window.setTimeout(
       () => {
         stale.forEach((look, i) => {
-          const key = previewKey(doc.id, look, target);
+          const key = previewKey(doc.id, look, target, layerOnly);
           keys.push(key);
           queue.push(
             key,
             () => {
               if (cancelled || contentSignature(doc) !== sig) return;
-              const url = renderLookPreviewURL(doc, look, targetId, PREVIEW_SIZE);
+              const url = renderLookPreviewURL(doc, look, requested, PREVIEW_SIZE);
               if (url && !cancelled) {
                 cacheSet(key, { sig, url });
                 bump();
@@ -157,9 +164,9 @@ function useLookPreviews(doc: Document | null, target: Layer | null, enabled: bo
     // `doc` changes on every commit (also selection/guides); the signature check above keeps
     // those from re-rendering. historyKey catches pixel-only edits and their undo/redo.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc, historyKey, targetId, enabled, wantedKey]);
+  }, [doc, historyKey, targetId, requested, layerOnly, enabled, wantedKey]);
 
-  return (look: LookDef) => (enabled && doc ? (previewCache.get(previewKey(doc.id, look, target))?.url ?? null) : null);
+  return (look: LookDef) => (enabled && doc ? (previewCache.get(previewKey(doc.id, look, target, layerOnly))?.url ?? null) : null);
 }
 
 /* ------------------------------------------------------------------ */
@@ -262,8 +269,8 @@ export function LooksPanel() {
   const resolved: LookTargets = doc ? lookTargets(doc, requested) : { targetId: null as ID | null };
   const targetId = resolved.targetId;
   const targetLayer = doc && targetId ? (doc.layers[targetId] ?? null) : null;
-  const current = currentLookId(doc, targetId);
-  const canRemove = hasLook(doc, targetId);
+  const current = currentLookFor(doc, requested);
+  const canRemove = canRemoveLook(doc, requested);
 
   const categories = useMemo(() => ['All', ...Array.from(new Set(all.map((l) => l.category)))], [all]);
   const shown = useMemo(() => {
@@ -276,7 +283,8 @@ export function LooksPanel() {
   }, [all, query, category, categories]);
   const onScreen = useMemo(() => shown.filter((l) => visible.has(l.id)), [shown, visible]);
 
-  const getPreview = useLookPreviews(doc, targetLayer, previews, onScreen, historyKey);
+  const layerOnly = !!targetLayer && !resolved.character;
+  const getPreview = useLookPreviews(doc, requested, targetLayer, layerOnly, previews, onScreen, historyKey);
   const aspect = doc ? Math.max(0.75, Math.min(1.78, doc.width / doc.height)) : 1;
 
   const onApply = useCallback(
@@ -294,7 +302,7 @@ export function LooksPanel() {
     [busy, requested],
   );
 
-  const targetName = targetLayer && !resolved.character ? targetLayer.name : 'Whole document';
+  const targetName = layerOnly ? targetLayer.name : 'Whole document';
   const targetTitle = `Target: ${targetName}${resolved.note ? ` — ${resolved.note}` : ''}`;
   const chipItems = useMemo(() => categories.map((c) => ({ value: c, label: c })), [categories]);
 
@@ -306,21 +314,21 @@ export function LooksPanel() {
         <div className="looks-seg" role="tablist" aria-label="Apply looks to">
           <button
             role="tab"
-            aria-selected={target === 'layer'}
-            className={target === 'layer' ? 'active' : ''}
-            onClick={() => setTarget('layer')}
-            title="Active layer — filters and effects go on the active layer"
-          >
-            <Layers size={12} /> Layer
-          </button>
-          <button
-            role="tab"
             aria-selected={target === 'doc'}
             className={target === 'doc' ? 'active' : ''}
             onClick={() => setTarget('doc')}
-            title="Whole document — grades and textures go into look groups; character filters go on the document’s character (when it has one)"
+            title="Whole document — the look styles the whole image: grades, textures and atmosphere go into look groups, character filters and effects go on the document’s character (when it has one)"
           >
             <ImageIcon size={12} /> Document
+          </button>
+          <button
+            role="tab"
+            aria-selected={target === 'layer'}
+            className={target === 'layer' ? 'active' : ''}
+            onClick={() => setTarget('layer')}
+            title="Active layer only — the look styles just the selected layer (a character, a title…): filters and effects go on it, grades and textures are clipped to it, the rest of the image is left alone"
+          >
+            <Layers size={12} /> Layer
           </button>
         </div>
         {doc ? (
@@ -380,7 +388,14 @@ export function LooksPanel() {
       </div>
 
       <div className="looks-foot">
-        <Button size="small" variant="ghost" icon={Eraser} disabled={!doc || !canRemove} onClick={() => removeLook(targetId)}>
+        <Button
+          size="small"
+          variant="ghost"
+          icon={Eraser}
+          disabled={!doc || !canRemove}
+          title={layerOnly ? `Remove the look from “${targetLayer.name}” only` : 'Remove the document’s look'}
+          onClick={() => removeLook(requested)}
+        >
           Remove look
         </Button>
         <IconButton

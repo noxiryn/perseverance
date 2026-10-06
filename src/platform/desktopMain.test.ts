@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, readdirSync, symlinkSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { samePath } from './index';
 
@@ -66,14 +66,60 @@ describe('path policy', () => {
     expect(lib.fileArgs(null)).toEqual([]);
   });
 
-  it('only opens http(s) URLs externally', () => {
-    expect(lib.isExternalUrl('https://www.roblox.com/users/1/profile')).toBe(true);
-    expect(lib.isExternalUrl('http://example.com')).toBe(true);
-    expect(lib.isExternalUrl('file:///C:/Windows/System32/calc.exe')).toBe(false);
-    expect(lib.isExternalUrl('javascript:alert(1)')).toBe(false);
-    expect(lib.isExternalUrl('ms-msdt:/id')).toBe(false);
-    expect(lib.isExternalUrl('smb://evil/share')).toBe(false);
-    expect(lib.isExternalUrl(undefined)).toBe(false);
+  it('opens only the allow-listed https pages externally (Roblox, the project page)', () => {
+    const ok = (u: unknown) => lib.isExternalUrl(u);
+    // What the app links to: the avatar dialog's profile button (src/roblox/avatar/fetch.ts profileUrl).
+    expect(ok('https://www.roblox.com/users/profile?username=Builderman')).toBe(true);
+    expect(ok('https://www.roblox.com/users/1/profile')).toBe(true);
+    expect(ok('https://roblox.com/')).toBe(true);
+    expect(ok('https://WWW.ROBLOX.COM/users/1/profile')).toBe(true);
+    expect(ok('https://github.com/noxiryn/perseverance')).toBe(true);
+    expect(ok('https://github.com/noxiryn/perseverance/')).toBe(true);
+    expect(ok('https://github.com/noxiryn/perseverance/releases/latest')).toBe(true);
+    expect(ok('https://github.com/Noxiryn/Perseverance/issues/1')).toBe(true);
+    // Any other site is a way to send data out (stolen contents in the query string).
+    expect(ok('https://attacker.example/?d=secret')).toBe(false);
+    expect(ok('http://www.roblox.com/users/1/profile')).toBe(false); // https only
+    expect(ok('https://www.roblox.com.attacker.example/')).toBe(false);
+    expect(ok('https://attacker.example/www.roblox.com')).toBe(false);
+    expect(ok('https://evil.roblox.com.example/')).toBe(false);
+    expect(ok('https://user:pw@www.roblox.com/')).toBe(false);
+    expect(ok('https://www.roblox.com:8443/')).toBe(false);
+    expect(ok('https://github.com/attacker/repo?d=secret')).toBe(false);
+    expect(ok('https://github.com/noxiryn/perseverance-evil')).toBe(false);
+    expect(ok('https://gist.github.com/noxiryn/perseverance')).toBe(false);
+    expect(ok('file:///C:/Windows/System32/calc.exe')).toBe(false);
+    expect(ok('javascript:alert(1)')).toBe(false);
+    expect(ok('ms-msdt:/id')).toBe(false);
+    expect(ok('smb://evil/share')).toBe(false);
+    expect(ok(undefined)).toBe(false);
+    expect(ok('not a url')).toBe(false);
+  });
+
+  it('the project page in the allowlist is package.json "homepage"', () => {
+    const pkg = JSON.parse(readFileSync(join(here, '..', '..', 'package.json'), 'utf8'));
+    expect(lib.PROJECT_HOMEPAGE).toBe(pkg.homepage);
+    expect(lib.isExternalUrl(pkg.homepage)).toBe(true);
+  });
+});
+
+describe('Vite dev server URL (VITE_DEV_SERVER_URL)', () => {
+  it('is ignored by a packaged app', () => {
+    expect(lib.devServerUrl('http://localhost:5173', true)).toBe(null);
+    expect(lib.devServerUrl('http://127.0.0.1:5399/', true)).toBe(null);
+  });
+  it('is honoured unpackaged only for a server on this machine', () => {
+    expect(lib.devServerUrl('http://localhost:5173', false)).toBe('http://localhost:5173/');
+    expect(lib.devServerUrl('http://127.0.0.1:5399/', false)).toBe('http://127.0.0.1:5399/');
+    expect(lib.devServerUrl('http://[::1]:5173', false)).toBe('http://[::1]:5173/');
+    expect(lib.devServerUrl('https://attacker.example/', false)).toBe(null);
+    expect(lib.devServerUrl('http://192.168.1.20:5173', false)).toBe(null);
+    expect(lib.devServerUrl('http://localhost.attacker.example:5173', false)).toBe(null);
+    expect(lib.devServerUrl('http://user:pw@localhost:5173', false)).toBe(null);
+    expect(lib.devServerUrl('file:///tmp/x.html', false)).toBe(null);
+    expect(lib.devServerUrl('', false)).toBe(null);
+    expect(lib.devServerUrl(undefined, false)).toBe(null);
+    expect(lib.devServerUrl('not a url', false)).toBe(null);
   });
 });
 
@@ -102,6 +148,56 @@ describe('file:// requests from the page', () => {
     expect(ok('file:///C:/Users/me/Documents/secret.txt')).toBe(false);
     expect(ok('file://attacker/share/x.pgfx')).toBe(false);
     expect(ok('file:///C:/Program%20Files/Perseverance/resources/app.asar/dist%5c..%5cx')).toBe(false);
+  });
+
+  /*
+   * Install folders with URL-special characters ('%', '#', '?', spaces, non-ASCII). The page URL comes from
+   * lib.fileUrlOf (main.cjs loads it with loadURL): it and every relative request the page makes must
+   * decode back to a path inside dist, and nothing outside dist may slip through. Windows profile names may
+   * contain '%' (per-user installs and the portable exe's %TEMP% live under the profile folder).
+   */
+  const SPECIAL_NAMES = ['100%Real', 'Apps 50%off', 'Sale 25%ad', 'x%41y', 'Promo %20off', '100% x#y ?q', 'a#b', 'C++ & (Work) {1}', "O'Brien", 'Ünïcödé 用户 Пользователь', 'semi;colon=1'];
+  const roots = {
+    win32: (n: string) => [`C:\\Users\\${n}\\AppData\\Local\\Programs\\Perseverance\\resources\\app.asar`, `D:\\${n}\\Perseverance\\resources\\app.asar`],
+    linux: (n: string) => [`/home/${n}/Applications/Perseverance/resources/app.asar`, `/tmp/${n}/inst/app`],
+  } as const;
+  for (const platform of ['win32', 'linux'] as const) {
+    const P = platform === 'win32' ? win32 : posix;
+    it(`loads the app from install folders with %, #, ?, spaces and unicode (${platform})`, () => {
+      for (const n of SPECIAL_NAMES) {
+        for (const root of roots[platform](n)) {
+          const dist = P.join(root, 'dist');
+          const index = P.join(dist, 'index.html');
+          const page = lib.fileUrlOf(index, platform);
+          const inside = (u: string) => lib.fileUrlInside(u, dist, platform);
+          expect(page, page).not.toMatch(/%(?![0-9A-F]{2})/i); // every '%' escaped
+          expect(lib.fileUrlPath(page, platform), n).toBe(index);
+          expect(inside(page), page).toBe(true);
+          expect(lib.fileUrlIs(page, index, platform), page).toBe(true); // isAppUrl → IPC trusted
+          expect(lib.fileUrlIs(`${page}#hash`, index, platform)).toBe(true);
+          // Lazy chunks / fonts / images the page requests relative to its own URL.
+          expect(inside(new URL('./assets/index-abc.js', page).href)).toBe(true);
+          expect(inside(new URL('assets/Font%20Name%20100%25.woff2', page).href)).toBe(true);
+          expect(inside(new URL('./favicon.png?v=1#x', page).href)).toBe(true);
+          // …and nothing outside the bundle.
+          expect(inside(new URL('../../secret.txt', page).href)).toBe(false);
+          expect(inside(new URL('../dist-other/a.js', page).href)).toBe(false);
+          expect(inside(new URL('/etc/hostname', page).href)).toBe(false);
+          expect(lib.fileUrlIs(new URL('./other.html', page).href, index, platform)).toBe(false);
+        }
+      }
+    });
+  }
+
+  it('the old loadFile-style URL (raw %) never names the app page', () => {
+    // Electron's loadFile left '%' unescaped: '%Re' is an invalid escape (refused) and '%ad' / '%41'
+    // decode to a different folder. The page URL must therefore come from fileUrlOf, never be patched here.
+    const raw = (p: string) => `file:///${p.replace(/\\/g, '/').replace(/ /g, '%20')}`;
+    const cases = ['C:\\Users\\100%Real\\app\\dist', 'D:\\Sale 25%ad\\app\\dist', 'C:\\x%41y\\app\\dist'];
+    for (const dist of cases) expect(lib.fileUrlInside(raw(`${dist}\\index.html`), dist, 'win32'), dist).toBe(false);
+    expect(lib.fileUrlPath('file:///tmp/100%Real/x', 'linux')).toBe(null);
+    expect(lib.fileUrlPath('https://example.com/x', 'linux')).toBe(null);
+    expect(lib.fileUrlPath(undefined, 'linux')).toBe(null);
   });
 });
 
@@ -191,6 +287,56 @@ describe('Save As extension', () => {
       { name: 'X', extensions: ['png', '*'] },
     ]);
     expect(lib.sanitizeFilters('pgfx')).toBeUndefined();
+  });
+});
+
+describe('Save dialog options from the page (desktop:save-file)', () => {
+  it('keeps only project / image / PSD types, and none at all means no save', () => {
+    // Everything the app itself saves (src/io/save.ts, exportRender.ts, psd.ts).
+    for (const f of [[{ name: 'Perseverance Project', extensions: ['pgfx'] }], [{ name: 'JPEG Image', extensions: ['jpg', 'jpeg'] }], [{ name: 'PNG Image', extensions: ['png'] }], [{ name: 'WebP Image', extensions: ['webp'] }], [{ name: 'Photoshop Document', extensions: ['psd'] }]])
+      expect(lib.saveFilters(f)).toEqual(f);
+    expect(lib.saveFilters([{ name: 'P', extensions: ['PGFX', 'bat', 'pgfx'] }, { name: 'Run', extensions: ['lnk', 'hta', 'exe', 'scr'] }])).toEqual([{ name: 'P', extensions: ['pgfx'] }]);
+    for (const bad of [undefined, null, [], 'pgfx', [{ name: 'Startup', extensions: ['bat'] }], [{ name: 'All files', extensions: ['*'] }], [{ name: 'x', extensions: ['cmd', 'ps1', 'vbs', 'js'] }]])
+      expect(lib.saveFilters(bad), JSON.stringify(bad)).toBeUndefined();
+    // With an allow-listed filter, the written name always ends in one of its types.
+    expect(lib.ensureExtension('C:\\Users\\Me\\Start Menu\\Programs\\Startup\\run.bat', lib.saveFilters([{ name: 'P', extensions: ['pgfx', 'bat'] }]), 'win32')).toBe(
+      'C:\\Users\\Me\\Start Menu\\Programs\\Startup\\run.bat.pgfx',
+    );
+  });
+
+  it('defaultPath: a file the user chose before is kept, anything else becomes a plain file name', () => {
+    const g = new lib.FileGrants(null, { platform: 'win32' });
+    g.grant('C:\\Art\\Poster.pgfx', { write: true });
+    g.grant('\\\\nas\\share\\Team Poster.pgfx', { write: true });
+    const dp = (p: unknown) => lib.saveDefaultPath(p, g, 'win32');
+    // The app's own calls: the document's granted path, or `${safeFileName(name)}.ext`.
+    expect(dp('c:/art/POSTER.pgfx')).toBe('C:\\Art\\Poster.pgfx');
+    expect(dp('\\\\nas\\share\\Team Poster.pgfx')).toBe('\\\\nas\\share\\Team Poster.pgfx'); // granted share: the user chose it
+    expect(dp('Poster.pgfx')).toBe('Poster.pgfx');
+    expect(dp('My Thumbnail 1920x1080.png')).toBe('My Thumbnail 1920x1080.png');
+    // Page-chosen folders never reach the dialog (UNC probe / NTLM leak, pre-filled startup folder).
+    expect(dp('\\\\attacker\\share\\Poster.pgfx')).toBe('Poster.pgfx');
+    expect(dp('//attacker/share/Poster.pgfx')).toBe('Poster.pgfx');
+    expect(dp('\\\\?\\UNC\\attacker\\share\\x.pgfx')).toBe('x.pgfx');
+    expect(dp('C:\\Users\\Me\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\Poster.bat')).toBe('Poster.bat');
+    expect(dp('C:\\Art\\..\\Windows\\Poster.pgfx')).toBe('Poster.pgfx');
+    expect(dp('C:Poster.pgfx')).toBe('Poster.pgfx'); // drive-relative
+    expect(dp('..\\..\\Poster.pgfx')).toBe('Poster.pgfx');
+    expect(dp('Poster.pgfx:evil.exe')).toBe('Poster.pgfx_evil.exe'); // no NTFS alternate stream
+    expect(dp('a\u0000b<>|?*".pgfx')).toBe('a_b_.pgfx');
+    expect(dp('\\\\attacker\\share\\')).toBe(undefined);
+    expect(dp('...')).toBe(undefined);
+    expect(dp('')).toBe(undefined);
+    expect(dp(42)).toBe(undefined);
+    expect(dp('x'.repeat(40000))).toBe(undefined);
+    expect(dp(`${'y'.repeat(400)}.pgfx`)?.length).toBe(255);
+    // POSIX: same rules.
+    const gp = new lib.FileGrants(null, { platform: 'linux' });
+    gp.grant('/home/me/Art/Poster.pgfx');
+    expect(lib.saveDefaultPath('/home/me/Art/Poster.pgfx', gp, 'linux')).toBe('/home/me/Art/Poster.pgfx');
+    expect(lib.saveDefaultPath('/home/me/.config/autostart/evil.desktop', gp, 'linux')).toBe('evil.desktop');
+    expect(lib.saveDefaultPath('/home/me/Art/Other.pgfx', gp, 'linux')).toBe('Other.pgfx');
+    expect(lib.saveDefaultPath('Poster.pgfx', null, 'linux')).toBe('Poster.pgfx');
   });
 });
 
@@ -442,6 +588,12 @@ describe('native chrome matches the CSS', () => {
     // tokens, case-insensitively ('wasm-unsafe-eval' contains the text "unsafe-eval").
     const directives = cspDirectives(csp);
     expect(directives.get('script-src')).toEqual(["'self'", "'wasm-unsafe-eval'"]);
+    // No workers of any kind. Requests from Dedicated/Shared Workers never reach the main process'
+    // file:// filter, and on a file:// page 'self' matches every local file: a blob: worker could read
+    // any file on disk. The app uses none (the WebAssembly blur runs on the page's own thread).
+    expect(directives.get('worker-src')).toEqual(["'none'"]);
+    // child-src is the fallback for frames AND workers when worker-src is missing: never loosen it either.
+    expect(directives.get('child-src') ?? ["'none'"]).toEqual(["'none'"]);
     expect(allowsPlainEval(csp)).toBe(false);
     expect(allowsPlainEval("default-src 'self'; script-src 'self' 'unsafe-eval'")).toBe(true);
     expect(allowsPlainEval("default-src 'self' 'UNSAFE-EVAL'")).toBe(true);
@@ -453,5 +605,35 @@ describe('native chrome matches the CSS', () => {
     expect(csp).not.toContain('ws://');
     expect(csp).toMatch(/connect-src [^;]*https:\/\/\*\.roblox\.com/);
     expect(existsSync(join(here, '..', '..', 'electron', 'main.cjs'))).toBe(true);
+  });
+});
+
+describe('main process wiring (electron/main.cjs)', () => {
+  const main = readFileSync(join(here, '..', '..', 'electron', 'main.cjs'), 'utf8');
+  it('loads the page from an escaped file:// URL, never loadFile ("%" in the install folder)', () => {
+    expect(main).not.toMatch(/\.loadFile\(/);
+    expect(main).toMatch(/INDEX_URL = lib\.fileUrlOf\(INDEX_HTML\)/);
+    expect(main).toMatch(/loadURL\(isDev \? DEV_URL : INDEX_URL\)/);
+  });
+  it('honours VITE_DEV_SERVER_URL only through lib.devServerUrl (never when packaged)', () => {
+    expect(main).toMatch(/lib\.devServerUrl\(process\.env\.VITE_DEV_SERVER_URL, app\.isPackaged\)/);
+    expect(main.match(/process\.env\.VITE_DEV_SERVER_URL/g)?.length).toBe(2); // the guarded read + the "ignored" log line
+  });
+  it('never hands a renderer navigation to the browser', () => {
+    const nav = main.slice(main.indexOf("contents.on('will-navigate'"), main.indexOf("contents.on('will-redirect'"));
+    expect(nav).toContain('e.preventDefault()');
+    expect(nav).not.toMatch(/openExternal/);
+  });
+});
+
+describe('packaging (package.json "build")', () => {
+  const pkg = JSON.parse(readFileSync(join(here, '..', '..', 'package.json'), 'utf8'));
+  it('publishes nothing itself (no updater): builds without a detectable GitHub remote exit 0', () => {
+    // Without this, electron-builder picks the github provider whenever GH_TOKEN/GITHUB_TOKEN is set, finds no
+    // repo (source zip, git worktree) and crashes after writing the installers (exit 1). CI uploads the
+    // installers with softprops/action-gh-release and passes --publish never.
+    expect('publish' in pkg.build).toBe(true);
+    expect(pkg.build.publish).toBe(null);
+    expect(pkg.repository?.url).toMatch(/github\.com\/noxiryn\/perseverance/);
   });
 });
