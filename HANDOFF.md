@@ -163,7 +163,8 @@ starting point; don't rewrite modules from scratch.
   re-render on the CPU (≈ 25–50 ms over gradients/flat art; separable modes ≈ 10–15 ms).
 - **Render caches** (release review render-paint-diff-1…5, e2e-flows-3; `src/render/engine.ts`,
   `cache.ts`, `contentBounds.ts`, `distance.ts`). Cached / incremental renders now equal fresh ones after
-  these edits; painting and dragging past the old render-cache limits no longer re-render every layer:
+  these edits; painting over layers whose renders exceed the render cache no longer re-renders every
+  layer on every frame (limits that remain: see "Still slow past the cap" below):
   - Clip stacks: `docItems` inlines a pass-through group only when `compositeList` does (not clipped, no
     shown clipped layer above it — `hasShownClipped`), so Create / Release Clipping Mask, hiding the only
     clipped layer or clipping the group itself forces a full composite (the canvas and File ▸ Export kept
@@ -194,24 +195,29 @@ starting point; don't rewrite modules from scratch.
     again, so the layers below the painted one are composited once at the start of the stroke and never
     needed again during it; the renders used while filling it are the first evicted (`beginFold`, the
     one just stored included: only the layers that were not cached are re-rendered, instead of LRU
-    evicting the next ones it needs), then layer renders (least recently used first), composites (below
-    caches, document composites, snapshots) last; slots holding no counted memory (zero-copy renders)
-    are never evicted for room.
+    evicting the next ones it needs), then layer renders (least recently used first; small ones such as
+    thumbnails after the large ones), composites (below caches, document composites, snapshots) last;
+    slots holding no counted memory (zero-copy renders) are never evicted for room.
   - Painting, software canvas, ms per brush frame. Soft budget alone (before → after): document-sized
     layers with Drop Shadow + Stroke at 1080p ×8 1030 → 2.6, ×16 2181 → 3.1, 4K ×2 1155 → 4.9 — but past
     its hard cap the thrash came back unchanged. With crops and the degradation (before = soft budget
     only → after; release review verifier's scripts): real brush on File ▸ New 4K with N × (New Layer +
     painted blob + Drop Shadow + Stroke) N = 8 4855 → 4.9, N = 10 7849 → 5.0, N = 5 with 4 GB 3892 → 4.9;
     document-sized disc layers through the API 4K N = 7 / 8 6722 / 5573 → 3.6 / 4.2, 1080p N = 20 with
-    4 GB 4622 → 3.3. `--bench` (mean, frames 6+): 4K ×8 blobs 4.9, 4K ×5 blobs with 4 GB 5.3; GPU canvas
-    ≈ 1.2. Layers whose content covers the canvas (not croppable) past the cap — 4K
-    × 10, ≈ 250M px of renders (cache 196M px): the first frame of a stroke re-renders the layers below
-    that the full composite before it could not keep (2 of 10: 2.7 s, was 4–7 s on every frame), later
-    frames 0–3 ms (bench 5.5 ms; 4K × 6 with 4 GB: first frame 1.7 s, then 5.2 ms).
+    4 GB 4622 → 3.3. `--bench` (mean of frames 6+): 4K ×8 blobs 4251 → 4.9, 4K ×5 blobs with 4 GB 2756 →
+    5.3 (GPU canvas ≈ 1.2). Layers whose content covers the canvas (not croppable) past the cap: 4K ×10
+    (≈ 250M px of renders, cache 196M px) 5658 → 5.5, 4K ×6 with 4 GB 3392 → 5.2 — the first frame of a
+    stroke re-renders the layers below that the full composite before it could not keep (2 of 10: 2.7 s;
+    1.7 s with 4 GB), later frames 0–3 ms of renderer work.
     Still slow past the cap: painting UNDER such layers (the layers above the painted one are needed every
     frame; when their renders alone exceed the cap each frame re-renders some of them), and edits that
     need every layer (an opacity drag of the bottom layer…). Not done: keeping the bitmap itself as the
     content canvas of an effects render (one region-sized canvas less per layer).
+  - Effect outputs kept for reuse (an effect-only edit re-runs only the edited effect) are reused from a
+    differently sized region only when the effect gives the same pixels on any canvas size on this
+    backend (`runEffects`: CPU-exact effects, or a crop-exact canvas): on GPU canvases a drop shadow
+    size / distance edit that grows the region re-runs the layer's glows / satin too — exports right after
+    such an edit were up to 6–8 levels off a fresh render (pre-existing, found by `fx-crop-reference`).
   - `renderDocument({ below })` after a patch edit inside a styled group: a group's own render no longer
     leaks `rc.stopped` into the caller (it returned a background-only hole: histogram, Auto Levels, PSD
     bakes).
@@ -234,8 +240,10 @@ starting point; don't rewrite modules from scratch.
     React), Gothic (cel-shade) 88 → 17; SwiftShader GPU (noisy, mostly readbacks): 476–601 → 245–345 and
     227–321 → 100–109.
   - Checks: `src/render/renderCache.test.ts`, `contentBounds.test.ts` (+ soft mattes in `review.test.ts`);
-    `dirty-rect-check.mjs` part 1b edit sequences (`clip-passthrough*`, `clip-base-change*`,
-    `stroke-size-soft-*`, `below-styled-group-*`, `inside-fx-edge-*`, `move-smart-filters-*`), e2e "move
+    `dirty-rect-check.mjs` part 1 (`fx-blob-crop`, `fx-empty-crop`: strokes leaving a render's crop) and
+    part 1b edit sequences (`clip-passthrough*`, `clip-base-change*`, `stroke-size-soft-*`,
+    `below-styled-group-*`, `inside-fx-edge-*`, `fx-crop-reference` — a cropped render equals the same
+    blob on a layer of its own size —, `move-smart-filters-*`), e2e "move
     tool drag" rows, and `--bench` guards (FX-layer painting at 1080p ×8 / ×16, 4K ×2 / ×8, 4K ×5 with a
     4 GB hard cap; past the cap 4K ×10 large-content layers, ×6 with 4 GB; Crimson / Gothic drags). Every
     one fails on the pre-fix code.

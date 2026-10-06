@@ -48,8 +48,9 @@
  * cap) document-sized layers holding a blob with Drop Shadow + Stroke (renders cropped to their
  * content; no other layer may re-render during the stroke, mean frame time under the limit);
  * painting on 4K with 10 (6 with 4 GB) layers whose large content cannot be cropped — layer renders
- * alone past the cache's hard cap: each layer below may re-render once at the start of the stroke,
- * never afterwards; and Move-tool drags of the Crimson / Gothic template characters (no
+ * alone past the cache's hard cap: only the layers below that the cache could not keep re-render,
+ * once, at the start of the stroke (at most half of them), never afterwards; and Move-tool drags
+ * of the Crimson / Gothic template characters (no
  * smart-filter run at full size during the drag, mean time per pointermove under the limit).
  */
 import { chromium } from 'playwright-core';
@@ -945,6 +946,48 @@ async function editsPart(opts) {
     );
   }
 
+  // render-paint-diff-3: a blob on a document-sized layer renders cropped to its content; effect
+  // edits and a move later, it renders like the same blob on a layer of its own size (uncropped) —
+  // exact on the software canvas (GPU blurs differ by a few levels with the canvas size).
+  {
+    const ids = {};
+    const blobAt = (g, ox, oy) => {
+      g.fillStyle = '#d05030';
+      g.beginPath();
+      g.ellipse(ox + 110, oy + 130, 99, 117, 0.3, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = 'rgba(40,90,220,0.7)';
+      g.fillRect(ox + 20, oy + 30, 60, 160);
+    };
+    const effectsFor = (size) => [fx('drop-shadow', { distance: 40, size, opacity: 0.9 }), fx('outer-glow', { size: 24 }), fx('stroke', { size: 6, color: '#ffffff' })];
+    let big = null;
+    await run(
+      'fx-crop-reference',
+      () => {
+        const d = doc0();
+        addRaster(d, photo(W, H), { name: 'Photo' });
+        big = canvas(W, H, (g) => blobAt(g, 520, 260));
+        ids.l = addRaster(d, big, { name: 'Blob', props: { effects: effectsFor(20) } }).id;
+        return d;
+      },
+      [
+        { label: 'shadow size 30', doc: (d) => edit(d, ids.l, { effects: effectsFor(30) }) },
+        { label: 'shadow size 44', doc: (d) => edit(d, ids.l, { effects: effectsFor(44) }) },
+        { label: 'move +37,+21', doc: (d) => moveTo(d, ids.l, 37, 21) },
+      ],
+      {
+        extra: (d) => {
+          if (opts.gpu) return null;
+          const l = d.layers[ids.l];
+          const ref = doc0();
+          addRaster(ref, photo(W, H), { name: 'Photo' });
+          addRaster(ref, canvas(220, 260, (g) => g.drawImage(big, -520, -260)), { name: 'Blob', transform: { x: 520 + l.transform.x, y: 260 + l.transform.y }, props: { effects: l.effects } });
+          return diff(premul(C.renderDocument(d)), premul(C.renderDocument(ref)));
+        },
+      },
+    );
+  }
+
   // e2e-flows-3: moving a layer with smart filters (template characters: gradient-map + halftone,
   // cel-shade, a glow). Whole-pixel moves reuse the filtered render; exact renders stay exact; a
   // doc-anchored filter (halftone) is only shifted in the live composite and settled afterwards.
@@ -1373,9 +1416,10 @@ async function benchPart(opts) {
   let demoId = null;
   // `guard`: perf regression limits (the run fails past them): mean ms per pointermove on the
   // software / GPU canvas (frames 6+), and layers re-rendered from scratch during the stroke (the
-  // painted layer is updated in place; nothing else may re-render — past the hard cap each layer
-  // below may be re-rendered once, at the start of the stroke). `mem`: navigator.deviceMemory
-  // the render cache's hard cap is set for during the case (GB; see hardCapFor).
+  // painted layer is updated in place; nothing else may re-render — past the hard cap the layers
+  // below that the cache could not keep are re-rendered once, at the start of the stroke).
+  // `mem`: navigator.deviceMemory the render cache's hard cap is set for during the case (GB; see
+  // hardCapFor).
   const cases = [
     { name: 'demo: Red Glow (raster under adjustments)', open: () => demoId ?? (demoId = app.openDemoDocument()), layer: 'Red Glow' },
     { name: 'demo: Roblox Character (effects, in group)', open: () => demoId ?? (demoId = app.openDemoDocument()), layer: 'Roblox Character' },
@@ -1388,8 +1432,9 @@ async function benchPart(opts) {
     { name: '4K: 8 full-canvas layers with Drop Shadow + Stroke', open: () => openFx(3840, 2160, 8), layer: 'Paint', guard: { sw: 30, gpu: 120, renders: 0 } },
     { name: '4K: 5 full-canvas layers with Drop Shadow + Stroke, 4 GB of memory', open: () => openFx(3840, 2160, 5), layer: 'Paint', mem: 4, guard: { sw: 30, gpu: 120, renders: 0 } },
     // Layer renders alone past the hard cap (≈ 250M px; ≈ 150M px with 4 GB): graceful degradation.
-    { name: '4K: 10 large-content layers with Drop Shadow + Stroke (past the hard cap)', open: () => openLarge(3840, 2160, 10), layer: 'Paint', guard: { sw: 30, gpu: 120, renders: 10 } },
-    { name: '4K: 6 large-content layers with Drop Shadow + Stroke, 4 GB of memory (past the hard cap)', open: () => openLarge(3840, 2160, 6), layer: 'Paint', mem: 4, guard: { sw: 30, gpu: 120, renders: 6 } },
+    // Only the layers the composite before the stroke could not keep are re-rendered, once (2–3).
+    { name: '4K: 10 large-content layers with Drop Shadow + Stroke (past the hard cap)', open: () => openLarge(3840, 2160, 10), layer: 'Paint', guard: { sw: 30, gpu: 120, renders: 5 } },
+    { name: '4K: 6 large-content layers with Drop Shadow + Stroke, 4 GB of memory (past the hard cap)', open: () => openLarge(3840, 2160, 6), layer: 'Paint', mem: 4, guard: { sw: 30, gpu: 120, renders: 3 } },
   ];
   const results = [];
   /** --bench-only a,b: only the cases whose name contains one of these strings. */
@@ -1446,19 +1491,24 @@ async function benchPart(opts) {
     const i0 = info();
     // Layer renders stored during the stroke for layers OTHER than the painted one: they never
     // change, so any is a re-render after an eviction (cache thrash).
-    let others = 0;
-    const otherKeys = new Set();
+    // Only renders at the scale the painted layer is composited at by the viewport (the largest
+    // scale it is rendered at with full flags) count: layer thumbnails and the navigator re-render
+    // tiny copies of layers whenever their panels refresh (≈ free; not what the cache must keep).
+    const otherSets = [];
+    let liveScale = null;
     const names = Object.fromEntries(Object.values(doc.layers).map((l) => [l.id, l.name]));
     const slotSet = CACHE?.slots?.set;
     if (slotSet)
       CACHE.slots.set = function (key, ...rest) {
-        if (typeof key === 'string' && key.startsWith('L|') && !key.startsWith(`L|${layer.id}|`)) {
-          others++;
+        if (typeof key === 'string' && key.startsWith('L|')) {
           const [, id, scale, flags] = key.split('|');
-          otherKeys.add(`${names[id] ?? id}@${scale}/${flags}`);
+          if (id === layer.id) {
+            if (flags === 'emf' && (liveScale === null || Number(scale) > Number(liveScale))) liveScale = scale;
+          } else otherSets.push({ name: names[id] ?? id, scale, flags });
         }
         return slotSet.call(this, key, ...rest);
       };
+    const otherAtLive = () => otherSets.filter((o) => liveScale === null || (o.scale === liveScale && o.flags === 'emf'));
     const per = [];
     let x = b.x,
       y = b.y,
@@ -1480,8 +1530,9 @@ async function benchPart(opts) {
         await nextFrame();
         per.push(handler + work);
       }
-      const othersStroke = slotSet ? others : null;
-      const othersWhich = [...otherKeys].slice(0, 6);
+      const counted = otherAtLive();
+      const othersStroke = slotSet ? counted.length : null;
+      const othersWhich = [...new Set(counted.map((o) => `${o.name}@${o.scale}/${o.flags}`))].slice(0, 6);
       longTasks.length = 0;
       const tUp = performance.now();
       fire('pointerup', x, y, 0);
@@ -1661,7 +1712,8 @@ try {
     }
     console.log('  settle frame: the frame re-rendering approximate GPU work exactly after the stroke (- = nothing to settle)');
     console.log('  * longest main-thread task within 1.5 s after the stroke (any work: history, thumbnails, settle…)');
-    console.log('  † brush: renders of layers other than the painted one stored during the stroke (re-renders after cache evictions);');
+    console.log('  † brush: renders of layers other than the painted one stored during the stroke at the viewport\'s scale (re-renders after');
+    console.log('    cache evictions; thumbnail / navigator copies not counted);');
     console.log('    move drag: smart-filter runs at full size during the drag (the moved render must be reused)');
     if (res[0]?.cropExact !== undefined) console.log(`  (canvas backend crop-exact: ${res[0].cropExact})`);
     await browser.close();

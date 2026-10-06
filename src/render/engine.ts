@@ -1674,10 +1674,14 @@ function runEffects(
     const cacheable = effectCacheable(e.def.id);
     const key = cacheable ? fxKey(e.def, e.params, knock && isBehind, clips) : '';
     // Reuse this effect's previous output (same content, same params) when it is complete in
-    // the new region: only the edited effect of a layer re-renders.
+    // the new region: only the edited effect of a layer re-renders. From a differently sized
+    // region only when the effect gives the same pixels on any canvas size on this backend (GPU
+    // blurs — shadows, glows, satin — differ by a few levels with the canvas size, and the render
+    // must equal a fresh one: exports use it).
     if (cacheable) {
       const need = contentRect ? intersectRect(expandSides(contentRect, effectExtent(e.def, e.params, s)), region) : null;
-      const hit = reuse.fx.find((f) => f.key === key && (sameRect(f.region, region) || !need || containsRect(f.region, need)));
+      const anySize = !backendApprox() || CROP_EXACT_EFFECTS.has(e.def.id);
+      const hit = reuse.fx.find((f) => f.key === key && (sameRect(f.region, region) || (anySize && (!need || containsRect(f.region, need)))));
       if (hit) {
         const pieces = hit.pieces.map((pc) => ({ canvas: moveCanvas(pc.canvas, hit.region, region), op: pc.op }));
         fxOut.push({ key, region, pieces });

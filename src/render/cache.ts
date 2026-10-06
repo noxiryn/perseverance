@@ -189,21 +189,37 @@ const clock = (): number => (typeof performance !== 'undefined' ? performance.no
 /** A slot whose entries hold no counted memory (e.g. zero-copy renders of bitmaps). */
 const weightless = (s: Slot): boolean => s.entries.every((e) => !e.pixels && !e.res);
 
+/** Pixels a slot's entries hold (shared resources counted in full). */
+function slotPixels(s: Slot): number {
+  let n = 0;
+  for (const e of s.entries) {
+    n += e.pixels;
+    if (e.res) for (const r of e.res) n += resourcePixels(r);
+  }
+  return n;
+}
+
+/** Below this (px), a slot is evicted past the hard cap only after the larger ones. */
+const SMALL_SLOT = 128 * 128;
+
 /**
  * Eviction. Plain LRU with a fixed budget has a cliff: once the renders a document needs exceed
  * the budget, every insert evicts renders that the next frame needs again (painting re-rendered
  * every layer on every frame). So the budget is soft:
  *  - on insert over budget, slots OUTSIDE the working set are evicted (least recently used first)
  *    down to 85% of the budget. The working set: slots used by the render pass in progress (see
- *    beginPass) or in the last `recentMs` (an interaction) and slots a displayed document needs (the keep-alive hook:
- *    the layer renders of the live composites, which while painting are only touched when a
- *    stroke reaches new tiles of the below cache);
+ *    beginPass) or in the last `recentMs` (an interaction) and slots a displayed document needs
+ *    (the keep-alive hook: the layer renders of the live composites, which while painting are only
+ *    touched when a stroke reaches new tiles of the below cache);
  *  - past the hard cap, working-set slots go too, down to the cap: slots used while filling a
- *    stroke's below cache first (see beginFold), then layer renders (least recently used first),
- *    composites (below caches, document composites, snapshots) last — a
- *    pass that does not fit keeps degrading gracefully instead of re-rendering every layer on every
- *    frame (live painting composites the layers below the painted one into the below cache once,
- *    see fillBelow, and never needs their renders again during the stroke);
+ *    stroke's below cache first (see beginFold), then layer renders (least recently used first;
+ *    small ones such as thumbnails after the large ones), composites (below caches, document
+ *    composites, snapshots) last; slots holding no counted memory are kept (dropping them frees
+ *    nothing). A pass that does not fit degrades gracefully
+ *    instead of re-rendering every layer on every frame: live painting composites the layers below
+ *    the painted one into the below cache once (see fillBelow in ./engine) and never needs their
+ *    renders again during the stroke. Layers ABOVE the painted one are needed every frame: when
+ *    their renders alone exceed the cap, frames still re-render some of them;
  *  - while over budget, an idle timer shrinks the cache back to the budget once nothing used it
  *    for `trimMs` (everything not kept alive by a displayed document), and keeps checking while
  *    kept-alive slots hold it above the budget (they expire when their document is no longer
@@ -429,10 +445,15 @@ export class SlotCache {
         if (this.total <= this.hardCap) break;
         if (s.fold && !s.composite && !weightless(s)) this.dropSlot(k, s);
       }
-      for (const composites of [false, true]) {
+      // Small slots (thumbnails, small text rasters) free little: they go after the large ones.
+      for (const [composites, small] of [
+        [false, false],
+        [false, true],
+        [true, true],
+      ]) {
         for (const [k, s] of this.map) {
           if (this.total <= this.hardCap) break;
-          if (k === keep || !!s.composite !== composites || weightless(s)) continue;
+          if (k === keep || !!s.composite !== composites || weightless(s) || (!small && slotPixels(s) < SMALL_SLOT)) continue;
           this.dropSlot(k, s);
         }
       }

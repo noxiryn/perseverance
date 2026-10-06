@@ -727,6 +727,18 @@ describe('soft render-cache budget (render-paint-diff-3)', () => {
     }
   });
 
+  it('past the hard cap, small slots (thumbnails) go after the large ones', () => {
+    const c = new SlotCache(40_000, 2, { hardCap: 80_000, recentMs: 1500, trimMs: 2000, now: () => 0 });
+    c.beginPass();
+    c.set('T|thumb', 's', 'thumb', 100);
+    for (let k = 0; k < 3; k++) c.set(`L${k}`, 's', k, 30_000);
+    c.endPass();
+    expect(c.pixels).toBeLessThanOrEqual(80_000);
+    expect(c.get('T|thumb', 's')).toBe('thumb');
+    expect(c.get('L0', 's')).toBeUndefined();
+    expect(c.get('L2', 's')).toBe(2);
+  });
+
   it('past the hard cap, layer renders are evicted before composites', () => {
     let t = 0;
     const c = new SlotCache(100, 2, { hardCap: 200, recentMs: 1500, trimMs: 2000, now: () => t });
@@ -1042,6 +1054,29 @@ describe('renders of layers with effects are cropped to their content (render-pa
       expectFresh(d, `mask dab at ${x},${y}`);
     }
     expect(rebuilt).toBe(0);
+  });
+
+  it('on GPU canvases an effect edit that changes the region re-runs the other blur effects (no reuse across canvas sizes)', () => {
+    const glow: LayerEffect = { id: 'og', effectId: 'outer-glow', enabled: true, params: { size: 6 } };
+    const shadow = (distance: number): LayerEffect => ({ id: 'ds', effectId: 'drop-shadow', enabled: true, params: { distance, size: 4 } });
+    try {
+      for (const cropExact of [true, false]) {
+        setCropExactBackend(cropExact);
+        invalidateRenderCache();
+        const d0 = createDocument({ name: 'fxreuse', width: W, height: H, background: '#ffffff' });
+        const l = raster(d0, canvasOf(W, H, disc(70, 80, 12)), { effects: [glow, shadow(4)] });
+        renderDocument(d0);
+        const reuse0 = renderCacheInfo().fxReuse;
+        // a longer shadow grows the region: the glow's output was made on a smaller canvas
+        const d1 = edit(d0, l.id, { effects: [glow, shadow(16)] });
+        renderDocument(d1);
+        const reused = renderCacheInfo().fxReuse - reuse0;
+        expect(reused, `crop-exact ${cropExact}`).toBe(cropExact ? 1 : 0);
+        expectFresh(d1, `crop-exact ${cropExact}`);
+      }
+    } finally {
+      setCropExactBackend(true);
+    }
   });
 
   it('a change of unknown extent rescans the bitmap; renders stay exact', () => {
