@@ -5,7 +5,7 @@
 import { Type } from 'lucide-react';
 import { commands, panels, propertiesSections, tools } from '../../registry';
 import type { Document, Point, TextLayer } from '../../core/types';
-import { DEFAULT_TEXT, flattenIds, isEffectivelyVisible } from '../../core/document';
+import { DEFAULT_TEXT, flattenIds, isEffectivelyVisible, isFaintLayer, isSeeThroughOverlay } from '../../core/document';
 import { activeDoc, activeSession, useEditor } from '../../state/editor';
 import { useUI } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
@@ -81,15 +81,20 @@ function containsPoint(l: TextLayer, p: Point): boolean {
 }
 
 /**
- * Text layer a move-tool double-click should edit: the hit layer when it is text, else the active
- * text layer under the pointer, else the topmost text layer whose box contains the point and that
- * is not covered by the hit layer (clicks between glyphs fall through to layers below).
+ * Text layer a move-tool double-click should edit (same rules as the move tool's own handler,
+ * src/viewport/tools/move.ts textLayerAt): the pixel hit looks through see-through overlays
+ * (blend-mode textures such as Halftone / Fold Creases / Ink Spray above a title, faint layers —
+ * `isSeeThroughOverlay`). The hit layer when it is solid text; else the active text layer under the
+ * pointer; else the topmost text layer whose box contains the point and that is not covered by the
+ * hit layer (clicks between glyphs fall through to layers below); else faint hit text (a ghost or
+ * kanji behind a title).
  */
 function textLayerForDoubleClick(doc: Document, p: Point, activeId: string | null): string | null {
-  const hit = hitTestLayer(doc, p.x, p.y);
-  if (hit && doc.layers[hit]?.type === 'text') return hit;
+  const hit = hitTestLayer(doc, p.x, p.y, isSeeThroughOverlay);
+  const hitLayer = hit ? doc.layers[hit] : undefined;
+  if (hit && hitLayer?.type === 'text' && !isFaintLayer(hitLayer)) return hit;
   const a = activeId ? doc.layers[activeId] : null;
-  if (a && a.type === 'text' && isEffectivelyVisible(doc, a.id) && containsPoint(a, p)) return a.id;
+  if (a && a.type === 'text' && !a.locks.all && isEffectivelyVisible(doc, a.id) && containsPoint(a, p)) return a.id;
   const ids = flattenIds(doc);
   for (let i = ids.length - 1; i >= 0; i--) {
     if (ids[i] === hit) break;
@@ -97,7 +102,7 @@ function textLayerForDoubleClick(doc: Document, p: Point, activeId: string | nul
     if (!l || l.type !== 'text' || l.locks.all || !isEffectivelyVisible(doc, l.id)) continue;
     if (containsPoint(l, p)) return l.id;
   }
-  return null;
+  return hit && hitLayer?.type === 'text' ? hit : null;
 }
 
 /**

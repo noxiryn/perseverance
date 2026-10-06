@@ -8,7 +8,7 @@
 import { Move } from 'lucide-react';
 import type { Document, ID, Layer, Point, Rect, Transform } from '../../core/types';
 import type { ToolDef, ToolPointerEvent } from '../../registry';
-import { insertLayerDraft, isEffectivelyVisible, isTransformable } from '../../core/document';
+import { insertLayerDraft, isEffectivelyVisible, isFaintLayer, isSeeThroughOverlay, isTransformable } from '../../core/document';
 import { pointInPolygon } from '../../core/geometry';
 import { viewport } from '../../editor/viewport';
 import { activeSession, toolOptions, useEditor } from '../../state/editor';
@@ -401,14 +401,19 @@ function onDoubleClick(e: ToolPointerEvent) {
 }
 
 /**
- * Text layer a double-click at (x, y) should edit: the layer under the pointer when it is text,
- * else the active text layer whose box contains the point, else the topmost visible, unlocked
- * text layer whose box contains it and that sits above the hit layer.
+ * Text layer a double-click at (x, y) should edit. The pick looks through see-through overlays
+ * (`isSeeThroughOverlay`: blend-mode textures such as Halftone, Fold Creases, Grain or Ink Spray that
+ * templates lay over the whole canvas, and faint layers), so the title under them is found; opaque
+ * Normal layers still stop it. Then: the layer under the pointer when it is solid text, else the
+ * active text layer whose box contains the point, else the topmost visible, unlocked text layer whose
+ * box contains it and that sits above the hit layer, else faint hit text (a ghost / kanji behind a
+ * title — a click between the title's glyphs opens the title).
  */
 function textLayerAt(doc: Document, x: number, y: number, activeId: ID | null): ID | null {
-  const hit = pickLayer(doc, x, y);
+  const hit = pickLayer(doc, x, y, isSeeThroughOverlay);
   const editable = (l: Layer | undefined): l is Layer => !!l && l.type === 'text' && !l.locks.all && isEffectivelyVisible(doc, l.id);
-  if (hit && editable(doc.layers[hit])) return hit;
+  const hitLayer = hit ? doc.layers[hit] : undefined;
+  if (hit && editable(hitLayer) && !isFaintLayer(hitLayer)) return hit;
   const inBox = (l: Layer) => isTransformable(l) && pointInPolygon({ x, y }, layerCorners(l));
   const a = activeId ? doc.layers[activeId] : undefined;
   if (editable(a) && inBox(a)) return a.id;
@@ -417,7 +422,7 @@ function textLayerAt(doc: Document, x: number, y: number, activeId: ID | null): 
     const l = doc.layers[id];
     if (editable(l) && inBox(l)) return id;
   }
-  return null;
+  return hit && editable(hitLayer) ? hit : null;
 }
 
 let lastHover = 0;

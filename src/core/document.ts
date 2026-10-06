@@ -273,3 +273,28 @@ export function removeLayerDraft(d: Document, id: ID) {
   detachLayerDraft(d, id);
   delete d.layers[id];
 }
+
+/** What a viewer sees of a layer's pixels: opacity × fill opacity (0..1). */
+export function layerVisibility(l: Layer): number {
+  const clamp01 = (v: number) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 1));
+  return clamp01(l.opacity) * clamp01(l.fillOpacity);
+}
+
+/**
+ * A faint layer (opacity × fill < 50 %): ghost / watermark text behind a title, a barely visible
+ * texture. Picking "what did the user double-click" prefers the solid layer above it.
+ */
+export function isFaintLayer(l: Layer): boolean {
+  return layerVisibility(l) < 0.5;
+}
+
+/**
+ * A layer that doesn't hide what is below it for "what text did the user double-click": blend-mode
+ * textures (halftone, grain, fold creases, scratches, ink spray…) and faint layers. Text layers and
+ * groups never are. Opaque Normal layers still stop the pick, so text hidden under the character
+ * isn't opened.
+ */
+export function isSeeThroughOverlay(l: Layer): boolean {
+  if (l.type === 'text' || l.type === 'group') return false;
+  return (l.blendMode ?? 'normal') !== 'normal' || isFaintLayer(l);
+}

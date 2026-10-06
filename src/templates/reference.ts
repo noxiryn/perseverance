@@ -85,8 +85,20 @@ export const gothicPaper = defineTemplate({
 
     b.group('Title', () => {
       const title = { fontFamily: BLACKLETTER_HEAVY, fontWeight: 700, fontSize: 200, anchor: 'center' as const, fitWidth: 560, lineHeight: 1.05 };
-      b.text('Birdcage', { ...title, x: 512 + 18, y: 40 + 14, fill: solid('#9a9a9a') }, { name: 'Title Ghost', opacity: 0.45 });
-      b.text('Birdcage', { ...title, x: 512, y: 40, fill: solid('#141414') }, { name: 'Title' });
+      const t = b.text('Birdcage', { ...title, x: 512, y: 40, fill: solid('#141414') }, { name: 'Title' });
+      // The faint offset duplicate behind the title is a layer style, so it follows every text / font
+      // edit (a second text layer kept the old word behind a retyped title). Offset (+18, +14):
+      // angle ≈ 142.125°, distance ≈ 22.8 px (offsetDir: x = −cos, y = sin).
+      const ghost = { x: 18, y: 14 };
+      b.effect(t, 'drop-shadow', {
+        color: '#9a9a9a',
+        opacity: 0.45,
+        angle: 180 - (Math.atan2(ghost.y, ghost.x) * 180) / Math.PI,
+        distance: Math.hypot(ghost.x, ghost.y),
+        spread: 0,
+        size: 0,
+        blendMode: 'normal',
+      });
     });
 
     const tendrils = b.asset(

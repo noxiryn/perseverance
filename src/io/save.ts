@@ -8,7 +8,7 @@ import { toast } from '../state/ui';
 import { safeFileName } from './math';
 import { encodeProjectSnapshot } from './project';
 import { addRecentFile, readRecentFiles } from './recent';
-import { removeRecovery } from './autosave';
+import { noteProjectSaved, removeRecovery } from './autosave';
 import { baseName, currentEntryId, markDirty, markSavedAt, renameDocSilently } from './util';
 
 export const PROJECT_FILTERS = [{ name: 'Perseverance Project', extensions: ['pgfx'] }];
@@ -125,6 +125,8 @@ export async function saveDocument(docId?: ID, opts: { saveAs?: boolean } = {}):
         written = false;
       }
       if (written) {
+        // Autosaved copies an earlier launch left for this file are now older than it (savedAfter).
+        void noteProjectSaved(s.filePath);
         markSavedAt(id, saved);
         addRecentFile(s.filePath);
         dropRecoveryIfClean(id);
@@ -137,6 +139,7 @@ export async function saveDocument(docId?: ID, opts: { saveAs?: boolean } = {}):
     const result = await saveFile({ title: 'Save As', defaultPath, filters: PROJECT_FILTERS, data, busyPaths });
     if (!result) return false; // cancelled
     if (isDesktop) {
+      void noteProjectSaved(result);
       detachOverwritten(id, result);
       useEditor.getState().setFilePath(id, result, false);
     }

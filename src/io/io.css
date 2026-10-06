@@ -472,6 +472,9 @@
   font-size: var(--fs-xs);
   margin-top: 3px;
 }
+.io-recover-item .io-recover-older {
+  color: var(--warning);
+}
 
 /* ---------- fill / stroke ---------- */
 .io-pattern-grid {

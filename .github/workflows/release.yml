@@ -70,6 +70,23 @@ jobs:
         if: runner.os == 'macOS'
         run: npx electron-builder --mac dmg --publish never
 
+      # The build is unsigned, so electron-builder skips code signing. Flipping the fuses rewrites a
+      # page of "Electron Framework", and an arm64 Mac refuses to launch an app whose ad-hoc signature
+      # no longer matches; build.electronFuses.resetAdHocDarwinSignature re-signs the bundle ad hoc.
+      # Fail here rather than publish a .dmg that cannot launch (the release job then goes out
+      # without it). release/mac = x64, release/mac-arm64 = arm64.
+      - name: Verify macOS signatures
+        if: runner.os == 'macOS'
+        run: |
+          set -e
+          found=0
+          for a in release/mac*/Perseverance.app; do
+            [ -d "$a" ] || continue
+            found=1
+            codesign --verify --deep --strict --verbose=2 "$a"
+          done
+          if [ "$found" = 0 ]; then echo "::error::No Perseverance.app found under release/mac*"; exit 1; fi
+
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: npx electron-builder --linux AppImage --publish never

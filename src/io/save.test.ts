@@ -38,7 +38,7 @@ vi.mock('../platform', async (importOriginal) => {
 
 const { saveDocument, defaultProjectSavePath, openProjectPaths } = await import('./save');
 const { encodeProject, loadProject } = await import('./project');
-const { autosaveNow, recoveryKey, resetAutosaveState, setRecoveryStore } = await import('./autosave');
+const { autosaveNow, listRecovery, memoryRecoveryStore, recoveryKey, resetAutosaveState, savedAfter, setRecoveryStore } = await import('./autosave');
 
 const nameIn = (data: ArrayBuffer) => (unpackContainer(data).header.document as Document).name;
 
@@ -49,7 +49,7 @@ beforeEach(() => {
   platform.answer = '/art/Poster.pgfx';
   useEditor.setState({ sessions: {}, docOrder: [], activeDocId: null });
   localStorage.clear();
-  setRecoveryStore({ getAll: async () => [], put: async () => undefined, delete: async () => undefined });
+  setRecoveryStore({ list: async () => [], get: async () => undefined, put: async () => undefined, delete: async () => undefined, supersede: async () => undefined });
 });
 
 describe('Save As names the document after the file', () => {
@@ -111,8 +111,8 @@ describe('opening a project', () => {
 
 describe('saving and this launch’s autosaved copy', () => {
   it('goes when the tab ends up clean, stays while an edit made during the save is unsaved', async () => {
-    const m = new Map<string, unknown>();
-    setRecoveryStore({ getAll: async () => [], put: async (e) => void m.set(e.id, e), delete: async (k) => void m.delete(k) });
+    const m = new Map<string, import('./autosave').RecoveryEntry>();
+    setRecoveryStore(memoryRecoveryStore(m));
     resetAutosaveState();
     const doc = createDocument({ name: 'Poster', width: 20, height: 10 });
     useEditor.getState().openDocument(doc, { filePath: '/art/Poster.pgfx' });
@@ -184,5 +184,55 @@ describe('Save As onto a project open in another tab', () => {
     expect(sb.dirty).toBe(false);
     expect(sa.filePath).toBeNull();
     expect(sa.dirty).toBe(true);
+  });
+});
+
+/**
+ * gate-fix-diff-review-1: saves are what make an earlier launch's autosaved copy of the project older
+ * than its file (the recovery dialog then opens it as a separate unsaved copy, never over the file).
+ */
+describe('saving marks earlier autosaved copies of the file as older', () => {
+  const crash = (id: string, filePath: string) => ({
+    id: `run_old:${id}`,
+    docId: id,
+    launchId: 'run_old',
+    name: 'Poster',
+    time: Date.now() - 60000,
+    width: 1,
+    height: 1,
+    data: new ArrayBuffer(8),
+    filePath,
+  });
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it('Save in place and Save As mark the entries for the written file (and only those)', async () => {
+    const m = new Map<string, import('./autosave').RecoveryEntry>();
+    m.set('run_old:a', crash('a', '/art/Poster.pgfx'));
+    m.set('run_old:b', crash('b', '/art/New.pgfx'));
+    m.set('run_old:c', crash('c', '/art/Other.pgfx'));
+    setRecoveryStore(memoryRecoveryStore(m));
+    const older = async () => Object.fromEntries((await listRecovery()).map((e) => [e.docId, savedAfter(e) !== null]));
+    expect(await older()).toEqual({ a: false, b: false, c: false });
+    const doc = createDocument({ name: 'Poster', width: 20, height: 10 });
+    useEditor.getState().openDocument(doc, { filePath: '/art/Poster.pgfx' });
+    expect(await saveDocument(doc.id)).toBe(true);
+    await settle();
+    expect(await older()).toEqual({ a: true, b: false, c: false });
+    platform.answer = '/art/New.pgfx';
+    expect(await saveDocument(doc.id, { saveAs: true })).toBe(true);
+    await settle();
+    expect(await older()).toEqual({ a: true, b: true, c: false });
+  });
+
+  it('a cancelled Save As marks nothing', async () => {
+    const m = new Map<string, import('./autosave').RecoveryEntry>();
+    m.set('run_old:a', crash('a', '/art/Poster.pgfx'));
+    setRecoveryStore(memoryRecoveryStore(m));
+    const doc = createDocument({ name: 'Poster', width: 20, height: 10 });
+    useEditor.getState().openDocument(doc);
+    platform.answer = null;
+    expect(await saveDocument(doc.id, { saveAs: true })).toBe(false);
+    await settle();
+    expect(m.get('run_old:a')!.supersededAt).toBeUndefined();
   });
 });

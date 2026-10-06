@@ -130,12 +130,12 @@ export function layersTopDown(doc: Document): ID[] {
 /**
  * Pick the topmost layer under a doc point. Uses the renderer's hitTestLayer first, then falls
  * back to a geometric test (raster alpha / text & shape boxes) so auto-select works even while
- * the renderer is incomplete.
+ * the renderer is incomplete. `ignore` skips layers the caller sees through (hitTestLayer).
  */
-export function pickLayer(doc: Document, x: number, y: number): ID | null {
+export function pickLayer(doc: Document, x: number, y: number, ignore?: (l: Layer) => boolean): ID | null {
   let hit: ID | null = null;
   try {
-    hit = hitTestLayer(doc, x, y);
+    hit = hitTestLayer(doc, x, y, ignore);
   } catch {
     hit = null;
   }
@@ -144,7 +144,7 @@ export function pickLayer(doc: Document, x: number, y: number): ID | null {
   for (const id of layersTopDown(doc)) {
     const l = doc.layers[id];
     if (!l || !isTransformable(l) || !isEffectivelyVisible(doc, id)) continue;
-    if (l.locks.all) continue;
+    if (l.locks.all || ignore?.(l)) continue;
     if (ancestorsOf(doc, id, parents).some((a) => doc.layers[a]?.locks.all)) continue;
     const { w, h, m } = layerFrame(l);
     const p = apply(invert(m), { x, y });

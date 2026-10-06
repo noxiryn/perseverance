@@ -157,7 +157,8 @@
       "enableNodeOptionsEnvironmentVariable": false,
       "enableNodeCliInspectArguments": false,
       "onlyLoadAppFromAsar": true,
-      "enableEmbeddedAsarIntegrityValidation": true
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "resetAdHocDarwinSignature": true
     },
     "fileAssociations": [
       {

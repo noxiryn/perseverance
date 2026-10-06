@@ -18,6 +18,9 @@ import {
   flushRecovery,
   isOwnEntry,
   listRecovery,
+  memoryRecoveryStore,
+  noteProjectSaved,
+  savedAfter,
   pendingRecovery,
   recoverEntries,
   recoveryKey,
@@ -31,15 +34,19 @@ import {
   type RecoveryStore,
 } from './autosave';
 
-/** In-memory stand-in for the IndexedDB store (jsdom has none). */
+/** In-memory stand-in for the IndexedDB store (jsdom has none); counts the data reads. */
 function memStore() {
   const m = new Map<string, RecoveryEntry>();
+  const base = memoryRecoveryStore(m);
+  const reads: string[] = [];
   const store: RecoveryStore = {
-    getAll: async () => [...m.values()],
-    put: async (e) => void m.set(e.id, e),
-    delete: async (k) => void m.delete(k),
+    ...base,
+    get: async (k) => {
+      reads.push(k);
+      return base.get(k);
+    },
   };
-  return { m, store };
+  return { m, store, reads };
 }
 
 const PATH = '/art/Poster.pgfx';
@@ -159,6 +166,7 @@ describe('recovering', () => {
 
   it('a project that is not open opens as a new document that saves back to its file', async () => {
     const old = await crashEntry('doc_q', 3);
+    await mem.store.put(old);
     await recoverEntries([old]);
     const s = session('doc_q');
     expect(s.doc.guides.length).toBe(3);
@@ -169,6 +177,7 @@ describe('recovering', () => {
 
   it('same id open as a different file: a separate document (fresh id), nothing replaced', async () => {
     const old = await crashEntry('doc_r', 4, '/art/A.pgfx');
+    await mem.store.put(old);
     useEditor.getState().openDocument(docWithGuides('doc_r', 0), { filePath: '/art/B.pgfx' });
     expect(recoveryTarget(old)).toBeNull();
     await recoverEntries([old]);
@@ -327,5 +336,112 @@ describe('writing the copies right before a forced quit (flushRecovery)', () => 
     await discardRecoveryFor(['doc_x']);
     expect(await flushRecovery()).toBe(0);
     expect(mem.m.size).toBe(0);
+  });
+});
+
+/**
+ * gate-fix-diff-review-1: a crash entry kept with "Later" outlives the reopened project being edited
+ * and saved. Offered later, it must never be bound to the file again (a Save would quietly replace the
+ * newer saved work with the stale copy, and Undo couldn't bring it back).
+ */
+describe('an entry older than the last save of its project file', () => {
+  it('recovers as a separate unsaved copy: the file is never bound to it', async () => {
+    const old = await crashEntry('doc_p', 5); // autosaved a minute ago
+    await mem.store.put(old);
+    // "Later"; Open Recent → Poster, 12 guides, Save (the project file is newer now), Close.
+    useEditor.getState().openDocument(docWithGuides('doc_p', 12), { filePath: PATH });
+    await noteProjectSaved(PATH);
+    useEditor.getState().closeDocument('doc_p');
+
+    // Next start: still offered, but known to be older than the file (the mark is on its info row).
+    const pending = await pendingRecovery();
+    expect(pending.map((e) => e.id)).toEqual([old.id]);
+    expect(savedAfter(pending[0])).not.toBeNull();
+
+    await recoverEntries(pending);
+    const all = Object.values(useEditor.getState().sessions);
+    expect(all.length).toBe(1);
+    const copy = all[0];
+    expect(copy.doc.guides.length).toBe(5);
+    expect(copy.dirty).toBe(true);
+    expect(copy.filePath).toBeNull(); // Save goes through Save As, never over Poster.pgfx
+    expect(copy.doc.name).toMatch(/^Poster \(autosaved .+\)$/);
+    // Kept under this launch's key, without the file and without the mark.
+    const kept = mem.m.get(recoveryKey(copy.doc.id))!;
+    expect([...mem.m.keys()]).toEqual([kept.id]);
+    expect(kept.filePath ?? null).toBeNull();
+    expect(kept.supersededAt).toBeUndefined();
+    expect(guidesIn(kept)).toBe(5);
+  });
+
+  it('with the newer project open: a separate tab, the open copy is left alone', async () => {
+    const old = await crashEntry('doc_p', 5);
+    await mem.store.put(old);
+    useEditor.getState().openDocument(docWithGuides('doc_p', 12), { filePath: PATH });
+    await noteProjectSaved(PATH);
+    const before = session('doc_p');
+    await recoverEntries(await pendingRecovery());
+    const open = session('doc_p');
+    expect(open).toBe(before); // not even an undoable step on the saved copy
+    expect(open.doc.guides.length).toBe(12);
+    expect(open.dirty).toBe(false);
+    const copy = Object.values(useEditor.getState().sessions).find((s) => s.doc.id !== 'doc_p')!;
+    expect(copy.doc.guides.length).toBe(5);
+    expect(copy.filePath).toBeNull();
+  });
+
+  it('an entry written after the last save still saves back to its file; opening alone changes nothing', async () => {
+    const old = await crashEntry('doc_q', 3); // a minute ago
+    await mem.store.put(old);
+    await noteProjectSaved(PATH, Date.now() - 120000); // that save came before the crash entry
+    const { addRecentFile } = await import('./recent');
+    addRecentFile(PATH); // reopening (Open Recent updates its time) is not a save
+    const [info] = await pendingRecovery();
+    expect(savedAfter(info)).toBeNull();
+    await recoverEntries([info]);
+    expect(session('doc_q').filePath).toBe(PATH);
+  });
+
+  it('a save marks only earlier launches’ entries for that file; never this launch’s own', async () => {
+    await mem.store.put(await crashEntry('doc_a', 1, PATH));
+    await mem.store.put(await crashEntry('doc_b', 2, '/art/Other.pgfx'));
+    await mem.store.put(await crashEntry('doc_n', 2, null));
+    useEditor.getState().openDocument(docWithGuides('doc_o', 0), { filePath: PATH });
+    edit('doc_o');
+    await autosaveNow();
+    await noteProjectSaved(PATH, Date.now() + 1000);
+    const byDoc = Object.fromEntries((await listRecovery()).map((e) => [e.docId, savedAfter(e) !== null]));
+    expect(byDoc).toEqual({ doc_a: true, doc_b: false, doc_n: false, doc_o: false });
+  });
+});
+
+/** gate-fix-diff-review-2: the start-up list must not load every entry's .pgfx data. */
+describe('the recovery list reads no project data', () => {
+  it('pendingRecovery lists infos only; recovering reads just the chosen entries', async () => {
+    const a = await crashEntry('doc_a', 1);
+    const b = await crashEntry('doc_b', 2, '/art/B.pgfx');
+    await mem.store.put(a);
+    await mem.store.put(b);
+    const pending = await pendingRecovery();
+    expect(pending.length).toBe(2);
+    for (const e of pending) {
+      expect('data' in e).toBe(false);
+      expect(e.bytes).toBe(mem.m.get(e.id)!.data.byteLength);
+    }
+    expect(mem.reads).toEqual([]);
+    await recoverEntries(pending.filter((e) => e.id === b.id));
+    expect(mem.reads).toEqual([b.id]);
+    expect(Object.values(useEditor.getState().sessions).map((s) => s.doc.guides.length)).toEqual([2]);
+  });
+
+  it('an entry deleted meanwhile is reported, the others are recovered', async () => {
+    const a = await crashEntry('doc_a', 1, '/art/A.pgfx');
+    const b = await crashEntry('doc_b', 2, '/art/B.pgfx');
+    await mem.store.put(a);
+    await mem.store.put(b);
+    const pending = await pendingRecovery();
+    mem.m.delete(a.id);
+    await recoverEntries(pending);
+    expect(Object.values(useEditor.getState().sessions).map((s) => s.filePath)).toEqual(['/art/B.pgfx']);
   });
 });

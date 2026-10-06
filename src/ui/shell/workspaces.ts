@@ -14,7 +14,7 @@
  */
 import { DEFAULT_WORKSPACE, useUI, type DockGroupState, type WorkspaceLayout } from '../../state/ui';
 import { useShell } from './shellStore';
-import { cssZoom } from './uiScale';
+import { cssZoom, useUiScaleState } from './uiScale';
 
 export const WORKSPACE_STORAGE_KEY = 'perseverance.workspace';
 
@@ -371,6 +371,21 @@ export function collapseForExpanded(prev: WorkspaceLayout, next: WorkspaceLayout
   return collapseToFit(layout, dockHeight, opened) ? layout : null;
 }
 
+/**
+ * The dock got another height without the user touching it (a UI scale change): collapse groups
+ * (middle first, then top; never the one holding Layers, never below two expanded) until the expanded
+ * ones get a comfortable body, then give the Layers group its ~4 rows. Null when nothing changes.
+ */
+export function refitLayout(l: WorkspaceLayout, dockHeight: number): WorkspaceLayout | null {
+  if (!Number.isFinite(dockHeight) || dockHeight <= 0) return null;
+  const layout = cloneLayout(l);
+  const keep = new Set(layout.groups.filter((gr) => gr.tabs.includes('layers')).map((gr) => gr.slot));
+  const collapsed = collapseToFit(layout, dockHeight, keep);
+  const sizes = layout.groups.map((gr) => gr.size).join();
+  keepLayersRoom(layout, dockHeight);
+  return collapsed || layout.groups.map((gr) => gr.size).join() !== sizes ? layout : null;
+}
+
 /** Dock height for the current window (CSS px): measured when the dock is shown, else estimated (window minus title + options bars). */
 function currentDockHeight(): number {
   if (typeof window === 'undefined') return 0;
@@ -424,6 +439,18 @@ export function initWorkspacePersistence() {
   } else {
     useUI.getState().setWorkspace(freshLayout(DEFAULT_WORKSPACE));
   }
+  // A UI scale change after start-up resizes the dock: refit the layout once the new size is laid out
+  // (a saved layout is never refitted at start-up).
+  let refit = 0;
+  useUiScaleState.subscribe((s, prev) => {
+    if (s.changes === prev.changes || typeof window === 'undefined') return;
+    window.clearTimeout(refit);
+    refit = window.setTimeout(() => {
+      const st = useUI.getState();
+      const next = refitLayout(st.workspace, currentDockHeight());
+      if (next) st.setWorkspace(next);
+    }, 120);
+  });
   useUI.subscribe((s, prev) => {
     if (s.workspace !== prev.workspace) {
       const fitted = collapseForExpanded(prev.workspace, s.workspace, currentDockHeight());

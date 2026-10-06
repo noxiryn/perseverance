@@ -579,6 +579,10 @@ export class DocBuilder {
     const family = resolveFont(fontFamily);
     const props: TextProps = {
       ...DEFAULT_TEXT,
+      // Centered / end-anchored text is aligned that way too, so a retyped or resized title keeps its
+      // centre / right edge (the type tool keeps a point text's alignment anchor fixed). One-line text
+      // renders the same with any alignment. An explicit `align` still wins.
+      align: anchor === 'center' ? 'center' : anchor === 'end' ? 'right' : DEFAULT_TEXT.align,
       ...rest,
       content,
       fontFamily: family,

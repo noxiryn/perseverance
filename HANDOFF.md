@@ -36,8 +36,11 @@ against its spec in ARCHITECTURE.md §3/§5, then fix what it finds. The code on
 starting point; don't rewrite modules from scratch.
 
 ## Integration status (latest)
-- Whole tree: `npx tsc -b` clean, `npx vitest run` 844 tests pass, `npx vite build` OK (dist ≈35 MB, mostly fonts).
-- `scripts/smoke.mjs` against `vite preview`: SMOKE OK (23 templates, 14 panels, all tools dragged, 293 commands, 0 errors).
+- Whole tree: `npx tsc -b` clean, `npx vitest run` 1373 tests pass, `npx vite build` OK (dist ≈35 MB, mostly fonts).
+- `scripts/smoke.mjs` against `vite preview`: SMOKE OK (23 templates, 14 panels, all tools dragged, 300 commands, 0 errors).
+- Release gate (latest): workflow-ui-check 22/22 (incl. first-user-1…5), template-determinism OK, dirty-rect OK,
+  electron-desktop-check --full 65/65, electron-recovery-check 47/47; NSIS build + wine install/uninstall leave
+  no perseverance-updater folder.
 - `xvfb-run -a node scripts/electron-smoke.mjs`: the real Electron app boots from dist/ with the desktop bridge, 0 errors.
 - Reference templates visually match the four reference styles.
 - All 13 modules done. In progress: perf (dirty-rect painting, hot filter LUTs) + Electron hardening workflow.
@@ -308,6 +311,32 @@ starting point; don't rewrite modules from scratch.
   lost". Entry writes resolve on transaction COMMIT with strict durability (before, a write or Discard's
   delete reported done could be lost when the window closed right after). Save drops the launch's own
   entry only when the tab ends up clean.
+  - **Entries older than their project file** (release gate gate-fix-diff-review-1): a crash entry kept with
+    "Later" / Escape outlived the reopened project being edited and saved, and was offered again ticked,
+    Enter = Recover, bound to the file — the next Save (or the quit prompt's primary button) replaced the
+    newer saved work, and Undo couldn't reach it (the new tab's history starts at "Recovered"). A save
+    (in place or Save As) now marks the earlier launches' entries for the written file that are older than
+    the save (`noteProjectSaved` → `supersededAt` on their 'meta' row, one strict-durability IndexedDB
+    transaction — a localStorage record was tried first, but Chromium commits localStorage seconds later,
+    so a crash right after the save lost it; paths compared with `samePath`). Opening a project does NOT
+    count (Open Recent's time would mark a real crash entry older). Such an entry (`savedAfter`) is offered unticked,
+    labelled "Older than the version you saved …", Enter doesn't recover it (only ticked newer entries
+    submit), and Recover opens it as a separate unsaved document "Poster (autosaved Oct 6)" — never bound
+    to the file, never applied to the open copy (Save goes through Save As). Entry `time` is now the moment
+    the state was taken (not when the write ended). Not covered: a file replaced outside the app (no mtime
+    check; would need a main-process stat of granted paths).
+  - **The start-up list reads no project data** (gate-fix-diff-review-2): every start loaded every entry's
+    .pgfx (6–14 MB each) just to list them (+≈13 MB RSS / +75–190 ms per kept entry). The database is now
+    version 2: 'docs' (full entries) + 'meta' (the same without `data`, plus `bytes`), written and deleted
+    in one strict transaction (put-then-delete order kept for `discardRecoveryFor`); the upgrade indexes
+    existing entries once. `listRecovery` / `pendingRecovery` read 'meta' only; `recoverEntries` reads an
+    entry's data right before decoding it (an entry deleted meanwhile is reported, the others recovered).
+    No silent pruning (the release review removed exactly that); duplicates can't arise (Recover moves an
+    entry). `RecoveryStore` is `{ list, get, put, delete }` (`memoryRecoveryStore` for tests).
+  Tests: `src/io/autosave.test.ts` (older-than-file: unbound copy, open copy untouched, newer entries still
+  bind, Open Recent isn't a save, only earlier launches' entries for that file are marked; list reads no
+  data), `src/io/save.test.ts` (Save in place / Save As mark the written file's entries, a cancelled Save As
+  doesn't).
 - **Opening and naming** (packaged-app-1/-2, electron-security-3): a project is named after its file when
   opened (like Photoshop); Save As also rewrites the file under the chosen name (same snapshot re-packed,
   `encodeProjectSnapshot`). A file dropped from Explorer/Finder opens like File ▸ Open: the preload reads
@@ -322,8 +351,11 @@ starting point; don't rewrite modules from scratch.
   for the session (embedded in a friend's project, or added while font storage was unavailable); My
   Templates embed every user font; recovery and user templates report still-missing fonts.
   Real-app check for all of the above: `scripts/electron-recovery-check.mjs` (crash, quit, forced, drop,
-  name, fonts, overwrite — 40 checks; the 363ced4 build fails them; polls instead of fixed waits and
-  never hangs on a dirty document at exit).
+  name, fonts, overwrite — the 363ced4 build fails them; polls instead of fixed waits and never hangs on a
+  dirty document at exit). The crash scenario now also covers the older-than-file entry (offered unticked
+  and labelled, Enter does nothing, Recover opens a separate copy, the file keeps the newer work) and then a
+  newer crash entry that Recover still adds to the open project as an undoable step; its IndexedDB reader
+  opens whatever version the app created and checks every entry has its 'meta' row.
 - **Templates render the same whatever ran before** (`src/templates/builder.ts`): the Group Banner
   hashed 9cf38442 alone and a57b737c after the other templates (Noir and Versus differed too). Two
   causes: (1) placeholder characters — the canvas ÷ figure height ratio per pose was measured by
@@ -354,6 +386,22 @@ starting point; don't rewrite modules from scratch.
   cancelled promise), and a visible card re-requests a preview that was cancelled (not one that
   failed). Before, closing the dialog early left 8 of 10 start-screen cards without art for the
   session. Tests: `src/templates/previews.test.ts`.
+- **macOS builds keep a valid signature** (release gate gate-installer-1): CI builds the .dmg unsigned
+  (`CSC_IDENTITY_AUTO_DISCOVERY=false`), so electron-builder skips code signing — but flipping the fuses
+  rewrites a page of "Electron Framework", whose ad-hoc signature then no longer matches (verifier: 1 bad
+  page, the fuse wire), and Apple Silicon kills such an app at launch. `build.electronFuses.resetAdHocDarwinSignature:
+  true` makes @electron/fuses run `codesign --sign - --force --deep` on the .app right after flipping (only
+  for paths containing ".app": Windows/Linux unaffected; a Mac target cross-built on Linux now needs
+  `codesign`, CI builds it on macos-latest). release.yml verifies `codesign --verify --deep --strict` on
+  release/mac*/Perseverance.app after packaging, so a broken signature fails the macOS job (the Release then
+  goes out without the .dmg) instead of shipping. Not run here (no Mac): the next manual workflow run checks it.
+- **No updater copy of the installer** (gate-installer-2): electron-builder's stock NSIS script copies the
+  Setup exe (≈143 MB) to %LOCALAPPDATA%\perseverance-updater\installer.exe for electron-updater, which this
+  app doesn't use (`build.publish: null`), and the uninstaller never removed it. `build/installer.nsh`
+  (included by default) deletes it right after it is made (`customInstall`, per-user context also in
+  all-users mode) and removes the folder on uninstall (`customUnInstall`, also cleans older installs).
+  Verified under wine by the gate verifier (install / upgrade / all-users / uninstall); if an auto-updater is
+  ever added, drop the customInstall half. Guards: `src/platform/buildConfig.test.ts`.
 - **CI / installers**: Build installers is green since f6ce5d3 (Windows case-clash rename b4d8728 +
   electron-builder caches outside the repo). No GitHub Release exists yet, and the macOS/Linux jobs
   have never run (they only run on tags / manual dispatch). Maintainer steps (need the owner's
@@ -364,6 +412,44 @@ starting point; don't rewrite modules from scratch.
   on disk is a local build of the current electron/ code (`WINEDEBUG=-all npx electron-builder --win
   nsis --x64 --publish never`, with embedded asar integrity), not a release artifact. README: sharing
   leads with sending the Setup .exe itself.
+
+## Release gate — first-user fixes (scripts/workflow-ui-check.mjs first-user-1…5; each fails on 0885633)
+- **Double-click edits the text under the pointer** (gate-first-user-1): the Move tool's double-click picked
+  the text with a pixel hit test that stopped at the topmost layer with ink there — Sunburst / Noir / Horror /
+  Group Banner / Anime lay full-canvas textures (Halftone, Fold Creases, Ink Spray, Grain, Scratches in
+  Multiply / Overlay / Screen) over their titles, so double-clicking those titles did nothing (README
+  quickstart step 4). Both handlers (src/viewport/tools/move.ts `textLayerAt`, the type module's window
+  fallback `textLayerForDoubleClick`) now pick with `hitTestLayer(…, isSeeThroughOverlay)` (blend-mode or
+  faint non-text layers are looked through; opaque Normal layers still stop it, so text hidden under the
+  character isn't opened); a faint hit text (Crimson's 0.42 kanji behind the title) gives way to a solid
+  text layer above whose box contains the point; the active-layer preference is unchanged. Move-tool
+  auto-select / hover outline keep picking textures (no predicate). Tests: `src/render/hitTestIgnore.test.ts`;
+  runtime: 45/45 glyph double-clicks on 7 templates open the right layer (21/45 before).
+- **Gothic title ghost follows the title** (gate-first-user-2): the offset grey duplicate was a second text
+  layer "Title Ghost" = "Birdcage", left behind by every retitle / font change (and exported). It is now the
+  Title's drop shadow (#9a9a9a, 45 %, Normal, size 0, offset exactly (+18, +14)): render within 3 levels of
+  the old template (5 087 channel values differ, none by more than 3), editable in PSD exports. All other
+  templates render bit-identical (template-determinism hashes compared with 0885633).
+- **Backdrops go behind the artwork** (gate-first-user-3): Libraries ▸ Backgrounds assets (and any Normal
+  asset that covers the canvas: Roblox Studs, Baseplate Grid, Obby Checker, Concrete) were inserted above the
+  active layer — after Pose Studio / a template that is the character, which they hid. `placeAsset` now puts
+  them at the root just above the bottom run of background layers (a Normal fill, a canvas-covering opaque
+  raster or Backgrounds asset, a group whose bottom layer is one — the templates' Paper / Film / Background
+  groups), else at the very bottom (`goesBehind`, `isBackdropLayer`, `behindSlot`; a toast says so). Drag &
+  drop and Place Asset go through it too. Textures and partial overlays still go above the active layer.
+  Tests: `src/assets/placeBehind.test.ts`.
+- **Centered titles stay centered** (gate-first-user-4): DocBuilder.text() turned `anchor: 'center' | 'end'`
+  into a left position but kept align left, so the type tool kept the LEFT edge fixed on retyping. Anchored
+  text is now aligned that way (explicit `align` still wins); 20 template layers changed align only, all
+  one-line, so renders are identical. Tests: `src/templates/builder.test.ts`.
+- **UI scale fits the window** (gate-first-user-5): 150 % on 1366×768 left a 911×512 UI (below the app's
+  own 1024×640 minimum) with the Layers list pushed out of the dock. The applied scale is now the largest
+  offered step that keeps ≥ 1024×640 CSS px (never below 100 %; ≤ 100 % untouched; re-checked on resize;
+  the preference is kept for larger windows) — `fittingUiScale`, `windowSize100`, `useUiScaleState`
+  (src/ui/shell/uiScale.ts). Preferences marks "150% (needs a larger window)" and says "Using 110% — …".
+  When the applied scale changes the dock is refitted (`refitLayout`: middle/top collapse, never the Layers
+  group, Layers keeps ~4 rows) and the document is fitted again. Tests: `src/ui/shell/shell.test.ts`,
+  `src/ui/shell/layout.test.ts`.
 
 ## Desktop hardening (electron/, checked with scripts/electron-desktop-check.mjs — 65 checks)
 - Security: sandbox + contextIsolation, no Node in the renderer, IPC sender-frame + type checks.

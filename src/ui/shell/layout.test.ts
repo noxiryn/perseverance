@@ -18,6 +18,7 @@ import {
   LEGACY_PRESETS,
   migrateLayouts,
   parsePersisted,
+  refitLayout,
   workspacePreset,
 } from './workspaces';
 
@@ -280,5 +281,36 @@ describe('tips guide', () => {
     expect(TIPS_STEPS.slice(2).every((s) => s.needsDoc)).toBe(true);
     // The verifier's case: remembered "Give it a look" (index 4) with no document open.
     expect(initialStep('4', TIPS_STEPS, false)).toBe(0);
+  });
+});
+
+/**
+ * gate-first-user-5: a UI scale change resizes the dock under a layout fitted for the old height (all
+ * three groups expanded at 100 % on 1366×768 → Layers pushed out of a 446 px dock at 150 %). The
+ * layout is refitted then: secondary groups collapse (never the Layers group) and Layers keeps ~4 rows.
+ */
+describe('refitLayout (the dock height changed under the layout)', () => {
+  it('a 1600×960 layout in the 125 % dock of the same window: middle collapses, Layers keeps its rows', () => {
+    const ess = fitLayoutToHeight(DEFAULT_WORKSPACE, DOCK_1600);
+    expect(ess.groups.every((g) => !g.collapsed)).toBe(true);
+    const dock = Math.round(960 / 1.25) - 66;
+    const next = refitLayout(ess, dock)!;
+    expect(next).not.toBeNull();
+    expect(group(next, 'middle').collapsed).toBe(true);
+    const layers = next.groups.find((g) => g.tabs.includes('layers'))!;
+    expect(layers.collapsed).toBe(false);
+    expect(heights(next, dock)[layers.slot] - 30).toBeGreaterThanOrEqual(LAYERS_MIN_BODY - 0.5);
+  });
+
+  it('never collapses the group holding Layers, wherever it is', () => {
+    const custom = { ...DEFAULT_WORKSPACE, groups: DEFAULT_WORKSPACE.groups.map((g) => ({ ...g, tabs: g.slot === 'middle' ? ['layers', 'swatches'] : g.tabs.filter((t) => t !== 'layers') })) };
+    const next = refitLayout(custom, 500)!;
+    expect(group(next, 'middle').collapsed).toBe(false);
+    expect(next.groups.filter((g) => g.tabs.length && !g.collapsed).length).toBe(2);
+  });
+
+  it('nothing to do when the layout already fits', () => {
+    expect(refitLayout(fitLayoutToHeight(DEFAULT_WORKSPACE, DOCK_1366), DOCK_1366)).toBeNull();
+    expect(refitLayout(DEFAULT_WORKSPACE, 0)).toBeNull();
   });
 });

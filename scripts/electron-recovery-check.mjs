@@ -5,8 +5,12 @@
  *
  *  crash   crash (SIGKILL) with an autosaved project, then reopen it by double-click (argv): the
  *          recovery offer still appears; "Later", Save and Close on the reopened copy keep the crash
- *          entry; the next start offers it again and Recover adds it to the open copy as an undoable
- *          step that saves back to the file (app-logic-diff-1).
+ *          entry (app-logic-diff-1). The next start offers it again, but as older than the version
+ *          saved since: unticked, Enter doesn't recover it, Recover opens a separate unsaved copy and
+ *          the newer file is never replaced (gate-fix-diff-review-1). New unsaved work + another crash:
+ *          that copy is newer than the file, so Recover adds it to the open copy as an undoable step
+ *          that saves back to the file. Entries carry their list info ('meta' store,
+ *          gate-fix-diff-review-2).
  *  quit    the native "Quit Anyway" (close again while the unsaved-changes prompt is open) and a
  *          Windows session end keep the autosaved copy and the next start offers it — with an edit
  *          made after the last autosave; the in-app Discard deletes it (packaged-app-5,
@@ -153,19 +157,42 @@ const idb = (page) =>
   page.evaluate(
     () =>
       new Promise((res) => {
-        const r = indexedDB.open('perseverance-recovery', 1);
+        // No version: whatever the app created (2: 'docs' + 'meta'). Closed right away so it never
+        // blocks the app's own upgrade.
+        const r = indexedDB.open('perseverance-recovery');
         r.onsuccess = () => {
           const db = r.result;
-          if (!db.objectStoreNames.contains('docs')) return res([]);
-          const q = db.transaction('docs').objectStore('docs').getAll();
-          q.onsuccess = () =>
+          if (!db.objectStoreNames.contains('docs')) {
+            db.close();
+            return res([]);
+          }
+          const stores = db.objectStoreNames.contains('meta') ? ['docs', 'meta'] : ['docs'];
+          const t = db.transaction(stores);
+          const q = t.objectStore('docs').getAll();
+          const m = stores.length > 1 ? t.objectStore('meta').getAllKeys() : null;
+          t.oncomplete = () => {
+            db.close();
+            const metaKeys = m ? new Set(m.result) : null;
             res(
               q.result.map((e) => {
                 const n = new DataView(e.data).getUint32(6, true);
                 const hdr = JSON.parse(new TextDecoder().decode(new Uint8Array(e.data, 10, n)));
-                return { key: e.id, launch: e.launchId ?? null, guides: hdr.document.guides.length, path: e.filePath ?? null, fonts: (hdr.fonts ?? []).map((f) => f.family) };
+                return {
+                  key: e.id,
+                  launch: e.launchId ?? null,
+                  guides: hdr.document.guides.length,
+                  path: e.filePath ?? null,
+                  fonts: (hdr.fonts ?? []).map((f) => f.family),
+                  // The recovery list reads only 'meta': every entry needs its info row.
+                  meta: metaKeys ? metaKeys.has(e.id) : null,
+                };
               }),
             );
+          };
+          t.onerror = () => {
+            db.close();
+            res([]);
+          };
         };
         r.onerror = () => res([]);
       }),
@@ -248,7 +275,7 @@ if (only.includes('crash')) {
   await poll(async () => fs.existsSync(poster));
   await addGuides(c.page, 5);
   const crashEntry = await poll(async () => (await idb(c.page)).find((e) => e.guides === 5), 40000, 1000);
-  check('autosave wrote the unsaved work', !!crashEntry, crashEntry);
+  check('autosave wrote the unsaved work (data + list info)', !!crashEntry && crashEntry.meta === true, crashEntry);
   c.app.process().kill('SIGKILL');
   await wait(1500);
 
@@ -276,27 +303,94 @@ if (only.includes('crash')) {
   await closeWindow(c.app);
   await Promise.race([c.exited, wait(8000)]);
 
-  // Next double-click: offered again; Recover adds it to the open copy as one undoable step.
+  // Next double-click: offered again — but the file was saved after that autosave (1 guide on disk, newer
+  // than the 5-guide copy). The copy must never be bound to the file again: unticked, labelled older
+  // than the saved version, Enter doesn't recover it, and Recover opens it as a separate unsaved copy, so
+  // a Save can't quietly replace the newer file (gate-fix-diff-review-1).
   c = await launch('cfg-crash', [poster]);
   await poll(async () => /Recover unsaved documents\?/.test(await dialogText(c.page)), 10000);
   await poll(async () => (await sessions(c.page)).some((s) => s.path === poster), 8000);
   await wait(500);
-  check('offered again on the next start', /Recover unsaved documents\?/.test(await dialogText(c.page)));
+  const text3 = await dialogText(c.page);
+  const ticked3 = await c.page.evaluate(() => [...document.querySelectorAll('.ui-dialog .io-recover-item input[type=checkbox]')].map((x) => x.checked));
+  check(
+    'offered again on the next start, as older than the version saved since (unticked, not “Open now as”)',
+    /older than the version of the project you saved since/.test(text3) && /Older than the version you saved/.test(text3) && !/Open now as/.test(text3) && ticked3.length === 1 && !ticked3[0],
+    { text: text3.slice(0, 320), ticked3 },
+  );
+  await c.page.keyboard.press('Enter');
+  await wait(800);
+  const afterEnter = await sessions(c.page);
+  check(
+    'Enter does not recover the older copy',
+    /Recover unsaved documents\?/.test(await dialogText(c.page)) && afterEnter.length === 1 && afterEnter[0].guides === 1 && !afterEnter[0].dirty,
+    afterEnter,
+  );
+  await c.page.click('.ui-dialog .io-recover-item input[type=checkbox]');
+  await clickDialogButton(c.page, 'Recover');
+  const copy = await poll(async () => (await sessions(c.page)).find((s) => s.path === null && s.guides === 5), 15000);
+  const all3 = await sessions(c.page);
+  const open3 = all3.find((s) => s.path === poster);
+  check(
+    'Recover opens it as a separate unsaved copy; the open project is untouched',
+    !!copy && copy.dirty && /^Poster \(autosaved .+\)$/.test(copy.name) && all3.length === 2 && open3?.guides === 1 && !open3.dirty && open3.last !== 'Recover Autosaved Changes',
+    all3,
+  );
+  // Save on the copy asks where (cancelled here): the newer file is never replaced.
+  await c.page.evaluate((id) => window.__app.useEditor.getState().setActiveDoc(id), copy?.id);
+  const savesBefore = (await T_(c.app)).saves.length;
+  await run(c.page, 'file.save');
+  await poll(async () => (await T_(c.app)).saves.length > savesBefore, 8000);
+  check('Save on the copy goes through Save As; the file keeps the newer work (1 guide)', (await T_(c.app)).saves.length > savesBefore && pgfxHeader(poster).guides.length === 1, {
+    saves: (await T_(c.app)).saves,
+    guides: pgfxHeader(poster).guides.length,
+  });
+  const kept3 = await idb(c.page);
+  check('the copy is kept under this launch without the file; the old entry is gone', kept3.length === 1 && kept3[0].guides === 5 && kept3[0].path === null && kept3[0].meta !== false, kept3);
+  check('no page errors (older copy)', c.errors.length === 0, c.errors.slice(0, 3));
+  // Throw the copy away, then make new unsaved work on the project and crash again.
+  const copyId = copy?.id;
+  await c.page.evaluate((id) => {
+    const ed = window.__app.useEditor.getState();
+    ed.markSaved(id); // close without the prompt
+    ed.closeDocument(id);
+  }, copyId);
+  await poll(async () => (await idb(c.page)).length === 0, 10000);
+  await c.page.evaluate(() => {
+    const ed = window.__app.useEditor.getState();
+    const s = Object.values(ed.sessions)[0];
+    if (s) ed.setActiveDoc(s.doc.id);
+  });
+  await addGuides(c.page, 2);
+  const crash2 = await poll(async () => (await idb(c.page)).find((e) => e.guides === 3 && e.path === poster), 40000, 1000);
+  check('autosave wrote the new unsaved work on the project (3 guides)', !!crash2, crash2);
+  c.app.process().kill('SIGKILL');
+  await wait(1500);
+
+  // Double-click again: this entry is newer than the file. Recover adds it to the open copy as one
+  // undoable step that saves back to the file (app-logic-diff-1).
+  c = await launch('cfg-crash', [poster]);
+  await poll(async () => /Recover unsaved documents\?/.test(await dialogText(c.page)), 10000);
+  await poll(async () => (await sessions(c.page)).some((s) => s.path === poster), 8000);
+  await wait(500);
+  const text4 = await dialogText(c.page);
+  const ticked4 = await c.page.evaluate(() => [...document.querySelectorAll('.ui-dialog .io-recover-item input[type=checkbox]')].map((x) => x.checked));
+  check('a copy newer than the file is offered ticked, “Open now as” the open project', /Open now as “Poster”/.test(text4) && !/Older than/.test(text4) && ticked4.join() === 'true', { text: text4.slice(0, 260), ticked4 });
   await clickDialogButton(c.page, 'Recover');
   // Decoding and applying the 13 MB entry takes 1–2 s (more on a loaded machine).
   await sessionOn(c.page, poster, (s) => s.last === 'Recover Autosaved Changes');
   const rec = await sessions(c.page);
   const onFile = rec.filter((s) => s.path === poster);
-  check('Recover adds the changes to the open copy (one tab, dirty, undoable step)', onFile.length === 1 && onFile[0].guides === 5 && onFile[0].dirty && onFile[0].last === 'Recover Autosaved Changes', rec);
+  check('Recover adds the changes to the open copy (one tab, dirty, undoable step)', rec.length === 1 && onFile.length === 1 && onFile[0].guides === 3 && onFile[0].dirty && onFile[0].last === 'Recover Autosaved Changes', rec);
   await c.page.evaluate(() => window.__app.useEditor.getState().undo());
   const undone = (await sessions(c.page)).find((s) => s.path === poster);
   await c.page.evaluate(() => window.__app.useEditor.getState().redo());
   check('Undo goes back to the file’s version', undone?.guides === 1 && !undone.dirty, undone);
   await run(c.page, 'file.save');
-  await poll(async () => pgfxHeader(poster).guides.length === 5 && (await idb(c.page)).length === 0, 15000);
+  await poll(async () => pgfxHeader(poster).guides.length === 3 && (await idb(c.page)).length === 0, 15000);
   const saved = pgfxHeader(poster);
   const left = await idb(c.page);
-  check('Save writes the recovered work to the file; no entry left', saved.guides.length === 5 && left.length === 0, { guides: saved.guides.length, left });
+  check('Save writes the recovered work to the file; no entry left', saved.guides.length === 3 && left.length === 0, { guides: saved.guides.length, left });
   check('no page errors (crash scenario)', c.errors.length === 0, c.errors.slice(0, 3));
   await exitApp(c);
 }

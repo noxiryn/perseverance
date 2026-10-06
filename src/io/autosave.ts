@@ -10,6 +10,17 @@
  * crash, a forced quit ("Quit Anyway"), Windows shutting down, a renderer reload — are offered on the
  * next start, also when the same project is already open, and stay until the user recovers or
  * discards them ("Later" keeps them for the next start).
+ *
+ * An entry older than the last save of its project file (the user kept it with "Later", then reopened,
+ * edited and saved the project) is never bound to that file again: a save marks the earlier launches'
+ * entries for that file (`noteProjectSaved` → `supersededAt`, in IndexedDB with strict durability, so
+ * a crash right after the save keeps the mark); such an entry is offered unticked, labelled as older
+ * than the saved version, and recovers as a separate unsaved copy (`savedAfter`), so a later Save
+ * can't replace the newer file with it.
+ *
+ * Storage: the full entries (with their .pgfx data) live in the 'docs' store, and their info without
+ * the data in 'meta' — written and deleted in the same transaction. The start-up list reads only
+ * 'meta'; an entry's data is read when it is recovered.
  */
 import type { DocSession, Document, ID } from '../core/types';
 import { uid } from '../core/ids';
@@ -22,7 +33,10 @@ import { reportProjectFonts } from './projectFonts';
 import { currentEntryId, idle, markDirty, readJSON, readPref, writeJSON } from './util';
 
 const DB_NAME = 'perseverance-recovery';
+/** 1: 'docs' only. 2: + 'meta' (the entries without their data). */
+const DB_VERSION = 2;
 const STORE = 'docs';
+const META = 'meta';
 
 export interface RecoveryEntry {
   /** Storage key: `<launchId>:<docId>` (entries written by older versions: the document id). */
@@ -40,6 +54,23 @@ export interface RecoveryEntry {
   thumb?: string;
   /** Project path on disk (desktop), so a recovered document saves back to its file. */
   filePath?: string | null;
+  /**
+   * When the project file was saved after this entry was written (by a later launch): the entry holds
+   * an older state than the file. Kept on the info row ('meta') only.
+   */
+  supersededAt?: number;
+}
+
+/** What the recovery list shows: an entry without its .pgfx data (`bytes` = its size). */
+export type RecoveryInfo = Omit<RecoveryEntry, 'data'> & { bytes: number };
+
+/** What identifies an entry and its document (a full entry or its info). */
+export type RecoveryRef = Pick<RecoveryEntry, 'id' | 'docId' | 'launchId' | 'name' | 'time' | 'filePath' | 'supersededAt'>;
+
+/** The info of an entry (everything but its data). */
+export function recoveryInfo(e: RecoveryEntry): RecoveryInfo {
+  const { data, ...rest } = e;
+  return { ...rest, bytes: data.byteLength };
 }
 
 /** This launch (page load). A renderer reload is a new launch: the previous page's entries are offered. */
@@ -51,13 +82,39 @@ export function recoveryKey(docId: ID): string {
 }
 
 /** The id of the document an entry holds. */
-export function entryDocId(e: RecoveryEntry): ID {
+export function entryDocId(e: RecoveryRef): ID {
   return e.docId ?? e.id;
 }
 
 /** True for entries written by this launch (they describe documents open right now). */
-export function isOwnEntry(e: RecoveryEntry): boolean {
+export function isOwnEntry(e: RecoveryRef): boolean {
   return e.launchId === LAUNCH_ID;
+}
+
+/* ---------------- project saves (stale entries) ---------------- */
+
+/**
+ * A project file was written (Save / Save As): mark the entries earlier launches left for that file,
+ * written before `time`, as older than the file (`supersededAt`). Only saves count — opening a project
+ * (Open Recent's `time`) doesn't make a crash entry older than the file. Never throws.
+ */
+export async function noteProjectSaved(path: string, time = Date.now()): Promise<void> {
+  if (!path) return;
+  try {
+    await store.supersede((e) => !isOwnEntry(e) && typeof e.filePath === 'string' && samePath(e.filePath, path) && e.time < time, time);
+  } catch (err) {
+    console.warn('[io] could not mark autosaved copies older than the saved project', err);
+  }
+}
+
+/**
+ * When the entry's project file was saved after the entry was written (null when it wasn't, the entry
+ * has no file, or it is this launch's own). Such an entry recovers as a separate unsaved copy.
+ */
+export function savedAfter(e: RecoveryRef): number | null {
+  if (isOwnEntry(e) || typeof e.filePath !== 'string' || !e.filePath) return null;
+  const t = e.supersededAt;
+  return typeof t === 'number' && Number.isFinite(t) && t > e.time ? t : null;
 }
 
 /** Small composite preview for the recovery list (never throws). */
@@ -81,9 +138,15 @@ function thumbnailOf(doc: Document): string | undefined {
 
 /** Where entries live: IndexedDB in the app, an in-memory stand-in in unit tests. */
 export interface RecoveryStore {
-  getAll(): Promise<RecoveryEntry[]>;
+  /** Every entry's info — never the .pgfx data (the start-up list must stay cheap). */
+  list(): Promise<RecoveryInfo[]>;
+  /** One entry with its data (undefined when it is gone). */
+  get(key: string): Promise<RecoveryEntry | undefined>;
+  /** Write an entry: its data and its info together. */
   put(e: RecoveryEntry): Promise<void>;
   delete(key: string): Promise<void>;
+  /** Set `supersededAt = time` on the info of every entry `match` accepts (a project file was saved). */
+  supersede(match: (e: RecoveryInfo) => boolean, time: number): Promise<void>;
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -92,11 +155,32 @@ function openDB(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
     if (typeof indexedDB === 'undefined') return reject(new Error('IndexedDB unavailable'));
-    const req = indexedDB.open(DB_NAME, 1);
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
-      if (!req.result.objectStoreNames.contains(STORE)) req.result.createObjectStore(STORE, { keyPath: 'id' });
+      const db = req.result;
+      const t = req.transaction!;
+      const docs = db.objectStoreNames.contains(STORE) ? t.objectStore(STORE) : db.createObjectStore(STORE, { keyPath: 'id' });
+      if (db.objectStoreNames.contains(META)) return;
+      const meta = db.createObjectStore(META, { keyPath: 'id' });
+      // Entries written before the info store existed: index them once (same upgrade transaction).
+      const cursor = docs.openCursor();
+      cursor.onsuccess = () => {
+        const c = cursor.result;
+        if (!c) return;
+        const e = c.value as RecoveryEntry;
+        if (e && typeof e.id === 'string' && e.data instanceof ArrayBuffer) meta.put(recoveryInfo(e));
+        c.continue();
+      };
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      // A newer version in another tab must not wait for this one.
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
     req.onerror = () => reject(req.error ?? new Error('IndexedDB open failed'));
   });
   dbPromise.catch(() => (dbPromise = null));
@@ -109,40 +193,86 @@ function openDB(): Promise<IDBDatabase> {
  * transaction still open at that moment is lost. Writes ask for strict durability (flushed to disk, not
  * left in OS buffers), so a power cut or Windows ending the session can't lose an entry reported stored.
  */
-function tx<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+function tx<T>(mode: IDBTransactionMode, fn: (t: IDBTransaction) => () => T): Promise<T> {
   return openDB().then(
     (db) =>
       new Promise<T>((resolve, reject) => {
-        const t = mode === 'readwrite' ? db.transaction(STORE, mode, { durability: 'strict' }) : db.transaction(STORE, mode);
-        const req = fn(t.objectStore(STORE));
-        const fail = () => reject(req.error ?? t.error ?? new Error('IndexedDB transaction failed'));
-        t.oncomplete = () => resolve(req.result);
+        // Both stores in every transaction: an entry's data and info change together, and read-write
+        // transactions with overlapping scopes run in the order they are created.
+        const t = mode === 'readwrite' ? db.transaction([STORE, META], mode, { durability: 'strict' }) : db.transaction([STORE, META], mode);
+        const result = fn(t);
+        const fail = () => reject(t.error ?? new Error('IndexedDB transaction failed'));
+        t.oncomplete = () => resolve(result());
         t.onerror = fail;
         t.onabort = fail;
       }),
   );
 }
 
-// Read-write transactions on the store run in the order they are created, so a delete issued after a
+// Read-write transactions on the stores run in the order they are created, so a delete issued after a
 // put always wins (see discardRecoveryFor).
 const idbStore: RecoveryStore = {
-  getAll: () => tx<RecoveryEntry[]>('readonly', (s) => s.getAll() as IDBRequest<RecoveryEntry[]>),
-  put: (e) => tx('readwrite', (s) => s.put(e)).then(() => undefined),
-  delete: (key) => tx('readwrite', (s) => s.delete(key)).then(() => undefined),
+  list: () =>
+    tx('readonly', (t) => {
+      const r = t.objectStore(META).getAll();
+      return () => r.result as RecoveryInfo[];
+    }),
+  get: (key) =>
+    tx('readonly', (t) => {
+      const r = t.objectStore(STORE).get(key);
+      return () => r.result as RecoveryEntry | undefined;
+    }),
+  put: (e) =>
+    tx('readwrite', (t) => {
+      t.objectStore(STORE).put(e);
+      t.objectStore(META).put(recoveryInfo(e));
+      return () => undefined;
+    }),
+  delete: (key) =>
+    tx('readwrite', (t) => {
+      t.objectStore(STORE).delete(key);
+      t.objectStore(META).delete(key);
+      return () => undefined;
+    }),
+  supersede: (match, time) =>
+    tx('readwrite', (t) => {
+      const cursor = t.objectStore(META).openCursor();
+      cursor.onsuccess = () => {
+        const c = cursor.result;
+        if (!c) return;
+        const info = c.value as RecoveryInfo;
+        if (info && match(info) && !((info.supersededAt ?? -Infinity) >= time)) c.update({ ...info, supersededAt: time });
+        c.continue();
+      };
+      return () => undefined;
+    }),
 };
 
 let store: RecoveryStore = idbStore;
+
+/** In-memory entry storage over `m` (unit tests; jsdom has no IndexedDB). `list` returns infos only, like IndexedDB's 'meta'. */
+export function memoryRecoveryStore(m = new Map<string, RecoveryEntry>()): RecoveryStore {
+  return {
+    list: async () => [...m.values()].map(recoveryInfo),
+    get: async (k) => m.get(k),
+    put: async (e) => void m.set(e.id, e),
+    delete: async (k) => void m.delete(k),
+    supersede: async (match, time) => {
+      for (const [k, e] of m) if (match(recoveryInfo(e)) && !((e.supersededAt ?? -Infinity) >= time)) m.set(k, { ...e, supersededAt: time });
+    },
+  };
+}
 
 /** Replace the entry storage (unit tests); null restores IndexedDB. */
 export function setRecoveryStore(s: RecoveryStore | null) {
   store = s ?? idbStore;
 }
 
-/** Every stored entry (all launches), newest first. */
-export async function listRecovery(): Promise<RecoveryEntry[]> {
+/** Every stored entry's info (all launches), newest first. Reads no .pgfx data. */
+export async function listRecovery(): Promise<RecoveryInfo[]> {
   try {
-    const all = await store.getAll();
-    return all.filter((e) => e && typeof e.id === 'string' && e.data instanceof ArrayBuffer).sort((a, b) => b.time - a.time);
+    const all = await store.list();
+    return all.filter((e) => e && typeof e.id === 'string' && Number.isFinite(e.time)).sort((a, b) => b.time - a.time);
   } catch {
     return [];
   }
@@ -235,7 +365,8 @@ async function autosaveDoc(id: ID, now: number, minutes: number, force: boolean)
     docId: id,
     launchId: LAUNCH_ID,
     name: doc.name,
-    time: Date.now(),
+    // When the state was taken (not when the write ended): compared with project save times.
+    time: snapAt,
     width: doc.width,
     height: doc.height,
     data,
@@ -342,7 +473,7 @@ export async function discardRecoveryFor(ids: ID[]): Promise<void> {
  * file) the same unsaved document. Recovering into it adds the autosaved state as an undoable step
  * instead of a second tab on the same file (whose Save would overwrite the other copy).
  */
-export function recoveryTarget(e: RecoveryEntry, sessions: Record<ID, DocSession> = useEditor.getState().sessions): DocSession | null {
+export function recoveryTarget(e: RecoveryRef, sessions: Record<ID, DocSession> = useEditor.getState().sessions): DocSession | null {
   const list = Object.values(sessions);
   if (typeof e.filePath === 'string' && e.filePath) return list.find((s) => samePath(s.filePath, e.filePath)) ?? null;
   const docId = entryDocId(e);
@@ -365,7 +496,7 @@ async function keepAsOwn(docId: ID, e: RecoveryEntry): Promise<boolean> {
   const s = useEditor.getState().sessions[docId];
   if (!s) return false;
   try {
-    await putRecovery({ ...e, id: recoveryKey(docId), docId, launchId: LAUNCH_ID, filePath: s.filePath });
+    await putRecovery({ ...e, id: recoveryKey(docId), docId, launchId: LAUNCH_ID, name: s.doc.name, filePath: s.filePath ?? null, supersededAt: undefined });
   } catch (err) {
     console.warn('[io] could not keep the recovered document for recovery', err);
     return false;
@@ -375,22 +506,45 @@ async function keepAsOwn(docId: ID, e: RecoveryEntry): Promise<boolean> {
   return true;
 }
 
-export async function recoverEntries(entries: RecoveryEntry[]) {
+/** "Oct 6" — part of a separate copy's name (no characters a file name can't hold). */
+function shortDate(t: number): string {
+  try {
+    return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  } catch {
+    return new Date(t).toDateString();
+  }
+}
+
+export async function recoverEntries(entries: RecoveryRef[]) {
   let ok = 0;
   const applied: string[] = [];
+  const copies: string[] = [];
   // Oldest first: when two entries belong to the same open project, the newest ends up on top.
-  for (const e of [...entries].sort((a, b) => a.time - b.time)) {
+  for (const ref of [...entries].sort((a, b) => a.time - b.time)) {
     try {
-      const { doc, embeddedFonts } = await decodeProjectWithFonts(e.data);
-      const target = recoveryTarget(e);
+      // The list holds only the entries' info: read this one's data now.
+      const e = await store.get(ref.id);
+      if (!e || !(e.data instanceof ArrayBuffer)) throw new Error('the autosaved copy is no longer there');
+      const decoded = await decodeProjectWithFonts(e.data);
+      const embeddedFonts = decoded.embeddedFonts;
+      let doc = decoded.doc;
+      // Older than the last save of its file: never bound to that file (a Save would replace the newer
+      // version), never applied to the open copy — a separate unsaved document instead. (The mark lives
+      // on the info row the list gave us.)
+      const older = savedAfter(ref) !== null || savedAfter(e) !== null;
+      const target = older ? null : recoveryTarget(e);
       let docId: ID;
       if (target) {
         applyToOpen(target, doc);
         docId = target.doc.id;
         applied.push(target.doc.name);
       } else {
+        if (older) {
+          doc = { ...doc, name: `${doc.name} (autosaved ${shortDate(e.time)})` };
+          copies.push(doc.name);
+        }
         // decodeProject gave the document a fresh id if one with its id is open.
-        useEditor.getState().openDocument(doc, { label: 'Recovered', filePath: typeof e.filePath === 'string' ? e.filePath : null });
+        useEditor.getState().openDocument(doc, { label: 'Recovered', filePath: !older && typeof e.filePath === 'string' ? e.filePath : null });
         markDirty(doc.id);
         docId = doc.id;
       }
@@ -402,21 +556,23 @@ export async function recoverEntries(entries: RecoveryEntry[]) {
       ok++;
     } catch (err) {
       console.error('[io] recovery failed', err);
-      toast(`Could not recover “${e.name}”: ${(err as Error).message}`, 'error', 5000);
+      toast(`Could not recover “${ref.name}”: ${(err as Error).message}`, 'error', 5000);
     }
   }
   if (!ok) return;
+  const parts: string[] = [];
   if (applied.length)
-    toast(
-      `Recovered the autosaved changes to ${applied.map((n) => `“${n}”`).join(', ')} — Edit ▸ Undo goes back to the version you had open. Save to keep them.`,
-      'success',
-      6000,
+    parts.push(`Recovered the autosaved changes to ${applied.map((n) => `“${n}”`).join(', ')} — Edit ▸ Undo goes back to the version you had open. Save to keep them.`);
+  if (copies.length)
+    parts.push(
+      `Opened ${copies.map((n) => `“${n}”`).join(', ')} as ${copies.length > 1 ? 'separate unsaved copies' : 'a separate unsaved copy'} — the project was saved after that autosave, so its file is left as it is.`,
     );
+  if (parts.length) toast(parts.join(' '), 'success', copies.length ? 7000 : 6000);
   else toast(`Recovered ${ok} document${ok > 1 ? 's' : ''} — save to keep your changes`, 'success', 4200);
 }
 
 /** Delete entries the user chose to discard in the recovery dialog. */
-export async function discardEntries(entries: RecoveryEntry[]) {
+export async function discardEntries(entries: RecoveryRef[]) {
   for (const e of entries) {
     if (isOwnEntry(e)) await removeRecovery(entryDocId(e));
     else await deleteEntry(e.id);
@@ -447,7 +603,7 @@ function markClosedWithoutSaving() {
  * desktop app ignores a marker an older version may have left: that one was also written by forced
  * quits ("Quit Anyway", Windows shutting down), so it can't tell a real Discard apart.
  */
-export async function pendingRecovery(): Promise<RecoveryEntry[]> {
+export async function pendingRecovery(): Promise<RecoveryInfo[]> {
   const marker = isDesktop ? [] : readJSON<unknown>(CLOSED_KEY, []);
   const closed = new Set(Array.isArray(marker) ? marker.filter((x): x is string => typeof x === 'string') : []);
   try {

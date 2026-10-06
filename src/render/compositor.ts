@@ -400,9 +400,10 @@ function clipBaseOf(doc: Document, ids: ID[], i: number): Layer | null {
  * Topmost visible leaf layer (descending into visible groups; skipping fill/adjustment and fully
  * locked layers) whose rendered alpha at doc (x, y) exceeds ~10/255. Layers hidden at the point
  * by an ancestor group (its mask, 0% opacity/fill, an isolated group's own result, or the base of
- * a clipped group) are skipped.
+ * a clipped group) are skipped. `ignore` skips leaf layers the caller sees through (e.g. blend-mode
+ * textures above a title when picking text to edit: `isSeeThroughOverlay`).
  */
-export function hitTestLayer(doc: Document, x: number, y: number): ID | null {
+export function hitTestLayer(doc: Document, x: number, y: number, ignore?: (l: Layer) => boolean): ID | null {
   if (!(x >= 0 && y >= 0 && x < doc.width && y < doc.height)) return null;
   const rc = makeRC(doc, 1);
   const clipOk = (ids: ID[], i: number, l: Layer): boolean => {
@@ -431,6 +432,7 @@ export function hitTestLayer(doc: Document, x: number, y: number): ID | null {
         continue;
       }
       if (l.type === 'fill' || l.type === 'adjustment' || l.locks?.all) continue;
+      if (ignore?.(l)) continue;
       if (!(l.opacity > 0.02)) continue;
       const vb = getLayerVisualBounds(doc, l.id);
       if (!vb || x < vb.x || y < vb.y || x > vb.x + vb.width || y > vb.y + vb.height) continue;

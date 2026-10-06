@@ -23,14 +23,14 @@ vi.mock('../platform', async (importOriginal) => {
   return { ...orig, isDesktop: true, desktop };
 });
 
-const { autosaveNow, pendingRecovery, recoveryKey, resetAutosaveState, setRecoveryStore, startAutosave } = await import('./autosave');
+const { autosaveNow, memoryRecoveryStore, pendingRecovery, recoveryKey, resetAutosaveState, setRecoveryStore, startAutosave } = await import('./autosave');
 
 afterEach(() => setRecoveryStore(null));
 
 describe('desktop: a normal page unload keeps the recovery entries', () => {
   it('pagehide (Quit Anyway / session end) writes no discard marker; the next start offers the entry', async () => {
     const m = new Map<string, import('./autosave').RecoveryEntry>();
-    setRecoveryStore({ getAll: async () => [...m.values()], put: async (e) => void m.set(e.id, e), delete: async (k) => void m.delete(k) });
+    setRecoveryStore(memoryRecoveryStore(m));
     resetAutosaveState();
     localStorage.clear();
     startAutosave();
@@ -53,7 +53,7 @@ describe('desktop: a normal page unload keeps the recovery entries', () => {
 
   it('a discard marker an older version left (also written by forced quits) never deletes an entry', async () => {
     const m = new Map<string, import('./autosave').RecoveryEntry>();
-    setRecoveryStore({ getAll: async () => [...m.values()], put: async (e) => void m.set(e.id, e), delete: async (k) => void m.delete(k) });
+    setRecoveryStore(memoryRecoveryStore(m));
     resetAutosaveState();
     // An entry of the old format (keyed by document id) plus the old build's marker naming it.
     m.set('doc_old', { id: 'doc_old', name: 'Poster', time: Date.now() - 1000, width: 1, height: 1, data: new ArrayBuffer(8), filePath: '/art/Poster.pgfx' });
@@ -67,7 +67,7 @@ describe('desktop: a normal page unload keeps the recovery entries', () => {
 describe('desktop: the main process asks for the copies before a forced quit', () => {
   it('startAutosave answers desktop:flush-recovery by writing the latest state', async () => {
     const m = new Map<string, import('./autosave').RecoveryEntry>();
-    setRecoveryStore({ getAll: async () => [...m.values()], put: async (e) => void m.set(e.id, e), delete: async (k) => void m.delete(k) });
+    setRecoveryStore(memoryRecoveryStore(m));
     resetAutosaveState();
     localStorage.clear();
     startAutosave(); // no-op if an earlier test started it: the listener is registered once per page

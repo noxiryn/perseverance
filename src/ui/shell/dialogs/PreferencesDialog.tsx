@@ -4,8 +4,9 @@ import { Button, Checkbox, ColorField, Dialog, Select } from '../../controls';
 import { toast } from '../../../state/ui';
 import { PREF_DEFAULTS, resetPrefs, setPref, usePref } from '../prefs';
 import { resetWorkspace } from '../workspaces';
+import { fittingUiScale, MIN_UI_SIZE, UI_SCALES, useUiScaleState } from '../uiScale';
 
-const SCALES = [0.8, 0.9, 1, 1.1, 1.25, 1.5].map((v) => ({ value: String(v), label: `${Math.round(v * 100)}%` }));
+const pct = (v: number) => `${Math.round(v * 100)}%`;
 const AUTOSAVE = [0, 1, 2, 5, 10, 15, 30].map((v) => ({ value: String(v), label: v === 0 ? 'Off' : `Every ${v} min` }));
 const CHECKER = [
   { value: '4', label: 'Small' },
@@ -38,6 +39,12 @@ export function PreferencesDialog({ close }: { close: (r?: unknown) => void }) {
   const bg = usePref<string>('defaultBackground', PREF_DEFAULTS.defaultBackground);
   const checker = usePref<number>('checkerSize', PREF_DEFAULTS.checkerSize);
   const isCustomBg = bg.startsWith('#');
+  // Scales this window is too small for (the UI would be under MIN_UI_SIZE) are marked; choosing one
+  // applies the largest scale that fits until the window is larger (uiScale.ts fittingUiScale).
+  const win = useUiScaleState((st) => st.window);
+  const applied = useUiScaleState((st) => st.applied);
+  const tooBig = (v: number) => !!win && fittingUiScale(v, win.width, win.height) < v;
+  const scales = UI_SCALES.map((v) => ({ value: String(v), label: tooBig(v) ? `${pct(v)} (needs a larger window)` : pct(v) }));
 
   return (
     <Dialog
@@ -65,12 +72,19 @@ export function PreferencesDialog({ close }: { close: (r?: unknown) => void }) {
       <div className="shell-prefs">
         <div className="shell-pref-section">Interface</div>
         <Row label="UI scale" hint="Size of menus, panels and text">
-          <Select
-            value={String(SCALES.find((s) => Number(s.value) === uiScale)?.value ?? '1')}
-            options={SCALES}
-            onChange={(v) => setPref('uiScale', Number(v))}
-            width={130}
-          />
+          <div className="shell-pref-stack">
+            <Select
+              value={String(scales.find((s) => Number(s.value) === uiScale)?.value ?? '1')}
+              options={scales}
+              onChange={(v) => setPref('uiScale', Number(v))}
+              width={210}
+            />
+            {applied < uiScale - 1e-6 && (
+              <span className="shell-pref-note" data-ui-scale-note="">
+                Using {pct(applied)} — this window is too small for {pct(uiScale)} (the editor needs {MIN_UI_SIZE.width} × {MIN_UI_SIZE.height} px at that size).
+              </span>
+            )}
+          </div>
         </Row>
         <Row label="Action toasts" hint="“Delete Layer completed.” notifications">
           <Checkbox checked={toasts} onChange={(v) => setPref('toasts', v)} label={toasts ? 'On' : 'Off'} />

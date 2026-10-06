@@ -18,6 +18,17 @@
  *   app-logic-diff-3 Escape in a colour popover inside Edit ▸ Fill closes only the popover (also from
  *                   its hex field, focus back on the swatch); a second Escape closes the dialog. With
  *                   the command palette over a popover, Escape closes the palette first.
+ *   first-user-1    Move-tool double-click on the glyphs of every text layer of the templates with
+ *                   full-canvas textures above their text (Sunburst, Noir, Horror, Group Banner, Anime)
+ *                   and of Gothic / Crimson opens that layer (a faint layer may give way to the solid
+ *                   title above it) — before, the textures stopped the pick and nothing opened.
+ *   first-user-2    Gothic Paper Poster: retitling leaves no "Birdcage" behind (the offset ghost is the
+ *                   Title's drop shadow, not a second text layer).
+ *   first-user-3    Libraries ▸ Backgrounds ▸ double-click Gradient Backdrop with the character
+ *                   selected: placed behind the character, above the template's background group.
+ *   first-user-4    Centered titles keep their centre when retyped (Sunburst "Ro" / "Shadow Realm").
+ *   first-user-5    1366×768 window, UI scale 150 %: the UI is scaled only as far as it stays
+ *                   ≥ 1024×640 (110 %), Preferences says so, and Layers rows are visible in the dock.
  *
  *   npx vite --port 5300 &   node scripts/workflow-ui-check.mjs --url http://localhost:5300 [--out dir] [--only e2e-flows-1,...]
  *
@@ -563,7 +574,293 @@ async function escPopover() {
   );
 }
 
-const all = { 'e2e-flows-1': flows1, 'e2e-flows-4': flows4, 'e2e-flows-5': flows5, 'e2e-flows-6': flows6, 'app-logic-diff-3': escPopover };
+/* ---------------- first-user (release gate) ---------------- */
+
+/** Make a raster the active layer, Move tool, nothing being edited. */
+async function moveToolOnRaster() {
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => {
+    const st = window.__app.useEditor.getState();
+    const s = st.sessions[st.activeDocId];
+    const r = Object.values(s.doc.layers).find((l) => l.type === 'raster');
+    if (r) st.setActiveLayer(r.id);
+    st.setTool('move');
+  });
+  await wait(80);
+}
+
+/** Screen points on the ink of a layer: pixels that change strongly when it is hidden (solid runs only). */
+async function inkPoints(layerId, n = 3) {
+  // Only the document on screen (toasts and overlays outside it change too), with no toast over it.
+  const rect = await page.evaluate(() => {
+    window.__app.useUI.setState({ toasts: [] });
+    const st = window.__app.useEditor.getState();
+    const s = st.sessions[st.activeDocId];
+    const vp = document.querySelector('[data-viewport]').getBoundingClientRect();
+    const v = s.view;
+    const x0 = vp.x + vp.width / 2 + v.panX - (s.doc.width * v.zoom) / 2;
+    const y0 = vp.y + vp.height / 2 + v.panY - (s.doc.height * v.zoom) / 2;
+    const x = Math.max(vp.x, x0), y = Math.max(vp.y, y0);
+    const r = Math.min(vp.x + vp.width, x0 + s.doc.width * v.zoom), b = Math.min(vp.y + vp.height, y0 + s.doc.height * v.zoom);
+    return { x: Math.ceil(x), y: Math.ceil(y), width: Math.floor(r - Math.ceil(x)), height: Math.floor(b - Math.ceil(y)) };
+  });
+  await wait(150);
+  const a = (await page.screenshot({ clip: rect })).toString('base64');
+  await page.evaluate((id) => window.__app.useEditor.getState().preview((d) => void (d.layers[id].visible = false)), layerId);
+  await wait(900);
+  const b = (await page.screenshot({ clip: rect })).toString('base64');
+  await page.evaluate(() => window.__app.useEditor.getState().cancelPreview());
+  await wait(700);
+  return page.evaluate(
+    async ({ a, b, rect, n }) => {
+      const dec = async (s) => {
+        const bmp = await createImageBitmap(await (await fetch(`data:image/png;base64,${s}`)).blob());
+        const c = new OffscreenCanvas(bmp.width, bmp.height);
+        const x = c.getContext('2d');
+        x.drawImage(bmp, 0, 0);
+        return x.getImageData(0, 0, bmp.width, bmp.height);
+      };
+      const A = await dec(a), B = await dec(b), W = A.width, H = A.height;
+      const strong = new Uint8Array(W * H);
+      for (let i = 0; i < W * H; i++) {
+        const j = i * 4;
+        strong[i] = Math.abs(A.data[j] - B.data[j]) + Math.abs(A.data[j + 1] - B.data[j + 1]) + Math.abs(A.data[j + 2] - B.data[j + 2]) > 90 ? 1 : 0;
+      }
+      const solid = [];
+      for (let y = 3; y < H - 3; y++)
+        for (let x = 3; x < W - 3; x++) {
+          const i = y * W + x;
+          if (strong[i] && strong[i - 2] && strong[i + 2] && strong[i - 2 * W] && strong[i + 2 * W]) solid.push([x, y]);
+        }
+      solid.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+      const pts = [];
+      for (let k = 0; k < n && solid.length; k++) pts.push(solid[Math.floor(((k + 0.5) / n) * solid.length)]);
+      return pts.map(([x, y]) => [x + rect.x, y + rect.y]);
+    },
+    { a, b, rect, n },
+  );
+}
+
+async function firstUser1() {
+  const names = ['Sunburst Halftone Icon', 'Noir Newspaper Thumbnail', 'Horror Fog', 'Group Banner', 'Anime Action', 'Gothic Paper Poster', 'Crimson Film Thumbnail'];
+  let total = 0;
+  const bad = [];
+  for (const name of names) {
+    await openTemplate(name);
+    const texts = await page.evaluate(() => {
+      const st = window.__app.useEditor.getState();
+      const s = st.sessions[st.activeDocId];
+      const du = window.__app.documentUtils;
+      return Object.values(s.doc.layers)
+        .filter((l) => l.type === 'text' && !l.locks.all && du.isEffectivelyVisible(s.doc, l.id))
+        .map((l) => ({ id: l.id, name: l.name, faint: du.isFaintLayer ? du.isFaintLayer(l) : l.opacity * (l.fillOpacity ?? 1) < 0.5 }));
+    });
+    const solidNames = new Set(texts.filter((t) => !t.faint).map((t) => t.name));
+    for (const t of texts) {
+      const pts = await inkPoints(t.id, 3);
+      for (const [x, y] of pts) {
+        await moveToolOnRaster();
+        await page.mouse.dblclick(x, y);
+        await wait(350);
+        const opened = await page.evaluate(() => {
+          const st = window.__app.useEditor.getState();
+          const s = st.sessions[st.activeDocId];
+          return st.activeTool === 'type' ? s.doc.layers[s.activeLayerId]?.name : 'nothing';
+        });
+        total++;
+        const ok = opened === t.name || (t.faint && solidNames.has(opened));
+        if (!ok) bad.push(`${name}: ${t.name} → ${opened}`);
+        if (opened !== 'nothing') {
+          await page.keyboard.press('Escape');
+          await wait(120);
+        }
+      }
+    }
+  }
+  check('first-user-1 (double-click opens the text under the pointer, through texture overlays)', total >= 30 && !bad.length, `${total - bad.length}/${total} clicks right${bad.length ? `; wrong: ${bad.slice(0, 8).join(' | ')}` : ''}`);
+}
+
+/** Retitle the active document's layer named `layerName` with the Type tool (T, click its ink, select all, type, commit). */
+async function retitle(layerName, text) {
+  const id = await page.evaluate((n) => {
+    const st = window.__app.useEditor.getState();
+    const s = st.sessions[st.activeDocId];
+    return Object.values(s.doc.layers).find((l) => l.name === n && l.type === 'text')?.id;
+  }, layerName);
+  const [pt] = await inkPoints(id, 1);
+  await moveToolOnRaster();
+  await page.keyboard.press('t');
+  await wait(100);
+  await page.mouse.click(pt[0], pt[1]);
+  await wait(300);
+  await page.keyboard.press('Control+a');
+  await page.keyboard.type(text);
+  await page.keyboard.press('Control+Enter');
+  await wait(500);
+  return id;
+}
+
+async function firstUser2() {
+  await openTemplate('Gothic Paper Poster');
+  const before = await page.evaluate(() => {
+    const st = window.__app.useEditor.getState();
+    const s = st.sessions[st.activeDocId];
+    const texts = Object.values(s.doc.layers).filter((l) => l.type === 'text' && /Birdcage/.test(l.text.content));
+    return { n: texts.length, shadow: texts.map((l) => l.effects.filter((e) => e.enabled && e.effectId === 'drop-shadow').length) };
+  });
+  const id = await retitle('Title', 'Owl');
+  const after = await page.evaluate((id) => {
+    const st = window.__app.useEditor.getState();
+    const s = st.sessions[st.activeDocId];
+    return {
+      title: s.doc.layers[id].text.content,
+      left: Object.values(s.doc.layers).filter((l) => l.type === 'text' && /Birdcage/.test(l.text.content)).map((l) => l.name),
+      shadow: s.doc.layers[id].effects.some((e) => e.enabled && e.effectId === 'drop-shadow'),
+    };
+  }, id);
+  await shot('first-user-2-gothic-owl');
+  check(
+    'first-user-2 (Gothic retitle leaves no old "Birdcage" ghost)',
+    before.n === 1 && before.shadow[0] === 1 && after.title === 'Owl' && after.left.length === 0 && after.shadow,
+    `before ${JSON.stringify(before)} → after ${JSON.stringify(after)}`,
+  );
+}
+
+async function firstUser3() {
+  await openTemplate('Gothic Paper Poster');
+  const order = () =>
+    page.evaluate(() => {
+      const st = window.__app.useEditor.getState();
+      const s = st.sessions[st.activeDocId];
+      return s.doc.rootIds.map((id) => s.doc.layers[id].name);
+    });
+  const before = await order();
+  const activeName = await page.evaluate(() => {
+    const st = window.__app.useEditor.getState();
+    const s = st.sessions[st.activeDocId];
+    return s.doc.layers[s.activeLayerId]?.name;
+  });
+  await page.getByText('Libraries', { exact: true }).first().click();
+  await wait(500);
+  await page.locator('.assets-chip', { hasText: 'Backgrounds' }).first().click();
+  await wait(1200);
+  await page.locator('.assets-card', { hasText: 'Gradient Backdrop' }).first().dblclick();
+  await wait(1500);
+  const after = await order();
+  await shot('first-user-3-backdrop');
+  const gi = after.indexOf('Gradient Backdrop');
+  const ci = after.indexOf(activeName);
+  check(
+    'first-user-3 (a Backgrounds asset goes behind the character, above the template background)',
+    gi === 1 && after[0] === before[0] && ci > gi,
+    `active ${activeName}; ${JSON.stringify(before)} → ${JSON.stringify(after)}`,
+  );
+}
+
+async function firstUser4() {
+  await openTemplate('Sunburst Halftone Icon');
+  const box = (id) =>
+    page.evaluate((id) => {
+      const st = window.__app.useEditor.getState();
+      const s = st.sessions[st.activeDocId];
+      const l = s.doc.layers[id];
+      return { x: l.transform.x, align: l.text.align, content: l.text.content };
+    }, id);
+  const id = await page.evaluate(() => {
+    const st = window.__app.useEditor.getState();
+    const s = st.sessions[st.activeDocId];
+    return Object.values(s.doc.layers).find((l) => l.name === 'Title' && l.type === 'text')?.id;
+  });
+  // Centre from the rendered ink (doc px) before and after retyping.
+  const centre = async () => {
+    const xs = (await inkPoints(id, 9)).map((p) => p[0]);
+    return { min: Math.min(...xs), max: Math.max(...xs) };
+  };
+  const b0 = await box(id);
+  const c0 = await centre();
+  await retitle('Title', 'Shadow Realm');
+  const b1 = await box(id);
+  const c1 = await centre();
+  await shot('first-user-4-sunburst');
+  const mid0 = (c0.min + c0.max) / 2;
+  const mid1 = (c1.min + c1.max) / 2;
+  check(
+    'first-user-4 (a retyped centered title keeps its centre)',
+    b0.align === 'center' && b1.content === 'Shadow Realm' && Math.abs(mid1 - mid0) <= 12 && b1.x < b0.x,
+    `align ${b0.align}; x ${b0.x} → ${b1.x}; ink centre ${mid0.toFixed(1)} → ${mid1.toFixed(1)} (screen px)`,
+  );
+}
+
+async function firstUser5() {
+  // The finding's path: a 1366×768 window at 100 %, then Preferences ▸ UI scale ▸ 150 % while working.
+  const small = await browser.newPage({ viewport: { width: 1366, height: 768 }, deviceScaleFactor: 1 });
+  small.on('pageerror', (e) => errors.push(`pageerror (1366): ${e.message}`));
+  await small.goto(url, { waitUntil: 'networkidle' });
+  await small.waitForFunction(() => !!window.__app && !!document.querySelector('.shell-root'), null, { timeout: 60000 });
+  await small.evaluate(() => {
+    const p = JSON.parse(localStorage.getItem('perseverance.prefs') || '{}');
+    delete p.uiScale;
+    localStorage.setItem('perseverance.prefs', JSON.stringify(p));
+    localStorage.removeItem('perseverance.workspace');
+  });
+  await small.reload({ waitUntil: 'networkidle' });
+  await small.waitForFunction(() => !!window.__app && !!document.querySelector('.shell-root'), null, { timeout: 60000 });
+  await small.waitForTimeout(1200);
+  await small.evaluate(async () => {
+    const a = window.__app;
+    a.useUI.setState({ dialogs: [] });
+    const doc = await a.templates.get('tpl-gothic-paper').build();
+    a.useEditor.getState().openDocument(doc, { label: 'Template' });
+  });
+  await small.waitForTimeout(1500);
+  await small.evaluate(() => window.__app.runCommand('edit.preferences'));
+  await small.waitForTimeout(500);
+  await small.locator('.ui-dialog select').first().selectOption('1.5');
+  await small.waitForTimeout(900);
+  const note = await small.evaluate(() => document.querySelector('[data-ui-scale-note]')?.textContent ?? '');
+  const opts = await small.evaluate(() => [...document.querySelectorAll('.ui-dialog select option')].map((o) => o.textContent).filter((t) => /%/.test(t)));
+  await small.keyboard.press('Escape');
+  await small.waitForTimeout(1200);
+  const st = await small.evaluate(() => {
+    const zoom = Number(getComputedStyle(document.documentElement).getPropertyValue('--shell-ui-scale')) || 1;
+    const groups = document.querySelector('.shell-dock-groups');
+    const g = groups.getBoundingClientRect();
+    const rows = [...document.querySelectorAll('.layers-row')].filter((r) => {
+      const b = r.getBoundingClientRect();
+      return b.height > 0 && b.top >= g.top - 1 && b.bottom <= g.bottom + 1;
+    }).length;
+    const s = window.__app.useEditor.getState().sessions[window.__app.useEditor.getState().activeDocId];
+    const vp = document.querySelector('[data-viewport]').getBoundingClientRect();
+    // The document fits the canvas area again (visual px; CSS zoom scales the view).
+    const docW = s.doc.width * s.view.zoom * zoom, docH = s.doc.height * s.view.zoom * zoom;
+    return { zoom, rows, scroll: groups.scrollHeight - groups.clientHeight, cssW: Math.round(innerWidth / zoom), cssH: Math.round(innerHeight / zoom), fits: docW <= vp.width + 1 && docH <= vp.height + 1 };
+  });
+  await small.screenshot({ path: path.join(outDir, 'first-user-5-1366-150.png') });
+  await small.evaluate(() => {
+    const p = JSON.parse(localStorage.getItem('perseverance.prefs') || '{}');
+    delete p.uiScale;
+    localStorage.setItem('perseverance.prefs', JSON.stringify(p));
+  });
+  await small.close();
+  check(
+    'first-user-5 (150 % on 1366×768 is applied only as far as the UI stays ≥ 1024×640; Layers rows visible)',
+    st.zoom === 1.1 && st.cssW >= 1024 && st.cssH >= 640 && st.rows >= 3 && st.fits && /Using 110%/.test(note) && opts.some((o) => /150% \(needs a larger window\)/.test(o)),
+    `${JSON.stringify(st)}; note "${note.slice(0, 80)}"; options ${JSON.stringify(opts)}`,
+  );
+}
+
+const all = {
+  'e2e-flows-1': flows1,
+  'e2e-flows-4': flows4,
+  'e2e-flows-5': flows5,
+  'e2e-flows-6': flows6,
+  'app-logic-diff-3': escPopover,
+  'first-user-1': firstUser1,
+  'first-user-2': firstUser2,
+  'first-user-3': firstUser3,
+  'first-user-4': firstUser4,
+  'first-user-5': firstUser5,
+};
 for (const [id, fn] of Object.entries(all)) {
   if (only && !only.includes(id)) continue;
   try {

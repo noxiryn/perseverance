@@ -20,7 +20,7 @@ import { completedMessage, decideHistoryToast, type HistorySnapshot, type ToastD
 import { cloneLayout, isPanelVisible, movePanel, removePanel, revealPanel, sanitizeLayout, WORKSPACE_PRESETS } from './workspaces';
 import { useShell } from './shellStore';
 import { submitTarget } from './dialogs/ChoiceDialog';
-import { applyUiScale, clampScale, cssZoom, nativeZoomSetter, shellPortalHost, toCss } from './uiScale';
+import { applyUiScale, clampScale, cssZoom, fittingUiScale, MIN_UI_SIZE, nativeZoomSetter, shellPortalHost, toCss, useUiScaleState } from './uiScale';
 import { _resetPrefsCache, defaultBackgroundColor, getPref, PREFS_KEY, resetPrefs, setPref } from './prefs';
 import { shortcutKeys } from './Keys';
 import { fitScale } from './ViewportHost';
@@ -490,6 +490,31 @@ describe('ui scale', () => {
     const bridge = { setZoomFactor(f: number) { calls.push(f); } };
     nativeZoomSetter(bridge)!(1.25);
     expect(calls).toEqual([1.25]);
+  });
+
+  it('never scales the UI below the minimum window size (gate-first-user-5)', () => {
+    // 1366×768 screen: 150 % would leave a 911×512 UI; 110 % keeps ≥ 1024×640 (768 / 1.1 = 698).
+    expect(fittingUiScale(1.5, 1366, 768)).toBe(1.1);
+    expect(fittingUiScale(1.25, 1366, 768)).toBe(1.1);
+    // A maximized window on a 1366×768 laptop (taskbar): 728 / 1.1 = 662 still fits.
+    expect(fittingUiScale(1.5, 1366, 728)).toBe(1.1);
+    // Large windows keep the choice; small ones never go below 100 %; ≤ 100 % is never changed.
+    expect(fittingUiScale(1.5, 1600, 960)).toBe(1.5);
+    expect(fittingUiScale(1.5, 1920, 1040)).toBe(1.5);
+    expect(fittingUiScale(1.25, 1100, 700)).toBe(1);
+    expect(fittingUiScale(0.8, 800, 500)).toBe(0.8);
+    expect(fittingUiScale(1.5, 0, 0)).toBe(1.5); // not measured yet
+    for (const [w, h] of [[1366, 768], [1440, 900], [1280, 800], [1920, 1080]]) {
+      const s = fittingUiScale(1.5, w, h);
+      if (s > 1) expect(Math.min(w / s / MIN_UI_SIZE.width, h / s / MIN_UI_SIZE.height)).toBeGreaterThanOrEqual(1 - 1e-6);
+    }
+  });
+
+  it('applyUiScale publishes the scale applied', () => {
+    applyUiScale(1.1);
+    expect(useUiScaleState.getState().applied).toBe(1.1);
+    applyUiScale(1);
+    expect(useUiScaleState.getState().applied).toBe(1);
   });
 
   it('clamps stored scales', () => {

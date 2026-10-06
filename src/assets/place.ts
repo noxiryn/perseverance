@@ -179,10 +179,15 @@ export function placeAsset(assetId: string, params?: ParamValues, opts: AssetLay
     return null;
   }
   if (!layer) return null;
-  const id = useEditor.getState().addLayer(layer, { label: `Place ${layer.name}` });
+  // Backdrops (the Backgrounds category, or any Normal asset that covers the whole canvas — Roblox
+  // studs, baseplate grid, concrete…) go behind the artwork, just above the background layers, not
+  // over whatever layer is selected (usually the character, which they would hide).
+  const behind = goesBehind(def, layer);
+  const id = useEditor.getState().addLayer(layer, { label: `Place ${layer.name}`, ...(behind ? behindSlot(doc) : {}) });
   viewport.requestRender();
   const blendName = blend.replace(/(^|-)(\w)/g, (_m, sep: string, c: string) => (sep ? ' ' : '') + c.toUpperCase());
-  if (adapt?.changed)
+  if (behind) toast(`Placed “${def.name}” behind your artwork, above the background. Drag it in the Layers panel to change the order.`, 'success', 3600);
+  else if (adapt?.changed)
     toast(
       `“${def.name}” uses ${blendName} by default, which can't show on a light background — placed in Multiply with a darker color${adapt.note ? ` ${adapt.note}` : ''} (switch the layer back to ${blendName} on dark backgrounds).`,
       'info',
@@ -190,6 +195,62 @@ export function placeAsset(assetId: string, params?: ParamValues, opts: AssetLay
     );
   else if (adapt?.invisible) toast(`“${def.name}” is in ${blendName} mode, which doesn't show on a light background — place it over a darker area or try Multiply with a darker color.`, 'info', 4600);
   return id;
+}
+
+/** A Normal layer covering more than this share of the canvas counts as a backdrop. */
+const BACKDROP_COVERAGE = 0.95;
+
+/** Does a freshly generated asset layer belong behind the artwork? */
+export function goesBehind(def: AssetDef, layer: RasterLayer): boolean {
+  if (def.sizing !== 'document' || layer.blendMode !== 'normal') return false;
+  return def.category === 'Backgrounds' || layerCoverage(layer) > BACKDROP_COVERAGE;
+}
+
+/** An unrotated raster layer that covers the whole canvas. */
+function coversCanvas(doc: Document, l: RasterLayer): boolean {
+  const t = l.transform;
+  if (t.rotation || t.skewX) return false;
+  const w = l.width * Math.abs(t.scaleX);
+  const h = l.height * Math.abs(t.scaleY);
+  // (x, y) is the unscaled box's top-left; scaling pivots on its center.
+  const x0 = t.x + l.width / 2 - w / 2;
+  const y0 = t.y + l.height / 2 - h / 2;
+  return x0 <= 0.5 && y0 <= 0.5 && x0 + w >= doc.width - 0.5 && y0 + h >= doc.height - 0.5;
+}
+
+/**
+ * A layer that already serves as the background: a visible, unclipped, Normal fill layer, or a
+ * canvas-covering raster that is a Backgrounds asset or (almost) opaque; a group (template "Paper",
+ * "Film", "Background"…) whose bottom layer is one.
+ */
+export function isBackdropLayer(doc: Document, id: ID): boolean {
+  const l = doc.layers[id];
+  if (!l || !l.visible || l.clipped) return false;
+  if (l.type === 'group') {
+    if (l.blendMode !== 'normal' && l.blendMode !== 'pass-through') return false;
+    const bottom = l.childIds.find((c) => doc.layers[c]?.visible);
+    return !!bottom && isBackdropLayer(doc, bottom);
+  }
+  if (l.blendMode !== 'normal') return false;
+  if (l.type === 'fill') return true;
+  if (l.type !== 'raster' || !coversCanvas(doc, l)) return false;
+  const aid = assetIdOfLayer(l);
+  if (aid && assets.get(aid)?.category === 'Backgrounds') return true;
+  return layerCoverage(l) > BACKDROP_COVERAGE;
+}
+
+/**
+ * Where a backdrop goes: at the root, just above the run of background layers at the bottom (an
+ * opaque base, a template's background group, earlier backdrops), else at the very bottom. `parentId:
+ * null` keeps addLayer from falling back to the active layer.
+ */
+export function behindSlot(doc: Document): { aboveId: ID } | { parentId: null; index: number } {
+  let top: ID | null = null;
+  for (const id of doc.rootIds) {
+    if (!isBackdropLayer(doc, id)) break;
+    top = id;
+  }
+  return top ? { aboveId: top } : { parentId: null, index: 0 };
 }
 
 /** Mean alpha (0..1) of a generated layer, measured on a small downscale. */

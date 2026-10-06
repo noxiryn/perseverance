@@ -94,3 +94,24 @@ describe('template builds are independent of earlier builds', () => {
     expect(seen).toEqual([true]);
   });
 });
+
+/**
+ * gate-first-user-4: centered template titles were left-aligned point text, so the type tool kept
+ * their LEFT edge fixed — a shorter title drifted left of the centre, a longer one ran off the right
+ * edge. Text anchored at its centre / end is now aligned that way, at the same position.
+ */
+describe('anchored template text keeps its anchor when edited', () => {
+  it('anchor center → align center, anchor end → align right; same box; an explicit align wins', () => {
+    const b = new DocBuilder('t', 1000, 1000, null);
+    const c = b.text('Birdcage', { x: 500, y: 40, fontSize: 80, anchor: 'center' });
+    const e = b.text('Right', { x: 900, y: 40, fontSize: 80, anchor: 'end' });
+    const s = b.text('Left', { x: 100, y: 40, fontSize: 80 });
+    const forced = b.text('Forced', { x: 500, y: 40, fontSize: 80, anchor: 'center', align: 'left' });
+    expect([c.text.align, e.text.align, s.text.align, forced.text.align]).toEqual(['center', 'right', 'left', 'left']);
+    const box = (l: typeof c) => b.textBox(l);
+    // The box is still placed by the anchor.
+    expect(Math.abs(box(c).x + box(c).width / 2 - 500)).toBeLessThanOrEqual(1);
+    expect(Math.abs(box(e).x + box(e).width - 900)).toBeLessThanOrEqual(1);
+    expect(s.transform.x).toBe(100);
+  });
+});
