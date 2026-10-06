@@ -14,6 +14,8 @@ export const TEMPLATE_PREVIEW_SIZE = 320;
 
 const cache = new Map<string, string>();
 const pending = new Map<string, { promise: Promise<string | null>; resolve: (url: string | null) => void }>();
+/** Templates whose preview could not be rendered: not retried automatically (a cancelled one is). */
+const failed = new Set<string>();
 const listeners = new Set<() => void>();
 // The dialog is modal (no editing underneath), so make steady progress even if never idle.
 const queue = new IdleQueue({ idleTimeout: 250 });
@@ -29,25 +31,30 @@ export function loadTemplatePreview(id: string, priority = 0): Promise<string | 
   if (hit) return Promise.resolve(hit);
   const existing = pending.get(id);
   if (existing) return existing.promise;
+  failed.delete(id);
   let resolve!: (url: string | null) => void;
-  const promise = new Promise<string | null>((r) => (resolve = r)).then((url) => {
-    pending.delete(id);
-    if (url) {
-      cache.set(id, url);
-      listeners.forEach((l) => l());
-    }
+  const promise: Promise<string | null> = new Promise<string | null>((r) => (resolve = r)).then((url) => {
+    // A cancel already dropped this entry, and a new request may have replaced it since: only
+    // remove our own (otherwise the new request would be orphaned and its card never updated).
+    if (pending.get(id)?.promise === promise) pending.delete(id);
+    if (url) cache.set(id, url);
+    // also on failure / cancel: cards stop showing "loading"
+    listeners.forEach((l) => l());
     return url;
   });
   pending.set(id, { promise, resolve });
+  listeners.forEach((l) => l());
   queue.push(
     id,
     async () => {
+      let url: string | null = null;
       try {
-        resolve(await renderTemplatePreview(id));
+        url = await renderTemplatePreview(id);
       } catch (e) {
         console.warn(`[templates] preview of ${id} failed`, e);
-        resolve(null);
       }
+      if (!url) failed.add(id);
+      resolve(url);
     },
     priority,
   );
@@ -60,9 +67,18 @@ export function pauseTemplatePreviews(paused: boolean) {
   else queue.resume();
 }
 
-/** Drop queued (not yet started) preview jobs; their promises resolve with null. */
+/**
+ * Drop queued (not yet started) preview jobs; their promises resolve with null. Their entries are
+ * removed right away, so a card that asks again in the same commit (the start screen's, when the
+ * New from Template dialog closes and cancels everything still queued) gets a fresh job instead
+ * of the cancelled promise.
+ */
 export function cancelPendingTemplatePreviews() {
-  for (const id of queue.clear()) pending.get(id)?.resolve(null);
+  for (const id of queue.clear()) {
+    const entry = pending.get(id);
+    pending.delete(id);
+    entry?.resolve(null);
+  }
 }
 
 async function renderTemplatePreview(id: string): Promise<string | null> {
@@ -82,26 +98,55 @@ async function renderTemplatePreview(id: string): Promise<string | null> {
   }
 }
 
-/** React hook: preview URL of a template, requested lazily when `visible` becomes true. */
-export function useTemplatePreview(id: string, visible: boolean, priority = 0): string | null {
-  const [url, setUrl] = useState<string | null>(() => getTemplatePreview(id));
+export interface TemplatePreviewState {
+  /** Cached preview (data URL), or null. */
+  url: string | null;
+  /**
+   * The preview is queued or rendering. Cards animate their placeholder only then: one that is
+   * off screen, cancelled or failed shows a still placeholder (an idle screen runs no animation).
+   */
+  loading: boolean;
+}
+
+function previewState(id: string): TemplatePreviewState {
+  const url = getTemplatePreview(id);
+  return { url, loading: !url && pending.has(id) };
+}
+
+/** React hook: preview of a template and whether it is being produced, requested lazily when `visible` becomes true. */
+export function useTemplatePreviewState(id: string, visible: boolean, priority = 0): TemplatePreviewState {
+  const [state, setState] = useState<TemplatePreviewState>(() => previewState(id));
   useEffect(() => {
-    const sync = () => setUrl(getTemplatePreview(id));
+    const sync = () =>
+      setState((prev) => {
+        const next = previewState(id);
+        return prev.url === next.url && prev.loading === next.loading ? prev : next;
+      });
     listeners.add(sync);
     sync();
     return () => {
       listeners.delete(sync);
     };
   }, [id]);
+  // Request when the card becomes visible, and again if a request ended without a preview while
+  // it still is (cancelled by someone else, or the cache was cleared) — but not after a failure,
+  // which would otherwise retry forever.
+  const idle = !state.url && !state.loading;
   useEffect(() => {
-    if (!visible || getTemplatePreview(id)) return;
+    if (!visible || !idle || getTemplatePreview(id) || failed.has(id)) return;
     void loadTemplatePreview(id, priority);
-  }, [id, visible, priority]);
-  return url;
+  }, [id, visible, priority, idle]);
+  return state;
+}
+
+/** React hook: preview URL of a template, requested lazily when `visible` becomes true. */
+export function useTemplatePreview(id: string, visible: boolean, priority = 0): string | null {
+  return useTemplatePreviewState(id, visible, priority).url;
 }
 
 /** Drop cached previews (e.g. after fonts finish loading). */
 export function clearTemplatePreviews() {
   cache.clear();
+  failed.clear();
   listeners.forEach((l) => l());
 }

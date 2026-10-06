@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { isReplaceableImage, sniffImageBytes } from './imageFiles';
+import { isReplaceableImage, mayBeReplaceableDrag, sniffImageBytes } from './imageFiles';
+import { fileDropHints, registerFileDropHandler, setFileDragInfo } from '../../ui/shell/dropHooks';
 
 const bytes = (...b: number[]) => new Uint8Array([...b, ...new Array(Math.max(0, 16 - b.length)).fill(0)]).buffer;
 const PNG = bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
@@ -51,5 +52,35 @@ describe('isReplaceableImage (drop on a selected character)', () => {
     expect(isReplaceableImage('C:\\renders.v2\\avatar.jpeg')).toBe(true);
     expect(isReplaceableImage('clipboard', 'image/png')).toBe(true);
     expect(isReplaceableImage('notes.txt', 'text/plain')).toBe(false);
+  });
+});
+
+describe('drag hint (only MIME types are known while dragging)', () => {
+  it('no Replace hint when every dragged file is a known non-raster type (PSD, SVG, TIFF, application/…)', () => {
+    expect(mayBeReplaceableDrag(['image/vnd.adobe.photoshop'])).toBe(false);
+    expect(mayBeReplaceableDrag(['image/svg+xml'])).toBe(false);
+    expect(mayBeReplaceableDrag(['image/tiff'])).toBe(false);
+    expect(mayBeReplaceableDrag(['application/octet-stream'])).toBe(false);
+    expect(mayBeReplaceableDrag(['image/vnd.adobe.photoshop', 'image/svg+xml'])).toBe(false);
+  });
+
+  it('keeps it for rasters, an empty type (Windows without a registration) or unknown types', () => {
+    for (const t of ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']) expect(mayBeReplaceableDrag([t]), t).toBe(true);
+    expect(mayBeReplaceableDrag([''])).toBe(true);
+    expect(mayBeReplaceableDrag([])).toBe(true);
+    expect(mayBeReplaceableDrag(['image/vnd.adobe.photoshop', 'image/png'])).toBe(true);
+  });
+
+  it('the drop overlay passes the dragged types to the hints', () => {
+    const off = registerFileDropHandler({ id: 'test.hint', claim: () => false, hint: (d) => (mayBeReplaceableDrag(d.types) ? 'replace' : null) });
+    try {
+      setFileDragInfo({ types: ['image/vnd.adobe.photoshop'] });
+      expect(fileDropHints()).not.toContain('replace');
+      setFileDragInfo({ types: ['image/png'] });
+      expect(fileDropHints()).toContain('replace');
+    } finally {
+      off();
+      setFileDragInfo({ types: [] });
+    }
   });
 });

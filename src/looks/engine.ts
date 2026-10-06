@@ -533,11 +533,19 @@ function removeLookGroupDraft(d: Document, g: GroupLayer) {
 }
 
 /**
- * Remove look artifacts from a draft: every look group (plus the filters/effects that same look
- * put on any layer), and the tracked filters/effects of the target layer (or of every layer when
- * `allLayers`). Returns true when something changed.
+ * What stripLookDraft removes besides the look groups:
+ * - 'target'   replacing a look (Document apply / preview base): the target's own look — its tracked
+ *              filters/effects and the grade / texture layers clipped to it — plus the filters/effects
+ *              the removed look groups' looks put on other layers (unless confined to them);
+ * - 'document' Document-mode "Remove look": every document-scope look (non-confined metas on any
+ *              layer); Layer-mode looks (confined to their layer) stay, with or without a character;
+ * - 'all'      every look in the document, Layer-mode ones included.
+ * Orphan clip layers (their layer is gone) always go.
  */
-export function stripLookDraft(d: Document, targetId: ID | null, allLayers = false): boolean {
+export type LookStripScope = 'target' | 'document' | 'all';
+
+/** Remove look artifacts from a draft (see LookStripScope). Returns true when something changed. */
+export function stripLookDraft(d: Document, targetId: ID | null, scope: LookStripScope = 'target'): boolean {
   let changed = false;
   const removedLooks = new Set<string>();
   for (const id of lookGroups(d).map((x) => x.id)) {
@@ -550,16 +558,28 @@ export function stripLookDraft(d: Document, targetId: ID | null, allLayers = fal
   // Layer-mode looks belong to their layer: only the target's (or all of them), plus orphans.
   for (const l of lookClipLayers(d)) {
     const t = lookClipTarget(l);
-    if (!d.layers[l.id] || !(allLayers || t === targetId || !t || !d.layers[t])) continue;
+    if (!d.layers[l.id] || !(scope === 'all' || (scope === 'target' && t === targetId) || !t || !d.layers[t])) continue;
     removeLayerDraft(d, l.id);
     changed = true;
   }
   for (const id of Object.keys(d.layers)) {
     const m = lookMetaOf(d.layers[id]);
     if (!m) continue;
-    if (allLayers || id === targetId || (!m.confined && removedLooks.has(m.lookId))) changed = stripLayerLook(d, id) || changed;
+    const strip = scope === 'all' || (scope === 'target' && id === targetId) || (!m.confined && (scope === 'document' || removedLooks.has(m.lookId)));
+    if (strip) changed = stripLayerLook(d, id) || changed;
   }
   return changed;
+}
+
+/** Whether the document has a document-scope look (what Document-mode "Remove look" removes). */
+export function hasDocumentLook(doc: Document): boolean {
+  if (lookGroups(doc).length) return true;
+  return Object.values(doc.layers).some((l) => {
+    const m = lookMetaOf(l);
+    if (m) return !m.confined;
+    const t = lookClipTarget(l);
+    return isLookClipLayer(l) && (!t || !doc.layers[t]);
+  });
 }
 
 /**
@@ -688,13 +708,26 @@ export interface ResolvedTarget {
   blocked?: string;
 }
 
-/** Decide the effective target for a request; returns a note when the request had to change. */
-export function resolveTarget(doc: Document, requested: ID | null): ResolvedTarget {
+/** What to do when Layer mode can't style the selected layer. */
+const PICK_A_LAYER = 'select a pixel, text or shape layer (or switch the Looks target to Document)';
+
+/**
+ * Decide the effective target for a request (Layer mode: the active layer); returns a note when
+ * the request had to change. A layer that can't hold a look (adjustment layer, a document look's
+ * layer) is `blocked` with no target — never silently widened to the whole document. A Layer-mode
+ * look's grade / texture layer targets the layer it styles (that layer's look is its look).
+ */
+export function resolveTarget(doc: Document, requested: ID | null, depth = 0): ResolvedTarget {
   if (!requested) return { targetId: null };
   const l = doc.layers[requested];
-  if (!l) return { targetId: null };
-  if (isInsideLookGroup(doc, requested)) return { targetId: null, note: 'look layers can’t be a target' };
-  if (l.type === 'adjustment') return { targetId: null, note: 'adjustment layers can’t hold a look' };
+  if (!l) return { targetId: null, blocked: `The selected layer is gone — ${PICK_A_LAYER}.` };
+  const styled = lookClipTarget(l);
+  if (styled && doc.layers[styled] && styled !== requested && depth < 2) {
+    const r = resolveTarget(doc, styled, depth + 1);
+    return r.blocked ? r : { ...r, note: `“${l.name}” is part of the look on “${doc.layers[styled].name}”` };
+  }
+  if (isInsideLookGroup(doc, requested)) return { targetId: null, note: 'look layers can’t be a target', blocked: `“${l.name}” belongs to the document’s look — ${PICK_A_LAYER}.` };
+  if (l.type === 'adjustment') return { targetId: null, note: 'adjustment layers can’t hold a look', blocked: `“${l.name}” is an adjustment layer, which can’t hold a look — ${PICK_A_LAYER}.` };
   if (l.type === 'group') {
     const ch = characterInGroup(doc, requested);
     const c = ch ? doc.layers[ch] : null;
@@ -802,19 +835,28 @@ export async function applyLook(lookId: string, targetLayerId: ID | null): Promi
 }
 
 /**
- * How a Looks panel request resolves: Layer mode (a requested layer) acts on that layer only;
- * Document mode (null) on the document's look, with its character as the subject.
+ * How a Looks panel request resolves: Layer mode (a requested layer) acts on that layer only —
+ * or on nothing (`blocked`) when it can't hold a look; Document mode (null) on the document's look,
+ * with its character as the subject.
  */
-function lookScope(doc: Document, requested: ID | null): { targetId: ID | null; layerOnly: boolean } {
-  const { targetId, character } = lookTargets(doc, requested);
-  return { targetId, layerOnly: !!targetId && !character };
+export function lookScope(doc: Document, requested: ID | null): { targetId: ID | null; layerOnly: boolean; blocked?: string } {
+  const { targetId, blocked } = lookTargets(doc, requested);
+  if (!requested) return { targetId, layerOnly: false };
+  return { targetId, layerOnly: true, blocked: targetId ? undefined : blocked };
 }
 
 /** The look a Looks panel request shows as applied: the layer's own look in Layer mode. */
 export function currentLookFor(doc: Document | null, requested: ID | null): string | null {
   if (!doc) return null;
   const { targetId, layerOnly } = lookScope(doc, requested);
-  if (!layerOnly || !targetId) return currentLookId(doc, targetId);
+  if (!layerOnly) {
+    // The document's look: a Document-mode look on the character, else the look groups'.
+    const m = targetId ? lookMetaOf(doc.layers[targetId]) : null;
+    if (m && !m.confined) return m.lookId;
+    const g = lookGroups(doc)[0];
+    return g ? String(g.meta!.lookId) : null;
+  }
+  if (!targetId) return null;
   const m = lookMetaOf(doc.layers[targetId]);
   if (m) return m.lookId;
   const clip = lookClipLayers(doc, targetId)[0];
@@ -825,15 +867,15 @@ export function currentLookFor(doc: Document | null, requested: ID | null): stri
 export function canRemoveLook(doc: Document | null, requested: ID | null): boolean {
   if (!doc) return false;
   const { targetId, layerOnly } = lookScope(doc, requested);
-  if (layerOnly && targetId) return !!lookMetaOf(doc.layers[targetId]) || lookClipLayers(doc, targetId).length > 0;
-  return hasLook(doc, targetId);
+  if (layerOnly) return !!targetId && (!!lookMetaOf(doc.layers[targetId]) || lookClipLayers(doc, targetId).length > 0);
+  return hasDocumentLook(doc);
 }
 
 /**
  * Remove the current look (one history step). `requested` is what the Looks panel targets:
  * a layer (Layer mode) loses its own look only — its look filters/effects and the grades /
- * textures clipped to it; null (Document mode) removes the document's look groups plus that
- * look's filters/effects on its character (or on every layer when there is no character).
+ * textures clipped to it; null (Document mode) removes the document's look — its look groups and
+ * the filters/effects document looks put on layers — while Layer-mode looks stay on their layers.
  */
 export function removeLook(requested: ID | null): void {
   const s = activeSession();
@@ -841,14 +883,18 @@ export function removeLook(requested: ID | null): void {
     toast('No document is open.', 'warning');
     return;
   }
-  const { targetId, layerOnly } = lookScope(s.doc, requested);
+  const { targetId, layerOnly, blocked } = lookScope(s.doc, requested);
+  if (blocked) {
+    toast(blocked, 'info', 4200);
+    return;
+  }
   if (!canRemoveLook(s.doc, requested)) {
-    toast(layerOnly && targetId ? `“${s.doc.layers[targetId]?.name ?? 'This layer'}” has no look.` : requested ? 'No look on this layer or document.' : 'This document has no look applied.', 'info');
+    toast(layerOnly && targetId ? `“${s.doc.layers[targetId]?.name ?? 'This layer'}” has no look.` : 'This document has no look applied.', 'info');
     return;
   }
   useEditor.getState().commit('Remove Look', (d) => {
     if (layerOnly && targetId) stripConfinedLookDraft(d, targetId);
-    else stripLookDraft(d, targetId, targetId === null);
+    else stripLookDraft(d, null, 'document');
   });
   toast(layerOnly && targetId ? `Look removed from “${s.doc.layers[targetId]?.name ?? 'the layer'}”.` : 'Look removed.', 'success');
 }

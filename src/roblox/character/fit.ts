@@ -24,11 +24,19 @@ export interface FitResult {
  *   bottom of that part: the canvas edge when the box extends past it, so the cut never shows
  *   mid-canvas, and the head lands where the figure's head was (lower when the image is wide).
  *   Needs the canvas size; falls back to `bottom` when the box is (almost) off the canvas.
+ *   characterFitAlign picks between `bottom` and `cut` for a character image.
  */
 export type FitAlign = 'center' | 'bottom' | 'cut';
 
 /** How much wider than the placeholder's box a cut-off image may get (`cut` fit). */
 export const CUT_MAX_WIDEN = 1.25;
+
+/**
+ * How much lower (fraction of the box's on-canvas height) the top of an image planted on the box
+ * bottom may land than the box top before a character image is fitted with `cut` instead — see
+ * characterFitAlign.
+ */
+export const CUT_TOP_DROP = 0.1;
 
 export interface CanvasSize {
   width: number;
@@ -96,6 +104,31 @@ export function fitIntoBox(t: Transform, w: number, h: number, srcW: number, src
   return { width: nw, height: nh, transform: next };
 }
 
+/**
+ * The alignment for an image replacing a character / placeholder (srcW×srcH = its visible pixels).
+ * - Cut off at the bottom (`cutOff`: a detected or known bust, headshot, waist-up render) → `cut`.
+ * - Otherwise a whole figure keeps its feet planted (`bottom`) — unless the box runs past the
+ *   canvas and the image is so much wider than the box (relative to its height) that planting it
+ *   on the box bottom would drop its top more than CUT_TOP_DROP of the on-canvas height below the
+ *   box top. That is a bust whose cut wasn't detected (it fades out, or the export has a few
+ *   transparent rows under it) or a wide pose: on the box bottom its face would sink to (or past)
+ *   the canvas edge, so it gets the `cut` fit too — head where the placeholder's head was, bottom
+ *   on the canvas edge. Tall figures (height-limited in the box) are never affected.
+ */
+export function characterFitAlign(t: Transform, w: number, h: number, srcW: number, srcH: number, canvas: CanvasSize | undefined, cutOff: boolean): FitAlign {
+  if (cutOff) return 'cut';
+  if (!canvas) return 'bottom';
+  const span = centerLineOnCanvas(t, w, h, canvas);
+  // Box entirely on the canvas (nothing to lose by planting) or (almost) off it.
+  if (!span || span.s1 >= 1 - 1e-6 || span.s1 - span.s0 < 0.05) return 'bottom';
+  const dispW = Math.max(1e-6, w * Math.abs(t.scaleX || 1));
+  const dispH = Math.max(1e-6, h * Math.abs(t.scaleY || 1));
+  const sw = Math.max(1, srcW);
+  const sh = Math.max(1, srcH);
+  const drop = dispH - sh * Math.min(dispW / sw, dispH / sh);
+  return drop > CUT_TOP_DROP * (span.s1 - span.s0) * dispH ? 'cut' : 'bottom';
+}
+
 /** `cut` fit (see FitAlign): contain into the on-canvas part of the box, cut edge on its bottom. */
 function fitCut(t: Transform, w: number, h: number, sw: number, sh: number, dispW: number, dispH: number, span: { s0: number; s1: number }, canvas: CanvasSize): FitResult {
   const availH = (span.s1 - span.s0) * dispH;
@@ -128,11 +161,11 @@ function fitCut(t: Transform, w: number, h: number, sw: number, sh: number, disp
 
 /**
  * Whether an image (RGBA, before trimming) is cut off at the bottom — a bust, a head-and-shoulders
- * or waist-up render — rather than a whole figure: its lowest rows are fully opaque across a wide
- * run, i.e. a straight cut at the image edge. Feet touching a tightly cropped edge only reach it
- * with anti-aliased (partly transparent) pixels and narrow soles; a figure with margin below it
- * never touches it. An image whose opaque background was kept counts as cut off (a photo reaching
- * the bottom edge).
+ * or waist-up render — rather than a whole figure: its lowest rows are fully opaque across one
+ * wide unbroken run (≥ 20 % of the content width), i.e. a straight cut at the image edge. Feet
+ * touching a tightly cropped edge reach it as separate narrow soles, usually with anti-aliased
+ * (partly transparent) pixels; a figure with margin below it never touches it. An image whose
+ * opaque background was kept counts as cut off (a photo reaching the bottom edge).
  */
 export function isCutOffAtBottom(img: { data: Uint8ClampedArray | Uint8Array; width: number; height: number }): boolean {
   const { data, width: W, height: H } = img;
@@ -151,13 +184,18 @@ export function isCutOffAtBottom(img: { data: Uint8ClampedArray | Uint8Array; wi
   }
   if (x1 < x0) return false;
   const minRun = Math.max(2, (x1 - x0 + 1) * 0.2);
-  const opaqueIn = (y: number) => {
+  /** Longest run of fully opaque pixels in row y. */
+  const longestRun = (y: number) => {
+    let best = 0;
     let n = 0;
     const row = y * W * 4;
-    for (let x = x0; x <= x1; x++) if (data[row + x * 4 + 3] >= 250) n++;
-    return n;
+    for (let x = x0; x <= x1; x++) {
+      n = data[row + x * 4 + 3] >= 250 ? n + 1 : 0;
+      if (n > best) best = n;
+    }
+    return best;
   };
-  return opaqueIn(H - 1) >= minRun && opaqueIn(Math.max(0, H - 3)) >= minRun;
+  return longestRun(H - 1) >= minRun && longestRun(Math.max(0, H - 3)) >= minRun;
 }
 
 /**

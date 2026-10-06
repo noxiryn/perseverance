@@ -284,7 +284,11 @@ export function LooksPanel() {
   const onScreen = useMemo(() => shown.filter((l) => visible.has(l.id)), [shown, visible]);
 
   const layerOnly = !!targetLayer && !resolved.character;
-  const getPreview = useLookPreviews(doc, requested, targetLayer, layerOnly, previews, onScreen, historyKey);
+  // Layer mode without a layer that can hold a look (nothing selected, an adjustment layer, a
+  // document look's layer): nothing to apply to — never fall back to the whole document.
+  const layerBlocked = !!doc && target === 'layer' && !targetLayer;
+  const blockedWhy = layerBlocked ? (resolved.blocked ?? 'Select a layer to style it (or switch the Looks target to Document).') : '';
+  const getPreview = useLookPreviews(doc, requested, targetLayer, layerOnly, previews && !layerBlocked, onScreen, historyKey);
   const aspect = doc ? Math.max(0.75, Math.min(1.78, doc.width / doc.height)) : 1;
 
   const onApply = useCallback(
@@ -302,8 +306,8 @@ export function LooksPanel() {
     [busy, requested],
   );
 
-  const targetName = layerOnly ? targetLayer.name : 'Whole document';
-  const targetTitle = `Target: ${targetName}${resolved.note ? ` — ${resolved.note}` : ''}`;
+  const targetName = layerOnly ? targetLayer.name : layerBlocked ? 'Pick a layer' : 'Whole document';
+  const targetTitle = layerBlocked ? blockedWhy : `Target: ${targetName}${resolved.note ? ` — ${resolved.note}` : ''}`;
   const chipItems = useMemo(() => categories.map((c) => ({ value: c, label: c })), [categories]);
 
   // Compact header (≈88px) so a short dock group still shows cards: toggle + target on one row,
@@ -334,8 +338,12 @@ export function LooksPanel() {
         {doc ? (
           <div className="looks-target" title={targetTitle} aria-label={targetTitle}>
             <span className="looks-target-name">{targetName}</span>
-            {resolved.note &&
-              (targetLayer ? <Info size={12} className="looks-target-icon info" aria-hidden /> : <TriangleAlert size={12} className="looks-target-icon warn" aria-hidden />)}
+            {layerBlocked ? (
+              <TriangleAlert size={12} className="looks-target-icon warn" aria-hidden />
+            ) : (
+              resolved.note &&
+              (targetLayer ? <Info size={12} className="looks-target-icon info" aria-hidden /> : <TriangleAlert size={12} className="looks-target-icon warn" aria-hidden />)
+            )}
           </div>
         ) : null}
       </div>
@@ -376,7 +384,7 @@ export function LooksPanel() {
                 busy={busy === l.id}
                 preview={getPreview(l)}
                 aspect={aspect}
-                disabled={!doc || (busy !== null && busy !== l.id)}
+                disabled={!doc || layerBlocked || (busy !== null && busy !== l.id)}
                 onApply={onApply}
                 register={register}
               />
@@ -392,8 +400,8 @@ export function LooksPanel() {
           size="small"
           variant="ghost"
           icon={Eraser}
-          disabled={!doc || !canRemove}
-          title={layerOnly ? `Remove the look from “${targetLayer.name}” only` : 'Remove the document’s look'}
+          disabled={!doc || layerBlocked || !canRemove}
+          title={layerBlocked ? blockedWhy : layerOnly ? `Remove the look from “${targetLayer.name}” only` : 'Remove the document’s look (looks applied to single layers stay)'}
           onClick={() => removeLook(requested)}
         >
           Remove look
@@ -401,8 +409,8 @@ export function LooksPanel() {
         <IconButton
           icon={BookmarkPlus}
           size="sm"
-          title="Save as Look… — keep the character’s filters/effects and the overlays above it under My Looks"
-          disabled={!doc}
+          title={layerBlocked ? blockedWhy : 'Save as Look… — keep the character’s filters/effects and the overlays above it under My Looks'}
+          disabled={!doc || layerBlocked}
           onClick={() => void saveCurrentLook(requested)}
         />
         <span className="looks-count">{shown.length} looks</span>

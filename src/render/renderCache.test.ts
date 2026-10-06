@@ -9,10 +9,11 @@ import { bitmaps } from '../core/bitmaps';
 import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeGroupLayer, makeRasterLayer } from '../core/document';
 import { filters } from '../registry';
 import { installSoftCanvas, pixelAt } from './softCanvas';
-import { invalidateRenderCache, renderCacheInfo, renderDocument, renderDocumentLive } from './compositor';
+import { invalidateRenderCache, renderCacheInfo, renderDocument, renderDocumentLive, settleRenderCaches } from './compositor';
 import { setCropExactBackend } from './backendProbe';
 import { SlotCache, hardCapFor, slots } from './cache';
 import { registerEffects } from './effects';
+import { boundsStats } from './contentBounds';
 
 type RGBA = [number, number, number, number];
 
@@ -40,9 +41,83 @@ beforeAll(() => {
   });
 });
 
+/** Smart-filter apply() calls per test filter id (see the move tests). */
+const applied: Record<string, number> = {};
+const count = (id: string) => (applied[id] = (applied[id] ?? 0) + 1);
+
+beforeAll(() => {
+  // A neighbourhood filter that never reads the document position (3×3 box blur, like cel-shade
+  // / blurs / edges).
+  filters.register({
+    id: 'rc-box',
+    name: 'Box (test)',
+    category: 'Blur',
+    params: [{ key: 'radius', label: 'Radius', type: 'number', default: 1, min: 1, max: 1 }],
+    apply: (img) => {
+      count('rc-box');
+      const { width: w, height: h, data: d } = img;
+      const src = new Uint8ClampedArray(d);
+      for (let y = 0; y < h; y++)
+        for (let x = 0; x < w; x++)
+          for (let k = 0; k < 4; k++) {
+            let sum = 0;
+            for (let v = -1; v <= 1; v++)
+              for (let u = -1; u <= 1; u++) {
+                const xx = Math.min(w - 1, Math.max(0, x + u));
+                const yy = Math.min(h - 1, Math.max(0, y + v));
+                sum += src[(yy * w + xx) * 4 + k];
+              }
+            d[(y * w + x) * 4 + k] = Math.round(sum / 9);
+          }
+      return img;
+    },
+  });
+  // A pixel-local adjustment with a dither pattern anchored to the image crop (like gradient-map).
+  filters.register({
+    id: 'rc-dither',
+    name: 'Dither (test)',
+    category: 'Adjustments',
+    adjustment: true,
+    params: [],
+    apply: (img) => {
+      count('rc-dither');
+      const { width: w, data: d } = img;
+      for (let i = 0; i < d.length; i += 4) {
+        const x = (i / 4) % w;
+        const y = Math.floor(i / 4 / w);
+        const t = ((x & 3) * 4 + (y & 3)) * 3;
+        d[i] = Math.min(255, d[i] + t);
+      }
+      return img;
+    },
+  });
+  // A doc-anchored pattern (like halftone / grain): reads the document position.
+  filters.register({
+    id: 'rc-anchored',
+    name: 'Anchored (test)',
+    category: 'Stylize',
+    params: [],
+    apply: (img, _p, ctx) => {
+      count('rc-anchored');
+      const { width: w, data: d } = img;
+      const ox = Math.round(ctx.offsetX * ctx.scale);
+      const oy = Math.round(ctx.offsetY * ctx.scale);
+      for (let i = 0; i < d.length; i += 4) {
+        const x = (i / 4) % w;
+        const y = Math.floor(i / 4 / w);
+        if (((x + ox) >> 2) % 2 === ((y + oy) >> 2) % 2) d[i + 1] = 255 - d[i + 1];
+      }
+      return img;
+    },
+  });
+});
+
 afterAll(() => {
   invalidateRenderCache();
   filters.unregister('rc-invert');
+  filters.unregister('rc-box');
+  filters.unregister('rc-dither');
+  filters.unregister('rc-anchored');
   uninstall();
 });
 
@@ -204,6 +279,87 @@ describe('pass-through groups in clip stacks (render-paint-diff-1)', () => {
       }
     });
   }
+
+  /**
+   * Create / Release Clipping Mask on a layer of a clip stack changes the base of the layers
+   * clipped above it (where they show). Photo, a small Body, a larger Shading above; the clipped
+   * area stays under the incremental-composite thresholds so the plan must see the base change.
+   */
+  const CW = 80;
+  const CH = 60;
+  function stack() {
+    const d = createDocument({ name: 'clipbase', width: CW, height: CH, background: '#ffffff' });
+    const photo = raster(d, canvasOf(CW, CH, (x, y) => [30 + 2 * x, 110 + y, 215 - 2 * x, 255]));
+    const body = raster(d, [24, 20, [224, 192, 160, 255]]);
+    Object.assign(body, at(body, 28, 20));
+    const shading = raster(d, [50, 36, [192, 32, 32, 255]]);
+    Object.assign(shading, at(shading, 10, 8));
+    return { d, photo, body, shading };
+  }
+
+  /** Each state, then back through the list (undo) and forward again (redo). */
+  function walk(states: [Document, string][]) {
+    invalidateRenderCache();
+    const all = [...states, ...states.slice(0, -1).reverse().map(([d, l]) => [d, `undo → ${l}`] as [Document, string]), ...states.slice(1).map(([d, l]) => [d, `redo → ${l}`] as [Document, string])];
+    for (const [doc, label] of all) {
+      expectFresh(doc, label);
+      expectLiveFresh(doc, label);
+    }
+  }
+
+  it('clipping a layer that already has a layer clipped to it, with undo and redo', () => {
+    const { d, body, shading } = stack();
+    const d0 = edit(d, shading.id, { clipped: true });
+    const d1 = edit(d0, body.id, { clipped: true });
+    walk([
+      [d0, 'shading clipped to body'],
+      [d1, 'clip body (shading now clipped to the photo)'],
+    ]);
+  });
+
+  it('releasing the middle layer of a three-layer clip stack, with undo and redo', () => {
+    const { d, body, shading } = stack();
+    const d0 = edit(edit(d, body.id, { clipped: true }), shading.id, { clipped: true });
+    const d1 = edit(d0, body.id, { clipped: false });
+    const d2 = edit(d1, shading.id, { clipped: false });
+    walk([
+      [d0, 'photo, body (clipped), shading (clipped)'],
+      [d1, 'release body'],
+      [d2, 'release shading'],
+    ]);
+  });
+
+  it('clipping a hidden base whose clipped layer then shows over the layer below, with undo and redo', () => {
+    const { d, body, shading } = stack();
+    const d0 = edit(edit(d, shading.id, { clipped: true }), body.id, { visible: false });
+    const d1 = edit(d0, body.id, { clipped: true });
+    const d2 = edit(d1, body.id, { visible: true });
+    walk([
+      [d0, 'hidden body with shading clipped to it'],
+      [d1, 'clip the hidden body'],
+      [d2, 'show body'],
+    ]);
+  });
+
+  it('clipping a pass-through group that has a shown clipped layer above it, with undo and redo', () => {
+    const d = createDocument({ name: 'clipgroupbase', width: CW, height: CH, background: '#ffffff' });
+    raster(d, canvasOf(CW, CH, (x, y) => [30 + 2 * x, 110 + y, 215 - 2 * x, 255]));
+    const g = group(d, { blendMode: 'pass-through' });
+    const body = raster(d, [24, 20, [224, 192, 160, 255]], {}, g.id);
+    Object.assign(body, at(body, 28, 20));
+    const shade = raster(d, [12, 20, [255, 48, 48, 255]], { blendMode: 'multiply' }, g.id);
+    Object.assign(shade, at(shade, 34, 24));
+    const tex = raster(d, [50, 36, [32, 192, 64, 255]]);
+    Object.assign(tex, at(tex, 10, 8));
+    const d0 = edit(d, tex.id, { clipped: true });
+    const d1 = edit(d0, g.id, { clipped: true });
+    const d2 = edit(d1, tex.id, { clipped: false });
+    walk([
+      [d0, 'texture clipped to the group'],
+      [d1, 'clip the group (texture now clipped to the photo)'],
+      [d2, 'release texture'],
+    ]);
+  });
 });
 
 /* ------------------------------------------------------------------------------------------- */
@@ -441,11 +597,31 @@ describe('soft render-cache budget (render-paint-diff-3)', () => {
     }
   });
 
+  it('keeps every slot a render pass uses until the pass ends, however long it takes', () => {
+    let t = 0;
+    const c = new SlotCache(100, 2, { hardCap: 300, recentMs: 1500, trimMs: 2000, now: () => t });
+    c.beginPass();
+    // a slow first composite: 5 layer renders 1 s apart (the first ones are no longer "recent")
+    for (let k = 0; k < 5; k++) {
+      c.set(`L${k}`, 's', k, 30);
+      t += 1000;
+    }
+    c.beginPass(); // nested composite joins the pass
+    c.endPass();
+    for (let k = 0; k < 5; k++) expect(c.get(`L${k}`, 's'), `L${k} during the pass`).toBe(k);
+    c.endPass();
+    // after the pass, an insert over budget evicts what is no longer in use
+    t += 5000;
+    c.set('X', 's', 'x', 30);
+    expect(c.pixels).toBeLessThanOrEqual(100);
+    expect(c.get('X', 's')).toBe('x');
+  });
+
   it('device memory sets the hard cap', () => {
     expect(hardCapFor(64, undefined)).toBe(192);
     expect(hardCapFor(64, 2)).toBe(96);
-    expect(hardCapFor(64, 4)).toBe(160);
-    expect(hardCapFor(64, 8)).toBe(256);
+    expect(hardCapFor(64, 4)).toBe(128);
+    expect(hardCapFor(64, 8)).toBe(192);
   });
 
   it('painting over many full-canvas layers with effects never re-renders them once the working set exceeds the budget', () => {
@@ -468,20 +644,459 @@ describe('soft render-cache budget (render-paint-diff-3)', () => {
       slots.hardCap = slots.pixels * 4;
       let seq = renderDocumentLive(d).seq;
       const k2 = bitmaps.get(paint.bitmapId).getContext('2d')!;
-      const renders0 = renderCacheInfo().layerRenders;
-      for (let f = 0; f < 12; f++) {
-        const x = 2 + f * 3;
-        k2.fillStyle = 'rgb(250,0,0)';
-        k2.fillRect(x, 10 + (f % 3) * 6, 3, 3);
-        bitmaps.touch(paint.bitmapId, { x, y: 10 + (f % 3) * 6, width: 3, height: 3 });
-        seq = renderDocumentLive(d, { since: seq }).seq;
+      const others = otherLayerRenders(paint.id);
+      try {
+        for (let f = 0; f < 12; f++) {
+          const x = 2 + f * 3;
+          k2.fillStyle = 'rgb(250,0,0)';
+          k2.fillRect(x, 10 + (f % 3) * 6, 3, 3);
+          bitmaps.touch(paint.bitmapId, { x, y: 10 + (f % 3) * 6, width: 3, height: 3 });
+          seq = renderDocumentLive(d, { since: seq }).seq;
+        }
+      } finally {
+        others.stop();
       }
       // painted layer updated in place every frame; nothing else re-rendered
-      expect(renderCacheInfo().layerRenders - renders0).toBe(0);
+      expect(others.keys).toEqual([]);
       expectLiveFresh(d, 'after painting');
     } finally {
       slots.budget = budget;
       slots.hardCap = cap;
     }
+  });
+
+  /**
+   * Past the hard cap (the layer renders alone do not fit): the brush frame composites the layers
+   * below the painted one into the below cache once — their renders are the first evicted and never
+   * needed again during the stroke — and the below cache / live state are never evicted to make
+   * room for layer renders.
+   */
+  it('past the hard cap, painting re-renders no other layer after the first frame (graceful degradation)', () => {
+    const W = 48;
+    const H = 36;
+    const budget = slots.budget;
+    const cap = slots.hardCap;
+    invalidateRenderCache();
+    try {
+      const d = createDocument({ name: 'pastcap', width: W, height: H, background: '#ffffff' });
+      raster(d, [W, H, [200, 200, 200, 255]]);
+      for (let k = 0; k < 8; k++) {
+        // content covering the canvas (not croppable)
+        raster(d, canvasOf(W, H, (x, y) => (Math.hypot(x - 6 - 5 * k, y - 18) < 14 ? [30 * k, 90, 200, 255] : [10, 10, 10, 40])), { effects: [strokeFx(2, 'outside'), strokeFx(1, 'inside')] });
+      }
+      const paint = raster(d, [W, H, [0, 0, 0, 0]]);
+      renderDocumentLive(d);
+      const all = slots.pixels;
+      // budget and cap far below the layer renders (≈ 3 renders fit), then a full composite
+      invalidateRenderCache();
+      slots.budget = Math.ceil(all / 8);
+      slots.hardCap = Math.ceil(all / 3);
+      let seq = renderDocumentLive(d).seq;
+      // full composite past the cap: some layer renders are cached, the others evicted
+      const fxIds = d.rootIds.slice(1, -1);
+      const missing = fxIds.filter((id) => !slots.values(`L|${id}|${(1).toFixed(5)}|emf`).length).length;
+      expect(missing).toBeGreaterThan(0);
+      expect(missing).toBeLessThan(fxIds.length);
+      const k2 = bitmaps.get(paint.bitmapId).getContext('2d')!;
+      const perFrame: number[] = [];
+      const others = otherLayerRenders(paint.id);
+      try {
+        for (let f = 0; f < 12; f++) {
+          const x = 2 + f * 3;
+          const n0 = others.keys.length;
+          k2.fillStyle = 'rgb(250,0,0)';
+          k2.fillRect(x, 4 + (f % 4) * 8, 3, 3);
+          bitmaps.touch(paint.bitmapId, { x, y: 4 + (f % 4) * 8, width: 3, height: 3 });
+          seq = renderDocumentLive(d, { since: seq }).seq;
+          perFrame.push(others.keys.length - n0);
+          expect(slots.pixels, `frame ${f}: within the hard cap`).toBeLessThanOrEqual(slots.hardCap);
+        }
+      } finally {
+        others.stop();
+      }
+      // the first frame re-renders the layers evicted before the stroke (filling the whole below
+      // cache) — only those, once: the ones still cached are not evicted to make room — later frames none
+      expect(perFrame[0], `re-renders per frame: ${perFrame}`).toBeLessThanOrEqual(missing);
+      expect(perFrame.slice(1).every((n) => n === 0), `re-renders per frame: ${perFrame}`).toBe(true);
+      expect(new Set(others.keys).size).toBe(others.keys.length);
+      expectLiveFresh(d, 'after painting past the cap');
+      expectFresh(d, 'export after painting past the cap');
+    } finally {
+      slots.budget = budget;
+      slots.hardCap = cap;
+    }
+  });
+
+  it('past the hard cap, layer renders are evicted before composites', () => {
+    let t = 0;
+    const c = new SlotCache(100, 2, { hardCap: 200, recentMs: 1500, trimMs: 2000, now: () => t });
+    c.beginPass();
+    c.set('SB|doc', 's', 'below', 60, { composite: true });
+    for (let k = 0; k < 6; k++) c.set(`L${k}`, 's', k, 40);
+    c.endPass();
+    expect(c.pixels).toBeLessThanOrEqual(200);
+    // the composite inserted first survived; the oldest layer renders went
+    expect(c.get('SB|doc', 's')).toBe('below');
+    expect(c.get('L5', 's')).toBe(5);
+    expect(c.get('L0', 's')).toBeUndefined();
+  });
+});
+
+/** Layer renders stored for layers other than `id` (re-renders), recorded until stop(). */
+function otherLayerRenders(id: string): { keys: string[]; stop: () => void } {
+  const keys: string[] = [];
+  const orig = slots.set;
+  slots.set = function (this: typeof slots, key: string, ...rest: unknown[]) {
+    if (key.startsWith('L|') && !key.startsWith(`L|${id}|`)) keys.push(key);
+    return (orig as (...a: unknown[]) => unknown).call(this, key, ...rest);
+  } as typeof slots.set;
+  return { keys, stop: () => void (slots.set = orig) };
+}
+
+/* ------------------------------------------------------------------------------------------- */
+
+describe('moving a layer with smart filters (e2e-flows-3)', () => {
+  const W = 64;
+  const H = 48;
+  // (the software test canvas has no CSS blur: a stroke stands in for the templates' glow)
+  const glow = strokeFx(3, 'outside');
+
+  /** A character-like layer (soft disc + stripes) with smart filters and an outline at (x, y). */
+  function scene(filterIds: string[], x: number, y: number) {
+    const d = createDocument({ name: 'move', width: W, height: H, background: '#ffffff' });
+    raster(d, canvasOf(W, H, (u, v) => [30 + 3 * u, 60 + 2 * v, 140, 255]));
+    const c = canvasOf(20, 24, (u, v) => {
+      const a = Math.max(0, Math.min(1, 10.5 - Math.hypot(u + 0.5 - 10, v + 0.5 - 12)));
+      return [180 + (u % 3) * 20, 40 + 7 * v, (u * 13) % 255, Math.round(a * 255)];
+    });
+    const fl: FilterInstance[] = filterIds.map((filterId, i) => ({ id: `f${i}`, filterId, enabled: true, params: {}, opacity: 1, blendMode: 'normal' }) as FilterInstance);
+    const l = raster(d, c, { filters: fl, effects: [glow] });
+    Object.assign(l, at(l, x, y));
+    return { d, l };
+  }
+
+  const calls = (ids: string[]) => ids.reduce((n, id) => n + (applied[id] ?? 0), 0);
+
+  for (const ids of [['rc-dither'], ['rc-box'], ['rc-dither', 'rc-box']]) {
+    it(`[${ids}]: whole-pixel moves inside the canvas reuse the filtered render, exactly`, () => {
+      invalidateRenderCache();
+      const { d: d0, l } = scene(ids, 20, 10);
+      renderDocumentLive(d0);
+      expectFresh(d0, 'initial');
+      const c0 = calls(ids);
+      const hits = renderCacheInfo().translateHits;
+      let d = d0;
+      // A drag: a new document per pointermove (live composite), plus exact renders in between.
+      for (const [x, y] of [
+        [23, 10],
+        [27, 12],
+        [31, 15],
+        [26, 9],
+        [18, 14],
+      ]) {
+        d = edit(d, l.id, at(d.layers[l.id], x, y));
+        renderDocumentLive(d);
+        renderDocument(d);
+      }
+      // the smart filters never ran again (the fresh reference renders below run them)
+      expect(calls(ids)).toBe(c0);
+      expect(renderCacheInfo().translateHits).toBeGreaterThan(hits);
+      expectFresh(d, 'moved');
+      expectLiveFresh(d, 'moved');
+      // a sub-pixel move changes the resampling: exact renders re-render, the live composite shows
+      // the render shifted by the rounded delta until the settle
+      const r0 = renderCacheInfo().layerRenders;
+      d = edit(d, l.id, at(d.layers[l.id], 18.5, 14));
+      renderDocumentLive(d);
+      expect(renderCacheInfo().layerRenders).toBe(r0);
+      expect(renderCacheInfo().settlePending).toBe(true);
+      renderDocument(d);
+      expect(renderCacheInfo().layerRenders).toBeGreaterThan(r0);
+      expectFresh(d, 'sub-pixel');
+      settleRenderCaches();
+      expectLiveFresh(d, 'sub-pixel (settled)');
+    });
+
+    it(`[${ids}]: moves across the canvas edge stay exact (filters see the crop a fresh render sees)`, () => {
+      invalidateRenderCache();
+      const { d: d0, l } = scene(ids, 20, 10);
+      renderDocumentLive(d0);
+      renderDocument(d0);
+      let d = d0;
+      for (const [x, y] of [
+        [20, 20],
+        [20, 30],
+        [20, 34],
+        [-6, 34],
+        [-9, 30],
+        [50, 4],
+        [52, -9],
+        [30, 12],
+      ]) {
+        d = edit(d, l.id, at(d.layers[l.id], x, y));
+        renderDocumentLive(d);
+        expectFresh(d, `moved to ${x},${y}`);
+      }
+      settleRenderCaches();
+      expectLiveFresh(d, 'moved across the edge (settled)');
+    });
+  }
+
+  it('a doc-anchored filter: the viewport drags the shifted render (approximate), exports and the settled viewport are exact', () => {
+    invalidateRenderCache();
+    const ids = ['rc-anchored', 'rc-dither'];
+    const { d: d0, l } = scene(ids, 20, 10);
+    renderDocumentLive(d0);
+    expectFresh(d0, 'initial');
+    let d = d0;
+    const c0 = calls(['rc-anchored']);
+    for (const x of [22, 25, 29, 31]) {
+      d = edit(d, l.id, at(d.layers[l.id], x, 13));
+      renderDocumentLive(d);
+    }
+    // live composites (the viewport while dragging) never re-ran the doc-anchored filter…
+    expect(calls(['rc-anchored'])).toBe(c0);
+    expect(renderCacheInfo().settlePending).toBe(true);
+    // …exact renders (export, thumbnails) do, and are right
+    expectFresh(d, 'export after the drag');
+    // the settle re-renders the viewport exactly
+    expect(settleRenderCaches()).toBe(true);
+    expectLiveFresh(d, 'settled');
+  });
+
+  it('a layer hanging off the canvas dragged back in: the viewport shifts it (approximate), exports re-render, the settle is exact', () => {
+    invalidateRenderCache();
+    const ids = ['rc-dither', 'rc-box'];
+    // 10 px off the bottom edge: the render (and its margin) is cut by the canvas
+    const { d: d0, l } = scene(ids, 20, 34);
+    renderDocumentLive(d0);
+    expectFresh(d0, 'initial');
+    let d = d0;
+    const r0 = renderCacheInfo().layerRenders;
+    const c0 = calls(ids);
+    for (const y of [33, 31, 30]) {
+      d = edit(d, l.id, at(d.layers[l.id], 20, y));
+      renderDocumentLive(d);
+    }
+    // dragging up brings content of the cut margin back: the live composite still shifts the render
+    expect(renderCacheInfo().layerRenders).toBe(r0);
+    expect(calls(ids)).toBe(c0);
+    expect(renderCacheInfo().settlePending).toBe(true);
+    expectFresh(d, 'export after the drag');
+    expect(settleRenderCaches()).toBe(true);
+    expectLiveFresh(d, 'settled');
+    // moved in so far that visible content is missing: re-rendered (exactly) even while dragging
+    d = edit(d, l.id, at(d.layers[l.id], 20, 4));
+    renderDocumentLive(d);
+    expectLiveFresh(d, 'dragged far up');
+  });
+
+  it('on GPU canvases a larger shifted region is exact only with CPU-exact effects (blurs differ by canvas size)', () => {
+    const shadow: LayerEffect = { id: 'ds', effectId: 'drop-shadow', enabled: true, params: { distance: 3, size: 0, spread: 0, opacity: 0.6, angle: 90, color: '#000000', blendMode: 'normal' } };
+    try {
+      for (const [label, effects, gpuExact] of [
+        ['stroke', [strokeFx(3, 'outside')], true],
+        ['drop shadow', [shadow], false],
+      ] as const) {
+        for (const cropExact of [true, false]) {
+          setCropExactBackend(cropExact);
+          invalidateRenderCache();
+          const d0 = createDocument({ name: 'gpu', width: W, height: H, background: '#ffffff' });
+          const l = raster(d0, canvasOf(20, 20, () => [200, 60, 60, 255]), { effects: [...effects] });
+          Object.assign(l, at(l, 20, 10));
+          renderDocument(d0);
+          // across the bottom edge: the shifted base region is larger than a fresh render's
+          const d1 = edit(d0, l.id, at(d0.layers[l.id], 20, 40));
+          const r0 = renderCacheInfo().layerRenders;
+          renderDocument(d1);
+          const reRendered = renderCacheInfo().layerRenders > r0;
+          expect(reRendered, `${label}, crop-exact ${cropExact}`).toBe(!cropExact && !gpuExact);
+          expectFresh(d1, `${label}, crop-exact ${cropExact}`);
+        }
+      }
+    } finally {
+      setCropExactBackend(true);
+    }
+  });
+
+  it('editing the filters of a moved layer is not served from the shifted render', () => {
+    invalidateRenderCache();
+    const { d: d0, l } = scene(['rc-dither'], 20, 10);
+    renderDocumentLive(d0);
+    renderDocument(d0);
+    let d = edit(d0, l.id, at(d0.layers[l.id], 24, 12));
+    renderDocumentLive(d);
+    renderDocument(d);
+    const fl = [...(d.layers[l.id].filters ?? []), { id: 'fb', filterId: 'rc-box', enabled: true, params: {}, opacity: 1, blendMode: 'normal' } as FilterInstance];
+    d = edit(d, l.id, { filters: fl });
+    renderDocumentLive(d);
+    expectFresh(d, 'filter added after a move');
+    expectLiveFresh(d, 'filter added after a move');
+    d = edit(d, l.id, at(d.layers[l.id], 28, 12));
+    renderDocumentLive(d);
+    d = edit(d, l.id, { filters: fl.map((f) => ({ ...f, enabled: f.filterId !== 'rc-dither' })) });
+    renderDocumentLive(d);
+    expectFresh(d, 'filter disabled after a move');
+    expectLiveFresh(d, 'filter disabled after a move');
+  });
+});
+
+/* ------------------------------------------------------------------------------------------- */
+
+describe('renders of layers with effects are cropped to their content (render-paint-diff-3)', () => {
+  const W = 320;
+  const H = 256;
+  const fxList = (): LayerEffect[] => [strokeFx(3, 'outside'), { ...strokeFx(2, 'inside'), id: 'st2', params: { ...strokeFx(2, 'inside').params, color: '#ff00ff' } }];
+  const disc = (cx: number, cy: number, r: number) => (x: number, y: number): RGBA => {
+    const a = Math.max(0, Math.min(1, r + 0.5 - Math.hypot(x + 0.5 - cx, y + 0.5 - cy)));
+    return a > 0 ? [220, 120, 40, Math.round(a * 255)] : [0, 0, 0, 0];
+  };
+
+  /** A document-sized layer (Layer ▸ New Layer) holding a small soft disc, with an outline. */
+  function scene() {
+    const d = createDocument({ name: 'crop', width: W, height: H, background: '#ffffff' });
+    raster(d, canvasOf(W, H, (x, y) => [40 + ((x * 3) % 160), 90 + ((y * 5) % 120), 150, 255]));
+    const l = raster(d, canvasOf(W, H, disc(70, 80, 12)), { effects: fxList() });
+    return { d, l };
+  }
+
+  /** The cached full-scale render of a layer (its canvases are region-sized). */
+  const cachedRender = (id: string) => slots.values<{ region: { w: number; h: number } } | null>(`L|${id}|${(1).toFixed(5)}|emf`)[0];
+
+  it('a small blob on a document-sized layer holds a crop, and renders like the same blob on a small layer', () => {
+    invalidateRenderCache();
+    const { d, l } = scene();
+    const got = renderDocument(d);
+    // its canvases cover the crop (the disc + slack + outline), not the document
+    const R = cachedRender(l.id);
+    expect(R).toBeTruthy();
+    expect(R!.region.w * R!.region.h).toBeLessThan(0.5 * W * H);
+    // reference: the same disc on a 40×40 layer at (50, 60)
+    const ref = createDocument({ name: 'crop-ref', width: W, height: H, background: '#ffffff' });
+    raster(ref, canvasOf(W, H, (x, y) => [40 + ((x * 3) % 160), 90 + ((y * 5) % 120), 150, 255]));
+    const small = raster(ref, canvasOf(40, 40, (x, y) => disc(20, 20, 12)(x, y)), { effects: fxList() });
+    Object.assign(small, at(small, 50, 60));
+    const r = diff(got, renderDocument(ref));
+    expect(r.n, `cropped vs small layer: ${r.n} px off (max ${r.max}), first ${r.first}`).toBe(0);
+  });
+
+  it('painting near the content updates the crop in place; painting far outside it renders a larger crop (live and export exact)', () => {
+    invalidateRenderCache();
+    const { d, l } = scene();
+    let seq = renderDocumentLive(d).seq;
+    renderDocument(d);
+    const k = bitmaps.get(l.bitmapId).getContext('2d')!;
+    let rebuilt = 0;
+    let updates = 0;
+    // a stroke from the disc outwards to the far corner
+    for (let f = 0; f < 14; f++) {
+      const x = 74 + f * 16;
+      const y = 84 + f * 11;
+      k.fillStyle = 'rgba(30,200,90,0.8)';
+      k.fillRect(x, y, 6, 6);
+      bitmaps.touch(l.bitmapId, { x, y, width: 6, height: 6 });
+      const i0 = renderCacheInfo();
+      seq = renderDocumentLive(d, { since: seq }).seq;
+      rebuilt += renderCacheInfo().layerRenders - i0.layerRenders;
+      updates += renderCacheInfo().regionUpdates - i0.regionUpdates;
+      if (f % 3 === 0) {
+        expectLiveFresh(d, `stroke frame ${f}`);
+        expectFresh(d, `stroke frame ${f}`);
+      }
+    }
+    expectLiveFresh(d, 'after the stroke');
+    expectFresh(d, 'after the stroke');
+    // most frames updated the render in place; leaving the crop re-rendered it a few times only
+    expect(updates).toBeGreaterThan(rebuilt);
+    expect(rebuilt).toBeGreaterThan(0);
+    expect(rebuilt).toBeLessThan(5);
+    // erase the disc: the crop stays (conservative bounds), the render stays exact
+    k.clearRect(50, 60, 40, 40);
+    bitmaps.touch(l.bitmapId, { x: 50, y: 60, width: 40, height: 40 });
+    renderDocumentLive(d, { since: seq });
+    expectLiveFresh(d, 'after erasing');
+    expectFresh(d, 'after erasing');
+  });
+
+  it('painting the layer mask outside the crop updates the render in place (no rebuild), exactly', () => {
+    invalidateRenderCache();
+    const { d: d0, l } = scene();
+    const maskId = bitmaps.add(canvasOf(W, H, () => [255, 255, 255, 255]));
+    const d = edit(d0, l.id, { mask: { bitmapId: maskId, enabled: true, density: 1, feather: 0, inverted: false } } as Partial<Layer>);
+    let seq = renderDocumentLive(d).seq;
+    renderDocument(d);
+    const k = bitmaps.get(maskId).getContext('2d')!;
+    let rebuilt = 0;
+    for (const [x, y] of [
+      [250, 200],
+      [270, 210],
+      [64, 76],
+    ]) {
+      k.fillStyle = '#000000';
+      k.fillRect(x, y, 8, 8);
+      bitmaps.touch(maskId, { x, y, width: 8, height: 8 });
+      const i0 = renderCacheInfo();
+      seq = renderDocumentLive(d, { since: seq }).seq;
+      rebuilt += renderCacheInfo().layerRenders - i0.layerRenders;
+      expectLiveFresh(d, `mask dab at ${x},${y}`);
+      expectFresh(d, `mask dab at ${x},${y}`);
+    }
+    expect(rebuilt).toBe(0);
+  });
+
+  it('a change of unknown extent rescans the bitmap; renders stay exact', () => {
+    invalidateRenderCache();
+    const { d, l } = scene();
+    renderDocumentLive(d);
+    const scans = boundsStats.scans;
+    const k = bitmaps.get(l.bitmapId).getContext('2d')!;
+    k.fillStyle = '#2040ff';
+    k.fillRect(250, 200, 30, 20);
+    bitmaps.touch(l.bitmapId);
+    renderDocumentLive(d);
+    expect(boundsStats.scans).toBe(scans + 1);
+    expectLiveFresh(d, 'after a full touch');
+    expectFresh(d, 'after a full touch');
+  });
+
+  it('moving a cropped layer reuses its render (translation), exactly', () => {
+    invalidateRenderCache();
+    const { d: d0, l } = scene();
+    renderDocumentLive(d0);
+    renderDocument(d0);
+    const hits = renderCacheInfo().translateHits;
+    let d = d0;
+    for (const [x, y] of [
+      [7, 3],
+      [19, 11],
+      [33, 20],
+      [-40, 30],
+    ]) {
+      d = edit(d, l.id, at(d.layers[l.id], x, y));
+      renderDocumentLive(d);
+      expectFresh(d, `moved to ${x},${y}`);
+    }
+    expectLiveFresh(d, 'moved');
+    expect(renderCacheInfo().translateHits).toBeGreaterThan(hits);
+  });
+
+  it('an empty layer with effects draws nothing until painted, then holds a small crop', () => {
+    invalidateRenderCache();
+    const d = createDocument({ name: 'empty', width: W, height: H, background: '#ffffff' });
+    raster(d, [W, H, [128, 128, 128, 255]]);
+    const l = raster(d, [W, H, [0, 0, 0, 0]], { effects: fxList() });
+    let seq = renderDocumentLive(d).seq;
+    expect(cachedRender(l.id)).toBeNull();
+    const k = bitmaps.get(l.bitmapId).getContext('2d')!;
+    for (let f = 0; f < 6; f++) {
+      k.fillStyle = '#d02020';
+      k.fillRect(100 + f * 4, 120, 5, 5);
+      bitmaps.touch(l.bitmapId, { x: 100 + f * 4, y: 120, width: 5, height: 5 });
+      seq = renderDocumentLive(d, { since: seq }).seq;
+    }
+    const R = cachedRender(l.id);
+    expect(R!.region.w * R!.region.h).toBeLessThan(0.5 * W * H);
+    expectLiveFresh(d, 'painted empty layer');
+    expectFresh(d, 'painted empty layer');
   });
 });

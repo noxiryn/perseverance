@@ -47,9 +47,52 @@ const run = async (name, fn, arg) => {
 const closeDialogs = () => run('close-dialogs', () => window.__app.useUI.setState({ dialogs: [], commandPaletteOpen: false }));
 const wait = (ms) => page.waitForTimeout(ms);
 
+// Count the page's own requestAnimationFrame calls (idle check below).
+await page.addInitScript(() => {
+  const raf = window.requestAnimationFrame.bind(window);
+  window.__rafCalls = 0;
+  window.requestAnimationFrame = (cb) => {
+    window.__rafCalls++;
+    return raf(cb);
+  };
+});
+
+/**
+ * Idle check: an app nobody is using must not keep producing frames. Once on-screen loading work
+ * (thumbnails, previews) has finished there may be no running CSS/Web animation and no
+ * requestAnimationFrame loop (an infinite shimmer on off-screen asset cards used to cost ~20 % of
+ * a CPU core for as long as the app was open).
+ */
+const idleCheck = async (label) => {
+  step = `idle:${label}`;
+  let anims = [];
+  for (let t = 0; t < 40; t++) {
+    anims = await page.evaluate(() =>
+      document
+        .getAnimations()
+        .filter((a) => a.playState === 'running')
+        .map((a) => {
+          const el = a.effect?.target;
+          const where = el ? `${el.tagName.toLowerCase()}${el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).join('.') : ''}` : '?';
+          return `${a.animationName ?? a.transitionProperty ?? a.constructor.name} on ${where}`;
+        }),
+    );
+    if (!anims.length) break;
+    await wait(500);
+  }
+  if (anims.length) errors.push(`[idle:${label}] ${anims.length} animation(s) still running after 20 s idle: ${[...new Set(anims)].slice(0, 6).join(', ')}`);
+  const before = await page.evaluate(() => window.__rafCalls);
+  await wait(3000);
+  const frames = (await page.evaluate(() => window.__rafCalls)) - before;
+  // a stray one-off frame is fine; a loop is ~180 in 3 s
+  if (frames > 6) errors.push(`[idle:${label}] ${frames} requestAnimationFrame calls in 3 s of idle (a frame loop keeps running)`);
+  console.log(`idle ${label}: ${anims.length} running animations, ${frames} rAF calls / 3 s`);
+};
+
 await page.goto(url, { waitUntil: 'networkidle' });
 await wait(1500);
 await shot('01-start');
+await idleCheck('start-screen');
 
 /* ---------- registry inventory ---------- */
 const inventory = await run('inventory', () => {
@@ -86,6 +129,7 @@ for (const [i, id] of templates.entries()) {
   await wait(2500);
   await shot(`10-template-${id}`);
 }
+if (templates.length) await idleCheck('template-open');
 
 /* ---------- demo doc ---------- */
 await run('demo', () => window.__app.openDemoDocument());
@@ -99,6 +143,7 @@ for (const id of inventory?.panels ?? []) {
   if (!quick) await shot(`30-panel-${id}`);
 }
 await run('panel-reset', () => window.__app.useUI.getState().setFlyout(null));
+await idleCheck('after-panels');
 
 /* ---------- tools: activate + drag on the canvas ---------- */
 const vp = await page.evaluate(() => {

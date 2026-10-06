@@ -65,6 +65,10 @@ async function start(bin, name, extraEnv = {}) {
   const port = nextPort++;
   const env = { ...process.env, XDG_CONFIG_HOME: cfg, ...extraEnv };
   if (!('VITE_DEV_SERVER_URL' in extraEnv)) delete env.VITE_DEV_SERVER_URL;
+  // Desktop sessions run with a UTF-8 locale. Under the bare C locale of a CI container a packaged
+  // Electron can't start from a non-ASCII folder at all (exit 1 before main.cjs runs, any Electron app),
+  // which would hide what this check is about.
+  if (!/utf-?8/i.test(env.LC_ALL || env.LC_CTYPE || env.LANG || '')) env.LANG = 'C.UTF-8';
   const child = spawn(bin, ['--no-sandbox', `--remote-debugging-port=${port}`], { env, cwd: T, stdio: 'ignore' });
   children.add(child);
   const exited = new Promise((r) => child.once('exit', (code) => r(code)));

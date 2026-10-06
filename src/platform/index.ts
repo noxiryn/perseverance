@@ -22,9 +22,10 @@ interface DesktopBridge {
   openFiles(opts: { title?: string; filters?: FileFilter[]; multiple?: boolean }): Promise<OpenedFile[]>;
   /**
    * Native Save dialog + write. Resolves the path actually written: the main process appends the
-   * first filter's extension when the chosen name lacks it ("Poster" → "Poster.pgfx").
+   * first filter's extension when the chosen name lacks it ("Poster" → "Poster.pgfx"). `busyPaths`:
+   * files open in other tabs — choosing one asks for another name instead of replacing it.
    */
-  saveFile(opts: { title?: string; defaultPath?: string; filters?: FileFilter[]; data: ArrayBuffer | string }): Promise<string | null>;
+  saveFile(opts: { title?: string; defaultPath?: string; filters?: FileFilter[]; data: ArrayBuffer | string; busyPaths?: string[] }): Promise<string | null>;
   /**
    * Crash-safe write (temp file + rename) to a path the user chose: a Save dialog result, or a project
    * opened via dialog / Explorer / Finder. Any other path rejects with an `ENOTGRANTED` error.
@@ -51,6 +52,13 @@ interface DesktopBridge {
    * process offers "Quit Anyway", so a busy or crashed renderer never traps the user.
    */
   onCloseRequested(cb: () => void): () => void;
+  /**
+   * Right before a forced quit ("Quit Anyway" in a native prompt, Windows ending the session) the main
+   * process asks the page to bring its autosaved copies up to date; it waits for the returned promise
+   * (a page that doesn't answer within a few seconds is not waited for). Not a close handler: a page
+   * without onCloseRequested still counts as unguarded.
+   */
+  onFlushRecovery?(cb: () => Promise<unknown>): () => void;
   confirmClose(ok: boolean): void;
   minimize(): void;
   toggleMaximize(): void;
@@ -96,7 +104,14 @@ export async function openFiles(opts: { title?: string; filters?: FileFilter[]; 
  * Save data via native Save dialog (desktop, returns the chosen path) or a download (browser,
  * returns the file name).
  */
-export async function saveFile(opts: { title?: string; defaultPath: string; filters?: FileFilter[]; data: ArrayBuffer | Blob | string }): Promise<string | null> {
+export async function saveFile(opts: {
+  title?: string;
+  defaultPath: string;
+  filters?: FileFilter[];
+  data: ArrayBuffer | Blob | string;
+  /** Desktop: files open in other tabs, never replaced (the user is asked for another name). */
+  busyPaths?: string[];
+}): Promise<string | null> {
   const data = opts.data instanceof Blob ? await opts.data.arrayBuffer() : opts.data;
   if (desktop) return desktop.saveFile({ ...opts, data });
   const blob = new Blob([data]);

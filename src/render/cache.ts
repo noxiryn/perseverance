@@ -150,6 +150,10 @@ interface Slot {
   scale?: string;
   /** Last use (get / set), in `now()` ms. */
   t: number;
+  /** Render pass of the last use (see SlotCache.beginPass). */
+  pass?: number;
+  /** Last used while folding (see SlotCache.beginFold). */
+  fold?: boolean;
 }
 
 export interface SlotSetOptions {
@@ -182,16 +186,24 @@ export type KeepAlive = (layerId: ID, scale: string) => boolean;
 
 const clock = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
+/** A slot whose entries hold no counted memory (e.g. zero-copy renders of bitmaps). */
+const weightless = (s: Slot): boolean => s.entries.every((e) => !e.pixels && !e.res);
+
 /**
  * Eviction. Plain LRU with a fixed budget has a cliff: once the renders a document needs exceed
  * the budget, every insert evicts renders that the next frame needs again (painting re-rendered
  * every layer on every frame). So the budget is soft:
  *  - on insert over budget, slots OUTSIDE the working set are evicted (least recently used first)
- *    down to 85% of the budget. The working set: slots used in the last `recentMs` (the render
- *    pass in progress, an interaction) and slots a displayed document needs (the keep-alive hook:
+ *    down to 85% of the budget. The working set: slots used by the render pass in progress (see
+ *    beginPass) or in the last `recentMs` (an interaction) and slots a displayed document needs (the keep-alive hook:
  *    the layer renders of the live composites, which while painting are only touched when a
  *    stroke reaches new tiles of the below cache);
- *  - past the hard cap, working-set slots go too (least recently used first) down to the cap;
+ *  - past the hard cap, working-set slots go too, down to the cap: slots used while filling a
+ *    stroke's below cache first (see beginFold), then layer renders (least recently used first),
+ *    composites (below caches, document composites, snapshots) last — a
+ *    pass that does not fit keeps degrading gracefully instead of re-rendering every layer on every
+ *    frame (live painting composites the layers below the painted one into the below cache once,
+ *    see fillBelow, and never needs their renders again during the stroke);
  *  - while over budget, an idle timer shrinks the cache back to the budget once nothing used it
  *    for `trimMs` (everything not kept alive by a displayed document), and keeps checking while
  *    kept-alive slots hold it above the budget (they expire when their document is no longer
@@ -208,6 +220,9 @@ export class SlotCache {
   private readonly now: () => number;
   private keepAlive: KeepAlive | null = null;
   private lastUse = 0;
+  private passDepth = 0;
+  private passId = 0;
+  private foldDepth = 0;
   private trimTimer: ReturnType<typeof setTimeout> | null = null;
   constructor(
     public budget = 40 * 1024 * 1024,
@@ -227,6 +242,36 @@ export class SlotCache {
 
   private use(slot: Slot) {
     slot.t = this.lastUse = this.now();
+    if (this.passDepth) slot.pass = this.passId;
+    slot.fold = this.foldDepth > 0;
+  }
+
+  /**
+   * A render pass (a document composite) starts: every slot it uses belongs to the working set
+   * until it ends, however long it takes (a heavy first composite on a slow machine must not evict
+   * the layer renders it made a second earlier). Nested calls join the outer pass.
+   */
+  beginPass() {
+    if (this.passDepth++ === 0) this.passId++;
+  }
+
+  endPass() {
+    if (this.passDepth > 0) this.passDepth--;
+  }
+
+  /**
+   * Layers are being composited into a cache that holds their result from now on (a live stroke's
+   * below cache): the slots used until endFold are not needed again while that cache lives. Past
+   * the hard cap they are the first evicted — the one just stored included (its value is drawn
+   * right away) — so filling such a cache re-renders only the layers that were not cached, instead
+   * of evicting the next layers it needs (LRU over a cyclic pass misses every time).
+   */
+  beginFold() {
+    this.foldDepth++;
+  }
+
+  endFold() {
+    if (this.foldDepth > 0) this.foldDepth--;
   }
 
   private addEntry(e: SlotEntry) {
@@ -360,6 +405,7 @@ export class SlotCache {
   /** Whether a slot belongs to the working set (see the eviction notes above the class). */
   private working(s: Slot, now: number): boolean {
     if (now - s.t < this.recentMs) return true;
+    if (this.passDepth && s.pass === this.passId) return true;
     return s.layerId !== undefined && s.scale !== undefined && !!this.keepAlive?.(s.layerId, s.scale);
   }
 
@@ -373,13 +419,33 @@ export class SlotCache {
       this.dropSlot(k, s);
     }
     if (this.total > this.hardCap) {
+      // Past the hard cap: folded slots first (see beginFold; `keep` included), then layer renders
+      // (least recently used first) before composites. The composites of a pass (a live painting
+      // frame's below cache, the document composite, adjustment snapshots) hold everything under
+      // them already — the layer renders folded into them are the ones a pass used first, so they
+      // go first and the frame never re-renders them.
+      // (Slots that hold no counted memory — zero-copy renders of bitmaps — free nothing: kept.)
       for (const [k, s] of this.map) {
         if (this.total <= this.hardCap) break;
-        if (k === keep) continue;
-        this.dropSlot(k, s);
+        if (s.fold && !s.composite && !weightless(s)) this.dropSlot(k, s);
+      }
+      for (const composites of [false, true]) {
+        for (const [k, s] of this.map) {
+          if (this.total <= this.hardCap) break;
+          if (k === keep || !!s.composite !== composites || weightless(s)) continue;
+          this.dropSlot(k, s);
+        }
       }
     }
     if (this.total > this.budget) this.armTrim(this.trimMs);
+  }
+
+  /**
+   * Whether the cache is close to its hard cap (past 3/4 of it): layer renders a pass used may be
+   * evicted before the next pass needs them again (see fillBelow).
+   */
+  nearCap(): boolean {
+    return this.total > this.hardCap * 0.75;
   }
 
   private armTrim(ms: number) {
@@ -419,13 +485,14 @@ export class SlotCache {
 
 /**
  * Hard cap of the render cache (px): how far the working set may exceed the budget, by device
- * memory (navigator.deviceMemory, GB; Chromium reports at most 8).
+ * memory (navigator.deviceMemory, GB; Chromium reports at most 8): 3× (≈ 768 MB of canvases for
+ * the 64M px budget) with more than 4 GB or unknown, 2× with 4 GB, 1.5× with 2 GB or less.
  */
 export function hardCapFor(budget: number, deviceMemoryGB: number | undefined): number {
   if (!deviceMemoryGB || !Number.isFinite(deviceMemoryGB)) return budget * 3;
   if (deviceMemoryGB <= 2) return budget * 1.5;
-  if (deviceMemoryGB <= 4) return budget * 2.5;
-  return budget * 4;
+  if (deviceMemoryGB <= 4) return budget * 2;
+  return budget * 3;
 }
 
 /** Generated assets / pattern tiles (keyed by asset definition identity + size + params). */
@@ -436,10 +503,12 @@ export const VOLATILE_ASSETS = '\u0000volatile-assets';
 
 /**
  * Layer renders, text/shape rasters, masks, composites, thumbnails. Soft budget 64M px (≈256 MB):
- * the renders of a document with ≈7 full-canvas 1080p layers with effects (a doc-sized layer with
- * Drop Shadow + Stroke holds ≈6–8M px: content, behind pieces, distance fields while its effects
- * are edited; ≈4× that at 4K) plus composites. The working set of the displayed documents may
- * exceed it up to the hard cap (≈1 GB with ≥ 8 GB of memory), see SlotCache.
+ * the renders of a document with ≈7 1080p layers with effects whose content covers the canvas (a
+ * layer with Drop Shadow + Stroke holds ≈3 region-sized canvases: content, behind pieces — plus
+ * distance fields while its effects are edited; ≈4× that at 4K; renders of layers with effects are
+ * cropped to their content, see ./contentBounds) plus composites. The working set of the displayed
+ * documents may exceed it up to the hard cap (≈ 768 MB with more than 4 GB of memory, see
+ * hardCapFor); past the cap the cache degrades gracefully (see SlotCache).
  */
 const SLOT_BUDGET = 64 * 1024 * 1024;
 export const slots = new SlotCache(SLOT_BUDGET, 2, {

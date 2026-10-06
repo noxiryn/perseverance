@@ -15,9 +15,13 @@
  *   the small-σ gaussian (σ < 1: watercolor, poster edges, …) ~285 MB, most others ≤ 64 MB. The stack
  *   never passes MAX_BYTES (1 GiB); an operation that would is run in JavaScript. Growing detaches
  *   every typed-array view of the old buffer, so callers keep byte addresses and take fresh views
- *   with `wasmHeap()` after their last allocation. Once no operation has needed more than 192 MB
- *   for 2 s, the instance is recreated so the memory is returned (a burst of big operations — a
- *   live preview on a 4K document — keeps reusing it).
+ *   with `wasmHeap()` after their last allocation.
+ * - A WebAssembly.Memory can never shrink, so memory grown past RELEASE_BYTES (64 MB) is handed back
+ *   by dropping the instance (and with it the memory) once no operation has needed that much for
+ *   RELEASE_DELAY_MS (3 s): a burst of big operations — a live preview or slider drag on a 4K
+ *   document — keeps reusing it, but one heavy filter run no longer pins hundreds of MB for the rest
+ *   of the session. The next kernel call re-instantiates from the compiled module (no recompile;
+ *   well under a millisecond plus the 1 MB initial memory). Results never depend on the instance.
  */
 import { BLUR_WASM_BASE64 } from './blurWasm.generated';
 
@@ -88,15 +92,19 @@ export type BlurBackendSetting = 'auto' | 'wasm' | 'js';
 const BASE = 64;
 /** Never let the stack pass 1 GiB (addresses stay positive int32 in every kernel and view index). */
 const MAX_BYTES = 1 << 30;
-/** Memory above this is handed back (instance recreated) once no operation has used it for shrinkDelayMs. */
-let shrinkBytes = 192 << 20;
+/** Memory above this is handed back (instance dropped) once no operation has needed it for releaseDelayMs. */
+export const RELEASE_BYTES = 64 << 20;
 /**
  * Idle time before oversized memory is handed back: a burst of big operations (a filter's live
  * preview on a 4K document, a slider drag) keeps reusing the grown memory instead of growing it
  * again — page faults and zeroing — on every run.
  */
-let shrinkDelayMs = 2000;
-let shrinkTimer: ReturnType<typeof setTimeout> | null = null;
+export const RELEASE_DELAY_MS = 3000;
+let releaseBytes = RELEASE_BYTES;
+let releaseDelayMs = RELEASE_DELAY_MS;
+let releaseTimer: ReturnType<typeof setTimeout> | null = null;
+/** Instances dropped to hand memory back (debug info). */
+let releases = 0;
 /** Highest stack position of the current outermost operation. */
 let peak = BASE;
 
@@ -177,16 +185,33 @@ function load() {
   }
 }
 
+/**
+ * The live instance, re-created from the compiled module after its memory was handed back. Null
+ * (JavaScript path for this call) if that fails, e.g. under memory pressure; the next call retries.
+ */
+function instance(): BlurWasm | null {
+  if (X || !mod) return X;
+  try {
+    instantiate(mod);
+  } catch (e) {
+    X = null;
+    reason = `re-instantiation failed: ${String(e)}`;
+  }
+  return X;
+}
+
 /** The kernels, or null when the JavaScript path must be used. */
 export function wasm(): BlurWasm | null {
   if (setting === 'js') return null;
   if (state === 'idle') load();
-  return state === 'ready' ? X : null;
+  return state === 'ready' ? instance() : null;
 }
 
-/** Which implementation the blur helpers currently use. */
+/** Which implementation the blur helpers currently use (doesn't re-create a released instance). */
 export function blurBackend(): BlurBackend {
-  return wasm() ? 'wasm' : 'js';
+  if (setting === 'js') return 'js';
+  if (state === 'idle') load();
+  return state === 'ready' ? 'wasm' : 'js';
 }
 
 /** Force the JavaScript path ('js') or go back to automatic selection ('auto'). For tests / benchmarks. */
@@ -194,10 +219,13 @@ export function setBlurBackend(s: BlurBackendSetting) {
   setting = s;
 }
 
-/** Debug details (why WebAssembly isn't used, memory size). */
-export function blurBackendInfo(): { backend: BlurBackend; setting: BlurBackendSetting; state: string; reason: string; memoryBytes: number } {
+/**
+ * Debug details (why WebAssembly isn't used, memory held: 0 while the instance is released, see
+ * RELEASE_BYTES; `releases` = how many times grown memory was handed back).
+ */
+export function blurBackendInfo(): { backend: BlurBackend; setting: BlurBackendSetting; state: string; reason: string; memoryBytes: number; releases: number } {
   const backend = blurBackend();
-  return { backend, setting, state, reason, memoryBytes: X ? X.memory.buffer.byteLength : 0 };
+  return { backend, setting, state, reason, memoryBytes: X ? X.memory.buffer.byteLength : 0, releases };
 }
 
 /** Current views of the module's memory (re-created after growth). Do not keep them across wasmAlloc. */
@@ -234,40 +262,42 @@ export function wasmAlloc(bytes: number): number {
   return p;
 }
 
-/** Tests: memory size above which the instance is recreated, and after how long idle (0 = right after the operation). */
-export function setWasmShrinkBytes(n: number, delayMs = 2000) {
-  shrinkBytes = n;
-  shrinkDelayMs = delayMs;
+/**
+ * Tests: memory size above which the instance is dropped, and after how long idle (0 = right after
+ * the operation). Defaults: RELEASE_BYTES, RELEASE_DELAY_MS.
+ */
+export function setWasmRelease(n = RELEASE_BYTES, delayMs = RELEASE_DELAY_MS) {
+  releaseBytes = n;
+  releaseDelayMs = delayMs;
 }
 
-/** Recreate the instance (fresh small memory) if it is idle and oversized. */
-function shrinkNow() {
-  if (top !== BASE || !mod || !X || X.memory.buffer.byteLength <= shrinkBytes) return;
-  try {
-    instantiate(mod);
-  } catch {
-    /* keep the big instance */
-  }
+/** Drop the instance (its memory goes with it: garbage-collected) if it is idle and oversized. */
+function releaseNow() {
+  if (top !== BASE || !X || X.memory.buffer.byteLength <= releaseBytes) return;
+  X = null;
+  heapCache = null;
+  peak = BASE;
+  releases++;
 }
 
 /**
  * Free everything allocated after `mark`. At the outermost level, oversized memory is handed back
- * once no operation has needed it for shrinkDelayMs (each operation that used more than
- * shrinkBytes restarts the wait; smaller ones don't postpone it).
+ * once no operation has needed it for releaseDelayMs (each operation that used more than
+ * releaseBytes restarts the wait; smaller ones neither postpone nor cancel it).
  */
 export function wasmRelease(mark: number) {
   top = mark;
   if (mark !== BASE) return;
-  const big = peak > shrinkBytes;
+  const big = peak > releaseBytes;
   peak = BASE;
-  if (!X || X.memory.buffer.byteLength <= shrinkBytes || (!big && shrinkTimer !== null)) return;
-  if (shrinkTimer !== null) clearTimeout(shrinkTimer);
-  shrinkTimer = null;
-  if (shrinkDelayMs <= 0 || typeof setTimeout !== 'function') return shrinkNow();
-  shrinkTimer = setTimeout(() => {
-    shrinkTimer = null;
-    shrinkNow();
-  }, shrinkDelayMs);
-  // Node (tests, tools): a pending shrink must not keep the process alive
-  (shrinkTimer as { unref?: () => void }).unref?.();
+  if (!X || X.memory.buffer.byteLength <= releaseBytes || (!big && releaseTimer !== null)) return;
+  if (releaseTimer !== null) clearTimeout(releaseTimer);
+  releaseTimer = null;
+  if (releaseDelayMs <= 0 || typeof setTimeout !== 'function') return releaseNow();
+  releaseTimer = setTimeout(() => {
+    releaseTimer = null;
+    releaseNow();
+  }, releaseDelayMs);
+  // Node (tests, tools): a pending release must not keep the process alive
+  (releaseTimer as { unref?: () => void }).unref?.();
 }

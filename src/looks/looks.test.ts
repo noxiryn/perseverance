@@ -189,9 +189,16 @@ describe('insert / strip', () => {
     // other layers keep their look unless stripping everything
     expect(lookMetaOf(stripped.layers[textId])?.lookId).toBe('x');
     const all = produce(applied, (d) => {
-      stripLookDraft(d, null, true);
+      stripLookDraft(d, null, 'all');
     });
     expect(lookMetaOf(all.layers[textId])).toBeNull();
+    // Document-mode removal takes every document-scope (non-confined) look as well.
+    const docScope = produce(applied, (d) => {
+      stripLookDraft(d, null, 'document');
+    });
+    expect(lookMetaOf(docScope.layers[textId])).toBeNull();
+    expect(lookMetaOf(docScope.layers[charId])).toBeNull();
+    expect(lookGroups(docScope)).toHaveLength(0);
     expect(all.layers[textId].filters).toEqual([]);
     expect(hasLook(all, null)).toBe(false);
   });
@@ -202,10 +209,13 @@ describe('resolveTarget', () => {
     const { doc, charId, adjId } = makeDoc();
     expect(resolveTarget(doc, charId)).toEqual({ targetId: charId });
     expect(resolveTarget(doc, null)).toEqual({ targetId: null });
-    expect(resolveTarget(doc, 'gone')).toEqual({ targetId: null });
+    expect(resolveTarget(doc, 'gone').targetId).toBeNull();
+    expect(resolveTarget(doc, 'gone').blocked).toBeTruthy();
+    // An adjustment layer can't hold a look: blocked (never widened to the whole document).
     const adj = resolveTarget(doc, adjId);
     expect(adj.targetId).toBeNull();
     expect(adj.note).toBeTruthy();
+    expect(adj.blocked).toMatch(/adjustment layer.*switch the Looks target to Document/);
     const locked = produce(doc, (d) => {
       d.layers[charId].locks.all = true;
     });

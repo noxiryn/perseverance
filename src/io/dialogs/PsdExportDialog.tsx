@@ -30,7 +30,7 @@ export function PsdExportDialog({ close }: { close: (r?: PsdExportOptions) => vo
       <Checkbox checked={bake} onChange={setBake} label="Bake layer styles into pixels" />
       <div className="io-note" style={{ marginTop: 6, paddingLeft: 19 }}>
         {bake
-          ? 'Drop shadows, strokes, glows and overlays are rendered into each layer so the PSD looks exactly like your document. Clipping-mask bases keep editable styles: baked, they would change the clip.'
+          ? 'Drop shadows, strokes, glows and overlays are rendered into pixels so the PSD looks like your document. Where one pixel layer can’t show them exactly (a glow or shadow with its own blend mode such as Screen, a layer blend mode or lowered opacity, a clipping-mask base), the styles behind the layer go on pixel layers of their own right below it, like Photoshop’s Create Layers; a clipping-mask base whose styles can’t be split that way keeps them editable.'
           : 'Layer styles are written as editable Photoshop effects (drop/inner shadow, outer/inner glow, bevel, satin, stroke, color and gradient overlay). Layers using a style Photoshop does not have (long shadow, pattern overlay) are baked.'}
       </div>
       <div className="io-sep" />

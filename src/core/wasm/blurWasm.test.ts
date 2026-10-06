@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { blurBackend, blurBackendInfo, setBlurBackend, setWasmShrinkBytes, wasm, wasmAlloc, wasmHeap, wasmMark, wasmRelease } from './runtime';
+import { RELEASE_BYTES, RELEASE_DELAY_MS, blurBackend, blurBackendInfo, setBlurBackend, setWasmRelease, wasm, wasmAlloc, wasmHeap, wasmMark, wasmRelease } from './runtime';
 import { blurChannel, boxBlurImageData } from '../blur';
 import { blurImage, blurPlane, boxBlurPasses, multiresBlurGrid, type BoxPass } from '../../filters/stylize/util';
 import { medianChannel } from '../../filters/stylize/median';
@@ -93,7 +93,7 @@ const SIZES: [number, number][] = [
 
 afterEach(() => {
   setBlurBackend('auto');
-  setWasmShrinkBytes(192 << 20);
+  setWasmRelease(); // defaults (64 MB, 3 s)
 });
 
 describe('WebAssembly blur kernels', () => {
@@ -213,7 +213,8 @@ describe('WebAssembly blur kernels', () => {
     const R = rng(9);
     const w = 700,
       h = 90;
-    setWasmShrinkBytes(1 << 30);
+    setWasmRelease(1 << 30);
+    expect(wasm()).not.toBeNull(); // callers take the kernels (re-instantiating a released instance) before allocating
     for (const ch of [1, 4]) {
       const src = floats(w * h * ch, R, 255);
       setBlurBackend('js');
@@ -318,15 +319,19 @@ describe('WebAssembly blur kernels', () => {
     blurChannel(Float32Array.from(src), w, h, 6);
     expect(blurBackendInfo().memoryBytes).toBe(grown);
     expect(wasmMark()).toBe(start);
-    // past the shrink threshold the instance is recreated (memory handed back): right after the
-    // call with no idle delay …
-    setWasmShrinkBytes(4 << 20, 0);
-    blurChannel(Float32Array.from(src), w, h, 6);
-    expect(blurBackendInfo().memoryBytes).toBeLessThan(grown);
-    // … or, by default, once no operation has used it for 2 s (a burst of calls keeps reusing it)
+    // past the release threshold the instance (and its memory) is dropped: right after the call
+    // with no idle delay — the next call re-instantiates from the compiled module, same results
+    setWasmRelease(4 << 20, 0);
+    const released = blurBackendInfo().releases;
+    const [e, f] = both(() => blurChannel(Float32Array.from(src), w, h, 6));
+    expect(firstDiff(e, f)).toBe(-1);
+    expect(blurBackendInfo().memoryBytes).toBe(0);
+    expect(blurBackendInfo().releases).toBe(released + 1);
+    expect(blurBackend()).toBe('wasm'); // still the backend: re-created on the next kernel call
+    // … or, by default, once no operation has needed it for a while (a burst of calls keeps reusing it)
     vi.useFakeTimers();
     try {
-      setWasmShrinkBytes(4 << 20, 2000);
+      setWasmRelease(4 << 20, 2000);
       blurChannel(Float32Array.from(src), w, h, 6);
       const big = blurBackendInfo().memoryBytes;
       expect(big).toBeGreaterThan(4 << 20);
@@ -336,14 +341,21 @@ describe('WebAssembly blur kernels', () => {
       vi.advanceTimersByTime(1500);
       expect(blurBackendInfo().memoryBytes).toBe(big);
       vi.advanceTimersByTime(600);
-      expect(blurBackendInfo().memoryBytes).toBeLessThan(4 << 20);
+      expect(blurBackendInfo().memoryBytes).toBe(0);
       // operations that don't need the big memory don't postpone handing it back
       blurChannel(Float32Array.from(src), w, h, 6);
       expect(blurBackendInfo().memoryBytes).toBe(big);
       vi.advanceTimersByTime(1500);
       blurChannel(new Float32Array(64 * 64).fill(0.5), 64, 64, 3);
       vi.advanceTimersByTime(600);
-      expect(blurBackendInfo().memoryBytes).toBeLessThan(4 << 20);
+      expect(blurBackendInfo().memoryBytes).toBe(0);
+      // small operations alone never trigger it (the instance stays, at its small size)
+      blurChannel(new Float32Array(64 * 64).fill(0.5), 64, 64, 3);
+      const small = blurBackendInfo().memoryBytes;
+      expect(small).toBeGreaterThan(0);
+      expect(small).toBeLessThanOrEqual(4 << 20);
+      vi.advanceTimersByTime(10000);
+      expect(blurBackendInfo().memoryBytes).toBe(small);
     } finally {
       vi.useRealTimers();
     }
@@ -351,6 +363,35 @@ describe('WebAssembly blur kernels', () => {
     const [c, d] = both(() => blurImage({ data: new Uint8ClampedArray(im.data), width: 1500, height: 900 }, 4).data);
     expect(firstDiff(c, d)).toBe(-1);
     expect(wasmMark()).toBe(start);
+  }, 60000);
+
+  it('by default hands back memory grown past 64 MB 3 s after the last operation that needed it; results unchanged', () => {
+    // A heavy filter run on a big image (here 72 MB for the small-σ gaussian's float planes) used to
+    // keep its memory for the rest of the session: a WebAssembly.Memory never shrinks.
+    setWasmRelease();
+    const R = rng(11);
+    const w = 2400,
+      h = 1200;
+    const im = image(w, h, R, false);
+    vi.useFakeTimers();
+    try {
+      const [a, b] = both(() => blurImage({ data: new Uint8ClampedArray(im.data), width: w, height: h }, 0.8).data);
+      expect(firstDiff(a, b)).toBe(-1);
+      const big = blurBackendInfo().memoryBytes;
+      expect(big).toBeGreaterThan(RELEASE_BYTES);
+      vi.advanceTimersByTime(RELEASE_DELAY_MS - 100);
+      expect(blurBackendInfo().memoryBytes).toBe(big);
+      vi.advanceTimersByTime(200);
+      expect(blurBackendInfo().memoryBytes).toBe(0);
+      // the next run re-instantiates and produces the same bytes
+      const again = blurImage({ data: new Uint8ClampedArray(im.data), width: w, height: h }, 0.8).data;
+      expect(blurBackendInfo().memoryBytes).toBeGreaterThan(RELEASE_BYTES);
+      expect(firstDiff(a, again)).toBe(-1);
+      vi.advanceTimersByTime(RELEASE_DELAY_MS + 100);
+      expect(blurBackendInfo().memoryBytes).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   }, 60000);
 
   it('a refused allocation changes nothing (callers then fall back to JavaScript)', () => {
@@ -376,7 +417,8 @@ describe('WebAssembly blur kernels', () => {
     ];
     const expected = boxBlurPasses(Float32Array.from(src), w, h, ch, list);
     setBlurBackend('auto');
-    setWasmShrinkBytes(1 << 30);
+    setWasmRelease(1 << 30);
+    expect(wasm()).not.toBeNull(); // callers take the kernels (re-instantiating a released instance) before allocating
     const mark = wasmMark();
     try {
       // the grid sits at the very end of the current memory, so the rings must grow it

@@ -18,7 +18,7 @@ import { insertLayerDraft, makeTextLayer, removeLayerDraft } from '../../core/do
 import { commands, runCommand, type ToolPointerEvent } from '../../registry';
 import { caretAt, indexAtPoint, measureText, selectionRects } from '../../render/compositor';
 import { activeSession, useEditor } from '../../state/editor';
-import { toast } from '../../state/ui';
+import { toast, useUI } from '../../state/ui';
 import { viewport } from '../../editor/viewport';
 import { isMac } from '../../platform';
 import { matchShortcut } from '../../ui/shortcuts';
@@ -28,7 +28,7 @@ import { TYPE_TOOL_ID, autoLayerName, optionsFromText, readTypeOptions, textProp
 import { getTextStyle, presetEffects } from './styles';
 import { caseMap, paragraphRangeAt, sanitizeTypedText, toDisplay, toSource, wordRangeAt, type CaseMap } from './textIndex';
 import { ClickCounter } from './clicks';
-import { shortcutDuringTextEdit } from './editKeys';
+import { shortcutDuringTextEdit, textStyleKeyFor } from './editKeys';
 
 /* ------------------------------------------------------------------ */
 /* Public reactive state (for the options bar / panels)                */
@@ -596,6 +596,13 @@ export function selectAllText() {
 /** Ctrl/⌘ combos that belong to text editing (handled natively by the textarea). */
 const TEXT_KEYS = new Set(['a', 'c', 'v', 'x', 'z', 'y', 'arrowleft', 'arrowright', 'arrowup', 'arrowdown', 'backspace', 'delete', 'home', 'end', 'insert']);
 
+/** Toast for a command that is disabled while text is edited (once per command while shown). */
+function hintCommitFirst(label: string) {
+  const message = `“${label.replace(/…$/, '')}” isn't available while you edit text — press Ctrl+Enter to commit the text first.`;
+  if (useUI.getState().toasts.some((t) => t.message === message)) return;
+  toast(message, 'info', 3600);
+}
+
 function commandForKey(e: KeyboardEvent) {
   for (const c of commands.list()) {
     if (!c.shortcut) continue;
@@ -643,11 +650,20 @@ function onTextareaKeyDown(e: KeyboardEvent) {
   if (ctrl) {
     const k = e.key.toLowerCase();
     if (!e.altKey && TEXT_KEYS.has(k)) return; // native editing
+    // Faux bold / italic / all caps (Ctrl+B / I, Shift+Ctrl+B / I / K) style the edited text and
+    // win over the document commands on the same keys; Ctrl+U (no underline here) does nothing.
+    const style = textStyleKeyFor(e, matchShortcut);
+    if (style) {
+      handled();
+      if (style.command) void runCommand(style.command);
+      return;
+    }
     const cmd = commandForKey(e);
     if (cmd) {
       handled();
       // Per command, see editKeys.ts: Type commands and view changes (zoom, fit, rulers…) keep
-      // editing; anything else commits the typed text first, then runs.
+      // editing; adjustments, filters and selections are disabled; layer / file commands commit
+      // the typed text first, then run.
       switch (shortcutDuringTextEdit(cmd.id)) {
         case 'text':
           void runCommand(cmd.id);
@@ -666,6 +682,9 @@ function onTextareaKeyDown(e: KeyboardEvent) {
           setSelection(f, f);
           break;
         }
+        case 'ignore':
+          hintCommitFirst(cmd.label);
+          break;
         default:
           commitEditing();
           void runCommand(cmd.id);

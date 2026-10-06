@@ -25,7 +25,7 @@ import { commands, docPresets, runCommand, templates, useRegistry, type Template
 import { isDesktop } from '../../platform';
 import { useEditor } from '../../state/editor';
 import { useUI } from '../../state/ui';
-import { cancelPendingTemplatePreviews, pauseTemplatePreviews, useTemplatePreview } from '../../templates/previews';
+import { cancelPendingTemplatePreviews, pauseTemplatePreviews, useTemplatePreviewState } from '../../templates/previews';
 import { openTipsGuide } from './dialogs/TipsDialog';
 import { Keys } from './Keys';
 import { LogoLarge } from './Logo';
@@ -117,7 +117,7 @@ function TemplateCard({ t, index, previewsOn }: { t: TemplateDef; index: number;
   const [busy, setBusy] = useState(false);
   const [ref, visible] = useOnScreen<HTMLButtonElement>();
   // While a dialog is up (e.g. New from Template) its own previews go first; ours resume after.
-  const preview = useTemplatePreview(t.id, visible && previewsOn, index);
+  const { url: preview, loading } = useTemplatePreviewState(t.id, visible && previewsOn, index);
   const ratio = t.width / Math.max(1, t.height);
   return (
     <button
@@ -147,7 +147,7 @@ function TemplateCard({ t, index, previewsOn }: { t: TemplateDef; index: number;
               ...(ratio >= ART_RATIO ? { width: '100%' } : { height: '100%' }),
             }}
           >
-            {preview ? <img src={preview} alt="" draggable={false} /> : <span className="shell-tpl-shimmer" />}
+            {preview ? <img src={preview} alt="" draggable={false} /> : loading && <span className="shell-tpl-shimmer" />}
           </div>
         </div>
         {busy && <div className="shell-tpl-busy">Building…</div>}

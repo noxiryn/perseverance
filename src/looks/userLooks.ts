@@ -13,7 +13,7 @@ import { toast } from '../state/ui';
 import { uid } from '../core/ids';
 import { assetIdOfLayer } from '../assets/place';
 import { parentOf } from '../core/document';
-import { isLookGroup, lookTargets, type ExtLookDef, type LookAdjustmentDef, type LookOverlayDef } from './engine';
+import { isLookGroup, lookClipTarget, lookTargets, type ExtLookDef, type LookAdjustmentDef, type LookOverlayDef } from './engine';
 import { captureMaskSpec, type OverlayMaskSpec } from './masks';
 import { promptSave } from './SavePresetDialog';
 
@@ -132,6 +132,9 @@ export function captureLook(
     for (const rid of above) {
       const l = doc.layers[rid];
       if (!l || (l.type === 'group' && typeof l.meta?.lookId === 'string')) continue;
+      // Grades / textures of another layer's Layer-mode look are that layer's, not this one's.
+      const clipTarget = lookClipTarget(l);
+      if (clipTarget && clipTarget !== target.id) continue;
       if (l.type === 'group') walk(l.childIds, 'top');
       else take(l, 'top');
     }

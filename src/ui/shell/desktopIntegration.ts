@@ -4,7 +4,7 @@
  */
 import { desktop, setWindowTitle, type OpenedFile } from '../../platform';
 import { useEditor } from '../../state/editor';
-import { autosaveBeforeClose, discardRecoveryFor } from '../../io/autosave';
+import { autosaveBeforeClose, discardRecoveryFor, flushRecovery } from '../../io/autosave';
 import { askChoice } from './dialogs/ChoiceDialog';
 import { dirtySessions, openFileWithIo, saveSession } from './documents';
 import { windowTitle } from './docInfo';
@@ -93,10 +93,12 @@ export function installDesktopIntegration(): () => void {
         } catch (e) {
           // Always answer the main process: a broken prompt must not leave the window unclosable.
           console.error('[shell] close prompt failed', e);
-          // Not the user's Discard: the autosaved copies stay and are offered the next time.
+          // Not the user's Discard: the autosaved copies are brought up to date first, kept, and offered
+          // the next time.
           ok = window.confirm(
-            'Perseverance could not show the unsaved-changes prompt. Quit anyway? Unsaved changes are lost (autosave may offer to recover them on the next launch).',
+            'Perseverance could not show the unsaved-changes prompt. Quit anyway? Unsaved changes are not saved to their files. Perseverance first tries to autosave them, and the next start offers to recover the autosaved copy (if autosave is on).',
           );
+          if (ok) await flushRecovery().catch(() => undefined);
         } finally {
           closing = false;
           desktop!.confirmClose(ok);

@@ -14,7 +14,7 @@
 import type { DocSession, Document, ID } from '../core/types';
 import { uid } from '../core/ids';
 import { renderThumbnail } from '../render/compositor';
-import { isDesktop, samePath } from '../platform';
+import { desktop, isDesktop, samePath } from '../platform';
 import { savedIndexOf, useEditor, type SavedState } from '../state/editor';
 import { openDialog, toast } from '../state/ui';
 import { encodeProject, decodeProjectWithFonts } from './project';
@@ -103,14 +103,22 @@ function openDB(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
+/**
+ * Resolves once the transaction has COMMITTED, not when its request succeeded: a write is only safe
+ * then. The window may close right after (a forced quit waits for flushRecovery, then closes), and a
+ * transaction still open at that moment is lost. Writes ask for strict durability (flushed to disk, not
+ * left in OS buffers), so a power cut or Windows ending the session can't lose an entry reported stored.
+ */
 function tx<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
   return openDB().then(
     (db) =>
       new Promise<T>((resolve, reject) => {
-        const t = db.transaction(STORE, mode);
+        const t = mode === 'readwrite' ? db.transaction(STORE, mode, { durability: 'strict' }) : db.transaction(STORE, mode);
         const req = fn(t.objectStore(STORE));
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error ?? new Error('IndexedDB request failed'));
+        const fail = () => reject(req.error ?? t.error ?? new Error('IndexedDB transaction failed'));
+        t.oncomplete = () => resolve(req.result);
+        t.onerror = fail;
+        t.onabort = fail;
       }),
   );
 }
@@ -173,7 +181,11 @@ const lastRun = new Map<ID, number>();
 const lastEntry = new Map<ID, SavedState>();
 /** Documents whose changes the user discarded (quit → Discard): their state then, and when. */
 const discarded = new Map<ID, { at: SavedState; time: number }>();
-let running = false;
+/** The autosave run in progress, and the forced run queued behind it (one serves every caller). */
+let running: Promise<void> | null = null;
+let queued: Promise<void> | null = null;
+/** > 0 while a forced quit waits for the copies (flushRecovery): don't wait for idle time. */
+let urgency = 0;
 
 /** True when the session's current step is exactly `at`. */
 function isAt(s: DocSession, at: SavedState | undefined): boolean {
@@ -195,55 +207,77 @@ export function autosaveMinutes(): number {
   return Number.isFinite(v) && v >= 0 ? v : 2;
 }
 
-async function autosaveTick(force = false) {
+/** Write one document's recovery entry if it is due (`force`: now). */
+async function autosaveDoc(id: ID, now: number, minutes: number, force: boolean) {
+  const s = useEditor.getState().sessions[id];
+  if (!s) return;
+  if (!lastRun.has(id)) lastRun.set(id, now);
+  if (!s.dirty) return;
+  if (alreadyWritten(id, s) || isDiscardedState(id, s)) return;
+  if (!force && now - (lastRun.get(id) ?? now) < minutes * 60000) return;
+  if (!urgency) await idle(1000);
+  // Re-read after yielding and snapshot synchronously: the recovery entry, its thumbnail and
+  // its pixels all describe the same (committed) history step.
+  const live = useEditor.getState().sessions[id];
+  if (!live || !live.dirty || alreadyWritten(id, live) || isDiscardedState(id, live)) return;
+  const snapAt = Date.now();
+  const doc = live.history.entries[live.history.index]?.doc ?? live.doc;
+  const written: SavedState = { entryId: currentEntryId(live), doc };
+  const thumb = thumbnailOf(doc);
+  const data = await encodeProject(doc, { background: true });
+  // The document may have been saved or closed while encoding, or the user discarded its changes.
+  const cur = useEditor.getState().sessions[id];
+  if (!cur || !cur.dirty) return;
+  if ((discarded.get(id)?.time ?? -Infinity) >= snapAt) return;
+  // No await between the checks above and the put: a discard issued later deletes after it.
+  await putRecovery({
+    id: recoveryKey(id),
+    docId: id,
+    launchId: LAUNCH_ID,
+    name: doc.name,
+    time: Date.now(),
+    width: doc.width,
+    height: doc.height,
+    data,
+    thumb,
+    filePath: live.filePath,
+  });
+  lastRun.set(id, Date.now());
+  lastEntry.set(id, written);
+}
+
+async function runTick(force: boolean) {
   const minutes = autosaveMinutes();
-  if ((!minutes && !force) || running) return;
-  running = true;
-  try {
-    const now = Date.now();
-    const st = useEditor.getState();
-    for (const id of st.docOrder) {
-      const s = useEditor.getState().sessions[id];
-      if (!s) continue;
-      if (!lastRun.has(id)) lastRun.set(id, now);
-      if (!s.dirty) continue;
-      if (alreadyWritten(id, s) || isDiscardedState(id, s)) continue;
-      if (!force && now - (lastRun.get(id) ?? now) < minutes * 60000) continue;
-      await idle(1000);
-      // Re-read after yielding and snapshot synchronously: the recovery entry, its thumbnail and
-      // its pixels all describe the same (committed) history step.
-      const live = useEditor.getState().sessions[id];
-      if (!live || !live.dirty || alreadyWritten(id, live) || isDiscardedState(id, live)) continue;
-      const snapAt = Date.now();
-      const doc = live.history.entries[live.history.index]?.doc ?? live.doc;
-      const written: SavedState = { entryId: currentEntryId(live), doc };
-      const thumb = thumbnailOf(doc);
-      const data = await encodeProject(doc, { background: true });
-      // The document may have been saved or closed while encoding, or the user discarded its changes.
-      const cur = useEditor.getState().sessions[id];
-      if (!cur || !cur.dirty) continue;
-      if ((discarded.get(id)?.time ?? -Infinity) >= snapAt) continue;
-      // No await between the checks above and the put: a discard issued later deletes after it.
-      await putRecovery({
-        id: recoveryKey(id),
-        docId: id,
-        launchId: LAUNCH_ID,
-        name: doc.name,
-        time: Date.now(),
-        width: doc.width,
-        height: doc.height,
-        data,
-        thumb,
-        filePath: live.filePath,
-      });
-      lastRun.set(id, Date.now());
-      lastEntry.set(id, written);
+  if (!minutes && !force) return;
+  const now = Date.now();
+  for (const id of useEditor.getState().docOrder) {
+    // One document that can't be written (e.g. storage full) doesn't keep the others from being kept.
+    try {
+      await autosaveDoc(id, now, minutes, force);
+    } catch (e) {
+      console.warn('[io] autosave failed', e);
     }
-  } catch (e) {
-    console.warn('[io] autosave failed', e);
-  } finally {
-    running = false;
   }
+}
+
+/**
+ * One autosave run at a time. A forced run asked for while one is in progress runs again right after
+ * it — that one may have passed a document before its latest edit — so the caller gets the state as it
+ * is now; every forced request made meanwhile shares that one queued run.
+ */
+function autosaveTick(force = false): Promise<void> {
+  if (running) {
+    if (!force) return running;
+    return (queued ??= running.then(() => {
+      queued = null;
+      return autosaveTick(true);
+    }));
+  }
+  const run: Promise<void> = runTick(force).finally(() => {
+    if (running === run) running = null;
+  });
+  running = run;
+  return run;
 }
 
 /** Write recovery data for all dirty documents now (used before risky operations / tests). */
@@ -258,6 +292,31 @@ export function autosaveNow() {
  */
 export function autosaveBeforeClose() {
   if (autosaveMinutes() > 0) void autosaveTick(true);
+}
+
+/** Dirty documents whose current state is in no recovery entry of this launch (and wasn't discarded). */
+export function unprotectedCount(): number {
+  const st = useEditor.getState();
+  return Object.values(st.sessions).filter((s) => s.dirty && !alreadyWritten(s.doc.id, s) && !isDiscardedState(s.doc.id, s)).length;
+}
+
+/**
+ * The window is about to close without the user's answer ("Quit Anyway" in a native prompt: the
+ * in-app prompt is stuck, or the UI broke): write the recovery entries of all dirty documents now,
+ * without waiting for idle time, and resolve once they are stored (also when an autosave was already
+ * running). Resolves the number of dirty documents still without an up-to-date copy (0 = all kept).
+ * Respects 'autosaveMinutes' = 0 (autosave off: nothing is written).
+ */
+export async function flushRecovery(): Promise<number> {
+  if (autosaveMinutes() > 0 && unprotectedCount() > 0) {
+    urgency++;
+    try {
+      await autosaveTick(true);
+    } finally {
+      urgency--;
+    }
+  }
+  return unprotectedCount();
 }
 
 /**
@@ -383,9 +442,13 @@ function markClosedWithoutSaving() {
   writeJSON(CLOSED_KEY, [...new Set([...(Array.isArray(prev) ? prev : []), ...keys])]);
 }
 
-/** Entries earlier launches left behind (minus those the browser marked as left without saving). */
+/**
+ * Entries earlier launches left behind (minus those the browser marked as left without saving). The
+ * desktop app ignores a marker an older version may have left: that one was also written by forced
+ * quits ("Quit Anyway", Windows shutting down), so it can't tell a real Discard apart.
+ */
 export async function pendingRecovery(): Promise<RecoveryEntry[]> {
-  const marker = readJSON<unknown>(CLOSED_KEY, []);
+  const marker = isDesktop ? [] : readJSON<unknown>(CLOSED_KEY, []);
   const closed = new Set(Array.isArray(marker) ? marker.filter((x): x is string => typeof x === 'string') : []);
   try {
     localStorage.removeItem(CLOSED_KEY);
@@ -414,7 +477,9 @@ export function resetAutosaveState() {
   lastRun.clear();
   lastEntry.clear();
   discarded.clear();
-  running = false;
+  running = null;
+  queued = null;
+  urgency = 0;
 }
 
 /** Remove this launch's entries for documents that were saved (clean) or closed. */
@@ -439,6 +504,11 @@ export function startAutosave() {
   started = true;
   window.setInterval(() => void autosaveTick(), 15000);
   watchSessions();
+  // Desktop: the main process asks for the copies right before a forced quit ("Quit Anyway").
+  desktop?.onFlushRecovery?.(() => {
+    if (autosaveMinutes() > 0 && unprotectedCount() > 0) toast('Keeping an autosaved copy of your unsaved changes…', 'info', 4000);
+    return flushRecovery();
+  });
   if (!isDesktop) window.addEventListener('pagehide', markClosedWithoutSaving);
   window.setTimeout(() => void offerRecovery(), 1200);
 }

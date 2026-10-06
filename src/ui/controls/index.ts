@@ -6,3 +6,4 @@ export * from './curves';
 export * from './ParamEditor';
 export * from './fontSelect';
 export * from './Dialog';
+export { pushEscapeLayer, type EscapeLayer } from './escapeLayers';

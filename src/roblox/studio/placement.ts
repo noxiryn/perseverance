@@ -44,6 +44,15 @@ export function outputFrameSize(size: 'document' | number, docW: number | null, 
   return { width: Math.max(1, Math.round(w * k)), height: Math.max(1, Math.round(h * k)) };
 }
 
+/**
+ * Whether a render's visible pixels reach the bottom edge of its frame: the figure is cut there
+ * (Head / Waist-up framing, or a camera moved close), so replacing a template placeholder it is
+ * fitted as a bust (fit.ts `cut`) instead of standing on the placeholder's bottom edge.
+ */
+export function rendersCutOff(opaque: { y: number; height: number }, frameH: number): boolean {
+  return opaque.y + opaque.height >= frameH - 1;
+}
+
 /** Expand opaque bounds by a padding (so smart filters/effects have room) and clamp to the frame. */
 export function padCrop(b: CropRect, frameW: number, frameH: number, pad: number): CropRect {
   const x0 = Math.max(0, Math.floor(b.x - pad));

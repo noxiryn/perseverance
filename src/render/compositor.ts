@@ -14,7 +14,9 @@ import type { Document, ID, Layer, Paint, Rect, Size, TextProps, TransformableLa
 import { bitmaps } from '../core/bitmaps';
 import { createCanvas, ctx2d } from '../core/canvas';
 import { transformedBounds } from '../core/geometry';
-import { applyFilterStack, makeFilterContext } from '../filters/engine';
+import { applyFilterStack, makeFilterContext, resolveParams } from '../filters/engine';
+import { effects as effectDefs } from '../registry';
+import { effectStage } from './effects/common';
 import { VOLATILE_ASSETS, bumpGeneration, px, renderCache, slots } from './cache';
 import {
   clipStackBackdrop,
@@ -181,6 +183,22 @@ export type { LayerParts } from './engine';
 export function renderLayerParts(doc: Document, layer: Layer, opts: { scale?: number; mask?: boolean } = {}): LayerParts | null {
   const rc = makeRC(doc, opts.scale ?? 1);
   return layerParts(rc, layer, { effects: true, mask: opts.mask !== false, filters: true });
+}
+
+/**
+ * Ids of a layer's enabled behind-stage effects (drop shadow, outer glow, outside stroke…) in the
+ * order the compositor draws them: the order of renderLayerParts' `behind` pieces when each of
+ * those effects drew one piece (names for split-off style layers). Metadata only.
+ */
+export function behindEffectIds(layer: Layer): string[] {
+  const list: { id: string; order: number; idx: number }[] = [];
+  layer.effects?.forEach((e, idx) => {
+    if (!e.enabled) return;
+    const def = effectDefs.get(e.effectId);
+    if (!def || effectStage(def, resolveParams(def, e.params)) !== 'behind') return;
+    list.push({ id: def.id, order: def.order, idx });
+  });
+  return list.sort((a, b) => a.order - b.order || a.idx - b.idx).map((e) => e.id);
 }
 
 /** What a clipped layer sees of its clip stack, see renderClipBackdrop. Canvases are fresh. */

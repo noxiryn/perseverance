@@ -103,7 +103,7 @@ export const TIPS_STEPS: Step[] = [
     title: 'Give it a look',
     needsDoc: true,
     icon: Sparkles,
-    body: 'One-click Looks combine gradient maps, halftone, grain and overlays into a cohesive style — Crimson Film, Noir Newspaper, Sunburst Halftone, Gothic Paper and more. Select your character layer first to stylize it.',
+    body: 'One-click Looks combine gradient maps, halftone, grain and overlays into a cohesive style — Crimson Film, Noir Newspaper, Sunburst Halftone, Gothic Paper and more. “Document” styles the whole image and your character; switch to “Layer” to style only the selected layer (a title, say).',
     actions: [{ label: 'Show Looks', icon: Sparkles, run: () => showPanel('looks') }],
   },
   {

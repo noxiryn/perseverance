@@ -5,7 +5,7 @@ import { Button, Dialog, SearchInput, showContextMenu } from '../ui/controls';
 import { deleteUserTemplate, isUserTemplate } from './userTemplates';
 import { nextPaint } from '../looks/shared';
 import { openTemplate } from './open';
-import { cancelPendingTemplatePreviews, pauseTemplatePreviews, useTemplatePreview } from './previews';
+import { cancelPendingTemplatePreviews, pauseTemplatePreviews, useTemplatePreviewState } from './previews';
 import './templates.css';
 
 const CATEGORY_ORDER: TemplateDef['category'][] = ['Mine', 'Thumbnail', 'Icon', 'Banner', 'Social', 'Blank'];
@@ -56,7 +56,7 @@ function useVisible<T extends Element>(): [React.RefObject<T | null>, boolean] {
 
 function TemplateCard({ t, index, busy, disabled, onOpen }: { t: TemplateDef; index: number; busy: boolean; disabled: boolean; onOpen: (t: TemplateDef) => void }) {
   const [ref, visible] = useVisible<HTMLButtonElement>();
-  const preview = useTemplatePreview(t.id, visible, index);
+  const { url: preview, loading } = useTemplatePreviewState(t.id, visible, index);
   const ratio = t.width / Math.max(1, t.height);
   return (
     <button
@@ -84,7 +84,7 @@ function TemplateCard({ t, index, busy, disabled, onOpen }: { t: TemplateDef; in
             ...(ratio >= 1.25 ? { width: '100%' } : { height: '100%' }),
           }}
         >
-          {preview ? <img src={preview} alt="" draggable={false} /> : <span className="templates-shimmer" />}
+          {preview ? <img src={preview} alt="" draggable={false} /> : loading && <span className="templates-shimmer" />}
         </div>
         {busy && (
           <div className="templates-busy">

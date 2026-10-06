@@ -34,6 +34,17 @@ function prunePngCache() {
   pngCache.prune(keep);
 }
 
+export interface EncodeOptions {
+  background?: boolean;
+  fonts?: 'all' | 'session';
+}
+
+/** An encoded project snapshot that can be packed again under another document name (same pixels, fonts, time). */
+export interface ProjectSnapshot {
+  /** The .pgfx file; `name` replaces the document's name inside it (Save As: the chosen file's name). */
+  pack(name?: string): ArrayBuffer;
+}
+
 /**
  * Encode a document as a .pgfx container.
  *
@@ -51,7 +62,12 @@ function prunePngCache() {
  * recovery entries, whose installed fonts stay on this machine). `background: true` (autosave,
  * templates) also yields to idle time before packing.
  */
-export async function encodeProject(doc: Document, opts: { background?: boolean; fonts?: 'all' | 'session' } = {}): Promise<ArrayBuffer> {
+export async function encodeProject(doc: Document, opts: EncodeOptions = {}): Promise<ArrayBuffer> {
+  return (await encodeProjectSnapshot(doc, opts)).pack();
+}
+
+/** encodeProject, keeping the encoded snapshot: same contract (synchronous pixel snapshot at call time). */
+export async function encodeProjectSnapshot(doc: Document, opts: EncodeOptions = {}): Promise<ProjectSnapshot> {
   // ---- synchronous snapshot (no await above this line) ----
   const savedAt = new Date().toISOString();
   const items: SnapshotItem<HTMLCanvasElement>[] = [];
@@ -66,7 +82,10 @@ export async function encodeProject(doc: Document, opts: { background?: boolean;
   const embedded = await fontsP;
   prunePngCache();
   if (opts.background) await idle();
-  return packContainer({ version: PGFX_VERSION, app: `${APP_NAME} ${appVersion}`, savedAt, document: doc }, blobs, embedded);
+  const app = `${APP_NAME} ${appVersion}`;
+  return {
+    pack: (name) => packContainer({ version: PGFX_VERSION, app, savedAt, document: name && name !== doc.name ? { ...doc, name } : doc }, blobs, embedded),
+  };
 }
 
 /* ------------------------------------------------------------------ */

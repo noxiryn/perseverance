@@ -48,10 +48,14 @@ let rendererGone = false; // the render process crashed / was killed
 let rendererReady = false; // the page finished loading and can receive 'desktop:open-file'
 let expectedKill = false; // we killed a hung renderer ourselves to reload it, don't report it as a crash
 let reloadTimer = null; // safety net for expectedKill: the reload must finish loading in time
-const closeReq = { pending: false, acked: false, ackedAt: 0, timer: null, fallbackShown: false };
+/** The page's loads: a failed one shows Chromium's error page, which is not the editor (see lib.createLoadState). */
+let pageLoad = lib.createLoadState();
+const closeReq = { pending: false, acked: false, ackedAt: 0, timer: null, fallbackShown: false, forcing: false };
 let forceTimer = null;
 /** One native prompt at a time (close fallback / crash / unresponsive). @type {AbortController | null} */
 let promptAbort = null;
+/** What the open prompt is about ('unresponsive' is the one a recovered renderer takes back). */
+let promptKind = null;
 let crashTimes = [];
 
 nativeTheme.themeSource = 'dark';
@@ -129,10 +133,11 @@ function openExternalSafe(url) {
 }
 
 /** Show a native prompt that a newer prompt / renderer answer can dismiss. Resolves -1 when dismissed. */
-async function prompt(options) {
+async function prompt(options, kind = null) {
   promptAbort?.abort();
   const ac = new AbortController();
   promptAbort = ac;
+  promptKind = kind;
   try {
     const w = liveWindow();
     const opts = { noLink: true, ...options, signal: ac.signal };
@@ -142,13 +147,17 @@ async function prompt(options) {
     log.warn('prompt failed', e);
     return -1;
   } finally {
-    if (promptAbort === ac) promptAbort = null;
+    if (promptAbort === ac) {
+      promptAbort = null;
+      promptKind = null;
+    }
   }
 }
 
 function dismissPrompt() {
   promptAbort?.abort();
   promptAbort = null;
+  promptKind = null;
 }
 
 /* ---------------- files ---------------- */
@@ -215,7 +224,7 @@ function scheduleSaveWindowState() {
 
 function resetClose() {
   clearTimeout(closeReq.timer);
-  Object.assign(closeReq, { pending: false, acked: false, ackedAt: 0, timer: null, fallbackShown: false });
+  Object.assign(closeReq, { pending: false, acked: false, ackedAt: 0, timer: null, fallbackShown: false, forcing: false });
 }
 
 /** Bring the window back so a prompt about unsaved work can be seen (minimized / hidden on macOS). */
@@ -258,15 +267,16 @@ function cancelClose() {
 function requestClose() {
   const w = liveWindow();
   if (!w) return;
-  if (rendererGone || w.webContents.isCrashed()) {
-    // Nothing left to save in a dead renderer (autosave offers recovery on next launch).
+  if (rendererGone || pageLoad.failed || w.webContents.isCrashed()) {
+    // Nothing left to save in a dead renderer or on Chromium's error page (autosave offers recovery on
+    // next launch), and nobody there would answer a close request.
     closeNow();
     return;
   }
   // The renderer's unsaved-changes prompt must be visible (e.g. closed from the taskbar while minimized).
   if (rendererEdited || closeReq.pending) revealWindow(w);
   if (closeReq.pending) {
-    if (closeReq.fallbackShown) return;
+    if (closeReq.fallbackShown || closeReq.forcing) return; // a prompt is open / "Quit Anyway" is under way
     if (closeReq.acked) {
       // Closing again while the renderer's prompt is (supposedly) open: after a moment, offer a way
       // out in case that prompt is lost or stuck. A quick double click just keeps the prompt.
@@ -283,17 +293,83 @@ function requestClose() {
 }
 
 /**
+ * What a forced quit does with unsaved work. The page deletes its autosaved copies only when the user
+ * picks Discard in its own prompt (src/io/autosave discardRecoveryFor); every other way out keeps them.
+ * After "Quit Anyway" the page is first asked to bring them up to date (quitAnyway → flushRecovery):
+ * a page that still runs (its prompt is lost or stuck, or the UI broke) writes the latest state, a busy
+ * or hung one can't — then only the last regular autosave (every few minutes) is there.
+ */
+const RECOVERY_NOTE = {
+  answering: 'If you quit now, unsaved changes are not saved to their files. Perseverance first tries to autosave them, and the next start offers to recover the autosaved copy (if autosave is on).',
+  busy: 'If you quit now, unsaved changes are not saved, and changes made since the last autosave may be lost. The next start offers the last autosaved copy, if there is one.',
+};
+
+/** A page that doesn't even start writing its copies within this time is busy or hung: not waited for. */
+const FLUSH_START_MS = 2000;
+/** Upper bound for writing the copies of very large documents. */
+const FLUSH_MAX_MS = 20000;
+let flushSeq = 0;
+/** @type {Map<number, { started: () => void, finish: (result: string) => void }>} */
+const flushWaiters = new Map();
+
+/**
+ * Ask the page to write the autosaved copies of its unsaved documents now (preload 'desktop:flush-recovery'
+ * → src/io/autosave flushRecovery). Resolves when they are stored, or when the page doesn't answer, goes
+ * away or takes too long: never rejects. The result is only logged.
+ */
+function flushRecovery() {
+  const w = liveWindow();
+  if (!w || rendererGone || pageLoad.failed || w.webContents.isCrashed()) return Promise.resolve('no page');
+  const wc = w.webContents;
+  const id = ++flushSeq;
+  return new Promise((resolve) => {
+    const gone = () => finish('page gone');
+    const startTimer = setTimeout(() => finish('no answer'), FLUSH_START_MS);
+    const maxTimer = setTimeout(() => finish('timed out'), FLUSH_MAX_MS);
+    function finish(result) {
+      if (!flushWaiters.has(id)) return;
+      flushWaiters.delete(id);
+      clearTimeout(startTimer);
+      clearTimeout(maxTimer);
+      for (const ev of ['render-process-gone', 'did-start-loading', 'destroyed']) wc.removeListener(ev, gone);
+      resolve(result);
+    }
+    flushWaiters.set(id, { started: () => clearTimeout(startTimer), finish });
+    for (const ev of ['render-process-gone', 'did-start-loading', 'destroyed']) wc.once(ev, gone);
+    try {
+      wc.send('desktop:flush-recovery', id);
+    } catch {
+      finish('page gone');
+    }
+  });
+}
+
+/**
+ * The user picked "Quit Anyway" in a native prompt: the page first brings its autosaved copies up to
+ * date, then the window closes. Closing again meanwhile is ignored; the page's own answer still counts
+ * (Cancel in its prompt keeps the window, Save/Discard closes it).
+ */
+async function quitAnyway() {
+  closeReq.forcing = true;
+  const result = await flushRecovery();
+  log.info(`forced quit: autosaved copies ${result}`);
+  // resetClose() clears `forcing` when the page answered meanwhile (cancelClose) or was reloaded; a page
+  // that crashed while writing has nothing more to save.
+  if (closeReq.forcing || result === 'page gone') closeNow();
+}
+
+/**
  * Native way out of the close guard. 'no-ack': the renderer didn't acknowledge the close request (busy
  * or broken). 'stuck': it did, but the user keeps trying to close while its prompt is open.
  */
 async function closeFallback(reason = 'no-ack') {
   if (reason === 'no-ack') closeReq.timer = null;
-  if (!closeReq.pending || closeReq.fallbackShown) return;
+  if (!closeReq.pending || closeReq.fallbackShown || closeReq.forcing) return;
   if (reason === 'no-ack' && closeReq.acked) return;
   const stuck = reason === 'stuck';
   closeReq.fallbackShown = true;
   log.warn(stuck ? 'close requested again while the unsaved-changes prompt is open' : 'close request not acknowledged by the renderer');
-  const lost = rendererEdited ? ' If you quit now, unsaved changes are lost (autosave may offer to recover them on the next launch).' : '';
+  const lost = rendererEdited ? ` ${stuck ? RECOVERY_NOTE.answering : RECOVERY_NOTE.busy}` : '';
   const r = await prompt({
     type: 'warning',
     title: 'Perseverance',
@@ -308,7 +384,7 @@ async function closeFallback(reason = 'no-ack') {
   closeReq.fallbackShown = false;
   // Dismissed (-1) or settled meanwhile: the renderer answered or acknowledged.
   if (r === -1 || !closeReq.pending || (!stuck && closeReq.acked)) return;
-  if (r === 1) closeNow();
+  if (r === 1) void quitAnyway();
   else if (!closeReq.acked) closeReq.timer = setTimeout(closeFallback, CLOSE_RETRY_TIMEOUT_MS);
 }
 
@@ -322,12 +398,12 @@ async function closeUnguarded() {
     type: 'warning',
     title: 'Perseverance',
     message: 'Quit Perseverance?',
-    detail: 'The editor could not confirm your unsaved changes. If you quit now they are lost (autosave may offer to recover them on the next launch).',
+    detail: `The editor could not confirm your unsaved changes. ${RECOVERY_NOTE.answering}`,
     buttons: ['Cancel', 'Quit Anyway'],
     defaultId: 0,
     cancelId: 0,
   });
-  if (r === 1) closeNow();
+  if (r === 1) void quitAnyway();
   else if (r === 0) cancelClose();
 }
 
@@ -336,6 +412,7 @@ async function closeUnguarded() {
 async function onRenderGone(details) {
   rendererGone = true;
   rendererReady = false;
+  pageLoad.abandon(); // a failure of the load it was running is the crash prompt's to report
   resetClose();
   log.error('render process gone', details);
   if (forceClose) return;
@@ -392,6 +469,7 @@ function reloadHungRenderer(w) {
     log.warn('the editor did not come back after reloading a hung renderer');
     void crashPrompt({ reason: 'the editor did not restart' });
   }, RELOAD_TIMEOUT_MS);
+  pageLoad.abandon(); // the dying page's own load may still report a failure: the reload speaks for it
   w.webContents.forcefullyCrashRenderer();
 }
 
@@ -429,7 +507,7 @@ async function onUnresponsive() {
     buttons: ['Wait', 'Reload', 'Quit'],
     defaultId: 0,
     cancelId: 0,
-  });
+  }, 'unresponsive');
   const w = liveWindow();
   if (!w) return;
   if (r === 1) reloadHungRenderer(w);
@@ -451,6 +529,7 @@ function createWindow() {
   const bounds = lib.initialBounds(saved, displays);
   rendererGone = false;
   rendererReady = false;
+  pageLoad = lib.createLoadState();
   forceClose = false;
   resetClose();
 
@@ -516,6 +595,12 @@ function createWindow() {
     requestClose();
   });
   // Windows log off / shut down: never block it (autosave keeps unsaved work for recovery).
+  // Windows asks whether it may end the session: never refuse, but let the page bring its autosaved
+  // copies up to date while Windows asks the other apps (nothing waits for it).
+  w.on('query-session-end', () => {
+    log.info('session end requested');
+    void flushRecovery();
+  });
   w.on('session-end', () => {
     log.info('session end');
     forceClose = true;
@@ -532,11 +617,15 @@ function createWindow() {
   const wc = w.webContents;
   wc.on('did-start-loading', () => {
     // A reload resets the renderer: forget half-finished close requests (and a quit waiting on one).
+    pageLoad.start();
     rendererReady = false;
     resetClose();
     quitRequested = false;
   });
   wc.on('did-finish-load', () => {
+    // After a failed load this is Chromium's error page, not the editor: it can't take files (they stay
+    // queued for "Try Again"), and a reload that ended here did not bring the editor back.
+    if (!pageLoad.finish()) return;
     rendererGone = false;
     rendererReady = true;
     clearReloadWatch();
@@ -545,15 +634,20 @@ function createWindow() {
   wc.on('render-process-gone', (_e, details) => void onRenderGone(details));
   w.on('unresponsive', () => void onUnresponsive());
   w.on('responsive', () => {
-    if (!closeReq.fallbackShown) dismissPrompt();
+    // Only the "not responding" prompt is about this (never the close fallback, a crash or a load error).
+    if (promptKind === 'unresponsive') dismissPrompt();
   });
   wc.on('preload-error', (_e, p, error) => log.error('preload error', p, error));
   wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
-    // -3 (ERR_ABORTED) only means a newer navigation/reload superseded this one.
-    if (!isMainFrame || code === -3) return;
+    const failure = pageLoad.fail(code, isMainFrame);
+    if (!failure) return; // a subframe, or ERR_ABORTED (a newer navigation/reload superseded this one)
     log.error('did-fail-load', code, desc, url);
-    // A renderer we are killing/reloading, or a window that is closing, reports its own way.
-    if (!forceClose && !expectedKill && !rendererGone) void onLoadFailed(w, code, desc, url);
+    // The load of a renderer that crashed or that we are killing is reported by the crash prompt / the
+    // reload that follows; a closing window needs no prompt. Anything else, also the reload after a crash
+    // or a hang (a new renderer), is told here.
+    if (failure !== 'report' || forceClose) return;
+    clearReloadWatch(); // the hung-renderer reload got its answer: no "did not restart" prompt on top
+    void onLoadFailed(w, code, desc, url);
   });
   let consoleLines = 0;
   wc.on('console-message', (...args) => {
@@ -645,11 +739,35 @@ handle('desktop:save-file', async (_e, opts) => {
   // The page's defaultPath never reaches the dialog as an arbitrary path (UNC probe / NTLM leak, a
   // pre-filled startup folder): a file the user chose before, or else just a file name.
   const dlg = { title: str(opts.title, 200), defaultPath: lib.saveDefaultPath(opts.defaultPath, grants), filters };
-  const res = w ? await dialog.showSaveDialog(w, dlg) : await dialog.showSaveDialog(dlg);
-  if (res.canceled || !res.filePath) return null;
-  // GTK/macOS dialogs may return "name" without the filter's extension: fix it before writing.
-  const target = lib.ensureExtension(res.filePath, filters);
-  if (target !== res.filePath) {
+  // Projects open in the page's other tabs are never replaced: two tabs would share one file, and the
+  // other tab's work — still shown as saved — would no longer be on disk.
+  const busy = new Set(
+    (Array.isArray(opts.busyPaths) ? opts.busyPaths.slice(0, 1000) : []).filter((p) => lib.isSafeAbsPath(p)).map((p) => lib.pathKey(p)),
+  );
+  let chosen = '';
+  let target = '';
+  for (;;) {
+    const res = w ? await dialog.showSaveDialog(w, dlg) : await dialog.showSaveDialog(dlg);
+    if (res.canceled || !res.filePath) return null;
+    chosen = res.filePath;
+    // GTK/macOS dialogs may return "name" without the filter's extension: fix it before writing.
+    target = lib.ensureExtension(chosen, filters);
+    if (!busy.has(lib.pathKey(target))) break;
+    const r = await prompt({
+      type: 'warning',
+      title: 'Save As',
+      message: `“${path.basename(target)}” is open in another tab.`,
+      detail: 'Saving here would replace the project you have open there. Choose another name, or close that tab first.',
+      buttons: ['Cancel', 'Choose Another Name'],
+      defaultId: 1,
+      cancelId: 0,
+    });
+    if (r !== 1) return null;
+    // The dialog again, in the folder the user just picked, proposing "<name> copy".
+    const ext = path.extname(target);
+    dlg.defaultPath = path.join(path.dirname(target), `${path.basename(target, ext)} copy${ext}`);
+  }
+  if (target !== chosen) {
     const exists = await fs
       .stat(target)
       .then(() => true)
@@ -733,13 +851,19 @@ listen('desktop:set-edited', (_e, v) => {
   win.setDocumentEdited(rendererEdited);
 });
 listen('desktop:close-ack', (_e, handled) => {
-  if (!closeReq.pending || closeReq.acked) return;
+  if (!closeReq.pending || closeReq.acked || closeReq.forcing) return;
   closeReq.acked = true;
   closeReq.ackedAt = Date.now();
   clearTimeout(closeReq.timer);
   closeReq.timer = null;
   if (closeReq.fallbackShown) dismissPrompt();
   if (handled === false) void closeUnguarded();
+});
+listen('desktop:flush-recovery-reply', (_e, id, stage, left) => {
+  const waiter = flushWaiters.get(id);
+  if (!waiter) return;
+  if (stage === 'started') waiter.started();
+  else if (stage === 'done') waiter.finish(left === 0 ? 'written' : left > 0 ? `written, ${left} not kept` : 'failed');
 });
 listen('desktop:confirm-close', (_e, ok) => {
   if (typeof ok !== 'boolean' || !closeReq.pending) return;

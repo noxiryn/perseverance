@@ -179,6 +179,8 @@ export function renderLookPreview(doc: Document, look: LookDef, targetId: ID | n
   const scale = Math.min(1, size / Math.max(doc.width, doc.height));
   const created: ID[] = [];
   const { targetId: tid, character } = lookTargets(doc, targetId);
+  // Layer mode on a layer that can't hold a look: Apply does nothing, so there is nothing to show.
+  if (targetId && !tid) return null;
   // Generate overlays at ~2× the preview resolution for crisp downsampling.
   const genScale = Math.min(1, scale * 2);
   let built: ReturnType<typeof buildLook> | null = null;

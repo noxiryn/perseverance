@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { produce } from 'immer';
 import type { Document, Layer } from '../core/types';
 import { bitmaps } from '../core/bitmaps';
-import { createDocument, insertLayerDraft, makeRasterLayer, makeTextLayer } from '../core/document';
+import { createDocument, insertLayerDraft, makeAdjustmentLayer, makeRasterLayer, makeTextLayer } from '../core/document';
 import { effects, filters, type LookDef } from '../registry';
 import { installSoftCanvas, pixelAt } from '../render/softCanvas';
 import { invalidateRenderCache, renderDocument } from '../render/compositor';
@@ -23,12 +23,16 @@ import {
   lookClipLayers,
   lookGroups,
   lookMetaOf,
+  lookScope,
+  lookTargets,
+  resolveTarget,
   stripConfinedLookDraft,
   stripLookDraft,
   type ExtLookDef,
   type OverlayFactory,
 } from './engine';
 import { parseLooksSettings } from './store';
+import { captureLook } from './userLooks';
 
 type RGBA = [number, number, number, number];
 const W = 8;
@@ -234,12 +238,102 @@ describe('Layer-mode looks belong to their layer', () => {
     expect(lookMetaOf(stripped.layers[titleId])).toBeNull();
     expect(stripped.layers[titleId].filters).toEqual([]);
     expect(lookGroups(stripped).length).toBe(lookGroups(whole).length);
-    // Removing everything (Document mode without a character) takes the confined looks too.
+    // Removing every look takes the confined looks too.
     const all = produce(whole, (d) => {
-      stripLookDraft(d, null, true);
+      stripLookDraft(d, null, 'all');
     });
     expect(lookClipLayers(all)).toHaveLength(0);
     expect(Object.values(all.layers).some((l: Layer) => !!l.meta?.[LOOK_META_KEY])).toBe(false);
+    // Document-mode removal: the document look goes, the title's Layer-mode look stays.
+    const docOnly = produce(whole, (d) => {
+      stripLookDraft(d, null, 'document');
+    });
+    expect(lookGroups(docOnly)).toHaveLength(0);
+    expect(lookMetaOf(docOnly.layers[charId])).toBeNull();
+    expect(lookClipLayers(docOnly, titleId)).toHaveLength(2);
+    expect(lookMetaOf(docOnly.layers[titleId])?.lookId).toBe('grade-look');
+  });
+
+  it('Document-mode Remove keeps Layer-mode looks in a document without a character too', () => {
+    // File ▸ New (no character), a Layer look on the title, then a Document look.
+    const { doc, titleId, charId } = makeDoc();
+    const noChar = produce(doc, (d) => {
+      d.layers[charId].meta = undefined;
+      d.layers[charId].visible = false;
+    });
+    const a = applyConfined(noChar, titleId);
+    const both = produce(a, (d) => {
+      insertLookDraft(d, buildLook({ ...LOOK, id: 'doc-look', name: 'Doc Look' }, a, null, blueTexture, { skipExisting: false }), null);
+    });
+    expect(lookGroups(both).length).toBeGreaterThan(0);
+    expect(lookClipLayers(both, titleId)).toHaveLength(2); // applying a Document look keeps it
+    expect(canRemoveLook(both, null)).toBe(true);
+    const removed = produce(both, (d) => {
+      stripLookDraft(d, null, 'document');
+    });
+    expect(lookGroups(removed)).toHaveLength(0);
+    expect(lookClipLayers(removed, titleId)).toHaveLength(2);
+    expect(lookMetaOf(removed.layers[titleId])?.lookId).toBe('grade-look');
+    // Nothing document-scope left: Document-mode Remove has nothing to do, Layer mode still does.
+    expect(canRemoveLook(removed, null)).toBe(false);
+    expect(canRemoveLook(removed, titleId)).toBe(true);
+    expect(currentLookFor(removed, null)).toBeNull();
+    expect(currentLookFor(removed, titleId)).toBe('grade-look');
+  });
+
+  it('a look clip layer targets the layer it styles (Remove / Apply act on that layer’s look only)', () => {
+    const { doc, titleId, charId } = makeDoc();
+    const both = applyConfined(applyConfined(doc, titleId), charId, { ...LOOK, id: 'char-look', name: 'Char Look' });
+    const titleClip = lookClipLayers(both, titleId)[0];
+    const r = lookScope(both, titleClip.id);
+    expect(r).toMatchObject({ targetId: titleId, layerOnly: true });
+    expect(r.blocked).toBeUndefined();
+    expect(resolveTarget(both, titleClip.id).note).toMatch(/part of the look on “Title”/);
+    expect(currentLookFor(both, titleClip.id)).toBe('grade-look');
+    expect(canRemoveLook(both, titleClip.id)).toBe(true);
+    // What removeLook / applyLook do for that request: only the title's look changes.
+    const removed = produce(both, (d) => {
+      stripConfinedLookDraft(d, r.targetId!);
+    });
+    expect(lookClipLayers(removed, titleId)).toHaveLength(0);
+    expect(lookClipLayers(removed, charId)).toHaveLength(2);
+    expect(lookMetaOf(removed.layers[charId])?.lookId).toBe('char-look');
+    const t = lookTargets(both, titleClip.id);
+    expect(t.targetId).toBe(titleId);
+    expect(t.character).toBeFalsy();
+  });
+
+  it('Layer mode never widens to the whole document: adjustment layers and document-look layers are blocked', () => {
+    const { doc, titleId } = makeDoc();
+    const adj = makeAdjustmentLayer({ name: 'Vignette', filterId: 'c-invert' });
+    const withAdj = produce(doc, (d) => {
+      insertLayerDraft(d, adj);
+    });
+    for (const id of [adj.id]) {
+      const r = lookScope(withAdj, id);
+      expect(r.targetId).toBeNull();
+      expect(r.layerOnly).toBe(true);
+      expect(r.blocked).toMatch(/select a pixel, text or shape layer/);
+      expect(canRemoveLook(withAdj, id)).toBe(false);
+      expect(currentLookFor(withAdj, id)).toBeNull();
+    }
+    // A layer inside a document look group.
+    const whole = produce(withAdj, (d) => {
+      insertLookDraft(d, buildLook(LOOK, withAdj, null, blueTexture, { skipExisting: false }), null);
+    });
+    const member = lookGroups(whole)[0].childIds[0];
+    expect(lookScope(whole, member).blocked).toMatch(/belongs to the document’s look/);
+    expect(canRemoveLook(whole, member)).toBe(false);
+    // ...while the title itself is still a fine target.
+    expect(lookScope(whole, titleId)).toMatchObject({ targetId: titleId, layerOnly: true });
+  });
+
+  it('Save as Look takes the target’s own grades, not another layer’s Layer-mode look', () => {
+    const { doc, titleId, charId } = makeDoc();
+    const both = applyConfined(applyConfined(doc, charId, { ...LOOK, id: 'char-look' }), titleId);
+    // Above the title: its own clip layers, the character and the character's clip layers.
+    const { look } = captureLook(both, titleId, 'Mine', 'user-look:t');
+    expect(look.adjustments!.map((a) => a.name)).toEqual(['Invert']);
   });
 
   it('the panel helpers follow the mode (Layer: this layer’s look; Document: the document’s)', () => {

@@ -16,8 +16,10 @@
  * --full also opens every template/panel, drags every tool and runs every safe command inside Electron
  * (the browser smoke test's coverage, but under the app's real CSP and file:// origin).
  * --app runs a copy of the app (a folder with electron/, package.json, dist/ and build/) instead of the repo.
- * The last phase also runs the app from an install folder named like "100% Art #1 ?q Ünï 25%ad" and checks
- * that the editor loads and its IPC is trusted there. Packaged-only behaviour (VITE_DEV_SERVER_URL ignored,
+ * Phase D runs the app from an install folder named like "100% Art #1 ?q Ünï 25%ad" and checks that the
+ * editor loads and its IPC is trusted there; phase E removes the bundle (at start, and under a running app
+ * before a crash / hang reload) and checks that every failed load says so and that files handed over
+ * meanwhile open after "Try Again". Packaged-only behaviour (VITE_DEV_SERVER_URL ignored,
  * fuses, asar) is checked by scripts/electron-packaged-check.mjs.
  * Linux only (isolates userData with XDG_CONFIG_HOME). Exit code 1 on any failure.
  */
@@ -92,35 +94,62 @@ async function poll(fn, timeout = 8000, every = 150) {
   }
 }
 
+/**
+ * Main-process test doubles for native dialogs / shell, recording into globalThis.__t. Self-contained (no
+ * outer variables): launch() runs it through app.evaluate once the window exists, and the cold-start
+ * phase writes its source into the app's entry module so it is in place before main.cjs runs.
+ * `hold`: message boxes stay open until release() answers them (like a real box nobody answered yet).
+ */
+function installMainDoubles({ app, BrowserWindow, dialog, shell, ipcMain }, { hold = false } = {}) {
+  const t = (globalThis.__t = { console: [], boxes: [], boxAnswers: [], hold, saveQueue: [], saves: [], saveOpts: [], openQueue: [], external: [], revealed: [], ipc: [] });
+  globalThis.__held = []; // answers for boxes held open (functions: kept out of __t, which the check reads)
+  for (const ch of ['desktop:close-ack', 'desktop:confirm-close']) ipcMain.on(ch, (_e, v) => t.ipc.push(`${ch}=${v}@${Date.now()}`));
+  const watch = (w) => w.webContents.on('console-message', (e) => t.console.push({ level: e.level, message: e.message, source: e.sourceId }));
+  const w0 = BrowserWindow.getAllWindows()[0];
+  if (w0) watch(w0);
+  else app.once('browser-window-created', (_e, w) => watch(w));
+  dialog.showSaveDialog = async (...a) => {
+    const o = a.length > 1 ? a[1] : a[0];
+    t.saves.push(o?.defaultPath ?? null);
+    t.saveOpts.push(JSON.parse(JSON.stringify(o ?? {})));
+    const p = t.saveQueue.shift();
+    return p ? { canceled: false, filePath: p } : { canceled: true, filePath: '' };
+  };
+  dialog.showMessageBox = async (...a) => {
+    const o = a.length > 1 ? a[1] : a[0];
+    const box = { message: o.message, buttons: o.buttons, at: Date.now(), visible: !!BrowserWindow.getAllWindows()[0]?.isVisible() };
+    t.boxes.push(box);
+    if (t.hold) {
+      // Open until the check answers it with release(), or the app takes it back (a newer prompt aborts it).
+      return new Promise((resolve) => {
+        const answer = (response) => {
+          box.answered = response;
+          resolve({ response, checkboxChecked: false });
+        };
+        globalThis.__held.push(answer);
+        o.signal?.addEventListener('abort', () => {
+          box.dismissed = true;
+          globalThis.__held = globalThis.__held.filter((f) => f !== answer);
+          resolve({ response: o.cancelId ?? 0, checkboxChecked: false });
+        });
+      });
+    }
+    return { response: t.boxAnswers.length ? t.boxAnswers.shift() : (o.cancelId ?? 0), checkboxChecked: false };
+  };
+  dialog.showOpenDialog = async () => {
+    const p = t.openQueue.shift();
+    return p ? { canceled: false, filePaths: [p] } : { canceled: true, filePaths: [] };
+  };
+  shell.openExternal = async (url) => void t.external.push(url);
+  shell.showItemInFolder = (p) => void t.revealed.push(p);
+}
+
 /** Launch the app with main-process test doubles for native dialogs / shell. */
 async function launch(extraArgs = [], { dir = appDir, launchEnv = env } = {}) {
   const app = await electron.launch({ executablePath: electronPath, args: [dir, '--no-sandbox', ...extraArgs], env: launchEnv, cwd: T });
   const exited = new Promise((r) => app.process().once('exit', (code) => r(code)));
   const page = await app.firstWindow();
-  await app.evaluate(({ BrowserWindow, dialog, shell, ipcMain }) => {
-    const t = (globalThis.__t = { console: [], boxes: [], boxAnswers: [], saveQueue: [], saves: [], saveOpts: [], openQueue: [], external: [], revealed: [], ipc: [] });
-    for (const ch of ['desktop:close-ack', 'desktop:confirm-close']) ipcMain.on(ch, (_e, v) => t.ipc.push(`${ch}=${v}@${Date.now()}`));
-    const w = BrowserWindow.getAllWindows()[0];
-    w.webContents.on('console-message', (e) => t.console.push({ level: e.level, message: e.message, source: e.sourceId }));
-    dialog.showSaveDialog = async (...a) => {
-      const o = a.length > 1 ? a[1] : a[0];
-      t.saves.push(o?.defaultPath ?? null);
-      t.saveOpts.push(JSON.parse(JSON.stringify(o ?? {})));
-      const p = t.saveQueue.shift();
-      return p ? { canceled: false, filePath: p } : { canceled: true, filePath: '' };
-    };
-    dialog.showMessageBox = async (...a) => {
-      const o = a.length > 1 ? a[1] : a[0];
-      t.boxes.push({ message: o.message, buttons: o.buttons, at: Date.now() });
-      return { response: t.boxAnswers.length ? t.boxAnswers.shift() : (o.cancelId ?? 0), checkboxChecked: false };
-    };
-    dialog.showOpenDialog = async () => {
-      const p = t.openQueue.shift();
-      return p ? { canceled: false, filePaths: [p] } : { canceled: true, filePaths: [] };
-    };
-    shell.openExternal = async (url) => void t.external.push(url);
-    shell.showItemInFolder = (p) => void t.revealed.push(p);
-  });
+  await app.evaluate(installMainDoubles);
   return { app, page, exited };
 }
 
@@ -128,6 +157,13 @@ const main = (app, fn, a) => app.evaluate(fn, a);
 const T_ = (app) => main(app, () => globalThis.__t);
 const queueSave = (app, p) => main(app, (_e, p) => globalThis.__t.saveQueue.push(p), p);
 const answerBox = (app, n) => main(app, (_e, n) => globalThis.__t.boxAnswers.push(n), n);
+/** Answer the oldest message box held open (installMainDoubles hold mode). True when there was one. */
+const release = (app, n) =>
+  main(app, (_e, n) => {
+    const answer = globalThis.__held.shift();
+    answer?.(n);
+    return !!answer;
+  }, n);
 const windowCount = (app) => main(app, ({ BrowserWindow }) => BrowserWindow.getAllWindows().length).catch(() => 0);
 const closeWindow = (app) => main(app, ({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
 const sessions = (page) =>
@@ -432,9 +468,9 @@ await queueSave(app, path.join(FILES, 'Resaved'));
 await page.evaluate(() => window.__app.commands.get('file.save').run());
 await poll(async () => fs.existsSync(path.join(FILES, 'Resaved.pgfx')));
 t = await T_(app);
-// The dialog starts from the document's name only: that path was never chosen in the app (no grant), so
-// the page may not pick the dialog's folder with it.
-check('Save on a path without write access goes through Save As', fs.existsSync(path.join(FILES, 'Resaved.pgfx')) && sameBytes(legacy, poster) && t.saves.length === savesBefore + 1 && t.saves.at(-1) === path.basename(legacy), { saves: t.saves.slice(savesBefore) });
+// That path was never chosen in the app (no grant), but its folder holds Poster.pgfx, which the user saved
+// there: a trusted folder, so the dialog may start at the document's path (see the Save dialog check below).
+check('Save on a path without write access goes through Save As', fs.existsSync(path.join(FILES, 'Resaved.pgfx')) && sameBytes(legacy, poster) && t.saves.length === savesBefore + 1 && t.saves.at(-1) === legacy, { saves: t.saves.slice(savesBefore) });
 
 /* ---- second instance forwards (relative) argv ---- */
 const second = path.join(FILES, 'Second Copy.pgfx');
@@ -651,7 +687,7 @@ check('setZoomFactor zooms the page and the caption overlay follows', Math.abs(z
 
 /* ---- the page can't choose the Save dialog's folder (UNC probe / NTLM leak) or an executable type ---- */
 const savesBeforeDlg = (await T_(app)).saves.length;
-for (const p of [null, null, null, path.join(FILES, 'run.bat')]) await queueSave(app, p); // the 4th dialog "presses Enter" on run.bat
+for (const p of [null, null, null, null, path.join(FILES, 'run.bat')]) await queueSave(app, p); // the 5th dialog "presses Enter" on run.bat
 const dlgRes = await page.evaluate(
   async ({ poster, files }) => {
     const d = window.desktop;
@@ -665,6 +701,8 @@ const dlgRes = await page.evaluate(
       unc: await attempt({ defaultPath: '\\\\attacker\\share\\Poster.pgfx', filters: PGFX }),
       ungrantedFolder: await attempt({ defaultPath: `${files}/Startup/Poster.pgfx`, filters: PGFX }),
       granted: await attempt({ defaultPath: poster, filters: PGFX }),
+      // A new name next to a file the user saved (a new document's Save As starts by the last project).
+      trustedFolder: await attempt({ defaultPath: `${files}/New: Poster?.pgfx`, filters: PGFX }),
       mixedFilters: await attempt({ defaultPath: 'run.pgfx', filters: [{ name: 'P', extensions: ['pgfx', 'bat'] }, { name: 'Run', extensions: ['exe', 'lnk'] }] }),
       bat: await attempt({ defaultPath: 'Poster.bat', filters: [{ name: 'Startup', extensions: ['bat'] }] }),
       noFilters: await attempt({ defaultPath: 'Poster.hta' }),
@@ -676,12 +714,13 @@ const dlgRes = await page.evaluate(
 t = await T_(app);
 const dlgSeen = t.saveOpts.slice(savesBeforeDlg).map((o) => ({ defaultPath: o.defaultPath ?? null, exts: (o.filters ?? []).flatMap((f) => f.extensions) }));
 check(
-  'Save dialog: page paths cut to a file name (granted kept), only project/image/PSD types, none = refused',
+  'Save dialog: page paths cut to a file name (granted files and their folders kept), only project/image/PSD types, none = refused',
   JSON.stringify(dlgSeen) ===
     JSON.stringify([
       { defaultPath: 'Poster.pgfx', exts: ['pgfx'] },
       { defaultPath: 'Poster.pgfx', exts: ['pgfx'] },
       { defaultPath: poster, exts: ['pgfx'] },
+      { defaultPath: path.join(FILES, 'New_ Poster_.pgfx'), exts: ['pgfx'] },
       { defaultPath: 'run.pgfx', exts: ['pgfx'] },
     ]) &&
     ['bat', 'noFilters', 'wildcard'].every((k) => dlgRes[k].startsWith('refused')) &&
@@ -1110,5 +1149,114 @@ await closeWindow(app).catch(() => {});
 const codeD = await Promise.race([exited, wait(8000).then(() => 'timeout')]);
 check('the window closes at once there (close-ack accepted from the page)', codeD !== 'timeout' && Date.now() - tCloseD < 4000, { exitCode: codeD, ms: Date.now() - tCloseD });
 if (codeD === 'timeout') await app.close().catch(() => {});
+
+/* ======================================================================== */
+/* Phase E: the bundle is missing at start / vanishes while the app runs    */
+/* ======================================================================== */
+// Antivirus quarantine, a reinstall or uninstall while the app is open, a cleaned %TEMP% under the portable
+// exe. Every failed load of the editor must say so (Try Again / Quit), also the reload after a crash or a
+// hang (it used to be skipped: a silent blank window), and Chromium's error page that follows a failed load
+// is not the editor: files handed over meanwhile wait for "Try Again" (they used to be sent to the error page
+// and lost), and the hung-renderer safety net doesn't stack a crash prompt on top.
+const instE = path.join(T, 'inst-e', '100% Art #1 ?q Ünï 25%ad x%41y', 'Perseverance');
+fs.mkdirSync(instE, { recursive: true });
+for (const part of ['electron', 'dist', 'build']) {
+  const from = path.join(appDir, part);
+  if (!fs.existsSync(from)) continue;
+  try {
+    execFileSync('cp', ['-al', from, instE]); // fresh folders with hard-linked files: renames here stay here
+  } catch {
+    fs.cpSync(from, path.join(instE, part), { recursive: true });
+  }
+}
+// Entry module: the same test doubles as launch(), boxes held open, installed BEFORE main.cjs creates the
+// window (the very first load fails at once, before the check could install anything from outside).
+const pkgE = JSON.parse(fs.readFileSync(path.join(appDir, 'package.json'), 'utf8'));
+pkgE.main = 'check-entry.cjs';
+fs.writeFileSync(path.join(instE, 'package.json'), JSON.stringify(pkgE, null, 2));
+fs.writeFileSync(path.join(instE, 'check-entry.cjs'), `(${installMainDoubles})(require('electron'), { hold: true });\nrequire('./electron/main.cjs');\n`);
+const indexE = path.join(instE, 'dist', 'index.html');
+const hideBundle = () => fs.renameSync(indexE, `${indexE}.gone`);
+const restoreBundle = () => fs.renameSync(`${indexE}.gone`, indexE);
+const CFG_E = path.join(T, 'cfg-e');
+fs.mkdirSync(CFG_E, { recursive: true });
+const coldMissing = path.join(FILES, 'Cold While Missing.pgfx');
+const whileDown = path.join(FILES, 'While Down.pgfx');
+fs.copyFileSync(poster, coldMissing);
+fs.copyFileSync(poster, whileDown);
+
+hideBundle();
+app = await electron.launch({ executablePath: electronPath, args: [instE, '--no-sandbox', coldMissing], env: { ...env, XDG_CONFIG_HOME: CFG_E }, cwd: T });
+exited = new Promise((r) => app.process().once('exit', (code) => r(code)));
+await app.firstWindow();
+/** Run in the editor page through the main process (a Playwright page does not survive a renderer crash). */
+const inPageE = (js) => main(app, ({ BrowserWindow }, js) => BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(js), js).catch(() => undefined);
+const editorUpE = () => inPageE('!!(window.__app && document.querySelector(".shell-root")) && location.href.endsWith("/index.html")');
+const hasDocE = (p) => inPageE(`Object.values(window.__app.useEditor.getState().sessions).some((s) => s.filePath === ${JSON.stringify(p)})`);
+const boxesE = async (from = 0) => (await T_(app)).boxes.slice(from);
+const findBox = (from, re) => poll(async () => (await boxesE(from)).find((b) => re.test(b.message)), 10000);
+
+/* ---- cold start with the bundle missing and a file argument (Explorer double-click) ---- */
+const coldFail = await findBox(0, /could not be loaded/);
+await wait(1500); // the error page's 'did-finish-load' has come and gone
+const coldUpBefore = !!(await editorUpE());
+restoreBundle();
+await release(app, 0); // "Try Again"
+const coldBack = await poll(editorUpE, 20000, 300);
+const coldOpened = await poll(() => hasDocE(coldMissing), 10000, 300);
+check(
+  'missing bundle at start: the error says so (Try Again / Quit), and Try Again opens the editor with the file handed over at launch',
+  !!coldFail && coldFail.buttons.join() === 'Try Again,Quit' && coldFail.visible && !coldUpBefore && !!coldBack && !!coldOpened,
+  { coldFail, coldBack: !!coldBack, coldOpened: !!coldOpened },
+);
+await inPageE('window.__app.useUI.setState({ dialogs: [] }), 1');
+
+/* ---- crash → Reload while the bundle is gone; a file handed over while the editor is down ---- */
+let nE = (await boxesE()).length;
+hideBundle();
+await main(app, ({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer());
+const crashE = await findBox(nE, /stopped unexpectedly/);
+await main(
+  app,
+  ({ app: eApp }, { file, cwd, exe, root }) => eApp.emit('second-instance', {}, [exe, root, file], cwd, { argv: [exe, root, file], cwd }),
+  { file: whileDown, cwd: T, exe: electronPath, root: instE },
+);
+await release(app, 0); // "Reload" in the crash prompt: the reload fails
+const crashFail = await findBox(nE, /could not be loaded/);
+await wait(1500);
+restoreBundle();
+await release(app, 0); // "Try Again"
+const crashBack = await poll(editorUpE, 20000, 300);
+const downOpened = await poll(() => hasDocE(whileDown), 10000, 300);
+check(
+  'a reload after a crash that fails (bundle gone) says so, and Try Again brings the editor back',
+  !!crashE && !!crashFail && crashFail.buttons.join() === 'Try Again,Quit' && crashFail.visible && !!crashBack,
+  { crash: !!crashE, crashFail, back: !!crashBack, boxes: (await boxesE(nE)).map((b) => b.message) },
+);
+check('a file handed over while the editor was down waits through the failed reload and opens after Try Again', !!downOpened, { downOpened: !!downOpened });
+await inPageE('window.__app.useUI.setState({ dialogs: [] }), 1');
+
+/* ---- unresponsive → Reload while the bundle is gone: the error, no crash prompt on top, Quit exits ---- */
+nE = (await boxesE()).length;
+hideBundle();
+await main(app, ({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].emit('unresponsive'));
+const hangE = await findBox(nE, /not responding/);
+await release(app, 1); // "Reload": the renderer is killed and the reload fails
+const hangFail = await findBox(nE, /could not be loaded/);
+await wait(Number(env.PERSEVERANCE_RELOAD_TIMEOUT_MS) + 1500); // past the "did not restart" safety net
+const afterHang = await boxesE(nE);
+check(
+  'a reload of a hung renderer that fails says so, and the restart safety net adds no crash prompt on top',
+  !!hangE && !!hangFail && !hangFail.dismissed && hangFail.answered === undefined && !afterHang.some((b) => /stopped unexpectedly/.test(b.message)),
+  { boxes: afterHang.map((b) => `${b.message}${b.dismissed ? ' (dismissed)' : ''}`) },
+);
+const tQuitE = Date.now();
+await release(app, 1); // "Quit"
+const codeE = await Promise.race([exited, wait(8000).then(() => 'timeout')]);
+check('Quit in the load error exits the app', codeE !== 'timeout', { exitCode: codeE, ms: Date.now() - tQuitE });
+if (codeE === 'timeout') await app.close().catch(() => {});
+if (fs.existsSync(`${indexE}.gone`)) restoreBundle();
+const logE = path.join(CFG_E, 'Perseverance', 'logs', 'main.log');
+check('failed loads are logged', fs.existsSync(logE) && (fs.readFileSync(logE, 'utf8').match(/did-fail-load/g) ?? []).length >= 3, logE);
 
 finish();

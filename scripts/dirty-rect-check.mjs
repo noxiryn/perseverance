@@ -4,8 +4,8 @@
  *
  *   npx vite --port 5321 &
  *   node scripts/dirty-rect-check.mjs --url http://localhost:5321/ [--gpu] [--only a,b] [--frames 24] [--every 3]
- *        [--no-e2e | --e2e-only]
- *   node scripts/dirty-rect-check.mjs --url http://localhost:5321/ --bench [--gpu] [--bench-frames 90]
+ *        [--no-e2e | --e2e-only] [--no-edits]
+ *   node scripts/dirty-rect-check.mjs --url http://localhost:5321/ --bench [--gpu] [--bench-frames 90] [--bench-only move,4K]
  *
  * Part 1 (renderer): for each scenario a document is built, rendered (warming every cache and the
  * live composite), then strokes are painted frame by frame straight into layer / mask bitmaps
@@ -15,6 +15,14 @@
  * original's caches stay untouched). Every few frames the shared renderDocument path and a 0.25×
  * render are refreshed too. After the strokes: live / shared / small vs a full render after
  * invalidateRenderCache(), then again after settling (approximate GPU work is re-rendered exactly).
+ *
+ * Part 1b (renderer, edit sequences; skip with --no-edits): structural edits as the store makes them
+ * (a new immutable document per step) — clipping onto pass-through groups, Create / Release Clipping
+ * Mask on layers of a clip stack (the layers clipped above change base), stroke size drags on
+ * semi-transparent content, below-renders (histograms / PSD bakes) after patch edits inside styled
+ * groups, inside effects on layers hanging off the canvas, moves of layers with smart filters. After
+ * every step the live composite, renderDocument at 1× / 0.25× and the step's below-render are
+ * compared with from-scratch renders of a clone; while dragging, smart filters must not run again.
  *
  * Part 2 (end-to-end, demo document): real brush / eraser / mask strokes through the paint tools
  * and the viewport at several zoom levels; the viewport's document canvas after the stroke (and
@@ -35,6 +43,14 @@
  * p90, max —, the cost of the frame that re-renders approximate GPU work exactly after the stroke
  * (the settle; none on the software canvas) and the longest main-thread task within 1.5 s after
  * the stroke (any work). Works against older trees too (for before/after numbers).
+ * Perf regression guards (the bench exits 1 past them; release review render-paint-diff-3 and
+ * e2e-flows-3): painting on 1080p with 8 / 16 and 4K with 2 / 8 (and 5 with a 4 GB device's hard
+ * cap) document-sized layers holding a blob with Drop Shadow + Stroke (renders cropped to their
+ * content; no other layer may re-render during the stroke, mean frame time under the limit);
+ * painting on 4K with 10 (6 with 4 GB) layers whose large content cannot be cropped — layer renders
+ * alone past the cache's hard cap: each layer below may re-render once at the start of the stroke,
+ * never afterwards; and Move-tool drags of the Crimson / Gothic template characters (no
+ * smart-filter run at full size during the drag, mean time per pointermove under the limit).
  */
 import { chromium } from 'playwright-core';
 
@@ -330,6 +346,27 @@ async function rendererPart(opts) {
     d.__paint = addRaster(d, { props: { effects: [fx('drop-shadow', { distance: 18, size: 24, opacity: 0.8 }), fx('stroke', { size: 4, color: '#ffffff' })] } }).bitmapId;
     return d;
   }, { strokes: [{ erase: true }] });
+  // render-paint-diff-3: a document-sized layer holding a small blob (Layer ▸ New Layer + a few
+  // dabs) with Drop Shadow + Stroke renders cropped to its content: strokes wander out of the crop
+  // (rendered again with a larger one) and erase; a layer with effects that starts empty.
+  await run('fx-blob-crop', () => {
+    const d = doc0();
+    addRaster(d, { seed: 5 });
+    const blob = canvas(W, H, (g) => {
+      g.fillStyle = '#c04080';
+      g.beginPath();
+      g.ellipse(W * 0.45, H * 0.5, 60, 80, 0.4, 0, Math.PI * 2);
+      g.fill();
+    });
+    d.__paint = addRaster(d, { canvas: blob, props: { effects: [fx('drop-shadow', { distance: 18, size: 24, opacity: 0.8 }), fx('stroke', { size: 4, color: '#ffffff' })] } }).bitmapId;
+    return d;
+  }, { strokes: [{}, { erase: true }] });
+  await run('fx-empty-crop', () => {
+    const d = doc0();
+    addRaster(d, { seed: 6 });
+    d.__paint = addRaster(d, { canvas: canvas(W, H), props: { effects: [fx('outer-glow', { size: 20 }), fx('stroke', { size: 6, position: 'center', color: '#20c0ff' })] } }).bitmapId;
+    return d;
+  }, { strokes: [{ size: 18 }] });
   await run('fx-inner-multi', () => {
     const d = doc0();
     const effects = [
@@ -555,6 +592,399 @@ async function rendererPart(opts) {
   return { rows: results, cropExact };
 }
 
+/**
+ * Part 1b (renderer, structural edits): sequences of document edits as the store makes them (a new
+ * immutable document per step: clipping toggles, effect size drags, moves, patch edits). After every
+ * step the live composite (viewport path), renderDocument at 1× and 0.25× (and the step's
+ * `below` render, the Levels/Curves histogram / PSD bake path) are compared with from-scratch renders
+ * of a clone. Release review findings: render-paint-diff-1 (clipping onto pass-through groups),
+ * -2 (stroke size on semi-transparent content), -4 (below renders after an edit inside a styled
+ * group), -5 (inside effects at the canvas edge), e2e-flows-3 (moving layers with smart filters: the
+ * filters must not run again, and the result must stay exact).
+ */
+async function editsPart(opts) {
+  const C = await import('/src/render/compositor.ts');
+  const { bitmaps, documentUtils: D, filters: FILTERS } = window.__app;
+  const settle = () => (C.settleRenderCaches ? C.settleRenderCaches() : false);
+  function canvas(w, h, draw) {
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    if (draw) draw(c.getContext('2d'), c);
+    return c;
+  }
+  function premul(c) {
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    const out = new Uint8ClampedArray(d.length);
+    for (let i = 0; i < d.length; i += 4) {
+      const a = d[i + 3];
+      out[i] = (d[i] * a + 127) / 255;
+      out[i + 1] = (d[i + 1] * a + 127) / 255;
+      out[i + 2] = (d[i + 2] * a + 127) / 255;
+      out[i + 3] = a;
+    }
+    return { d: out, w: c.width, h: c.height };
+  }
+  function diff(a, b) {
+    if (a.w !== b.w || a.h !== b.h) return { max: 999, size: `${a.w}x${a.h} vs ${b.w}x${b.h}` };
+    let max = 0,
+      over = 0;
+    for (let i = 0; i < a.d.length; i++) {
+      const d = Math.abs(a.d[i] - b.d[i]);
+      if (d > 1) over++;
+      if (d > max) max = d;
+    }
+    return over ? { max, over } : { max };
+  }
+  const worst = (p, q) => (!p ? q : !q ? p : q.max > p.max ? q : p);
+  let cloneSeq = 0;
+  /** Copy with new document / layer ids (same bitmaps): renders from scratch. */
+  function cloneDoc(doc) {
+    const suf = `~edit${++cloneSeq}`;
+    const map = (id) => id + suf;
+    const layers = {};
+    for (const [id, l] of Object.entries(doc.layers)) {
+      const c = structuredClone(l);
+      c.id = map(id);
+      if (Array.isArray(c.childIds)) c.childIds = c.childIds.map(map);
+      layers[map(id)] = c;
+    }
+    return { doc: { ...doc, id: doc.id + suf, layers, rootIds: doc.rootIds.map(map) }, map };
+  }
+  /** A new document with one layer replaced (what an undoable store edit produces). */
+  const edit = (d, id, patch) => ({ ...d, layers: { ...d.layers, [id]: { ...d.layers[id], ...patch } } });
+  const moveTo = (d, id, x, y) => edit(d, id, { transform: { ...d.layers[id].transform, x, y } });
+  function addRaster(doc, c, o = {}) {
+    const l = D.makeRasterLayer({ name: o.name ?? 'L', bitmapId: bitmaps.add(c), width: c.width, height: c.height, transform: o.transform });
+    Object.assign(l, o.props ?? {});
+    D.insertLayerDraft(doc, l, { parentId: o.parent ?? null });
+    return l;
+  }
+  function addGroup(doc, props = {}, parent = null) {
+    const g = D.makeGroupLayer({ name: 'G' });
+    Object.assign(g, props);
+    D.insertLayerDraft(doc, g, { parentId: parent });
+    return g;
+  }
+  function addAdj(doc, filterId, params, parent = null) {
+    const a = D.makeAdjustmentLayer({ filterId, params });
+    D.insertLayerDraft(doc, a, { parentId: parent });
+    return a;
+  }
+  let fxSeq = 0;
+  const fx = (effectId, params) => ({ id: `x${++fxSeq}`, effectId, enabled: true, params });
+  const photo = (w, h) =>
+    canvas(w, h, (g) => {
+      const lg = g.createLinearGradient(0, 0, w, h);
+      lg.addColorStop(0, '#d8a060');
+      lg.addColorStop(0.5, '#3070c0');
+      lg.addColorStop(1, '#40c070');
+      g.fillStyle = lg;
+      g.fillRect(0, 0, w, h);
+      for (let i = 0; i < 9; i++) {
+        g.fillStyle = `hsl(${i * 40},70%,${30 + (i % 3) * 15}%)`;
+        g.fillRect((i * 0.11 * w) % w, (i * 0.17 * h) % h, w * 0.18, h * 0.15);
+      }
+    });
+  const blob = (w, h, color, alpha = 1, feather = 1) =>
+    canvas(w, h, (g) => {
+      const rg = g.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.45 * (1 - 0.3 * (feather > 1)), w / 2, h / 2, Math.min(w, h) * 0.45);
+      rg.addColorStop(0, color);
+      rg.addColorStop(1, 'rgba(0,0,0,0)');
+      g.globalAlpha = alpha;
+      g.fillStyle = rg;
+      g.fillRect(0, 0, w, h);
+      g.fillStyle = '#ffffff';
+      g.fillRect(w * 0.3, h * 0.2, w * 0.1, h * 0.5);
+    });
+  /** Count smart-filter runs (layer filter stacks) on images at least `minPx` big (not thumbnails). */
+  const filterRuns = { n: 0, on: false, minPx: 0 };
+  const wrapped = [];
+  for (const def of FILTERS.list()) {
+    const orig = def.apply;
+    def.apply = function (img, p, ctx) {
+      if (filterRuns.on && img.width * img.height >= filterRuns.minPx && /applyFilterInstanceToCanvas/.test(new Error().stack ?? '')) filterRuns.n++;
+      return orig.call(this, img, p, ctx);
+    };
+    wrapped.push([def, orig]);
+  }
+
+  /**
+   * Run steps; each step: { label, doc: (d) => d', below?, background?, live?: false, moveNoFilters? }.
+   * `moveNoFilters`: the live composite of this step must not run smart filters at full size.
+   */
+  async function scenario(name, build, steps, so = {}) {
+    if (opts.only && !opts.only.includes(name)) return null;
+    C.invalidateRenderCache();
+    let d = build();
+    const t0 = performance.now();
+    C.renderDocumentLive(d);
+    C.renderDocument(d);
+    C.renderDocument(d, { scale: 0.25 });
+    const rows = [];
+    let reruns = 0;
+    for (const st of steps) {
+      d = st.doc ? st.doc(d) : d;
+      const i0 = C.renderCacheInfo();
+      filterRuns.n = 0;
+      filterRuns.on = !!st.moveNoFilters;
+      filterRuns.minPx = st.moveNoFilters ? 64 * 64 : 0;
+      const live = premul(C.renderDocumentLive(d).canvas);
+      filterRuns.on = false;
+      if (st.moveNoFilters) reruns += filterRuns.n;
+      const i1 = C.renderCacheInfo();
+      const cl = cloneDoc(d);
+      const ref = premul(C.renderDocument(cl.doc));
+      const r = { label: st.label, live: diff(live, ref), shared: diff(premul(C.renderDocument(d)), ref), small: diff(premul(C.renderDocument(d, { scale: 0.25 })), premul(C.renderDocument(cl.doc, { scale: 0.25 }))) };
+      if (st.below) {
+        for (const o of [{ background: true }, { background: false }, { background: true, scale: 0.5 }]) {
+          const got = premul(C.renderDocument(d, { ...o, below: st.below(d) }));
+          const want = premul(C.renderDocument(cl.doc, { ...o, below: cl.map(st.below(d)) }));
+          r.below = worst(r.below, diff(got, want));
+        }
+      }
+      // Approximate live work (GPU crops, or work approximate on every canvas such as a doc-anchored
+      // smart filter shifted while dragging) may differ until it is settled.
+      r.inexact = (i1.inexactUpdates ?? 0) - (i0.inexactUpdates ?? 0);
+      r.approx = (i1.approxUpdates ?? 0) - (i0.approxUpdates ?? 0);
+      rows.push(r);
+    }
+    const settled = settle();
+    const live = premul(C.renderDocumentLive(d).canvas);
+    C.invalidateRenderCache();
+    const full = premul(C.renderDocument(d));
+    let extra = null;
+    if (so.extra) extra = so.extra(d);
+    return { name, rows, settled: { did: settled, live: diff(live, full) }, reruns, extra, ms: Math.round(performance.now() - t0) };
+  }
+
+  const W = 1280,
+    H = 800;
+  const doc0 = (w = W, h = H, bg = '#ffffff') => D.createDocument({ name: 'E', width: w, height: h, background: bg });
+  const results = [];
+  const run = async (...a) => {
+    try {
+      const r = await scenario(...a);
+      if (r) {
+        results.push(r);
+        console.log('[edits] ' + JSON.stringify(r));
+      }
+    } catch (e) {
+      results.push({ name: a[0], error: String(e && e.stack ? e.stack : e) });
+    }
+  };
+
+  // render-paint-diff-1: Create / Release Clipping Mask onto a pass-through group (Multiply child
+  // hanging past an opaque sibling, optionally an adjustment inside), eye toggle of the only
+  // clipped layer, clipping the group itself; undo / redo = the previous immutable documents.
+  for (const withAdj of [false, true]) {
+    const ids = {};
+    const hist = [];
+    const keep = (label, f) => ({ label, doc: (d) => (hist.push(d), f(d)) });
+    await run(
+      `clip-passthrough${withAdj ? '-adjustment' : ''}`,
+      () => {
+        const d = doc0();
+        addRaster(d, photo(W, H), { name: 'Photo' });
+        const g = addGroup(d, { blendMode: 'pass-through' });
+        addRaster(d, blob(500, 420, '#3050c0'), { parent: g.id, name: 'Body', transform: { x: 300, y: 200 } });
+        addRaster(d, blob(760, 300, '#c03030'), { parent: g.id, name: 'Shade', transform: { x: 200, y: 380 }, props: { blendMode: 'multiply' } });
+        if (withAdj) addAdj(d, 'invert', {}, g.id);
+        const t = addRaster(d, canvas(260, 180, (k) => ((k.fillStyle = '#f0e020'), k.fillRect(0, 0, 260, 180))), { name: 'Texture', transform: { x: 820, y: 520 } });
+        ids.g = g.id;
+        ids.t = t.id;
+        return d;
+      },
+      [
+        keep('clip texture', (d) => edit(d, ids.t, { clipped: true })),
+        keep('hide clipped', (d) => edit(d, ids.t, { visible: false })),
+        keep('show clipped', (d) => edit(d, ids.t, { visible: true })),
+        keep('release', (d) => edit(d, ids.t, { clipped: false })),
+        keep('clip group', (d) => edit(d, ids.g, { clipped: true })),
+        { label: 'undo clip group', doc: () => hist[4] },
+        { label: 'undo release', doc: () => hist[3] },
+        { label: 'undo clip', doc: () => hist[0] },
+        { label: 'redo clip', doc: () => hist[1] },
+        { label: 'redo all', doc: () => edit(hist[4], ids.g, { clipped: true }) },
+      ],
+    );
+  }
+
+  // render-paint-diff-1 (other entry points): Create / Release Clipping Mask on a layer of a clip
+  // stack changes the base of the layers clipped above it — clipping a layer that has a layer
+  // clipped to it, releasing the middle layer of a three-layer stack, clipping a hidden base, and
+  // clipping a pass-through group that is the base of a shown clipped layer. The clipped layers
+  // stay under the incremental thresholds (the plan must see the base change).
+  for (const asGroup of [false, true]) {
+    const ids = {};
+    const hist = [];
+    const keep = (label, f) => ({ label, doc: (d) => (hist.push(d), f(d)) });
+    const steps = [
+      keep('clip shading to body', (d) => edit(d, ids.s, { clipped: true })),
+      keep('clip body (shading → photo)', (d) => edit(d, ids.b, { clipped: true })),
+      keep('release body (middle of the stack)', (d) => edit(d, ids.b, { clipped: false })),
+    ];
+    if (!asGroup)
+      steps.push(
+        keep('hide body', (d) => edit(d, ids.b, { visible: false })),
+        keep('clip hidden body', (d) => edit(d, ids.b, { clipped: true })),
+        keep('show body', (d) => edit(d, ids.b, { visible: true })),
+      );
+    const n = steps.length;
+    for (let k = n - 1; k >= 0; k--) steps.push({ label: `undo → ${k}`, doc: () => hist[k] });
+    for (let k = 1; k < n; k++) steps.push({ label: `redo → ${k}`, doc: () => hist[k] });
+    await run(`clip-base-change${asGroup ? '-group' : ''}`, () => {
+      const d = doc0();
+      addRaster(d, photo(W, H), { name: 'Photo' });
+      if (asGroup) {
+        const g = addGroup(d, { blendMode: 'pass-through' });
+        addRaster(d, blob(360, 300, '#e0c0a0'), { parent: g.id, name: 'Body', transform: { x: 420, y: 260 } });
+        addRaster(d, blob(200, 300, '#ff3030'), { parent: g.id, name: 'Shade', transform: { x: 500, y: 300 }, props: { blendMode: 'multiply' } });
+        ids.b = g.id;
+      } else ids.b = addRaster(d, blob(360, 300, '#e0c0a0'), { name: 'Body', transform: { x: 420, y: 260 } }).id;
+      ids.s = addRaster(d, canvas(900, 560, (k) => ((k.fillStyle = '#c02020'), k.fillRect(0, 0, 900, 560))), { name: 'Shading', transform: { x: 160, y: 100 } }).id;
+      return d;
+    }, steps);
+  }
+
+  // render-paint-diff-2: inside / center Stroke size edits and drags on semi-transparent content.
+  for (const position of ['inside', 'center']) {
+    const ids = {};
+    const stroke = (size) => [fx('stroke', { size, position, color: '#10e040' })];
+    const steps = [{ label: 'size 14 → 2', doc: (d) => edit(d, ids.l, { effects: stroke(2) }) }];
+    for (let s = 3; s <= 14; s++) steps.push({ label: `drag ${s}`, doc: (d) => edit(d, ids.l, { effects: stroke(s) }) });
+    for (let s = 12; s >= 1; s -= 2) steps.push({ label: `drag ${s}`, doc: (d) => edit(d, ids.l, { effects: stroke(s) }) });
+    await run(`stroke-size-soft-${position}`, () => {
+      const d = doc0();
+      addRaster(d, photo(W, H), { name: 'Photo' });
+      const c = canvas(900, 600, (g) => {
+        g.fillStyle = 'rgba(220,30,30,0.7)';
+        g.fillRect(60, 60, 380, 420);
+        g.fillStyle = 'rgba(40,60,220,0.85)';
+        g.beginPath();
+        g.arc(640, 300, 190, 0, 7);
+        g.fill();
+        g.filter = 'blur(8px)';
+        g.fillStyle = 'rgba(250,200,40,0.9)';
+        g.fillRect(200, 470, 500, 90);
+      });
+      ids.l = addRaster(d, c, { name: 'Soft', transform: { x: 180, y: 100 }, props: { effects: stroke(14) } }).id;
+      return d;
+    }, steps);
+  }
+
+  // render-paint-diff-4: the below-render of an adjustment inside a styled group, after a patch edit
+  // (brush / fill) on a layer of that group.
+  for (const [label, props] of [
+    ['effect', { blendMode: 'pass-through', effects: [fx('drop-shadow', { distance: 14, size: 12 })] }],
+    ['normal', { blendMode: 'normal' }],
+    ['normal-80', { blendMode: 'normal', opacity: 0.8 }],
+  ]) {
+    const ids = {};
+    const patch = (x, y, color) => (d) => {
+      const c = bitmaps.get(d.layers[ids.p].bitmapId);
+      const g = c.getContext('2d');
+      g.fillStyle = color;
+      g.fillRect(x, y, 70, 60);
+      bitmaps.touch(d.layers[ids.p].bitmapId, { x, y, width: 70, height: 60 });
+      return d;
+    };
+    await run(`below-styled-group-${label}`, () => {
+      const d = doc0();
+      addRaster(d, photo(W, H), { name: 'BG' });
+      const g = addGroup(d, props);
+      ids.p = addRaster(d, photo(700, 500), { parent: g.id, name: 'Photo', transform: { x: 260, y: 150 } }).id;
+      ids.lv = addAdj(d, 'levels', { inBlack: 20, gamma: 1.3 }, g.id).id;
+      return d;
+    }, [
+      { label: 'initial', below: () => ids.lv },
+      { label: 'patch', doc: patch(40, 50, '#101010'), below: () => ids.lv },
+      { label: 'patch 2', doc: patch(400, 300, '#f0f0f0'), below: () => ids.lv },
+    ]);
+  }
+
+  // render-paint-diff-5: inside stroke / inner bevel / satin on a layer hanging off the canvas must
+  // render like the same layer on a larger canvas, cropped (no fake edge along the border); moving it
+  // across the edge (translation reuse) stays exact.
+  for (const [label, effects] of [
+    ['inside-stroke', [fx('stroke', { size: 8, position: 'inside', color: '#10e040' })]],
+    ['inner-bevel', [fx('bevel', { size: 14 })]],
+    ['satin', [fx('satin', { size: 16 })]],
+  ]) {
+    let cardId = null;
+    /** Background independent of the canvas size (so a larger canvas, cropped, is the reference). */
+    const make = (w, h, x, y) => {
+      const d = doc0(w, h);
+      addRaster(d, canvas(w, h, (g) => {
+        g.fillStyle = '#707070';
+        g.fillRect(0, 0, w, h);
+        g.fillStyle = '#a0a0a0';
+        for (let i = 0; i < w; i += 64) g.fillRect(i, 0, 24, h);
+      }), { name: 'BG' });
+      const id = addRaster(d, canvas(420, 320, (g) => ((g.fillStyle = '#3060c0'), g.fillRect(0, 0, 420, 320), (g.fillStyle = 'rgba(240,120,40,0.6)'), g.fillRect(60, 40, 300, 240))), { name: 'Card', transform: { x, y }, props: { effects } }).id;
+      return { d, id };
+    };
+    const steps = [560, 600, 640, 700].map((y) => ({ label: `move to y=${y}`, doc: (d) => moveTo(d, cardId, 400, y) }));
+    steps.push({ label: 'off the right', doc: (d) => moveTo(d, cardId, 1000, 700) });
+    await run(
+      `inside-fx-edge-${label}`,
+      () => {
+        const m = make(W, H, 400, 120);
+        cardId = m.id;
+        return m.d;
+      },
+      steps,
+      {
+        extra: (d) => {
+          const t = d.layers[cardId].transform;
+          const big = C.renderDocument(make(W + 400, H + 400, t.x, t.y).d);
+          const want = canvas(W, H, (g) => g.drawImage(big, 0, 0));
+          return diff(premul(C.renderDocument(d)), premul(want));
+        },
+      },
+    );
+  }
+
+  // e2e-flows-3: moving a layer with smart filters (template characters: gradient-map + halftone,
+  // cel-shade, a glow). Whole-pixel moves reuse the filtered render; exact renders stay exact; a
+  // doc-anchored filter (halftone) is only shifted in the live composite and settled afterwards.
+  for (const [label, list] of [
+    ['local', [['hue-saturation', { hue: 30, saturation: 20 }], ['gradient-map', { dither: true }]]],
+    ['cel-shade', [['cel-shade', {}]]],
+    ['halftone', [['gradient-map', {}], ['halftone', {}]]],
+  ]) {
+    const ids = {};
+    const steps = [];
+    let x = 300,
+      y = 120;
+    for (let i = 0; i < 6; i++) {
+      x += 13;
+      y += 3;
+      const [mx, my] = [x, y];
+      steps.push({ label: `drag ${mx},${my}`, doc: (d) => moveTo(d, ids.l, mx, my), moveNoFilters: true });
+    }
+    // across the bottom / left edge and back
+    for (const [mx, my] of [
+      [380, 420],
+      [380, 520],
+      [-90, 520],
+      [420, 160],
+    ])
+      steps.push({ label: `move ${mx},${my}`, doc: (d) => moveTo(d, ids.l, mx, my) });
+    await run(`move-smart-filters-${label}`, () => {
+      const d = doc0();
+      addRaster(d, photo(W, H), { name: 'BG' });
+      const l = addRaster(d, blob(460, 560, '#e0a070'), { name: 'Character', transform: { x, y }, props: { effects: [fx('outer-glow', { size: 18, opacity: 0.7 })] } });
+      l.filters = list.map(([id, p]) => D.makeFilterInstance(id, p));
+      ids.l = l.id;
+      return d;
+    }, steps);
+  }
+
+  for (const [def, orig] of wrapped) def.apply = orig;
+  return results;
+}
+
 /** End-to-end through the real paint tools and the viewport (demo document). */
 async function e2ePart(opts) {
   const app = window.__app;
@@ -764,6 +1194,67 @@ async function e2ePart(opts) {
   results.push(await checkDoc('canvas size -1px (top-left)'));
   st().undo();
   results.push(await checkDoc('canvas size -1px: undo'));
+
+  // Move tool drags of a layer with smart filters (release review e2e-flows-3): while dragging, the
+  // filtered render is shifted instead of re-running the filters (a doc-anchored filter such as a
+  // halftone grid only on screen: approximate until the settle). The screen after the settle and
+  // renderDocument / thumbnails right after the drag must equal from-scratch renders.
+  const D = app.documentUtils;
+  st().setView({ zoom: 0, panX: 0, panY: 0 });
+  st().setActiveLayer(char.id);
+  st().setEditTarget('content');
+  for (const [label, list] of [
+    ['gradient-map + cel-shade', [['gradient-map', { dither: true }], ['cel-shade', {}]]],
+    ['+ halftone (doc-anchored)', [['gradient-map', { dither: true }], ['cel-shade', {}], ['halftone', {}]]],
+  ]) {
+    st().commit('Smart filters', (d) => {
+      d.layers[char.id].filters = list.map(([id, p]) => D.makeFilterInstance(id, p));
+    });
+    st().setTool('move');
+    await frames(6);
+    await sleep(500);
+    const b = C.getLayerBounds(doc(), char.id);
+    let x = b.x + b.width / 2,
+      y = b.y + b.height / 2;
+    const i0 = C.renderCacheInfo();
+    const tx0 = doc().layers[char.id].transform.x;
+    let runs = 0;
+    const wrapped = [];
+    for (const def of app.filters.list()) {
+      const orig = def.apply;
+      def.apply = function (img, p, ctx) {
+        // smart filters (layer filter stacks), not adjustment layers re-applied over the dirty area
+        if (img.width * img.height >= 64 * 64 && /applyFilterInstanceToCanvas/.test(new Error().stack ?? '')) runs++;
+        return orig.call(this, img, p, ctx);
+      };
+      wrapped.push([def, orig]);
+    }
+    let dragRuns = 0;
+    try {
+      fire('pointerdown', x, y, 1);
+      await frame();
+      for (let i = 0; i < 14; i++) {
+        x += i < 7 ? 6 : -4;
+        y += 3;
+        fire('pointermove', x, y, 1);
+        await frame();
+      }
+      dragRuns = runs;
+      fire('pointerup', x, y, 0);
+      await frames(2);
+    } finally {
+      for (const [def, orig] of wrapped) def.apply = orig;
+    }
+    const i1 = C.renderCacheInfo();
+    const r = await check(`move tool drag: ${label}`);
+    // Approximate on every canvas (shifted doc-anchored filters, a crop cut by the canvas edge): the
+    // screen right after the drag may differ until the settle.
+    r.approxOk = (i1.inexactUpdates ?? 0) > (i0.inexactUpdates ?? 0);
+    r.dragRuns = dragRuns;
+    // the drag really moved the layer
+    if (doc().layers[char.id].transform.x === tx0) r.dragRuns = r.dragRuns || -1;
+    results.push(r);
+  }
   return results;
 }
 
@@ -846,21 +1337,68 @@ async function benchPart(opts) {
     D.insertLayerDraft(doc, l, { parentId: null });
     return st().openDocument(doc, { label: 'Bench' });
   }
+  /**
+   * Past the render cache's hard cap: N document-sized layers whose content covers most of the
+   * canvas (renders cannot be cropped to a small part of it) with Drop Shadow + Stroke — ≈ 25M px
+   * of renders each at 4K — under an empty paint layer. The layer renders alone exceed the cap:
+   * the brush frame must degrade gracefully (the layers below are composited into the below cache
+   * once, at the start of the stroke, and never re-rendered again during it).
+   */
+  function openLarge(w, h, n) {
+    const doc = D.createDocument({ name: `Bench ${w}×${h} ×${n} large fx`, width: w, height: h, background: '#ffffff' });
+    for (let i = 0; i < n; i++) {
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      const g = c.getContext('2d');
+      g.fillStyle = `hsl(${i * 33},60%,${40 + (i % 3) * 10}%)`;
+      g.beginPath();
+      g.ellipse(w * 0.5 + (i - n / 2) * 8, h * 0.5, w * 0.46, h * 0.44, 0, 0, 7);
+      g.fill();
+      const l = D.makeRasterLayer({ name: `Large ${i + 1}`, bitmapId: bitmaps.add(c), width: w, height: h });
+      l.opacity = 0.9;
+      l.effects = [
+        { id: `ds${i}`, effectId: 'drop-shadow', enabled: true, params: { distance: 12, size: 10 } },
+        { id: `st${i}`, effectId: 'stroke', enabled: true, params: { size: 5, position: 'outside', color: '#ffffff' } },
+      ];
+      D.insertLayerDraft(doc, l, { parentId: null });
+    }
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const l = D.makeRasterLayer({ name: 'Paint', bitmapId: bitmaps.add(c), width: w, height: h });
+    D.insertLayerDraft(doc, l, { parentId: null });
+    return st().openDocument(doc, { label: 'Bench' });
+  }
   let demoId = null;
   // `guard`: perf regression limits (the run fails past them): mean ms per pointermove on the
-  // software / GPU canvas, and layers re-rendered from scratch during the stroke (the painted layer
-  // is updated in place; nothing else may re-render).
+  // software / GPU canvas (frames 6+), and layers re-rendered from scratch during the stroke (the
+  // painted layer is updated in place; nothing else may re-render — past the hard cap each layer
+  // below may be re-rendered once, at the start of the stroke). `mem`: navigator.deviceMemory
+  // the render cache's hard cap is set for during the case (GB; see hardCapFor).
   const cases = [
     { name: 'demo: Red Glow (raster under adjustments)', open: () => demoId ?? (demoId = app.openDemoDocument()), layer: 'Red Glow' },
     { name: 'demo: Roblox Character (effects, in group)', open: () => demoId ?? (demoId = app.openDemoDocument()), layer: 'Roblox Character' },
     { name: '1080p: one raster layer', open: open1080, layer: 'Paint' },
     { name: '1080p: 8 full-canvas layers with Drop Shadow + Stroke', open: () => openFx(1920, 1080, 8), layer: 'Paint', guard: { sw: 30, gpu: 120, renders: 0 } },
     { name: '4K: 2 full-canvas layers with Drop Shadow + Stroke', open: () => openFx(3840, 2160, 2), layer: 'Paint', guard: { sw: 30, gpu: 120, renders: 0 } },
-    // ≈ 100M px of renders: well past the soft budget (the working set must stay cached).
+    // ≈ 100M px of renders before renders were cropped to their content (the working set must stay cached).
     { name: '1080p: 16 full-canvas layers with Drop Shadow + Stroke', open: () => openFx(1920, 1080, 16), layer: 'Paint', guard: { sw: 30, gpu: 120, renders: 0 } },
+    // Past the old hard caps (≈ 200M px, ≈ 125M px with 4 GB) before renders were cropped to their content.
+    { name: '4K: 8 full-canvas layers with Drop Shadow + Stroke', open: () => openFx(3840, 2160, 8), layer: 'Paint', guard: { sw: 30, gpu: 120, renders: 0 } },
+    { name: '4K: 5 full-canvas layers with Drop Shadow + Stroke, 4 GB of memory', open: () => openFx(3840, 2160, 5), layer: 'Paint', mem: 4, guard: { sw: 30, gpu: 120, renders: 0 } },
+    // Layer renders alone past the hard cap (≈ 250M px; ≈ 150M px with 4 GB): graceful degradation.
+    { name: '4K: 10 large-content layers with Drop Shadow + Stroke (past the hard cap)', open: () => openLarge(3840, 2160, 10), layer: 'Paint', guard: { sw: 30, gpu: 120, renders: 10 } },
+    { name: '4K: 6 large-content layers with Drop Shadow + Stroke, 4 GB of memory (past the hard cap)', open: () => openLarge(3840, 2160, 6), layer: 'Paint', mem: 4, guard: { sw: 30, gpu: 120, renders: 6 } },
   ];
   const results = [];
+  /** --bench-only a,b: only the cases whose name contains one of these strings. */
+  const wanted = (name) => !opts.benchOnly || opts.benchOnly.some((w) => name.includes(w));
+  const hardCap0 = CACHE?.slots?.hardCap;
   for (const cs of cases) {
+    if (!wanted(cs.name)) continue;
+    // A smaller device's hard cap (no-op against trees without one).
+    if (cs.mem && CACHE?.hardCapFor && hardCap0 !== undefined) CACHE.slots.hardCap = CACHE.hardCapFor(CACHE.slots.budget, cs.mem);
     const docId = cs.open();
     if (st().activeDocId !== docId) st().setActiveDoc(docId);
     await sleep(800);
@@ -909,10 +1447,16 @@ async function benchPart(opts) {
     // Layer renders stored during the stroke for layers OTHER than the painted one: they never
     // change, so any is a re-render after an eviction (cache thrash).
     let others = 0;
+    const otherKeys = new Set();
+    const names = Object.fromEntries(Object.values(doc.layers).map((l) => [l.id, l.name]));
     const slotSet = CACHE?.slots?.set;
     if (slotSet)
       CACHE.slots.set = function (key, ...rest) {
-        if (typeof key === 'string' && key.startsWith('L|') && !key.startsWith(`L|${layer.id}|`)) others++;
+        if (typeof key === 'string' && key.startsWith('L|') && !key.startsWith(`L|${layer.id}|`)) {
+          others++;
+          const [, id, scale, flags] = key.split('|');
+          otherKeys.add(`${names[id] ?? id}@${scale}/${flags}`);
+        }
         return slotSet.call(this, key, ...rest);
       };
     const per = [];
@@ -937,6 +1481,7 @@ async function benchPart(opts) {
         per.push(handler + work);
       }
       const othersStroke = slotSet ? others : null;
+      const othersWhich = [...otherKeys].slice(0, 6);
       longTasks.length = 0;
       const tUp = performance.now();
       fire('pointerup', x, y, 0);
@@ -949,6 +1494,7 @@ async function benchPart(opts) {
         name: cs.name,
         guard: cs.guard ?? null,
         layerRenders: othersStroke,
+        otherKeys: othersWhich,
         slotMpx: i1.slotPixels !== undefined ? +(i1.slotPixels / 1e6).toFixed(1) : null,
         frames: per.length,
         work: stats(per.slice(5)),
@@ -967,6 +1513,103 @@ async function benchPart(opts) {
     await sleep(300);
     // Bench documents of their own are closed again (their renders leave the cache).
     if (docId !== demoId && st().closeDocument) st().closeDocument(docId);
+    await sleep(300);
+    if (hardCap0 !== undefined) CACHE.slots.hardCap = hardCap0;
+    // Their renders go now (the next case starts from a cache holding nothing of them).
+    C?.invalidateRenderCache?.();
+  }
+
+  // Move-tool drags of template characters with smart filters (release review e2e-flows-3): every
+  // pointermove used to re-run the character's smart filters (and its glow) at full resolution.
+  // `renders` here = smart-filter runs at full size during the drag (moved renders must be reused;
+  // a doc-anchored filter such as the halftone grid is shifted on screen and settled afterwards).
+  // No time limit on GPU canvases: there (SwiftShader) a move is dominated by synchronous readbacks
+  // for the templates' adjustment layers re-applied over the changed area, and very noisy.
+  const TPL = await import('/src/templates/open.ts').catch(() => null);
+  const moveCases = TPL?.openTemplate
+    ? [
+        { name: 'move drag: Crimson template character (gradient-map + halftone, glow)', tpl: 'tpl-crimson-thumbnail', guard: { sw: 130, gpu: null, renders: 0 } },
+        { name: 'move drag: Gothic template character (cel-shade)', tpl: 'tpl-gothic-paper', guard: { sw: 50, gpu: null, renders: 0 } },
+      ]
+    : [];
+  for (const cs of moveCases) {
+    if (!wanted(cs.name)) continue;
+    const docId = await TPL.openTemplate(cs.tpl);
+    if (!docId) continue;
+    if (st().activeDocId !== docId) st().setActiveDoc(docId);
+    // The viewport is loaded lazily (a first document on a cold dev server takes a while).
+    for (let i = 0; i < 150 && !document.querySelector('.viewport-overlay'); i++) await sleep(200);
+    st().setView({ zoom: 0, panX: 0, panY: 0 });
+    st().setTool('move');
+    for (let i = 0; i < 6; i++) await nextFrame();
+    await sleep(2500); // fonts, idle work, the backend probe
+    await document.fonts?.ready;
+    const doc = st().sessions[docId].doc;
+    const layerId = st().sessions[docId].activeLayerId;
+    st().setActiveLayer(layerId);
+    for (let i = 0; i < 3; i++) await nextFrame();
+    const tx0 = doc.layers[layerId].transform.x;
+    const lb = C.getLayerBounds(doc, layerId);
+    const ov = document.querySelector('.viewport-overlay');
+    const v = st().sessions[docId].view;
+    const box = ov.getBoundingClientRect();
+    const z = v.zoom;
+    const toClient = (x, y) => ({ clientX: box.left + box.width / 2 + v.panX - (doc.width * z) / 2 + x * z, clientY: box.top + box.height / 2 + v.panY - (doc.height * z) / 2 + y * z });
+    const fire = (type, x, y, buttons) => ov.dispatchEvent(new PointerEvent(type, { ...toClient(x, y), button: 0, buttons, pointerId: 1, pointerType: 'mouse', bubbles: true, cancelable: true }));
+    let runs = 0;
+    const wrapped = [];
+    for (const def of app.filters.list()) {
+      const orig = def.apply;
+      def.apply = function (img, p, ctx) {
+        if (img.width * img.height >= 64 * 64 && /applyFilterInstanceToCanvas/.test(new Error().stack ?? '')) runs++;
+        return orig.call(this, img, p, ctx);
+      };
+      wrapped.push([def, orig]);
+    }
+    let work = 0;
+    window.requestAnimationFrame = (cb) =>
+      origRaf((t) => {
+        const s0 = performance.now();
+        try {
+          cb(t);
+        } finally {
+          work += performance.now() - s0;
+        }
+      });
+    const per = [];
+    let x = lb.x + lb.width / 2,
+      y = lb.y + lb.height / 2;
+    let dragRuns = 0;
+    try {
+      fire('pointerdown', x, y, 1);
+      await nextFrame();
+      await nextFrame();
+      runs = 0;
+      const n = Math.max(12, Math.min(60, Math.round(opts.benchFrames / 2)));
+      for (let i = 0; i < n; i++) {
+        x += (Math.floor(i / 10) % 2 ? -1 : 1) * 6;
+        y += i % 2 ? 2 : -2;
+        work = 0;
+        const t0 = performance.now();
+        fire('pointermove', x, y, 1);
+        const handler = performance.now() - t0;
+        await nextFrame();
+        per.push(handler + work);
+      }
+      dragRuns = runs;
+      fire('pointerup', x, y, 0);
+      for (let i = 0; i < 3; i++) await nextFrame();
+      await sleep(1200);
+    } finally {
+      window.requestAnimationFrame = origRaf;
+      for (const [def, orig] of wrapped) def.apply = orig;
+    }
+    // A drag that did not move the layer measures nothing: reported as a failure.
+    const moved = st().sessions[docId].doc.layers[layerId].transform.x !== tx0;
+    results.push({ name: cs.name, guard: cs.guard, layerRenders: dragRuns, notMoved: !moved, slotMpx: +(info().slotPixels / 1e6).toFixed(1), frames: per.length, work: stats(per.slice(3)), afterTask: 0, settleFrame: null, regionUpdates: '-' });
+    st().undo();
+    await sleep(300);
+    if (st().closeDocument) st().closeDocument(docId);
     await sleep(300);
   }
   return results;
@@ -997,8 +1640,8 @@ try {
 
   console.log(`dirty-rect check — ${gpu ? 'GPU (accelerated canvas)' : 'software canvas'}`);
   if (args.bench === 'true') {
-    const res = await page.evaluate(benchPart, { benchFrames: Number(args['bench-frames'] ?? 90) });
-    console.log('\nbrush 200 px, fit zoom: main-thread ms per pointermove (handler + frame)   mean   p50    p90    max    settle frame  longest task*  region updates  other renders† cache Mpx');
+    const res = await page.evaluate(benchPart, { benchFrames: Number(args['bench-frames'] ?? 90), benchOnly: args['bench-only'] ? String(args['bench-only']).split(',') : null });
+    console.log('\nbrush 200 px / move drags, fit zoom: main-thread ms per pointermove     mean   p50    p90    max    settle frame  longest task*  region updates  other renders† cache Mpx');
     let benchFailed = false;
     for (const r of res) {
       // Perf regression guard (render-cache working set over budget, see openFx).
@@ -1006,8 +1649,9 @@ try {
       if (r.guard) {
         const limit = gpu ? r.guard.gpu : r.guard.sw;
         const bad = [];
-        if (r.work.mean > limit) bad.push(`mean ${r.work.mean} ms > ${limit} ms`);
-        if (r.layerRenders !== null && r.layerRenders > r.guard.renders) bad.push(`${r.layerRenders} re-renders of other layers during the stroke`);
+        if (r.notMoved) bad.push('the drag did not move the layer');
+        if (limit !== null && r.work.mean > limit) bad.push(`mean ${r.work.mean} ms > ${limit} ms`);
+        if (r.layerRenders !== null && r.layerRenders > r.guard.renders) bad.push(r.name.startsWith('move') ? `${r.layerRenders} smart-filter runs during the drag` : `${r.layerRenders} re-renders of other layers during the stroke (${(r.otherKeys ?? []).join(', ')})`);
         verdict = bad.length ? `  ✗ ${bad.join(', ')}` : '  ok';
         if (bad.length) benchFailed = true;
       }
@@ -1017,7 +1661,8 @@ try {
     }
     console.log('  settle frame: the frame re-rendering approximate GPU work exactly after the stroke (- = nothing to settle)');
     console.log('  * longest main-thread task within 1.5 s after the stroke (any work: history, thumbnails, settle…)');
-    console.log('  † renders of layers other than the painted one stored during the stroke (re-renders after cache evictions)');
+    console.log('  † brush: renders of layers other than the painted one stored during the stroke (re-renders after cache evictions);');
+    console.log('    move drag: smart-filter runs at full size during the drag (the moved render must be reused)');
     if (res[0]?.cropExact !== undefined) console.log(`  (canvas backend crop-exact: ${res[0].cropExact})`);
     await browser.close();
     const realB = errors.filter((e) => !/Failed to load resource/.test(e));
@@ -1056,16 +1701,57 @@ try {
     );
   }
   console.log('* frame = worst per-frame mismatch of the live composite vs a from-scratch render of a document clone');
+  if (args['e2e-only'] !== 'true' && args['no-edits'] !== 'true') {
+    const edits = await page.evaluate(editsPart, opts);
+    console.log('\nedit sequences (a new document per step)   steps  live*       shared      small       below       settled     extra      filter re-runs†  ms');
+    for (const r of edits) {
+      if (r.error) {
+        console.log(`✗ ${r.name.padEnd(40)}ERROR ${r.error.split('\n')[0]}`);
+        failed = true;
+        continue;
+      }
+      let live = null,
+        shared = null,
+        small = null,
+        below = null;
+      const bad = [];
+      for (const s of r.rows) {
+        // Exact renders (renderDocument at any scale, below renders) at every step on every backend;
+        // the live composite at every step on the software canvas unless the step did work that is
+        // approximate everywhere (reported as inexact), else after the settle.
+        if (!ok(s.shared) || !ok(s.small) || (s.below && !ok(s.below))) bad.push(`${s.label}: exact render off`);
+        const liveRequired = !gpu && !s.inexact;
+        if (liveRequired && !ok(s.live)) bad.push(`${s.label}: live off`);
+        if (!gpu && s.approx > s.inexact) bad.push(`${s.label}: ${s.approx - s.inexact} approximate update(s) on the software canvas`);
+        live = worstOf(live, liveRequired ? s.live : null);
+        shared = worstOf(shared, s.shared);
+        small = worstOf(small, s.small);
+        below = worstOf(below, s.below ?? null);
+      }
+      if (!ok(r.settled.live)) bad.push('settled live off');
+      if (r.extra && !ok(r.extra)) bad.push('extra reference off');
+      if (r.reruns) bad.push(`${r.reruns} smart-filter run(s) while dragging`);
+      const pass = !bad.length;
+      if (!pass) failed = true;
+      console.log(
+        `${(pass ? '  ' : '✗ ') + r.name.padEnd(41)}${String(r.rows.length).padEnd(7)}${[live, shared, small, below, r.settled.live].map((d) => `${fmt(d).padEnd(11)} `).join('')}${fmt(r.extra).padEnd(10)} ${String(r.reruns).padEnd(17)}${r.ms}`,
+      );
+      if (!pass) console.log(`    ${bad.slice(0, 6).join('; ')}`);
+    }
+    console.log('* live: worst over the steps where the live composite must be exact (software canvas, no work approximate everywhere)');
+    console.log('† smart filters run at full size by the live composite while a layer is dragged (must be 0: moved renders are reused)');
+  }
   if (args['no-e2e'] !== 'true') {
     await page.goto(url.includes('?') ? `${url}&demo=1` : `${url}?demo=1`, { waitUntil: 'networkidle' });
     await page.waitForTimeout(1200);
     const e2e = await page.evaluate(e2ePart, opts);
     console.log('\nend-to-end (paint tools + viewport, demo document)    after stroke   durable**      after settle');
     for (const r of e2e) {
-      const pass = ok(r.settled) && ok(r.durable) && (gpu || ok(r.now));
+      // dragRuns: smart filters run at full size while a layer was dragged (moved renders must be reused).
+      const pass = ok(r.settled) && ok(r.durable) && (gpu || r.approxOk || ok(r.now)) && !r.dragRuns;
       if (!pass) failed = true;
       const f = (d, fail = 'FAIL ') => (d.max <= 1 ? `ok(${d.max})` : `${fail}max ${d.max} ×${d.n}`);
-      console.log(`${(pass ? '  ' : '✗ ') + r.label.padEnd(52)}${f(r.now, '').padEnd(15)}${f(r.durable).padEnd(15)}${f(r.settled)}`);
+      console.log(`${(pass ? '  ' : '✗ ') + r.label.padEnd(52)}${f(r.now, '').padEnd(15)}${f(r.durable).padEnd(15)}${f(r.settled)}${r.dragRuns > 0 ? `   ✗ ${r.dragRuns} smart-filter runs while dragging` : r.dragRuns < 0 ? '   ✗ the drag did not move the layer' : ''}`);
     }
     console.log('** renderDocument + document / layer thumbnails right after the stroke (before any settle) vs from-scratch renders');
   }

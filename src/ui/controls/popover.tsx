@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { create } from 'zustand';
 import { Check, ChevronRight } from 'lucide-react';
 import { formatShortcut } from '../shortcuts';
-import { escapeFromInside, insideLaterLayer, pushEscapeLayer, type EscapeLayer } from './escapeLayers';
+import { insideLaterLayer, pushEscapeLayer, type EscapeLayer } from './escapeLayers';
 
 /* ---------------- Popover ---------------- */
 
@@ -86,19 +86,25 @@ export function Popover({
     };
     layerRef.current = layer;
     const pop = pushEscapeLayer(layer);
-    const key = (e: KeyboardEvent) => escapeFromInside(layer, e);
-    el?.addEventListener('keydown', key);
     return () => {
       pop();
-      el?.removeEventListener('keydown', key);
       if (layerRef.current === layer) layerRef.current = null;
-      // Closed with Escape while one of its fields had focus: give focus back to the control that
-      // opened it (inside a dialog, Enter / Tab / a second Escape keep working) instead of <body>.
-      const opener = anchorRef.current ?? openedFrom;
-      if (byEscape && el && el.contains(document.activeElement) && opener instanceof HTMLElement) {
+      // Closed with Escape inside a dialog — or inside a popover opened from one (a gradient stop's
+      // colour picker) — while focus was in it or nowhere: give focus back to the control that opened
+      // it, not <body>, so keyboard users go on from there. (Outside dialogs and popovers focus stays
+      // put: Space must still pan.)
+      const anchorEl = anchorRef.current ?? openedFrom;
+      const opener = anchorEl instanceof HTMLElement ? anchorEl : null;
+      const active = document.activeElement;
+      const lost = !active || active === document.body || !!el?.contains(active);
+      const home = opener?.closest<HTMLElement>('.ui-dialog, .ui-popover') ?? null;
+      if (byEscape && lost && opener && home) {
         requestAnimationFrame(() => {
           const now = document.activeElement;
-          if ((!now || now === document.body) && opener.isConnected && !opener.closest('[inert]')) opener.focus({ preventScroll: true });
+          if ((now && now !== document.body) || !opener.isConnected || opener.closest('[inert]')) return;
+          opener.focus({ preventScroll: true });
+          // An opener that can't take focus: keep focus in its dialog (keyboard users stay there).
+          if (document.activeElement !== opener && home.isConnected) home.closest<HTMLElement>('.ui-dialog')?.focus({ preventScroll: true });
         });
       }
     };

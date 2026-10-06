@@ -9,6 +9,9 @@ import { viewport } from '../../editor/viewport';
 import { newTransparentDocument } from '../util';
 import { isPlaceholder, replaceLayerContents } from '../character/replace';
 import type { Document, Layer } from '../../core/types';
+import { freshTransform, outputFrameSize, padCrop, readPlacement, reeditTransform, rendersCutOff, type Placement } from './placement';
+import type { StudioScene } from './scene';
+import type { StudioOutput } from './types';
 
 /** The active layer when it is a template placeholder (renders replace it), else null. */
 export function activePlaceholder(doc: Document): Layer | null {
@@ -18,9 +21,6 @@ export function activePlaceholder(doc: Document): Layer | null {
   const l = doc.layers[s.activeLayerId];
   return l && isPlaceholder(l) ? l : null;
 }
-import { freshTransform, outputFrameSize, padCrop, readPlacement, reeditTransform, type Placement } from './placement';
-import type { StudioScene } from './scene';
-import type { StudioOutput } from './types';
 
 export interface CommitRenderOptions {
   output: StudioOutput;
@@ -38,11 +38,6 @@ export interface CommitRenderOptions {
 export function frameSizeFor(output: StudioOutput): { width: number; height: number } {
   const doc = activeDoc();
   return outputFrameSize(output.size, doc?.width ?? null, doc?.height ?? null);
-}
-
-/** Whether a render's visible pixels reach the bottom edge of its frame (the figure is cut there). */
-export function rendersCutOff(opaque: { y: number; height: number }, frameH: number): boolean {
-  return opaque.y + opaque.height >= frameH - 1;
 }
 
 export function commitRender(scene: StudioScene, opts: CommitRenderOptions): boolean {

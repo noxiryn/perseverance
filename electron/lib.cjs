@@ -196,16 +196,31 @@ function saveFilters(filters) {
  * The Save dialog's starting path from a renderer-supplied defaultPath. The dialog touches that path on
  * disk before the user does anything (Windows checks whether it or its folder exists and opens that
  * folder), so a page-chosen "\\attacker\share\x" would make Windows connect out and offer the user's
- * NTLM hash. Only a path the user chose before (an opened/saved file: `grants.get()`) is kept as is,
- * which also keeps the folder for projects on a NAS. Anything else is cut down to a plain file name and
- * the OS picks the folder (the one last used): no absolute, UNC or drive-relative path from the page.
+ * NTLM hash, and a page could pre-fill a startup folder. So the page never picks the folder:
+ *  - a file the user chose before (opened/saved: `grants.get()`) is kept as is — also on a NAS share;
+ *  - a new name in the folder of such a file (Save As of a new document starts next to the last project:
+ *    src/io/save defaultProjectSavePath) keeps that trusted folder, with the name cleaned up;
+ *  - anything else is cut down to a plain file name and the OS picks the folder (the one last used).
  */
 function saveDefaultPath(defaultPath, grants, platform = process.platform) {
   if (typeof defaultPath !== 'string' || !defaultPath || defaultPath.length > 32767) return undefined;
-  const granted = isSafeAbsPath(defaultPath, platform) && grants && typeof grants.get === 'function' ? grants.get(defaultPath) : null;
-  if (granted) return granted.path;
-  // Last path segment (either slash: a Windows path is cut on POSIX too), then the characters no file
-  // system accepts in a name (as src/io safeFileName does; ':' would also name an NTFS stream).
+  const name = saveFileName(defaultPath);
+  if (isSafeAbsPath(defaultPath, platform) && grants && typeof grants.get === 'function') {
+    const granted = grants.get(defaultPath);
+    if (granted) return granted.path;
+    const P = pathApi(platform);
+    const dir = name && typeof grants.folder === 'function' ? grants.folder(P.dirname(defaultPath)) : null;
+    if (dir) return P.join(dir, name);
+  }
+  return name;
+}
+
+/**
+ * The file-name part of a page-supplied path, safe to hand to a Save dialog: the last segment (either
+ * slash: a Windows path is cut on POSIX too) without the characters no file system accepts in a name (as
+ * src/io safeFileName does; ':' would also name an NTFS stream or a drive), or undefined when nothing is left.
+ */
+function saveFileName(defaultPath) {
   const name = defaultPath
     .split(/[\\/]/)
     .pop()
@@ -382,6 +397,21 @@ class FileGrants {
     return isSafeAbsPath(p, this.platform) ? this.map.get(pathKey(p, this.platform)) ?? null : null;
   }
 
+  /**
+   * The folder of a granted file that `dir` names, as that file's path spells it ("C:\Art"), or null:
+   * a folder the user picked in a dialog or opened a file from.
+   */
+  folder(dir) {
+    if (!isSafeAbsPath(dir, this.platform)) return null;
+    const P = pathApi(this.platform);
+    const k = pathKey(dir, this.platform);
+    for (const e of this.map.values()) {
+      const d = P.dirname(e.path);
+      if (pathKey(d, this.platform) === k) return d;
+    }
+    return null;
+  }
+
   canRead(p) {
     return !!this.get(p);
   }
@@ -435,6 +465,52 @@ function createOpenQueue({ ready, deliver }) {
         if (ready()) await send(p);
         else keep(p);
       }
+    },
+  };
+}
+
+/* ---------------- editor page load state ---------------- */
+
+/** net::ERR_ABORTED: a newer navigation or reload superseded the load (not a failure). */
+const ERR_ABORTED = -3;
+
+/**
+ * Load state of the editor window's page, fed from its webContents events. Chromium reports a failed
+ * load as 'did-fail-load' followed by 'did-finish-load' for its own error page: that page is not the
+ * editor (it can't take files, and a reload that ends there did not bring the editor back). A failed load
+ * is the user's to see, unless it belongs to a renderer that crashed or is being killed: the crash prompt
+ * or the hung-renderer reload speaks for that one. The reload that follows starts in a new renderer, so a
+ * failure of THAT load is reported again (a bundle that vanished while the app ran: antivirus, reinstall).
+ */
+function createLoadState() {
+  let failed = false; // the last main-frame load failed: the window shows Chromium's error page
+  let abandoned = false; // the current load belongs to a renderer that crashed / that we are killing
+  return {
+    /** 'did-start-loading': a new load (also the reload in a fresh renderer after a crash or a kill). */
+    start() {
+      failed = false;
+      abandoned = false;
+    },
+    /** 'render-process-gone', or right before killing a hung renderer: the current load dies with it. */
+    abandon() {
+      abandoned = true;
+    },
+    /**
+     * 'did-fail-load'. null: not a failure of the page (a subframe, or ERR_ABORTED). 'abandoned': the load
+     * of a dead or dying renderer (reported by the crash flow). 'report': tell the user.
+     */
+    fail(code, isMainFrame) {
+      if (!isMainFrame || code === ERR_ABORTED) return null;
+      failed = true;
+      return abandoned ? 'abandoned' : 'report';
+    },
+    /** 'did-finish-load'. True when the editor itself loaded, false for Chromium's error page. */
+    finish() {
+      return !failed;
+    },
+    /** Chromium's error page is showing: the last load failed and nothing has reloaded since. */
+    get failed() {
+      return failed;
     },
   };
 }
@@ -600,6 +676,7 @@ module.exports = {
   readJsonSync,
   FileGrants,
   createOpenQueue,
+  createLoadState,
   parseWindowState,
   initialBounds,
   createLogger,

@@ -304,7 +304,7 @@ describe('Save dialog options from the page (desktop:save-file)', () => {
     );
   });
 
-  it('defaultPath: a file the user chose before is kept, anything else becomes a plain file name', () => {
+  it('defaultPath: a file the user chose before (or a new name in its folder) is kept, anything else becomes a plain file name', () => {
     const g = new lib.FileGrants(null, { platform: 'win32' });
     g.grant('C:\\Art\\Poster.pgfx', { write: true });
     g.grant('\\\\nas\\share\\Team Poster.pgfx', { write: true });
@@ -314,6 +314,17 @@ describe('Save dialog options from the page (desktop:save-file)', () => {
     expect(dp('\\\\nas\\share\\Team Poster.pgfx')).toBe('\\\\nas\\share\\Team Poster.pgfx'); // granted share: the user chose it
     expect(dp('Poster.pgfx')).toBe('Poster.pgfx');
     expect(dp('My Thumbnail 1920x1080.png')).toBe('My Thumbnail 1920x1080.png');
+    // A new document's Save As starts next to the last project (src/io/save defaultProjectSavePath): the
+    // folder of a granted file is one the user chose, so it is kept (spelled as the grant spells it).
+    expect(dp('C:\\Art\\Untitled.pgfx')).toBe('C:\\Art\\Untitled.pgfx');
+    expect(dp('c:/ART/Untitled.pgfx')).toBe('C:\\Art\\Untitled.pgfx');
+    expect(dp('C:\\Art\\..\\Art\\New:Name?.pgfx')).toBe('C:\\Art\\New_Name_.pgfx');
+    expect(dp('\\\\nas\\share\\Team Banner.pgfx')).toBe('\\\\nas\\share\\Team Banner.pgfx');
+    expect(dp('C:\\Art\\Sub\\Untitled.pgfx')).toBe('Untitled.pgfx'); // a sub-folder was never chosen
+    expect(dp('C:\\Untitled.pgfx')).toBe('Untitled.pgfx');
+    expect(g.folder('c:\\art\\')).toBe('C:\\Art');
+    expect(g.folder('C:\\Art\\Sub')).toBe(null);
+    expect(g.folder('Art')).toBe(null);
     // Page-chosen folders never reach the dialog (UNC probe / NTLM leak, pre-filled startup folder).
     expect(dp('\\\\attacker\\share\\Poster.pgfx')).toBe('Poster.pgfx');
     expect(dp('//attacker/share/Poster.pgfx')).toBe('Poster.pgfx');
@@ -335,7 +346,9 @@ describe('Save dialog options from the page (desktop:save-file)', () => {
     gp.grant('/home/me/Art/Poster.pgfx');
     expect(lib.saveDefaultPath('/home/me/Art/Poster.pgfx', gp, 'linux')).toBe('/home/me/Art/Poster.pgfx');
     expect(lib.saveDefaultPath('/home/me/.config/autostart/evil.desktop', gp, 'linux')).toBe('evil.desktop');
-    expect(lib.saveDefaultPath('/home/me/Art/Other.pgfx', gp, 'linux')).toBe('Other.pgfx');
+    expect(lib.saveDefaultPath('/home/me/Art/Other.pgfx', gp, 'linux')).toBe('/home/me/Art/Other.pgfx');
+    expect(lib.saveDefaultPath('/home/me/art/Other.pgfx', gp, 'linux')).toBe('Other.pgfx'); // case-sensitive file system
+    expect(lib.saveDefaultPath('/home/me/Art/../.config/autostart/Other.pgfx', gp, 'linux')).toBe('Other.pgfx');
     expect(lib.saveDefaultPath('Poster.pgfx', null, 'linux')).toBe('Poster.pgfx');
   });
 });
@@ -532,6 +545,83 @@ describe('files opened from the OS', () => {
   });
 });
 
+describe('editor page load state (lib.createLoadState)', () => {
+  const ERR_FILE_NOT_FOUND = -6;
+  const ERR_ABORTED = -3;
+
+  it('a load that succeeds is the editor; subframe failures and superseded loads are no page failures', () => {
+    const s = lib.createLoadState();
+    s.start();
+    expect(s.fail(ERR_FILE_NOT_FOUND, false)).toBe(null); // an iframe
+    expect(s.fail(ERR_ABORTED, true)).toBe(null); // a newer navigation / reload took over
+    expect(s.failed).toBe(false);
+    expect(s.finish()).toBe(true);
+  });
+
+  it("a failed load is reported, and Chromium's error page that follows is not the editor until the next load", () => {
+    const s = lib.createLoadState();
+    s.start();
+    expect(s.fail(ERR_FILE_NOT_FOUND, true)).toBe('report');
+    expect(s.failed).toBe(true);
+    expect(s.finish()).toBe(false); // 'did-finish-load' of the error page
+    expect(s.failed).toBe(true); // still showing it
+    s.start(); // "Try Again"
+    expect(s.failed).toBe(false);
+    expect(s.finish()).toBe(true);
+  });
+
+  it("a dead or dying renderer's load is the crash flow's, but the reload in the new renderer is reported again", () => {
+    const s = lib.createLoadState();
+    s.start();
+    expect(s.finish()).toBe(true);
+    s.abandon(); // crashed (or about to be killed because it hung)
+    expect(s.fail(-2, true)).toBe('abandoned');
+    s.start(); // the crash prompt's / hung-renderer Reload: a new renderer
+    expect(s.fail(ERR_FILE_NOT_FOUND, true)).toBe('report'); // the bundle vanished while the app ran
+    expect(s.finish()).toBe(false);
+  });
+
+  it('wired like main.cjs: a file handed over while the editor is down survives a failed reload and opens after Try Again', async () => {
+    // Events from the bug report: crash → Reload with the bundle gone → did-fail-load → did-finish-load (error page).
+    const s = lib.createLoadState();
+    let ready = false;
+    const delivered: string[] = [];
+    const queue = lib.createOpenQueue({ ready: () => ready, deliver: async (p: string) => void delivered.push(p) });
+    const reported: number[] = [];
+    const ev = {
+      start: () => {
+        s.start();
+        ready = false;
+      },
+      finish: async () => {
+        if (!s.finish()) return;
+        ready = true;
+        await queue.flush();
+      },
+      gone: () => {
+        ready = false;
+        s.abandon();
+      },
+      fail: (code: number) => {
+        if (s.fail(code, true) === 'report') reported.push(code);
+      },
+    };
+    ev.start();
+    await ev.finish();
+    ev.gone();
+    queue.open('C:\\Art\\Poster.pgfx'); // Explorer double-click while the crash prompt is up
+    ev.start();
+    ev.fail(ERR_FILE_NOT_FOUND);
+    await ev.finish(); // the error page: must not swallow the file
+    expect(reported).toEqual([ERR_FILE_NOT_FOUND]);
+    expect(delivered).toEqual([]);
+    expect(queue.pending).toEqual(['C:\\Art\\Poster.pgfx']);
+    ev.start(); // Try Again, bundle back
+    await ev.finish();
+    expect(delivered).toEqual(['C:\\Art\\Poster.pgfx']);
+  });
+});
+
 describe('window state', () => {
   const primary = { x: 0, y: 0, width: 1920, height: 1040 };
   const second = { x: 1920, y: 0, width: 2560, height: 1400 };
@@ -623,6 +713,34 @@ describe('main process wiring (electron/main.cjs)', () => {
     const nav = main.slice(main.indexOf("contents.on('will-navigate'"), main.indexOf("contents.on('will-redirect'"));
     expect(nav).toContain('e.preventDefault()');
     expect(nav).not.toMatch(/openExternal/);
+  });
+  /** The body of `wc.on('<event>', …)` up to the next handler. */
+  const handler = (event: string) => {
+    const at = main.indexOf(`wc.on('${event}'`);
+    expect(at).toBeGreaterThan(0);
+    const next = main.slice(at + 1).search(/\n {2}(wc|w)\.on\(/);
+    return main.slice(at, next < 0 ? undefined : at + 1 + next);
+  };
+  it("treats Chromium's error page as no editor: files stay queued, the reload watch keeps running", () => {
+    const finish = handler('did-finish-load');
+    expect(finish).toMatch(/if \(!pageLoad\.finish\(\)\) return;/);
+    expect(finish.indexOf('pageLoad.finish()')).toBeLessThan(finish.indexOf('openQueue.flush()'));
+    expect(finish.indexOf('pageLoad.finish()')).toBeLessThan(finish.indexOf('clearReloadWatch()'));
+    expect(handler('did-start-loading')).toContain('pageLoad.start()');
+  });
+  it('reports a failed load also on the reload after a crash or a hang (no silent blank window)', () => {
+    const fail = handler('did-fail-load');
+    expect(fail).toContain('pageLoad.fail(code, isMainFrame)');
+    expect(fail).not.toMatch(/rendererGone|expectedKill/); // the old guards that swallowed the reload's failure
+    expect(fail.indexOf('clearReloadWatch()')).toBeLessThan(fail.indexOf('onLoadFailed('));
+    const gone = main.slice(main.indexOf('async function onRenderGone'), main.indexOf('async function crashPrompt'));
+    expect(gone).toContain('pageLoad.abandon()');
+    const hung = main.slice(main.indexOf('function reloadHungRenderer'), main.indexOf('async function onLoadFailed'));
+    expect(hung.indexOf('pageLoad.abandon()')).toBeLessThan(hung.indexOf('forcefullyCrashRenderer()'));
+  });
+  it('a renderer that recovers only takes back the "not responding" prompt', () => {
+    const responsive = main.slice(main.indexOf("w.on('responsive'"), main.indexOf("wc.on('preload-error'"));
+    expect(responsive).toMatch(/if \(promptKind === 'unresponsive'\) dismissPrompt\(\);/);
   });
 });
 

@@ -246,7 +246,7 @@ describe('PSD round trip of clipped baked adjustments over soft base edges', () 
     expect(built.baked).toEqual([]);
     expect(built.approxAdjustments).toEqual([]);
     const layers = back.rootIds.map((id) => back.layers[id]);
-    expect(layers.map((l) => l.name)).toEqual(['Badge', "Base's Styles 1", "Base's Styles 2", 'Base', 'Texture', 'Invert']);
+    expect(layers.map((l) => l.name)).toEqual(['Badge', "Base's Drop Shadow", "Base's Stroke", 'Base', 'Texture', 'Invert']);
     expect(layers.map((l) => l.clipped)).toEqual([false, false, false, false, true, true]);
     for (const l of layers) expect(l.effects).toEqual([]); // all baked
     expect(layers[1].opacity).toBeCloseTo(0.8, 2); // the base's opacity, on each piece
@@ -284,7 +284,7 @@ describe('PSD round trip of clipped baked adjustments over soft base edges', () 
     const { built, back, px } = roundTrip(d, false);
     expect(built.baked).toEqual(['Base (Long Shadow)']);
     expect(built.splitClipBases).toEqual(['Base']);
-    expect(back.rootIds.map((id) => back.layers[id].name)).toEqual(["Base's Styles", 'Base', 'Texture']);
+    expect(back.rootIds.map((id) => back.layers[id].name)).toEqual(["Base's Long Shadow", 'Base', 'Texture']);
     expect(maxDiff(px)).toBe(0);
     // When no split can reproduce it (an overlay at a reduced Fill), the unsupported style forces
     // the old whole bake — the clip then follows the baked styles, and the report says so.

@@ -12,7 +12,9 @@
  * Regions: the padded region grows per side by the layer effects' reach (a shadow only grows it
  * in its own direction) and is clipped to the part of the document those effects can affect.
  * Effects receive the full raster extent of the content (`bounds`, including text stroke/warp/
- * descender and smart-filter overflow) and the layout box separately (`paintBox`).
+ * descender and smart-filter overflow) and the layout box separately (`paintBox`). A raster layer
+ * with effects starts from its content's bounds instead of the whole bitmap (`crop`, see
+ * ./contentBounds): a small blob on a document-sized layer holds small canvases.
  *
  * Caching: LayerRenders live in per-layer slots keyed by a signature (object identity of the
  * layer + bitmap/mask versions + descendants for groups + scale/doc size), so during a live
@@ -28,10 +30,11 @@ import type { AdjustmentLayer, Document, FilterInstance, GroupLayer, ID, Layer, 
 import { bitmaps } from '../core/bitmaps';
 import { ctx2d } from '../core/canvas';
 import { transformMatrix } from '../core/geometry';
-import { effects, filters, type EffectDef } from '../registry';
+import { effects, filters, type EffectDef, type FilterContext } from '../registry';
 import { applyFilterStack, compositeOp, makeFilterContext, resolveParams, runFilter } from '../filters/engine';
 import { cacheGeneration, objId, slots, type Resource } from './cache';
 import { edgeDistance } from './distance';
+import { rasterCrop } from './contentBounds';
 import { applyMask, lerpInto, maskAlpha } from './mask';
 import { coreExceedsShape, normalizeClipBase } from './clip';
 import { blendAtop, isBlendable } from './blendMath';
@@ -113,6 +116,20 @@ interface MoveInfo {
   full: PxRect;
   /** Document clip growth: regions are clipped to expandSides(doc, clip). */
   clip: Sides;
+  /**
+   * The base's pixels depend on where the layer sits in the document (smart filters that read
+   * the document position — halftone grids, grain, vignettes —, doc-anchored or unknown effects):
+   * a shifted copy is only approximate (live composites only, settled exactly, see renderLayer).
+   */
+  pos: boolean;
+  /** Smart filters of the base: 0 none, 1 pixel-local only (adjustment filters), 2 any. */
+  filt: 0 | 1 | 2;
+  /**
+   * Every effect of the base gives the same pixels on any canvas size on every backend (CPU
+   * distance fields and fills, see CROP_EXACT_EFFECTS): GPU blurs of a differently sized region
+   * differ by a few levels.
+   */
+  fxCrop: boolean;
 }
 
 export interface LayerRender {
@@ -129,6 +146,12 @@ export interface LayerRender {
   csig?: string;
   /** @internal Raster extent of the content (output px, unclipped). */
   extent?: PxRect;
+  /**
+   * @internal The render is cropped to this part of the layer's raster (output px, unclipped; the
+   * content's conservative bounds plus slack, see ./contentBounds): content appearing outside it
+   * needs a new render (see regionReuse). Undefined = the whole raster.
+   */
+  crop?: PxRect;
   /** @internal Distance fields of `shape`, reusable by renders with the same csig. */
   fields?: FieldEntry[];
   /**
@@ -138,6 +161,11 @@ export interface LayerRender {
   tight?: PxRect | null;
   /** @internal Outputs of cacheable effects, reusable by renders with the same csig. */
   fx?: FxEntry[];
+  /**
+   * @internal The smart filters that made `shape` read the document position of the content
+   * (FilterContext offsetX / offsetY, see positionTracked): moved copies are approximate.
+   */
+  fpos?: boolean;
   /** @internal Translation reuse. */
   move?: MoveInfo;
   /** @internal Structure signature (layerSig without bitmap versions), see structSig. */
@@ -462,6 +490,31 @@ export function filterPad(list: FilterInstance[] | undefined, s: number): number
   return pad > 0 ? Math.ceil(pad * s) + 2 : 0;
 }
 
+/**
+ * A smart-filter context that records whether a filter read the document position of the image
+ * (`offsetX` / `offsetY`: doc-anchored patterns — halftone grids, grain, vignettes, light
+ * centers…). Filters that never read it give the same pixels wherever the layer sits (the image
+ * crop and the render scale being the same), so a render whose filters did not read it can be
+ * moved by whole pixels exactly (translation reuse). The first read turns the accessor into a
+ * plain value (per-pixel reads stay fast).
+ */
+function positionTracked(ctx: FilterContext, seen: { pos: boolean }): FilterContext {
+  const t: FilterContext = { ...ctx };
+  for (const k of ['offsetX', 'offsetY'] as const) {
+    const v = ctx[k];
+    Object.defineProperty(t, k, {
+      enumerable: true,
+      configurable: true,
+      get() {
+        seen.pos = true;
+        Object.defineProperty(t, k, { value: v, enumerable: true, configurable: true, writable: true });
+        return v;
+      },
+    });
+  }
+  return t;
+}
+
 /** Per-side reach (output px) of a layer's enabled effects. */
 export function effectsSidesOf(l: Layer, s: number): Sides {
   let r: Sides = NO_SIDES;
@@ -743,15 +796,15 @@ const wholePx = (d: number) => Math.abs(d - Math.round(d)) < 1e-6;
 
 /**
  * Signature of everything a transformable layer's render depends on EXCEPT its integer
- * position (content identity, effects, rotation/scale/skew, fill/knockout, sub-pixel phase).
- * Null when the render depends on the document position (masks, smart filters, doc-anchored
- * effects) — then a moved layer is rendered from scratch.
+ * position (content identity, effects, smart filters, rotation/scale/skew, fill/knockout,
+ * sub-pixel phase). Null when the render depends on where the layer sits in a way a shift cannot
+ * follow (masks: their pixels stay in document space) — then a moved layer is rendered from
+ * scratch. Smart filters and effects that depend on the document position (doc-anchored patterns)
+ * are allowed: such a shift is approximate (see MoveInfo.pos), live composites only.
  */
 function translationSig(l: Layer, flags: RenderFlags, m: DOMMatrix): string | null {
   if (l.type !== 'raster' && l.type !== 'text' && l.type !== 'shape') return null;
   if (flags.mask && l.mask?.enabled) return null;
-  if (flags.filters && hasFilters(l.filters)) return null;
-  if (flags.effects && l.effects?.some((e) => e.enabled && !effectTranslationSafe(e.effectId))) return null;
   const t = l.transform;
   const content =
     l.type === 'raster'
@@ -763,10 +816,39 @@ function translationSig(l: Layer, flags: RenderFlags, m: DOMMatrix): string | nu
   const knock = fill * Math.max(0, Math.min(1, l.opacity)) < 0.999 ? 1 : 0;
   // The sub-pixel phase is NOT part of the signature: the lookup requires an exact whole-pixel
   // delta from the base render (see renderLayer), so a shifted render equals a fresh one.
-  return `${content}|e${flags.effects ? objId(l.effects) : 0}|${m.a},${m.b},${m.c},${m.d}|${t.rotation}|${t.scaleX}|${t.scaleY}|${t.skewX ?? 0}|${fill}|${knock}`;
+  const filt = flags.filters && hasFilters(l.filters) ? objId(l.filters) : 0;
+  return `${content}|e${flags.effects ? objId(l.effects) : 0}|f${filt}|${m.a},${m.b},${m.c},${m.d}|${t.rotation}|${t.scaleX}|${t.scaleY}|${t.skewX ?? 0}|${fill}|${knock}`;
+}
+
+/** Whether a layer's enabled effects depend on its document position (doc-anchored or unknown effects). */
+function effectsAnchored(l: Layer, flags: RenderFlags): boolean {
+  return !!flags.effects && !!l.effects?.some((e) => e.enabled && effects.has(e.effectId) && !effectTranslationSafe(e.effectId));
 }
 
 const shiftRect = (r: PxRect, dx: number, dy: number): PxRect => ({ x: r.x + dx, y: r.y + dy, w: r.w, h: r.h });
+
+/**
+ * Whether a base render shifted to `shifted` equals a fresh render whose region would be `need`
+ * (the shifted base contains it). Content and effects: always on the same region; on a larger one
+ * on crop-exact backends, or when every effect is CPU-exact (the content is drawn at the same
+ * sub-pixel phase; content the document clip cuts away is beyond the effects' influence). Smart
+ * filters see the content crop as their image: pixel-local ones (adjustment filters) give the same
+ * pixels on any crop that starts on the same 16 px grid (dither patterns are anchored to the crop,
+ * as in region updates), other filters (blurs, cel-shading, edges…) only on the very same crop — a
+ * crop cut by the document edge differs (a blur would see the cut as an edge). Never when the
+ * pixels depend on the document position (doc-anchored filters or effects).
+ */
+function moveExact(mv: MoveInfo, shifted: PxRect, need: PxRect): boolean {
+  if (mv.pos) return false;
+  if (sameRect(shifted, need)) return true;
+  // A larger region than a fresh render's: GPU blurs (shadows, glows, satin) of a differently
+  // sized canvas differ slightly (as region updates on such canvases do, see backendApprox).
+  if (!mv.fxCrop && backendApprox()) return false;
+  if (mv.filt === 0) return true;
+  if (mv.filt === 2 || need.w > MAX_SIDE || need.h > MAX_SIDE) return false;
+  const g = alignGrid(0);
+  return (need.x - shifted.x) % g === 0 && (need.y - shifted.y) % g === 0;
+}
 
 /** A render moved by whole output pixels (canvases and fields shared, positions shifted). */
 function shiftRender(r: LayerRender, dx: number, dy: number, csig: string | undefined): LayerRender {
@@ -778,9 +860,11 @@ function shiftRender(r: LayerRender, dx: number, dy: number, csig: string | unde
     bounds: shiftRect(r.bounds, dx, dy),
     csig,
     extent: r.extent && shiftRect(r.extent, dx, dy),
+    crop: r.crop && shiftRect(r.crop, dx, dy),
     fields: r.fields?.map((f) => ({ ...f, rect: shiftRect(f.rect, dx, dy), src: shiftRect(f.src, dx, dy) })),
     tight: r.tight && shiftRect(r.tight, dx, dy),
     fx: r.fx?.map((f) => ({ ...f, region: shiftRect(f.region, dx, dy) })),
+    fpos: r.fpos,
   };
 }
 
@@ -818,7 +902,7 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
     return upd;
   }
   // A moved layer (same content, whole-pixel delta) reuses its previous render, shifted:
-  // dragging a layer with strokes/shadows never recomputes its effects.
+  // dragging a layer with strokes/shadows/smart filters never recomputes them.
   const geom = layerGeometry(l, rc.s);
   const tsig = geom ? translationSig(l, flags, geom.m) : null;
   const tfull = tsig ? `${tsig}|${geometrySig(rc)}` : '';
@@ -826,27 +910,47 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
     for (const p of prevs) {
       const mv = p?.move;
       if (!mv || mv.sig !== tfull || (mv.base.approx && !rc.approxOk)) continue;
-      // Shift relative to the unshifted base by an exact whole-pixel delta (same sub-pixel
-      // phase): the shifted render is identical to a fresh render at the new position.
+      // Shift relative to the unshifted base by a whole-pixel delta (same sub-pixel phase): the
+      // content is drawn exactly as a fresh render at the new position draws it.
       const ddx = geom.m.e - mv.e;
       const ddy = geom.m.f - mv.f;
-      if (!wholePx(ddx) || !wholePx(ddy)) continue;
+      // A sub-pixel delta (a layer at a fractional position dragged onto whole pixels) changes how
+      // the content is resampled: only live composites may show it shifted by the rounded delta
+      // (approximate, settled after the drag).
+      const phase = wholePx(ddx) && wholePx(ddy);
+      if (!phase && !rc.approxOk) continue;
       const dx = Math.round(ddx);
       const dy = Math.round(ddy);
-      // Valid when everything a fresh render would hold at the new position (its clipped
-      // region) is inside the shifted base: pixels the base lacked (clipped away near the
-      // document edge) must not move into view.
+      // Everything a fresh render would hold at the new position (its clipped region) must be
+      // inside the shifted base: pixels the base lacked (clipped away near the document edge)
+      // must not move into view.
       const need = intersectRect(shiftRect(mv.full, dx, dy), expandSides({ x: 0, y: 0, w: rc.W, h: rc.H }, mv.clip));
-      if (!need || !containsRect(shiftRect(mv.base.region, dx, dy), need)) continue;
+      if (!need) continue;
+      const shifted = shiftRect(mv.base.region, dx, dy);
+      const complete = containsRect(shifted, need);
+      if (!complete) {
+        // The base lacks content beyond the document only (a layer hanging off the canvas dragged
+        // back in, by less than its margin): what it lacks only feeds effects / filters near the
+        // canvas edge — live composites may show the shift approximately (see below).
+        const vis = intersectRect(need, { x: 0, y: 0, w: rc.W, h: rc.H });
+        if (!rc.approxOk || (vis && !containsRect(shifted, vis))) continue;
+      }
+      const exact = phase && complete && moveExact(mv, shifted, need);
+      // Not exact (the pixels depend on the document position, smart filters would see a
+      // different crop, content beyond the canvas edge is missing, a sub-pixel shift): live composites (the viewport
+      // while dragging) may still show the shifted render — approximate on every backend,
+      // re-rendered exactly once the drag pauses (settle); every other render (export,
+      // thumbnails…) re-renders.
+      if (!exact && !rc.approxOk) continue;
       const moved = shiftRender(mv.base, dx, dy, contentSig(rc, l, flags));
       moved.move = mv;
       moved.ssig = structSig(rc, l);
       moved.deps = depList(rc, l);
       renderStats.translateHits++;
-      if (mv.base.approx) {
+      if (mv.base.approx || !exact) {
         moved.approx = true;
         approxUses++;
-        markApprox(rc, l.id, moved.region);
+        markApprox(rc, l.id, moved.region, !exact);
       }
       slots.set(key, sig, moved, 0, { layerId: l.id, scale: scaleKey(rc.s), max: 2, res: renderResources(moved) });
       return moved;
@@ -872,10 +976,15 @@ export function renderLayer(rc: RC, l: Layer, flags: RenderFlags = FULL_FLAGS): 
     // (not those cut further by the canvas size limit).
     const grow = addSides(flags.effects ? effectsSidesOf(l, rc.s) : NO_SIDES, flags.filters ? filterPad(l.filters, rc.s) : 0);
     const b = boundsOfMatrixRect(geom.m, geom.local);
-    const full = expandSides(coverRect(b.x, b.y, b.w, b.h), grow);
+    // A cropped render covers its crop (a part of the raster fixed in layer space: it moves along).
+    const full = expandSides(r.crop ?? coverRect(b.x, b.y, b.w, b.h), grow);
     const clip = docClipSides(l, flags, rc.s, grow);
     const expected = intersectRect(full, expandSides({ x: 0, y: 0, w: rc.W, h: rc.H }, clip));
-    if (expected && sameRect(expected, r.region)) r.move = { sig: tfull, base: r, e: geom.m.e, f: geom.m.f, full, clip };
+    if (expected && sameRect(expected, r.region)) {
+      const filt = flags.filters && hasFilters(l.filters) ? (filtersLocal(l.filters) ? 1 : 2) : 0;
+      const fxCrop = !flags.effects || activeEffects(l).every((e) => CROP_EXACT_EFFECTS.has(e.def.id));
+      r.move = { sig: tfull, base: r, e: geom.m.e, f: geom.m.f, full, clip, pos: !!r.fpos || effectsAnchored(l, flags), filt, fxCrop };
+    }
   }
   if (r) {
     r.ssig = structSig(rc, l);
@@ -1370,6 +1479,18 @@ function updateRenderRegion(rc: RC, l: Layer, flags: RenderFlags, p: LayerRender
 }
 
 /**
+ * Whether a cropped raster render's bitmap changed outside its crop since the versions `deps`
+ * (mask changes do not count: the content is transparent outside the crop anyway).
+ */
+function outsideCrop(rc: RC, l: Layer, crop: PxRect, deps: DepList): boolean {
+  if (l.type !== 'raster') return false;
+  const d = bitmapChange(l.bitmapId, new Map(deps));
+  if (!d) return false;
+  const geom = layerGeometry(l, rc.s);
+  return d === 'full' || !geom || !containsRect(crop, mapDirtyRect(geom.m, d));
+}
+
+/**
  * Region reuse (live painting): the previous render of the same layer structure updated in place
  * over the area its bitmaps changed since it was made. Undefined when not applicable (the layer
  * is then rendered the usual way).
@@ -1381,6 +1502,8 @@ function regionReuse(rc: RC, l: Layer, flags: RenderFlags, key: string, sig: str
   if (!p) return undefined;
   const ch = changeOf(rc, l, new Map(p.deps), flags);
   if (ch === 'full') return undefined;
+  // Content painted outside a cropped render's crop: rendered again with a larger crop.
+  if (p.crop && outsideCrop(rc, l, p.crop, p.deps ?? [])) return undefined;
   const D = ch.content ? intersectRect(ch.content, p.region) : null;
   if (D) {
     // A large change re-renders from scratch (as cheap, and keeps the usual reuse paths).
@@ -1432,6 +1555,8 @@ interface Reuse {
   C: HTMLCanvasElement | null;
   /** A previous render with the same content signature exists (effects / opacity / blending are being edited). */
   hit: boolean;
+  /** The reused content's smart filters read the document position (LayerRender.fpos). */
+  fpos?: boolean;
   fields: FieldEntry[];
   fx: FxEntry[];
   /** Opaque content bounds known from the previous render (undefined = unknown). */
@@ -1453,10 +1578,10 @@ function reuseContent(prevs: (LayerRender | null)[], csig: string, region: PxRec
     // the previous canvas (known opaque bounds lie inside it by construction).
     const need = tight !== undefined ? null : intersectRect(extent, expandRect(region, fpad));
     if (need && !containsRect(p.region, need)) return { C: null, hit: true, fields, fx, tight, approx };
-    if (sameRect(p.region, region) && !borrowed.has(p.shape)) return { C: p.shape, hit: true, fields, fx, tight, approx };
+    if (sameRect(p.region, region) && !borrowed.has(p.shape)) return { C: p.shape, hit: true, fpos: p.fpos, fields, fx, tight, approx };
     const C = fresh(region.w, region.h);
     ctx2d(C).drawImage(p.shape, p.region.x - region.x, p.region.y - region.y);
-    return { C, hit: true, fields, fx, tight, approx };
+    return { C, hit: true, fpos: p.fpos, fields, fx, tight, approx };
   }
   return { C: null, hit: false, fields: [], fx: [], tight: undefined };
 }
@@ -1725,6 +1850,19 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
   const fpad = flags.filters ? filterPad(l.filters, s) : 0;
   const csig = contentSig(rc, l, flags);
 
+  // A raster layer with effects renders several region-sized canvases: limit them to its content
+  // (a small blob on a document-sized layer), see ./contentBounds. Not with smart filters (they see
+  // the region as their image: a crop would change what they compute).
+  let crop: PxRect | undefined;
+  if (l.type === 'raster' && fx.length && geom && !(flags.filters && hasFilters(l.filters))) {
+    const cr = rasterCrop(l.bitmapId, l.width, l.height, s);
+    if (cr === null) return null;
+    if (cr !== 'full') {
+      box = boundsOfMatrixRect(geom.m, cr);
+      crop = coverRect(box.x, box.y, box.w, box.h);
+    }
+  }
+
   // Plain raster at 1:1 and an integer offset: the bitmap itself is the render (zero copy).
   if (l.type === 'raster' && !fx.length && !(flags.filters && hasFilters(l.filters)) && !(flags.mask && l.mask?.enabled) && !(l.fillOpacity < 0.999)) {
     const m = geom!.m;
@@ -1760,8 +1898,11 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
   // opacity or blending changed) ------------------------------------------------------------
   const reuse = reuseContent(prevs, csig, region, extent, fpad);
   let C: HTMLCanvasElement;
+  /** The smart filters read the document position (see positionTracked). */
+  let fpos = false;
   if (reuse.C) {
     C = reuse.C;
+    fpos = !!reuse.fpos;
     renderStats.contentReuse++;
   } else {
     C = fresh(region.w, region.h);
@@ -1769,12 +1910,14 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
 
     // 3) smart filters
     if (flags.filters && hasFilters(l.filters)) {
+      const seen = { pos: false };
       try {
-        const out = applyFilterStack(C, l.filters, makeFilterContext({ docWidth: doc.width, docHeight: doc.height, offsetX: region.x / s, offsetY: region.y / s, scale: s }));
+        const out = applyFilterStack(C, l.filters, positionTracked(makeFilterContext({ docWidth: doc.width, docHeight: doc.height, offsetX: region.x / s, offsetY: region.y / s, scale: s }), seen));
         if (out !== C) C = out;
       } catch (err) {
         warnOnce(`smart filters of ${l.id} failed`, err);
       }
+      fpos = seen.pos;
     }
 
     // 4) mask
@@ -1793,7 +1936,7 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
       k.globalAlpha = fill;
       k.drawImage(C, 0, 0);
     }
-    return { region, core: fill > 0 ? core : null, shape: C, behind: [], bounds: layoutBox, csig, extent, fields: reuse.fields.length ? reuse.fields : undefined, tight: reuse.tight, approx: reuse.approx || undefined };
+    return { region, core: fill > 0 ? core : null, shape: C, behind: [], bounds: layoutBox, csig, extent, fields: reuse.fields.length ? reuse.fields : undefined, tight: reuse.tight, fpos: fpos || undefined, approx: reuse.approx || undefined };
   }
 
   const fxr = runEffects(rc, fx, C, region, extent, layoutBox, fill, l.opacity, reuse);
@@ -1805,7 +1948,7 @@ function buildLayerRender(rc: RC, l: Layer, flags: RenderFlags, prevs: (LayerRen
   // document holds a quarter to a half less memory.
   const keep = reuse.hit;
   const fxKept = keep ? fxr.fx : fxr.fx?.filter((f) => f.pieces.every((pc) => fxr.behind.some((b) => b.canvas === pc.canvas)));
-  return { region, core: fxr.core, shape: C, behind: fxr.behind, bounds: layoutBox, csig, extent, fields: keep ? fxr.fields : undefined, fx: fxKept?.length ? fxKept : undefined, tight: fxr.tight, approx: reuse.approx || undefined };
+  return { region, core: fxr.core, shape: C, behind: fxr.behind, bounds: layoutBox, csig, extent, crop, fields: keep ? fxr.fields : undefined, fx: fxKept?.length ? fxKept : undefined, tight: fxr.tight, fpos: fpos || undefined, approx: reuse.approx || undefined };
 }
 
 /* ================================================================== */
@@ -2493,6 +2636,8 @@ interface DocItem {
   ssig?: string;
   /** Bitmap versions the item was composited from, when shown. */
   deps?: DepList;
+  /** Clip stack base of a shown clipped layer (see RawItem.base). */
+  base?: ID;
 }
 
 interface DocEntry {
@@ -2507,6 +2652,8 @@ interface RawItem {
   layer: Layer | null;
   /** Index in doc.rootIds of the top-level layer this item belongs to. */
   root: number;
+  /** Shown clipped layers: id of the base they are clipped to ('' when they are a base themselves). */
+  base?: ID;
 }
 
 function inlinePassThrough(g: GroupLayer): boolean {
@@ -2539,14 +2686,39 @@ function hasShownClipped(rc: RC, ids: ID[], i: number): boolean {
 }
 
 /**
+ * Index of the clip stack base each index of a layer list is composited with (its own index for
+ * bases and unclipped layers), exactly as compositeList partitions the list: a layer gathers the
+ * clipped layers right above it, adjustment layers never gather any (a clipped layer above one is
+ * a base itself), and a missing layer ends a stack.
+ */
+function clipBases(rc: RC, ids: ID[]): Int32Array {
+  const out = new Int32Array(ids.length);
+  let i = 0;
+  while (i < ids.length) {
+    out[i] = i;
+    const l = rc.doc.layers[ids[i]];
+    let j = i + 1;
+    if (l && l.type !== 'adjustment') while (j < ids.length && rc.doc.layers[ids[j]]?.clipped) out[j++] = i;
+    i = j;
+  }
+  return out;
+}
+
+/**
  * Flattened composite items: pass-through groups (opacity 100%, no mask) composite exactly like
  * their children inlined, so they are expanded and changes are tracked per leaf — unless they
  * take part in a clip stack (clipped themselves, or the base of shown clipped layers): then
  * compositeList renders them isolated, and they are one item. The decision is exactly
  * compositeList's, so any flip of it (Create / Release Clipping Mask, showing or hiding the only
  * clipped layer) changes the item list and forces a full composite.
+ *
+ * A shown clipped layer's signature includes the base it is clipped to: where it shows depends on
+ * that base, so when its base changes (Create / Release Clipping Mask on the base or on a layer of
+ * the stack below it) the item changes too and its old and new regions are re-composited. Changes
+ * of the base itself are covered by the base's own region (clipped layers only show inside it).
  */
 function docItems(rc: RC, ids: ID[], st: { stopped: boolean }, out: RawItem[], root = -1) {
+  const bases = clipBases(rc, ids);
   for (let i = 0; i < ids.length; i++) {
     const id = ids[i];
     const r = root >= 0 ? root : i;
@@ -2564,7 +2736,10 @@ function docItems(rc: RC, ids: ID[], st: { stopped: boolean }, out: RawItem[], r
       out.push({ id, sig: 'g', layer: null, root: r });
       continue;
     }
-    out.push({ id, sig: listSig(rc, [id], st), layer: isShown(rc, l) ? l : null, root: r });
+    const shown = isShown(rc, l);
+    const base = shown && l.clipped ? (bases[i] === i ? '' : ids[bases[i]]) : undefined;
+    const sig = listSig(rc, [id], st) + (base === undefined ? '' : `@${base}`);
+    out.push({ id, sig, layer: shown ? l : null, root: r, base });
   }
 }
 
@@ -2578,6 +2753,12 @@ function itemRegion(rc: RC, l: Layer | null): ItemRegion {
   return renderLayer(rc, l)?.region ?? null;
 }
 
+function sameItemRegion(a: ItemRegion, b: ItemRegion): boolean {
+  if (a === b) return true;
+  if (!a || !b || a === 'full' || b === 'full') return false;
+  return sameRect(a, b);
+}
+
 function makeItem(rc: RC, r: RawItem): DocItem {
   return {
     id: r.id,
@@ -2585,6 +2766,7 @@ function makeItem(rc: RC, r: RawItem): DocItem {
     region: itemRegion(rc, r.layer),
     ssig: r.layer ? structSig(rc, r.layer) : undefined,
     deps: r.layer ? depList(rc, r.layer) : undefined,
+    base: r.base,
   };
 }
 
@@ -2623,8 +2805,9 @@ interface DocPlan {
 
 /**
  * Plan an incremental composite from a previous one (same items, a few changed). Items whose
- * layer kept its structure and only had bitmap pixels touched (live painting) contribute just
- * the area their render changed (see changeOf); other changed items their old ∪ new regions.
+ * layer kept its structure (and clip base) and only had bitmap pixels touched (live painting)
+ * contribute just the area their render changed (see changeOf); other changed items their old ∪
+ * new regions.
  * Null when a full composite is needed (structure changed, an adjustment changed, too much
  * changed…).
  */
@@ -2635,7 +2818,7 @@ function planIncremental(st: DocState, old: DocItem[], maxFrac: number): DocPlan
   const changed: number[] = [];
   for (let i = 0; i < raw.length; i++) if (raw[i].sig !== old[i].sig) changed.push(i);
   if (changed.length > 8) return null;
-  const items: DocItem[] = old.map((it, i) => ({ ...it, sig: raw[i].sig }));
+  const items: DocItem[] = old.map((it, i) => ({ ...it, sig: raw[i].sig, base: raw[i].base }));
   let D: PxRect | null = null;
   const roots = new Set<number>();
   for (const i of changed) {
@@ -2643,13 +2826,21 @@ function planIncremental(st: DocState, old: DocItem[], maxFrac: number): DocPlan
     const it = old[i];
     roots.add(r.root);
     const l = r.layer;
-    if (l && it.deps && it.ssig !== undefined && structSig(rc, l) === it.ssig) {
+    // Only bitmap pixels changed (same structure, same clip base): just the area they changed.
+    if (l && it.deps && it.ssig !== undefined && r.base === it.base && structSig(rc, l) === it.ssig) {
       const ch = changeOf(rc, l, new Map(it.deps), FULL_FLAGS);
       if (ch !== 'full') {
         // Brings the layer's cached render up to date (in place) before compositing.
-        items[i].region = itemRegion(rc, l);
+        const nr = itemRegion(rc, l);
+        items[i].region = nr;
         items[i].deps = depList(rc, l);
         D = unionRect(D, ch.out);
+        // Rebuilt with another region (a cropped render outgrown by new content, see regionReuse):
+        // blurs of a differently sized canvas differ slightly on GPU canvases — all of it.
+        if (!sameItemRegion(nr, it.region)) {
+          if (nr === 'full' || it.region === 'full') return null;
+          D = unionRect(unionRect(D, it.region), nr);
+        }
         continue;
       }
     }
@@ -2668,15 +2859,7 @@ function planIncremental(st: DocState, old: DocItem[], maxFrac: number): DocPlan
 
 /** Start index of the clipping stack (base + clipped layers) a top-level index belongs to. */
 function stackStart(rc: RC, ids: ID[], r: number): number {
-  let i = 0;
-  while (i < ids.length) {
-    const l = rc.doc.layers[ids[i]];
-    let j = i + 1;
-    if (l && l.type !== 'adjustment') while (j < ids.length && rc.doc.layers[ids[j]]?.clipped) j++;
-    if (r < j) return i;
-    i = j;
-  }
-  return r;
+  return r >= 0 && r < ids.length ? clipBases(rc, ids)[r] : r;
 }
 
 /* ---------------- below cache (live painting) ---------------- */
@@ -2755,9 +2938,13 @@ function fillBelow(st: DocState, b: BelowCache, r: PxRect, prefix: string[]) {
   // re-render, masks come from their full rects).
   const approxOk = rc.approxOk;
   rc.approxOk = false;
+  // The layers below are folded into the cache: past the render cache's hard cap their renders go
+  // first (see SlotCache.beginFold).
+  slots.beginFold();
   try {
     compositeList(rc, st.doc.rootIds.slice(0, b.index), acc, { prefix, base: st.base, store: false });
   } finally {
+    slots.endFold();
     rc.approxOk = approxOk;
     rc.stopped = stopped;
   }
@@ -2786,7 +2973,14 @@ function recomposite(st: DocState, plan: DocPlan, canvas: HTMLCanvasElement) {
   const start = plan.root >= 0 ? stackStart(rc, doc.rootIds, plan.root) : -1;
   const below = start > 0 ? belowCache(st, start, prefix) : null;
   if (below) {
-    fillBelow(st, below, dirty, prefix);
+    // Tiles are filled lazily (a stroke's first frame composites the layers below over the dab
+    // only) — unless their renders may not stay cached until the stroke reaches the next tiles: the
+    // cache is near its hard cap, or some had to be rendered again already (evicted). Then the
+    // whole cache is filled now, while their renders are at hand: once complete, the stroke never
+    // needs them again (past the cap they are the first renders evicted, see SlotCache).
+    const n0 = renderStats.layerRenders;
+    fillBelow(st, below, slots.nearCap() ? st.docR : dirty, prefix);
+    if (renderStats.layerRenders !== n0) fillBelow(st, below, st.docR, prefix);
     // The dirty rect is clear: a source-over draw copies the cached pixels exactly.
     ctx.drawImage(below.canvas, 0, 0);
     acc.bounds = below.bounds;
@@ -2810,6 +3004,16 @@ function storeDoc(st: DocState, canvas: HTMLCanvasElement, items: DocItem[]) {
 
 /** Composite the document (cached; the returned canvas must be treated as read-only). */
 export function compositeDocument(doc: Document, o: DocRenderOptions): HTMLCanvasElement {
+  // One render pass: the renders it uses stay cached until it ends (see SlotCache.beginPass).
+  slots.beginPass();
+  try {
+    return compositeDocumentPass(doc, o);
+  } finally {
+    slots.endPass();
+  }
+}
+
+function compositeDocumentPass(doc: Document, o: DocRenderOptions): HTMLCanvasElement {
   const st = docState(doc, o);
   const { rc } = st;
   const prev = slots.peek<DocEntry>(st.key);
@@ -2909,10 +3113,11 @@ function touchLive(key: string, cur: LiveState) {
 
 /**
  * How long (ms) after its last live update a document still counts as displayed: its renders at
- * the live scale stay cached while the cache is over budget (an idle editor resumes without
- * re-rendering everything; a document switched away from lets its renders go after a while).
+ * the live scale stay cached while the cache is over budget (an editor left idle for a few minutes
+ * resumes painting without re-rendering every layer; a document switched away from, or an editor
+ * left alone, lets its renders go after a while). Bounded by the cache's hard cap anyway.
  */
-const LIVE_KEEP_MS = 60_000;
+const LIVE_KEEP_MS = 5 * 60_000;
 
 const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
@@ -2952,6 +3157,15 @@ slots.setKeepAlive((layerId, scale) => {
  * their previous result as `since` so changes made through other callers are reported too.
  */
 export function compositeDocumentLive(doc: Document, o: DocRenderOptions, since?: number): LiveComposite {
+  slots.beginPass();
+  try {
+    return compositeDocumentLivePass(doc, o, since);
+  } finally {
+    slots.endPass();
+  }
+}
+
+function compositeDocumentLivePass(doc: Document, o: DocRenderOptions, since?: number): LiveComposite {
   const st = docState(doc, o);
   let cur = liveStates.get(st.key);
   if (cur && (cur.canvas.width !== st.rc.W || cur.canvas.height !== st.rc.H)) cur = undefined;

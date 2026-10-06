@@ -82,6 +82,18 @@ export function renderPreview(def: AssetDef, params: ParamValues | undefined, ma
   return c;
 }
 
+/** Placeholder for a thumbnail that can't be rendered (same colour as a failed render). */
+function failedThumb(size: number): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = c.height = Math.max(1, Math.round(size));
+  const ctx = c.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = '#5a2a2a';
+    ctx.fillRect(0, 0, c.width, c.height);
+  }
+  return c;
+}
+
 /* ------------------------------------------------------------------ */
 /* Cache + idle queue                                                  */
 /* ------------------------------------------------------------------ */
@@ -189,7 +201,11 @@ function run(deadline: { timeRemaining(): number; didTimeout: boolean }) {
     if (queue.get(job.key) !== job) continue; // cancelled or superseded meanwhile
     const def = assets.get(job.assetId);
     if (!def) {
+      // Unregistered (e.g. a user asset deleted meanwhile): answer with the failure placeholder (not
+      // cached) so no card waits — and shimmers — forever.
       queue.delete(job.key);
+      const c = failedThumb(job.size);
+      for (const cb of job.cbs) cb(c);
       continue;
     }
     // text-drawing assets wait for their fonts (loaded off this slice, then re-scheduled)

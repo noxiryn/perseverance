@@ -41,3 +41,14 @@ export function isReplaceableImage(name: string, mime = '', data?: ArrayBuffer |
   if (ext) return IMAGE_FILE_EXTS.includes(ext);
   return RASTER_MIME.test(mime);
 }
+
+/**
+ * While a drag is over the window only the items' MIME types are known (no names, no bytes): could
+ * it be a render Replace Character takes? False when every file item has a known type that isn't
+ * one of the decoder's rasters (a PSD reported as image/vnd.adobe.photoshop, SVG, TIFF,
+ * application/…); true when a type is empty (Windows without a registration for the extension) or
+ * a raster, or when the types are unknown (`types` empty).
+ */
+export function mayBeReplaceableDrag(types: readonly string[]): boolean {
+  return types.length === 0 || types.some((t) => t === '' || RASTER_MIME.test(t));
+}

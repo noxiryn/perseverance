@@ -79,7 +79,7 @@ starting point; don't rewrite modules from scratch.
     shape in Photoshop (clipped layers painting over its shadow / stroke / glow — e.g. max 226 levels
     for a clipped texture over a stroked, shadowed character). With "Bake layer styles" (the default),
     and for a clip base with a style Photoshop lacks, the behind-stage pieces are written as pixel
-    layers of their own below the base ("<name>'s Styles", each with its blend mode, at the base's
+    layers of their own below the base ("<name>'s Drop Shadow" … like Photoshop, each with its blend mode, at the base's
     opacity, knocked out under the content as rendered — like Photoshop's Create Layers), and the base
     keeps its content (Fill / mask still Photoshop's) or, with above-stage effects, its core pixels.
     Where that can't reproduce the render (above-stage effects with a reduced Fill, an enabled mask, or
@@ -87,6 +87,33 @@ starting point; don't rewrite modules from scratch.
     effects instead, unless one has no Photoshop equivalent (long shadow, pattern overlay): then they
     are baked into the base as before and the toast says the clip now includes them. All three cases
     are named in the export toast.
+  - Baked styles with their own blend mode (release review e2e-flows-2): one baked pixel layer can't
+    show what the compositor draws — each behind-stage piece with its own blend mode at the layer's
+    opacity, then the core with the layer's blend — so a Screen glow (Crimson Film look, the Styler
+    styles: #ff1f1f Screen 35 %) was drawn plainly (Screen over transparency is Normal): a red halo in
+    the PSD (verifier: 50 820 px / max 69 levels for a glow over #ece8df; Gothic Paper + Crimson Film
+    84 299 px / max 99). Now, with "Bake layer styles", an unclipped layer whose pieces aren't all
+    Normal, or with a non-Normal blend mode or a reduced opacity, gets one pixel layer per piece below
+    it ("<name>'s Outer Glow", `renderLayerParts` + `behindEffectIds`, blend mode from the piece's
+    operation, at the layer's opacity, knocked out exactly as rendered; empty pieces skipped), and keeps
+    its content (Fill / mask Photoshop's) or, with above-stage effects, its core pixels (mask applied;
+    the PSD mask is kept but switched off). Clipped layers stay one layer (the compositor draws them
+    flattened itself). A flattened bake of a masked layer is rendered from the masked content (effects
+    follow the masked edge, as in the renderer and Photoshop) and its PSD mask switched off — it used to
+    be masked a second time. Toast (`psdExportNotes`, each layer name once, "Coin ×6"): "styles
+    written as separate layers below their layer (like Photoshop’s Create Layers): …". Layer ▸
+    Rasterize Layer Style does the same (one raster layer per piece, its blend mode, the layer
+    opacity; one undo step; the old single "<name> Effects" layer + `unknockAlpha` and its "may look a
+    little different" note are gone); without effects over the content the layer keeps its content
+    at full Fill and its Fill, so a clipping base's clip is unchanged (a Fill-40 % clip base: 11 687 px
+    / 115 levels off → 0). A clipping base with effects over its content and a reduced Fill or
+    coverage past its content (centered stroke; an inside stroke's soft edge) has no exact pixel
+    form: its core becomes the clip, as in Photoshop, and a warning toast says how the clipped layers
+    change (and that Undo brings the style back). Runtime: the glow repro 0 px off (was 50 820),
+    Rasterize Layer Style 0 px (was 50 820), Gothic Paper + Crimson Film max 1 level (was 99); all 13
+    designed templates buildPsd → writePsd → readPsd → psdToDocument → render: max 0–3 levels, the same
+    as with editable styles. Tests: `src/io/psdStyles.test.ts`, `src/panels/rasterizeStyle.test.ts`
+    (fail on the previous code).
   - Gradient fill/overlay center offsets are written in Photoshop's convention (percent of the box,
     ±50 % = edge; ours is ±1 = edge). ag-psd stores scale/offset as whole percents: a fill that needs
     rounding stays an editable fill only if the rounded gradient renders within 2 levels, otherwise
@@ -134,8 +161,191 @@ starting point; don't rewrite modules from scratch.
   outlines change (0.1–0.85 % of values; the old dark halo from the added coverage is gone). Cost:
   a hue/saturation/color/luminosity adjustment blend over a noisy 1080p area ≈ 0.1 s per full
   re-render on the CPU (≈ 25–50 ms over gradients/flat art; separable modes ≈ 10–15 ms).
+- **Render caches** (release review render-paint-diff-1…5, e2e-flows-3; `src/render/engine.ts`,
+  `cache.ts`, `contentBounds.ts`, `distance.ts`). Cached / incremental renders now equal fresh ones after
+  these edits; painting and dragging past the old render-cache limits no longer re-render every layer:
+  - Clip stacks: `docItems` inlines a pass-through group only when `compositeList` does (not clipped, no
+    shown clipped layer above it — `hasShownClipped`), so Create / Release Clipping Mask, hiding the only
+    clipped layer or clipping the group itself forces a full composite (the canvas and File ▸ Export kept
+    the old blend). A shown clipped layer's item signature also names the base it is clipped to
+    (`clipBases`: compositeList's partition), and the bitmap-only shortcut of `planIncremental` requires
+    the same base: Create / Release Clipping Mask on a layer that has layers clipped to it, on the middle
+    layer of a stack, on a hidden base, or on a pass-through group that is a base re-composites the clipped
+    layers' old and new areas (they kept showing over their old base).
+  - Distance fields: a pixel's own coverage bounds its distance only for anti-aliasing pixels next to
+    the edge (nearest site an 8-neighbour). Inside / center strokes and bevels on semi-transparent
+    content are as wide as asked (a 2 px stroke on a 70 % fill drew 7–21 px, depending on the edit
+    history), and a field's values no longer depend on the depth it was computed to.
+  - Soft slot budget (`SlotCache`): 64M px is a soft budget. Slots used by the composite in progress
+    (`beginPass`/`endPass`: a slow first composite no longer evicts the renders it made a second earlier),
+    in the last 1.5 s, or by documents displayed in the last 5 minutes (`setKeepAlive`, from the live
+    composites) may exceed it up to a hard cap (3× the budget, ≈ 768 MB; 2× with 4 GB of memory, 1.5× with
+    2 GB); after 2 s idle the cache trims back to the budget. Fresh effect renders no longer keep distance
+    fields / above-effect outputs (only renders made while the effects are edited do).
+  - Render crops (`contentBounds.ts`): a raster layer with effects (no smart filters) renders only its
+    content — conservative opaque bounds of the bitmap (one alpha scan, then grown by the regions touched;
+    keyed by bitmap id + version, so every render of a version uses the same crop) plus slack (¼ of their
+    size, ≥ 64 px), snapped to 64 px; not when that saves < 40 %. A New Layer with a small blob and Drop
+    Shadow + Stroke holds ≈ 0.5M px of renders at 4K instead of ≈ 25M. Painting inside the crop updates the
+    render in place; painting outside it renders it again with a larger crop (`regionReuse` →
+    `outsideCrop`; mask painting does not count); an empty layer with effects renders nothing.
+  - Past the hard cap the cache degrades gracefully: a stroke's below cache is filled whole at once
+    (`recomposite`) when the cache is near the cap (`nearCap`, > ¾) or a layer below had to be rendered
+    again, so the layers below the painted one are composited once at the start of the stroke and never
+    needed again during it; the renders used while filling it are the first evicted (`beginFold`, the
+    one just stored included: only the layers that were not cached are re-rendered, instead of LRU
+    evicting the next ones it needs), then layer renders (least recently used first), composites (below
+    caches, document composites, snapshots) last; slots holding no counted memory (zero-copy renders)
+    are never evicted for room.
+  - Painting, software canvas, ms per brush frame. Soft budget alone (before → after): document-sized
+    layers with Drop Shadow + Stroke at 1080p ×8 1030 → 2.6, ×16 2181 → 3.1, 4K ×2 1155 → 4.9 — but past
+    its hard cap the thrash came back unchanged. With crops and the degradation (before = soft budget
+    only → after; release review verifier's scripts): real brush on File ▸ New 4K with N × (New Layer +
+    painted blob + Drop Shadow + Stroke) N = 8 4855 → 4.9, N = 10 7849 → 5.0, N = 5 with 4 GB 3892 → 4.9;
+    document-sized disc layers through the API 4K N = 7 / 8 6722 / 5573 → 3.6 / 4.2, 1080p N = 20 with
+    4 GB 4622 → 3.3. `--bench` (mean, frames 6+): 4K ×8 blobs 4.9, 4K ×5 blobs with 4 GB 5.3; GPU canvas
+    ≈ 1.2. Layers whose content covers the canvas (not croppable) past the cap — 4K
+    × 10, ≈ 250M px of renders (cache 196M px): the first frame of a stroke re-renders the layers below
+    that the full composite before it could not keep (2 of 10: 2.7 s, was 4–7 s on every frame), later
+    frames 0–3 ms (bench 5.5 ms; 4K × 6 with 4 GB: first frame 1.7 s, then 5.2 ms).
+    Still slow past the cap: painting UNDER such layers (the layers above the painted one are needed every
+    frame; when their renders alone exceed the cap each frame re-renders some of them), and edits that
+    need every layer (an opacity drag of the bottom layer…). Not done: keeping the bitmap itself as the
+    content canvas of an effects render (one region-sized canvas less per layer).
+  - `renderDocument({ below })` after a patch edit inside a styled group: a group's own render no longer
+    leaks `rc.stopped` into the caller (it returned a background-only hole: histogram, Auto Levels, PSD
+    bakes).
+  - Inside effects at the canvas edge: a layer's region is clipped to the document grown by its effects'
+    influence too (`docClipSides`), so inside strokes / inner bevels / satin never see the canvas border
+    as a content edge, also after moves across it.
+  - Moving layers with smart filters: the renderer records whether a layer's smart filters read
+    `FilterContext.offsetX/offsetY` (`positionTracked`; filter contract in ARCHITECTURE §5.4). A move by
+    whole pixels shifts the cached render exactly when they did not (pixel-local stacks on any crop on the
+    same 16 px grid, other filters only on the very same crop; on GPU canvases a larger region than a
+    fresh render's only with CPU-exact effects — GPU blurs differ by canvas size). Doc-anchored filters or
+    effects (halftone, grain, pattern overlay), a crop the canvas edge cuts differently, a sub-pixel delta
+    (a layer at a fractional position), or a layer hanging off the canvas dragged back in by less than its
+    effect / filter margin: the live composite shows the shifted render (approximate on every backend,
+    settled ~350 ms after the drag); exports and thumbnails re-render. Dragging such a layer in further
+    re-renders it once per margin (its render holds no content beyond the canvas margin; rendering
+    off-canvas layers unclipped would avoid that at the cost of filtering content that is never seen).
+    Move-tool drags, ms per pointermove, software canvas: Crimson character (gradient-map + halftone +
+    glow) 191 → 60 (what is left: the template's adjustment layers re-applied over the changed area,
+    React), Gothic (cel-shade) 88 → 17; SwiftShader GPU (noisy, mostly readbacks): 476–601 → 245–345 and
+    227–321 → 100–109.
+  - Checks: `src/render/renderCache.test.ts`, `contentBounds.test.ts` (+ soft mattes in `review.test.ts`);
+    `dirty-rect-check.mjs` part 1b edit sequences (`clip-passthrough*`, `clip-base-change*`,
+    `stroke-size-soft-*`, `below-styled-group-*`, `inside-fx-edge-*`, `move-smart-filters-*`), e2e "move
+    tool drag" rows, and `--bench` guards (FX-layer painting at 1080p ×8 / ×16, 4K ×2 / ×8, 4K ×5 with a
+    4 GB hard cap; past the cap 4K ×10 large-content layers, ×6 with 4 GB; Crimson / Gothic drags). Every
+    one fails on the pre-fix code.
 - **Free Transform on tab switch** (`src/viewport/transform/controller.ts commitTransformInOwnDoc`):
   applied in its own document (with a toast) instead of being dropped.
+- **Busts / head / waist-up renders on a template placeholder** (`src/roblox/character/fit.ts`, FitAlign
+  `cut`): an image cut off at the bottom (one wide, fully opaque run on its last rows — `isCutOffAtBottom`,
+  judged before the trim; Pose Studio / model renders whose pixels reach the frame bottom —
+  `rendersCutOff`; Fetch Avatar bust / headshot) fills the part of the placeholder box that is on the
+  canvas (≤ 1.25 × the box width) with its cut on the canvas edge, so the head lands where the placeholder's
+  head was; whole figures keep their feet on the box bottom. A cut that isn't detected (a bust fading out
+  at the bottom, an export with transparent rows under it) is caught by geometry (`characterFitAlign`):
+  when the box runs past the canvas and the trimmed image is so much wider than the box that standing on
+  the box bottom would drop its top > 10 % of the on-canvas height below the box top, it gets the `cut`
+  fit too (busts, wide poses); tall figures (height-limited in the box) are never affected. Checked on
+  the four flagship templates with Pose Studio full / waist-up / head renders and synthetic busts (hard
+  edge, faded, padded) (`scripts/workflow-ui-check.mjs`).
+- **Looks target** (`src/looks/engine.ts`, `store.ts`): Document (the default) styles the whole image with
+  the document's character as subject; Layer styles only the selected layer — filters/effects on it, grades
+  and textures clipped directly above it (meta `lookPart: 'clip'`, `lookTargetId`), atmosphere left out;
+  each layer keeps its own look (Remove Look in Layer mode removes only that layer's). Selecting one of
+  those clip layers targets the layer it styles. Layer mode never widens to the whole document: with an
+  adjustment layer, a document look's layer or nothing selected the panel says "Pick a layer" (the
+  reason in its tooltip) and Apply / Remove / Save as Look are off. Document-mode Remove Look
+  (`stripLookDraft` scope 'document') removes the look groups and document-scope filters/effects only —
+  Layer-mode looks stay, with or without a character (a Document look applied later does replace the
+  character's own Layer look: one styling owner). Settings saved before (no `v: 2`) start in Document,
+  which is what the old 'layer' default produced.
+- **Escape** (`src/ui/controls/escapeLayers.ts`): dialogs, popovers and menus register escape layers;
+  only the innermost reacts (a colour popover inside a dialog closes first, a second Escape closes the
+  dialog). An Escape from a control inside a popover reaches that control first (a number field reverts,
+  a search field that preventDefaults clears instead of closing), then the popover closes — also when the
+  control stopped the key's propagation (the hex field); closing consumes the key. The command palette
+  is a dialog-kind layer (Ctrl+K over an open popover: Escape closes the palette first). Swatches and
+  gradient previews that open popovers are focusable buttons, so focus returns to them on close.
+- **Shortcuts while typing on the canvas** (`src/tools/type/editKeys.ts`): zoom / fit / 100 % and the
+  other view toggles keep editing; Step Backward undoes typing, Ctrl+D drops the text selection;
+  adjustments, Image menu commands, filters and selections are disabled while typing, as in Photoshop
+  (a toast says to commit first); Ctrl+B / Ctrl+I and Shift+Ctrl+B / I / K are faux bold / italic /
+  all caps on the edited text (`TEXT_STYLE_KEYS`, listed in the Shortcuts dialog), Ctrl+U does nothing;
+  layer, transform, file commands and the palette commit the typed text first (one history step), then run.
+- **Drops on a selected placeholder** (`src/roblox/character/imageFiles.ts`): only PNG / JPEG / WebP /
+  GIF / BMP are offered as a replacement (by bytes, else extension; a MIME type only without one);
+  PSD / .pgfx / SVG / TIFF fall through to the normal open path, and the drag hint doesn't offer
+  Replace for them (DataTransferItem types; an empty type keeps the hint).
+- **Crash recovery never loses work** (`src/io/autosave.ts`, release-review app-logic-diff-1/-2,
+  packaged-app-5, electron-security-2): entries are keyed per app launch (`<launchId>:<docId>`, a page
+  reload is a new launch). A document keeps its id in the .pgfx, so the old per-document keys let a
+  project reopened after a crash (Explorer double-click / Open Recent) hide its crash entry, overwrite it
+  with the next autosave and delete it on Save / Close. Now a launch only writes and removes its own
+  entries; every earlier launch's entry is offered at start — also when that project is already open
+  ("Open now as …": Recover adds it to the open tab as one undoable step, else it opens as a new tab that
+  saves back to its file) — and only the user's Recover / Discard removes it ("Later" keeps it). Desktop:
+  only the in-app quit prompt's Discard deletes autosaved copies (`discardRecoveryFor`, also correct while
+  an autosave is writing); "Quit Anyway" (stuck or missing prompt), Windows session end, crashes and kills
+  keep them. The 'pagehide' discard marker is browser-only ("Leave page?"). A close request refreshes the
+  autosaved copies while the prompt is open, and after "Quit Anyway" main asks the page to write them
+  before the window goes (preload 'desktop:flush-recovery' → `flushRecovery`; main waits ≤ 2 s for it to
+  start, ≤ 20 s to finish; also fired on Windows 'query-session-end'), so a page whose prompt is stuck or
+  whose UI broke keeps even an edit made seconds before. The native texts promise only that ("first tries
+  to autosave them"); a busy page that can't answer gets "changes made since the last autosave may be
+  lost". Entry writes resolve on transaction COMMIT with strict durability (before, a write or Discard's
+  delete reported done could be lost when the window closed right after). Save drops the launch's own
+  entry only when the tab ends up clean.
+- **Opening and naming** (packaged-app-1/-2, electron-security-3): a project is named after its file when
+  opened (like Photoshop); Save As also rewrites the file under the chosen name (same snapshot re-packed,
+  `encodeProjectSnapshot`). A file dropped from Explorer/Finder opens like File ▸ Open: the preload reads
+  its path with `webUtils.getPathForFile` (page script can't forge one) and main grants it only when the
+  file holds exactly the dropped bytes (`desktop:grant-dropped`), so Save writes in place, it joins Open
+  Recent and an open project switches to its tab. Save As of a document without a file starts in the
+  folder of the last project (`defaultProjectSavePath`). Save As never binds two tabs to one file: the
+  renderer passes the other tabs' files (`busyPaths`) and main asks for another name instead of replacing
+  one ("… is open in another tab"); the proposed name skips them ("A copy.pgfx"); a tab whose file was
+  replaced anyway (opened while the dialog was up) becomes an unsaved document.
+- **Session-only fonts** (app-logic-diff-4): autosave entries carry the user fonts this machine has only
+  for the session (embedded in a friend's project, or added while font storage was unavailable); My
+  Templates embed every user font; recovery and user templates report still-missing fonts.
+  Real-app check for all of the above: `scripts/electron-recovery-check.mjs` (crash, quit, forced, drop,
+  name, fonts, overwrite — 40 checks; the 363ced4 build fails them; polls instead of fixed waits and
+  never hangs on a dirty document at exit).
+- **Templates render the same whatever ran before** (`src/templates/builder.ts`): the Group Banner
+  hashed 9cf38442 alone and a57b737c after the other templates (Noir and Versus differed too). Two
+  causes: (1) placeholder characters — the canvas ÷ figure height ratio per pose was measured by
+  whichever build needed it first (a 0.17× start-screen preview, another template at another size) and a
+  later build skipped its exact re-render when that ratio was within 3 %; it is now a pure function of
+  the look, measured once at a fixed 1024 px reference (`figureRatio`). (2) assets that draw text
+  (newspaper clippings in Noir; film frame, polaroid, comic burst) were generated before their fonts
+  loaded when a template was built right after start (the Libraries panel usually warmed them up first),
+  baking fallback fonts into the bitmap; `DocBuilder.flush` now awaits `prepareAsset` for every asset
+  that isn't `assetReady` (fonts, user-image decodes) before generating. Character pixels changed
+  slightly once (now rendered at the reference ratio). Checks: `src/templates/builder.test.ts` (both
+  fail on the previous builder) and `scripts/template-determinism-check.mjs` (dev server; all 23
+  templates forward / reverse / after every preview / alone in a fresh page / with the asset-only font
+  files arriving 3 s late, WASM and `--js` → identical hashes; the pre-fix tree fails it).
+- **Idle CPU** (release review packaged-app-3): every asset card that had never been on screen kept an
+  infinite background-position shimmer (51 cards in the default Libraries panel: ~20 % of a core,
+  60 style recalcs/s, forever — also with the window hidden). The placeholder now shimmers only while
+  its thumbnail is queued (`AssetThumb` `loading`; an unregistered asset answers with the failure
+  placeholder so nothing waits forever); start-screen / New from Template previews do the same
+  (`useTemplatePreviewState`: shimmer only while queued or rendering; off-screen, cancelled or failed
+  cards are still). Other infinite animations are spinners shown only while something runs. Idle now:
+  0 running animations and 0 requestAnimationFrame calls on the start screen and with a document open;
+  Electron (xvfb, fresh profile), whole process tree: start screen 18.5 % → 0.1 % of a core, template
+  open 23.8 % → 0.3 %. `scripts/smoke.mjs` checks it (start screen, template open, after the panels:
+  no running animation once loading settles, no rAF loop). Closing New from Template cancels the
+  previews still queued — also the start screen's, which ask again in the same commit: the cancel now
+  drops their pending entries synchronously (a re-request queues a fresh job instead of getting the
+  cancelled promise), and a visible card re-requests a preview that was cancelled (not one that
+  failed). Before, closing the dialog early left 8 of 10 start-screen cards without art for the
+  session. Tests: `src/templates/previews.test.ts`.
 - **CI / installers**: Build installers is green since f6ce5d3 (Windows case-clash rename b4d8728 +
   electron-builder caches outside the repo). No GitHub Release exists yet, and the macOS/Linux jobs
   have never run (they only run on tags / manual dispatch). Maintainer steps (need the owner's
@@ -147,7 +357,7 @@ starting point; don't rewrite modules from scratch.
   nsis --x64 --publish never`, with embedded asar integrity), not a release artifact. README: sharing
   leads with sending the Setup .exe itself.
 
-## Desktop hardening (electron/, checked with scripts/electron-desktop-check.mjs — 52 checks)
+## Desktop hardening (electron/, checked with scripts/electron-desktop-check.mjs — 65 checks)
 - Security: sandbox + contextIsolation, no Node in the renderer, IPC sender-frame + type checks.
   Desktop bridge file grants: `readFile`/`writeFile` only accept user-chosen paths (persisted in
   userData); any other path is refused before it is opened (no FIFOs/devices, no UNC paths). The page
@@ -158,10 +368,13 @@ starting point; don't rewrite modules from scratch.
   (and on file:// CSP 'self' matches every local file), so the CSP has `worker-src 'none'` — the app
   uses no workers; keep it 'none' (never blob:, and 'self' only after an app:// migration). The page is
   loaded with `loadURL(lib.fileUrlOf(index.html))`, not `loadFile` (which left '%' unescaped: an install
-  folder like `C:\Users\100%Real\…` gave a blank window with IPC refused); a failed page load shows a
-  native error naming main.log (Try Again / Quit). Save dialog: the page's `defaultPath` is kept only
-  when it is a granted file, else cut to a file name (no UNC/absolute paths from the page: Windows probes
-  them before the user acts), and only pgfx/png/jpg/jpeg/webp/psd filters (none left → refused).
+  folder like `C:\Users\100%Real\…` gave a blank window with IPC refused). Every failed load of the
+  editor (at start, or the reload after a crash or a hang, e.g. a bundle quarantined or reinstalled while
+  the app runs) shows a native error naming main.log (Try Again / Quit); Chromium's error page that follows
+  is not taken for the editor (lib.createLoadState): files handed over meanwhile wait for Try Again, and the
+  hung-reload safety net adds no crash prompt on top. Save dialog: the page's `defaultPath` is kept only
+  when it is a granted file or a new name in a granted file's folder (lib.saveDefaultPath), else cut to a
+  file name (no other UNC/absolute paths from the page: Windows probes them before the user acts), and only pgfx/png/jpg/jpeg/webp/psd filters (none left → refused).
   External links: `openExternal` / `window.open` hand only https www.roblox.com / roblox.com and the
   project's GitHub page to the browser (lib.isExternalUrl); navigations of the window are blocked and
   never handed on. VITE_DEV_SERVER_URL is ignored by a packaged app (and unpackaged only honoured for
@@ -207,8 +420,8 @@ starting point; don't rewrite modules from scratch.
    - fx-filters `src/filters/ui/apply.ts resolveTarget`: allow editTarget==='mask' on adjustment/fill layers.
    - Optional: FilterDef custom params editor so Levels/Curves/Color Balance/Selective Color/Exposure can use
      openFilterDialog (adjustments currently uses its own AdjustmentDialog for those 5).
-   - renderer: export `renderLayerParts(doc, layer)` (behind-effects + core separately; engine.ts has an internal
-     `renderLayer`) so layers-panels' Rasterize Layer Style is exact for non-Normal blend layers.
+   - (done) renderer: `renderLayerParts(doc, layer)` (behind-effects + core separately) — Rasterize Layer Style and
+     the PSD bake use it (see "Baked styles with their own blend mode" below).
    - (done) shell start screen / palette open templates via openTemplate(id) from src/templates (character
      selected); palette looks use currentTargetId().
    - (partly done, filter-perf) 1080p filter speedups. Every optimized filter is bit-identical to its previous
@@ -239,8 +452,12 @@ starting point; don't rewrite modules from scratch.
      (core/blur.ts, also `window.__app`) say which one runs and why; `setBlurBackend('js')` forces JS
      (tests/benchmarks). Memory grows on demand (a 4K image: a few MB to ~350 MB depending on the filter — bloom with
      radius ≤ 4 ~349 MB, the σ < 1 gaussian ~285 MB, most others ≤ 64 MB; capped at 1 GiB, beyond which that operation
-     runs in JavaScript), is reused, and is handed back (instance recreated) once no operation has needed more than
-     192 MB for 2 s — a burst of 4K runs (live preview) doesn't regrow it each time. CSP: index.html script-src is
+     runs in JavaScript) and is reused; a WebAssembly.Memory never shrinks, so memory grown past 64 MB is handed back by
+     dropping the instance (garbage-collected) 3 s after the last operation that needed that much (a burst of 4K runs —
+     live preview — keeps reusing it; smaller operations neither postpone nor cancel the release); the next kernel call
+     re-instantiates from the compiled module (`blurBackendInfo().memoryBytes` is 0 meanwhile, `releases` counts them).
+     In the browser: 4K gaussian σ 0.8 holds 284 MB and bloom radius 4 348 MB until 3 s later, then 0; re-runs give the
+     same bytes (and the same as JavaScript). CSP: index.html script-src is
      `'self' 'wasm-unsafe-eval'` (WebAssembly compilation only; eval / new Function stay blocked — desktopMain.test.ts
      compares CSP keywords as whole tokens and still forbids plain 'unsafe-eval'); electron/main.cjs sets no CSP
      header of its own and its file:// filter is unaffected (no fetch). Tests: src/core/wasm/blurWasm.test.ts (JS vs

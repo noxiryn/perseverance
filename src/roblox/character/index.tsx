@@ -19,6 +19,7 @@ import { registerPlacedImageHandler } from '../../io/placeHooks';
 import { requireDoc } from '../util';
 import { trimRasterLayer } from './cutout';
 import { characterTarget, contentsTarget, decodeImageFile, imageBaseName, isCharacterLayer, isPlaceholder, isReplaceableImage, replaceLayerContents } from './replace';
+import { mayBeReplaceableDrag } from './imageFiles';
 import { autoCutoutPref, openReplaceDialog } from './ReplaceDialog';
 
 function replaceCharacter() {
@@ -120,7 +121,6 @@ export const characterCommands: CommandDef[] = [
 
 /* ---------------- drop an image on a selected character ---------------- */
 
-
 function dropTarget() {
   const s = activeSession();
   if (!s) return null;
@@ -130,9 +130,11 @@ function dropTarget() {
 
 registerFileDropHandler({
   id: 'roblox.replaceCharacter',
-  hint: () => {
+  hint: (drag) => {
     const t = dropTarget();
-    return t ? `Drop one image to replace “${t.name}” (you'll be asked)` : null;
+    // A PSD / SVG / TIFF being dragged opens as usual: don't promise a Replace it won't offer.
+    if (!t || !mayBeReplaceableDrag(drag.types)) return null;
+    return `Drop one image to replace “${t.name}” (you'll be asked)`;
   },
   claim: (ctx) => {
     // Only renders the decoder reads: a PSD / project / SVG falls through to the normal open path.

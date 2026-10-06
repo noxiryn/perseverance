@@ -5,7 +5,26 @@ import { Popover } from './popover';
 import { useEditor } from '../../state/editor';
 import { palettes, useRegistry } from '../../registry';
 
-/** Color chip with checkerboard behind (shows alpha). */
+/**
+ * Enter / Space on a focused clickable chip clicks it, like a button (the real click carries the
+ * chip as currentTarget — popovers anchor to it); consumed, so Enter doesn't also submit the dialog.
+ * Space only inside dialogs and popovers: elsewhere it stays the temporary Hand tool, as it is for a
+ * focused button in a panel or options bar.
+ */
+export function clickOnEnterOrSpace(e: React.KeyboardEvent<HTMLElement>) {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+  if (e.key === ' ' && !e.currentTarget.closest('.ui-dialog, .ui-popover')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  e.currentTarget.click();
+}
+
+/**
+ * Color chip with checkerboard behind (shows alpha). With `onClick` it is a keyboard-focusable
+ * button (Tab reaches it, Enter / Space opens what it opens, and a popover it opened gives focus
+ * back to it on Escape).
+ */
 export function ColorSwatch({
   color,
   onClick,
@@ -24,6 +43,10 @@ export function ColorSwatch({
       className="ui-swatch"
       title={title ?? color}
       onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      aria-label={onClick ? (title ?? color) : undefined}
+      onKeyDown={onClick ? clickOnEnterOrSpace : undefined}
       style={{ width: size, height: size, outline: selected ? '2px solid var(--accent)' : undefined, outlineOffset: 1 }}
     >
       <span style={{ background: color }} />

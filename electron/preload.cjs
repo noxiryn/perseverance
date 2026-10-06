@@ -52,6 +52,25 @@ ipcRenderer.on('desktop:close-requested', () => {
   deliver(closeListeners, undefined);
 });
 
+// Right before a forced quit ("Quit Anyway", Windows ending the session) the main process asks the page
+// to bring its autosaved copies up to date. 'started' at once (the page is alive: main waits for it),
+// 'done' when they are stored. Its own listener set: it must not count as a close handler above.
+const flushListeners = new Set();
+ipcRenderer.on('desktop:flush-recovery', async (_e, id) => {
+  ipcRenderer.send('desktop:flush-recovery-reply', id, 'started');
+  let left = 0;
+  for (const cb of [...flushListeners]) {
+    try {
+      const n = await cb();
+      if (typeof n === 'number' && Number.isFinite(n)) left += n;
+    } catch (e) {
+      console.error(e);
+      left = NaN;
+    }
+  }
+  ipcRenderer.send('desktop:flush-recovery-reply', id, 'done', Number.isNaN(left) ? -1 : left);
+});
+
 // Sandboxed preloads cannot require local files; the main process passes the version via argv.
 let version = 'dev';
 const vArg = process.argv.find((a) => a.startsWith('--app-version='));
@@ -75,6 +94,7 @@ contextBridge.exposeInMainWorld('desktop', {
       defaultPath: typeof o.defaultPath === 'string' ? o.defaultPath : undefined,
       filters: Array.isArray(o.filters) ? o.filters : undefined,
       data: o.data,
+      busyPaths: Array.isArray(o.busyPaths) ? o.busyPaths.filter((p) => typeof p === 'string').slice(0, 1000) : undefined,
     });
   },
   writeFile: (p, data) => {
@@ -135,6 +155,11 @@ contextBridge.exposeInMainWorld('desktop', {
     if (typeof cb !== 'function') throw new TypeError('callback must be a function');
     closeListeners.add(cb);
     return () => closeListeners.delete(cb);
+  },
+  onFlushRecovery: (cb) => {
+    if (typeof cb !== 'function') throw new TypeError('callback must be a function');
+    flushListeners.add(cb);
+    return () => flushListeners.delete(cb);
   },
   onMaximizeChange: (cb) => on('desktop:maximize', cb),
 });

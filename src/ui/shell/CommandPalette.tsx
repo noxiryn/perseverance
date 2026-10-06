@@ -22,6 +22,7 @@ import {
   type PaletteKind,
 } from './paletteSources';
 import { shellPortalHost } from './uiScale';
+import { pushEscapeLayer } from '../controls/escapeLayers';
 
 const CAPS: Record<string, number> = { command: 12, tool: 6, panel: 5, filter: 8, look: 6, template: 6, asset: 6, font: 6 };
 
@@ -56,6 +57,7 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
   const [sel, setSel] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   // Snapshot sources when the palette opens (enabled() states are evaluated now).
   const items = useMemo(() => collectPaletteItems(), []);
   const recent = useMemo(() => readPaletteRecent(), []);
@@ -98,6 +100,9 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
+  // A modal surface for Escape (escapeLayers.ts): opened with Ctrl+K over a popover or menu, the
+  // first Escape is the palette's (it handles the key itself), not the hidden popover's.
+  useLayoutEffect(() => pushEscapeLayer({ kind: 'dialog', close: () => {}, contains: (node) => !!rootRef.current?.contains(node) }), []);
 
   const run = (it: PaletteItem | undefined) => {
     if (!it) return;
@@ -177,7 +182,7 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
   const groupLabel = (k: string) => (k === 'recent' ? 'Recent' : k === 'suggested' ? 'Suggested' : (KIND_LABELS[k as PaletteKind] ?? k));
 
   return (
-    <div className="shell-pal" role="dialog" aria-label="Command palette" onPointerDown={(e) => e.stopPropagation()}>
+    <div ref={rootRef} className="shell-pal" role="dialog" aria-label="Command palette" onPointerDown={(e) => e.stopPropagation()}>
       <div className="shell-pal-input">
         <Search size={15} strokeWidth={1.8} />
         {kind && (

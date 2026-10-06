@@ -11,7 +11,7 @@ import { toast } from '../../state/ui';
 import { dropMode, isSupportedDrop } from './docInfo';
 import { openFileWithIo } from './documents';
 import { useShell } from './shellStore';
-import { claimFileDrop, fileDropHints } from './dropHooks';
+import { claimFileDrop, fileDragInfoOf, fileDropHints, setFileDragInfo } from './dropHooks';
 
 const ASSET_MIME = 'application/x-perseverance-asset';
 
@@ -49,6 +49,7 @@ export function useFileDrop() {
     const enter = (e: DragEvent) => {
       if (!isFileDrag(e)) return;
       depth++;
+      setFileDragInfo(fileDragInfoOf(e.dataTransfer));
       setFileDrag(true);
       armHide();
     };
@@ -56,6 +57,7 @@ export function useFileDrop() {
       if (!isFileDrag(e)) return;
       e.preventDefault();
       if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+      if (depth === 0) setFileDragInfo(fileDragInfoOf(e.dataTransfer)); // no dragenter seen
       setFileDrag(true);
       armHide();
     };

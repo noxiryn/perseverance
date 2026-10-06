@@ -4,6 +4,7 @@ import { Dialog, SearchInput, Button, Checkbox } from '../../controls';
 import { commands, tools } from '../../../registry';
 import { buildMenuTree, shortcutAlternatives, TOP_MENUS, type MenuTreeNode } from '../menuModel';
 import { Keys } from '../Keys';
+import { TEXT_STYLE_KEYS } from '../../../tools/type/editKeys';
 
 interface Row {
   label: string;
@@ -26,6 +27,13 @@ const CANVAS_KEYS: Row[] = [
   { label: 'Show / hide all panels', shortcuts: ['Tab'] },
   { label: 'Command search', shortcuts: ['Ctrl+K'] },
   { label: 'Focus the menu bar', shortcuts: ['Alt'] },
+];
+
+/** Keys of on-canvas text editing (Type tool), see tools/type/editKeys.ts. */
+const TEXT_EDIT_KEYS: Row[] = [
+  { label: 'Commit text', path: 'While editing text', shortcuts: ['Ctrl+Enter'] },
+  { label: 'Cancel editing', path: 'While editing text', shortcuts: ['Esc'] },
+  ...TEXT_STYLE_KEYS.filter((k) => k.command).map((k) => ({ label: k.label, path: 'While editing text', shortcuts: k.keys })),
 ];
 
 function flattenTree(nodes: MenuTreeNode[], path: string[], out: Row[]) {
@@ -53,6 +61,7 @@ function collectGroups(): Group[] {
     .map((t) => ({ label: t.name, path: 'Tool', shortcuts: t.shortcut ? [t.shortcut] : [] }));
   if (toolRows.length) groups.push({ title: 'Tools', rows: toolRows });
   groups.push({ title: 'Canvas & navigation', rows: CANVAS_KEYS });
+  groups.push({ title: 'Text editing', rows: TEXT_EDIT_KEYS });
   // Keep menu order stable even for unknown menus.
   return groups.sort((a, b) => {
     const ia = TOP_MENUS.indexOf(a.title.replace(/ menu$/, '') as never);

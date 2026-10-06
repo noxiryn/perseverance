@@ -15,6 +15,7 @@ import {
   discardEntries,
   discardRecoveryFor,
   entryDocId,
+  flushRecovery,
   isOwnEntry,
   listRecovery,
   pendingRecovery,
@@ -252,5 +253,79 @@ describe('browser build: leaving the page through "Leave page?"', () => {
     const pending = await pendingRecovery();
     expect(pending.map((e) => e.id)).toEqual([crashed.id]);
     expect(mem.m.has(own.id)).toBe(false);
+  });
+});
+
+/**
+ * Before a forced quit ("Quit Anyway" in a native prompt — the in-app prompt is stuck or the UI broke)
+ * the main process asks the page to write its copies now (preload 'desktop:flush-recovery'): the
+ * native prompt promises that the next start offers them, so the latest edit must be in them, not only
+ * what the last 2-minute tick wrote.
+ */
+describe('writing the copies right before a forced quit (flushRecovery)', () => {
+  it('writes an edit the regular autosave has not reached yet', async () => {
+    useEditor.getState().openDocument(docWithGuides('doc_f', 0), { filePath: PATH });
+    edit('doc_f');
+    edit('doc_f');
+    expect(await flushRecovery()).toBe(0);
+    expect(guidesIn(mem.m.get(recoveryKey('doc_f'))!)).toBe(2);
+  });
+
+  it('waits for an autosave that is writing, then writes the edit made meanwhile', async () => {
+    useEditor.getState().openDocument(docWithGuides('doc_g', 0), { filePath: PATH });
+    edit('doc_g');
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const put = mem.store.put;
+    let first = true;
+    mem.store.put = async (e) => {
+      if (first) {
+        first = false;
+        await gate; // the regular tick is stuck writing the 1-guide state
+      }
+      await put(e);
+    };
+    const tick = autosaveNow();
+    for (let i = 0; i < 20 && first; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(first).toBe(false);
+    edit('doc_g'); // after that tick took its snapshot
+    let done = false;
+    const flushing = flushRecovery().then((n) => ((done = true), n));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(done).toBe(false); // not before the copy is really there
+    release();
+    expect(await flushing).toBe(0);
+    await tick;
+    expect(guidesIn(mem.m.get(recoveryKey('doc_g'))!)).toBe(2);
+  });
+
+  it('one document that can’t be written doesn’t keep the others from being kept', async () => {
+    useEditor.getState().openDocument(docWithGuides('doc_bad', 0), { filePath: '/art/Bad.pgfx' });
+    useEditor.getState().openDocument(docWithGuides('doc_ok', 0), { filePath: PATH });
+    edit('doc_bad');
+    edit('doc_ok');
+    const put = mem.store.put;
+    mem.store.put = async (e) => {
+      if (e.docId === 'doc_bad') throw new Error('QuotaExceededError');
+      await put(e);
+    };
+    expect(await flushRecovery()).toBe(1);
+    expect([...mem.m.keys()]).toEqual([recoveryKey('doc_ok')]);
+  });
+
+  it('autosave turned off: nothing is written', async () => {
+    localStorage.setItem('perseverance.prefs', JSON.stringify({ autosaveMinutes: 0 }));
+    useEditor.getState().openDocument(docWithGuides('doc_off', 0), { filePath: PATH });
+    edit('doc_off');
+    expect(await flushRecovery()).toBe(1);
+    expect(mem.m.size).toBe(0);
+  });
+
+  it('a discarded state is not written again', async () => {
+    useEditor.getState().openDocument(docWithGuides('doc_x', 0), { filePath: PATH });
+    edit('doc_x');
+    await discardRecoveryFor(['doc_x']);
+    expect(await flushRecovery()).toBe(0);
+    expect(mem.m.size).toBe(0);
   });
 });

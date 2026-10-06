@@ -44,6 +44,7 @@ import { uid } from '../core/ids';
 import { resolveParams } from '../filters/engine';
 import { measureText } from '../render/compositor';
 import { renderPlaceholderCharacter, type PlaceholderOptions } from '../roblox/placeholder';
+import { assetReady, prepareAsset } from '../assets/place';
 import { TEMPLATE_STYLE_KEY, templateStyleOf } from '../looks/characterStyling';
 import { fitFontSize, segmentTransform } from './layout';
 import { smokeCanvas, type SmokeOptions } from './paint';
@@ -95,8 +96,28 @@ export interface CharacterOpts extends Omit<PlaceholderOptions, 'width' | 'heigh
 
 export const PLACEHOLDER_NAME = 'Your Character (replace me)';
 
-/** Placeholder canvas height ÷ visible figure height, per pose/style (measured once). */
-const FIGURE_RATIO = new Map<string, number>();
+/**
+ * Placeholder canvas height ÷ visible figure height per look (pose, style, colours), measured once
+ * at a fixed reference size: a pure function of the look, so every build of a template renders the
+ * same characters. (It used to be measured by whichever build needed it first — a low-resolution
+ * start-screen preview, another template with the same pose at another size — and later builds
+ * skipped their exact re-render when that ratio was within 3 %, so a template's pixels depended on
+ * what had been built before it in the session.) Null: the look renders nothing.
+ */
+const FIGURE_RATIO = new Map<string, number | null>();
+const FIGURE_REF_HEIGHT = 1024;
+
+function figureRatio(style: Omit<PlaceholderOptions, 'width' | 'height'>): number | null {
+  const key = JSON.stringify(Object.entries(style).filter(([, v]) => v !== undefined).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  let ratio = FIGURE_RATIO.get(key);
+  if (ratio === undefined) {
+    const c = renderPlaceholderCharacter({ ...style, width: Math.round(FIGURE_REF_HEIGHT * 0.9), height: FIGURE_REF_HEIGHT });
+    const b = opaqueBounds(c, 8);
+    ratio = b ? c.height / b.height : null;
+    FIGURE_RATIO.set(key, ratio);
+  }
+  return ratio;
+}
 
 /** Pick the first registered family of a list (or the first entry when the registry is empty). */
 export function resolveFont(choice: FontChoice | undefined, fallback = DEFAULT_TEXT.fontFamily): string {
@@ -134,6 +155,13 @@ export class DocBuilder {
    * "Building…" indicator keeps painting. Layers are inserted right away with reserved bitmap ids.
    */
   private jobs: { label: string; run: () => void }[] = [];
+  /**
+   * Assets whose generation must wait for something (text-drawing assets: their fonts; user
+   * images: the full-resolution decode). Generated before that, a template's bitmap would bake in
+   * fallback fonts — so the same template looked different depending on whether something else
+   * (the Libraries panel, an earlier build) had loaded those fonts first.
+   */
+  private unready = new Set<string>();
 
   constructor(name: string, width: number, height: number, background: Color | null, opts: BuildOptions = {}) {
     this.doc = createDocument({ name, width, height, background });
@@ -308,6 +336,11 @@ export class DocBuilder {
    * (input and painting keep going during long template builds).
    */
   async flush(budgetMs = 32): Promise<void> {
+    if (this.unready.size) {
+      const ids = [...this.unready];
+      this.unready.clear();
+      await Promise.all(ids.map((id) => prepareAsset(id)));
+    }
     let t0 = performance.now();
     while (this.jobs.length) {
       const job = this.jobs.shift()!;
@@ -375,6 +408,7 @@ export class DocBuilder {
     layer.blendMode = def.defaultBlendMode ?? 'normal';
     layer.opacity = def.defaultOpacity ?? 1;
     this.add(layer, o);
+    if (!assetReady(assetId)) this.unready.add(assetId);
     this.defer(`asset "${assetId}"`, () => {
       let canvas: HTMLCanvasElement;
       try {
@@ -411,17 +445,14 @@ export class DocBuilder {
       try {
         const want = Math.max(16, height * this.preview);
         const render = (h: number) => renderPlaceholderCharacter({ ...style, width: Math.round(h * 0.9), height: Math.round(h) });
-        // Canvas height per figure height depends on the pose; remember it so later builds
-        // (and previews) render the character once instead of measure + re-render.
-        const ratioKey = `${style.pose ?? 'idle'}|${style.style ?? 'shaded'}`;
-        const known = FIGURE_RATIO.get(ratioKey);
-        let canvas = render(want * (known ?? 1.15));
-        let bounds = opaqueBounds(canvas, 8);
-        if (!bounds) {
+        // Canvas height per figure height depends on the pose (see figureRatio): usually one render.
+        const ratio = figureRatio(style);
+        let canvas = ratio ? render(want * ratio) : null;
+        let bounds = canvas ? opaqueBounds(canvas, 8) : null;
+        if (!canvas || !bounds) {
           this.drop(layer, 'placeholder character rendered empty');
           return;
         }
-        if (!known) FIGURE_RATIO.set(ratioKey, canvas.height / bounds.height);
         // Re-render so the figure itself is `want` px tall (crisper than scaling the raster).
         const f = want / bounds.height;
         if (Math.abs(f - 1) > 0.03) {

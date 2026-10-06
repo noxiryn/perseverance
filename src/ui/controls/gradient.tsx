@@ -3,7 +3,7 @@ import { ArrowLeftRight, Trash2 } from 'lucide-react';
 import type { Gradient, GradientKind, GradientStop } from '../../core/types';
 import { mixColors } from '../../core/color';
 import { gradientPresets, useRegistry } from '../../registry';
-import { ColorField } from './color';
+import { ColorField, clickOnEnterOrSpace } from './color';
 import { Popover } from './popover';
 import { IconButton, NumberField, Select } from './basic';
 
@@ -15,6 +15,7 @@ export function gradientToCss(g: Gradient, angle = 90): string {
   return `linear-gradient(${angle}deg, ${list}), repeating-conic-gradient(#888 0% 25%, #bbb 0% 50%) 50% / 8px 8px`;
 }
 
+/** Gradient strip; with `onClick` a keyboard-focusable button (see ColorSwatch). */
 export function GradientPreview({
   gradient,
   height = 18,
@@ -30,6 +31,10 @@ export function GradientPreview({
     <div
       title={title}
       onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      aria-label={onClick ? (title ?? 'Gradient') : undefined}
+      onKeyDown={onClick ? clickOnEnterOrSpace : undefined}
       style={{
         height,
         borderRadius: 3,

@@ -1,8 +1,9 @@
 /**
  * Replace Character / Replace Contents: swap a raster layer's pixels for another image while the
  * layer keeps its place in the composition — the new image is fitted into the old box (aspect
- * kept, centered; whole characters keep their feet planted, busts / head and waist-up renders fill
- * the part of the box on the canvas with their cut edge on the canvas edge) with the same rotation
+ * kept, centered; whole characters keep their feet planted, busts / head and waist-up renders — and
+ * images too wide to stand on an off-canvas box bottom — fill the part of the box on the canvas with
+ * their bottom on the canvas edge, fit.ts characterFitAlign) with the same rotation
  * and flip, and the layer keeps its smart filters, layer effects, mask, blend mode, clipping and
  * name. A template's placeholder becomes "your character" (renamed after the image, placeholder
  * flag cleared). Opaque images can have their background removed automatically on the way in.
@@ -21,7 +22,7 @@ import { adoptTemplateStylingDraft } from '../../looks/characterStyling';
 import { autoCutout, type AutoCutoutOutcome } from '../bg/core';
 import { alphaBounds } from '../pixels';
 import { canvasHasOpaqueBorder, clearMaskDraft, hasRemoveBgMask } from './cutout';
-import { fitIntoBox, fitIntoBoxAtScale, isCutOffAtBottom, type FitAlign } from './fit';
+import { characterFitAlign, fitIntoBox, fitIntoBoxAtScale, isCutOffAtBottom, type FitAlign } from './fit';
 
 /** Name given to a replaced placeholder when the image has no usable name (clipboard). */
 export const REPLACED_PLACEHOLDER_NAME = 'Your Character';
@@ -183,10 +184,12 @@ export function replaceLayerContents(layerId: ID, src: HTMLCanvasElement, opts: 
   const wasPlaceholder = isPlaceholder(layer);
   const dispW = layer.width * Math.abs(layer.transform.scaleX || 1);
   const dispH = layer.height * Math.abs(layer.transform.scaleY || 1);
-  // Characters: a whole figure keeps its feet planted on the box bottom; a bust / head / waist-up
-  // image fills the part of the box that is on the canvas, its cut edge on the canvas edge.
-  const alignFor = (cutOff: boolean | undefined): FitAlign => (!character ? 'center' : cutOff ? 'cut' : 'bottom');
   const canvasSize = { width: doc.width, height: doc.height };
+  // Characters: a whole figure keeps its feet planted on the box bottom; a bust / head / waist-up
+  // image (detected, known, or too wide for the box to stand on its off-canvas bottom) fills the
+  // part of the box that is on the canvas, its cut edge on the canvas edge.
+  const alignFor = (cutOff: boolean | undefined, srcW: number, srcH: number): FitAlign =>
+    !character ? 'center' : characterFitAlign(layer.transform, layer.width, layer.height, srcW, srcH, canvasSize, !!cutOff);
   let prepared: PreparedImage;
   let fit: { width: number; height: number; transform: RasterLayer['transform'] };
   let bitmap: HTMLCanvasElement;
@@ -196,12 +199,12 @@ export function replaceLayerContents(layerId: ID, src: HTMLCanvasElement, opts: 
     fit = {
       width: src.width,
       height: src.height,
-      transform: fitIntoBoxAtScale(layer.transform, layer.width, layer.height, src.width, src.height, alignFor(opts.cutOff), canvasSize),
+      transform: fitIntoBoxAtScale(layer.transform, layer.width, layer.height, src.width, src.height, alignFor(opts.cutOff, src.width, src.height), canvasSize),
     };
   } else {
     // Work at no more than twice the size the image will be shown at (keeps the cut-out quick).
     prepared = prepareReplacement(src, { cutout: !!opts.cutout, maxSide: Math.max(256, Math.ceil(Math.max(dispW, dispH) * 2)) });
-    const align = alignFor(opts.cutOff ?? prepared.cutOff);
+    const align = alignFor(opts.cutOff ?? prepared.cutOff, prepared.canvas.width, prepared.canvas.height);
     fit = fitIntoBox(layer.transform, layer.width, layer.height, prepared.canvas.width, prepared.canvas.height, align, canvasSize);
     bitmap = prepared.canvas.width === fit.width && prepared.canvas.height === fit.height ? prepared.canvas : resampleCanvas(prepared.canvas, fit.width, fit.height);
   }

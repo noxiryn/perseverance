@@ -45,9 +45,11 @@ import { toast, useUI } from '../state/ui';
 import { effects, filters } from '../registry';
 import { defaultParams } from '../filters/engine';
 import {
+  behindEffectIds,
   getLayerSize,
   renderDocument,
   renderLayerContent,
+  renderLayerParts,
   renderLayerToDoc,
   shapeLocalBounds,
   textLocalBounds,
@@ -68,8 +70,6 @@ import {
 import { alignDelta, distributeDeltas, pixelBox, reboxTransform, unionRects, type AlignMode, type DistributeMode } from './geometryMath';
 import { layerContentBounds } from './bounds';
 import { adaptPresetToFill, effectName, layerFillLuminance, type StylePreset } from './effectPresets';
-import { effectPlacement } from './effectOrder';
-import { unknockAlpha } from './pixelMath';
 
 /* ------------------------------------------------------------------ */
 /* Guards & accessors                                                  */
@@ -1196,81 +1196,116 @@ function renderAlone(doc: Document, l: Layer): HTMLCanvasElement {
   return renderSubset(doc, [l.id], { [l.id]: { ...l, visible: true, clipped: false } as Layer });
 }
 
-const isBehindEffect = (e: LayerEffect) => e.enabled && effects.has(e.effectId) && effectPlacement(e).stage === 'behind';
+/** Our blend mode for a canvas composite operation the renderer draws an effect with. */
+function blendOfOp(op: GlobalCompositeOperation): BlendMode {
+  if (op === 'source-over') return 'normal';
+  if (op === 'lighter') return 'linear-dodge';
+  return op as BlendMode;
+}
 
 interface StyleBake {
   layer: RasterLayer;
-  /** Effects drawn behind the content, on their own layer below (see bakeStyle). */
-  below: RasterLayer | null;
+  /** Effects drawn behind the content, one layer each, to go below it in this order (see bakeStyle). */
+  below: RasterLayer[];
   bakedOpacity: boolean;
   /**
-   * The split is approximate: with another blend mode at 100% opacity and fill, the effects
-   * hidden under opaque content still tint what the content blends with, and the compositor
-   * contract has no way to render them there.
+   * A clipping-mask base whose effects over its content can't keep the clip as it was (see
+   * bakeStyle): the clipped layers now also follow its Fill (`fill`, when below 100 %) and/or
+   * cover its effect pixels past the content's edge (`pastEdge`). Null: the image is unchanged.
    */
-  approx: boolean;
+  clipChange: { fill: number | null; pastEdge: boolean } | null;
+}
+
+/** Whether `core` covers pixels where `shape` is transparent (an effect past the content's edge). */
+function coversPastEdge(core: HTMLCanvasElement, shape: HTMLCanvasElement | null): boolean {
+  const w = core.width;
+  const h = core.height;
+  const read = (c: HTMLCanvasElement) => ctxRead(c).getImageData(0, 0, w, h).data;
+  const k = read(core);
+  const sh = shape ? read(shape) : null;
+  for (let i = 3; i < k.length; i += 4) if (k[i] > 0 && (!sh || sh[i] === 0)) return true;
+  return false;
 }
 
 /**
  * Bake a layer's effects and smart filters into pixels so the image does not change. The
- * compositor draws the effects BEHIND the content (shadows, outer glows, outside strokes) with
- * their own blend modes, each at the layer opacity, and the content with the layer's blend mode;
- * a clipping base clips the layers above to its content only. One pixel layer can reproduce that
- * when the layer is clipped itself, has no effects behind it, or is a plain normal-blend layer
- * (at reduced opacity the opacity is baked into the pixels). Otherwise (another blend mode, or a
- * clipping base) the effects behind it go to their own layer below, so the layer keeps its blend
- * mode, opacity and clipping shape.
+ * compositor draws the effects BEHIND the content (shadows, outer glows, outside strokes) one by
+ * one, each with its own blend mode at the layer opacity, then the core (content at Fill + the
+ * effects over it) with the layer's blend mode; a clipping base clips the layers above to its
+ * content at full Fill (its `shape`), and a clipped layer is drawn flattened (pieces + core as one
+ * layer). One pixel layer reproduces that when the layer is clipped, has nothing behind it and is
+ * no clipping base, or is a normal-blend layer, not a clipping base, whose effects behind are all
+ * Normal (at reduced opacity the opacity is baked into the pixels). Otherwise the effects behind it
+ * go on layers of their own below it, exactly as rendered (renderLayerParts), each with its blend
+ * mode — a Screen glow flattened onto transparency would turn into a plain coloured halo — and the
+ * layer keeps its blend mode, opacity and clipping shape: without effects over the content it keeps
+ * its content at full Fill and its Fill (like PSD export), so a clipping base's clip is unchanged;
+ * with them it becomes its core at 100 % Fill. For a clipping base that core is the new clip
+ * shape, which differs when it was drawn at a reduced Fill or reaches past the content (a centered
+ * stroke; an inside stroke's soft edge): no pixel layer can keep those, like in Photoshop, so the
+ * change is reported (`clipChange`).
  */
 function bakeStyle(doc: Document, l: Layer, bakeMask: boolean): StyleBake | null {
   const W = doc.width;
   const H = doc.height;
-  const finish = (c: HTMLCanvasElement, opacity: number): RasterLayer => {
+  const finish = (c: HTMLCanvasElement, opacity: number, fill = 1): RasterLayer => {
     const r = toRaster(l, bitmaps.add(c), W, H, identityTransform());
     r.effects = [];
     r.filters = [];
-    r.fillOpacity = 1;
+    r.fillOpacity = fill;
     r.opacity = opacity;
     if (bakeMask) r.mask = null;
     return r;
   };
   const opacity = Math.max(0, Math.min(1, l.opacity));
-  const fill = Math.max(0, Math.min(1, Number.isFinite(l.fillOpacity) ? l.fillOpacity : 1));
-  const behind = l.effects.filter(isBehindEffect);
   const shown = { ...l, visible: true } as Layer;
+  const parts = renderLayerParts(doc, shown, { mask: true });
+  if (!parts) return null;
+  const behind = parts.behind;
+  const clipBase = isClipBase(doc, l.id);
 
-  if (l.clipped || !behind.length || (l.blendMode === 'normal' && !isClipBase(doc, l.id))) {
-    if (!l.clipped && behind.length && opacity < 0.999) return { layer: finish(renderAlone(doc, l), 1), below: null, bakedOpacity: true, approx: false };
+  if (l.clipped || (!clipBase && (!behind.length || (l.blendMode === 'normal' && behind.every((p) => p.op === 'source-over'))))) {
+    if (!l.clipped && behind.length && opacity < 0.999) return { layer: finish(renderAlone(doc, l), 1), below: [], bakedOpacity: true, clipChange: null };
     const c = renderLayerToDoc(doc, shown, { effects: true, mask: true });
-    return c ? { layer: finish(c, l.opacity), below: null, bakedOpacity: false, approx: false } : null;
+    return c ? { layer: finish(c, l.opacity), below: [], bakedOpacity: false, clipChange: null } : null;
   }
 
-  // Content + the effects drawn over it, with the layer's own blend mode and opacity.
-  const core = renderLayerToDoc(doc, { ...shown, effects: l.effects.filter((e) => !isBehindEffect(e)) } as Layer, { effects: true, mask: true });
-  // The effects behind it, each at the layer opacity, knocked out where the content is (fill 0).
-  const pieces = renderAlone(doc, { ...l, effects: behind, fillOpacity: 0, blendMode: 'normal' } as Layer);
-  const opaque = opacity * fill >= 0.999;
-  if (opaque) {
-    // Under fully opaque content the compositor does not knock the effects out: bring back what
-    // still shows through the content's partly transparent edges.
-    const shape = renderLayerToDoc(doc, { ...shown, effects: [], fillOpacity: 1 } as Layer, { effects: false, mask: true });
-    if (shape) {
-      const pctx = ctxRead(pieces);
-      const img = pctx.getImageData(0, 0, W, H);
-      unknockAlpha(img.data, ctxRead(shape).getImageData(0, 0, W, H).data);
-      pctx.putImageData(img, 0, 0);
-    }
+  // Each piece behind the content as the compositor draws it: its own blend mode, the layer's
+  // opacity, knocked out under the content exactly where the render knocks it out.
+  const ids = behindEffectIds(l);
+  const below: RasterLayer[] = [];
+  behind.forEach((p, i) => {
+    if (!opaqueBounds(p.canvas)) return; // an effect that draws nothing here
+    const name = ids.length === behind.length ? `${l.name}'s ${effectName(ids[i])}` : `${l.name}'s Styles${behind.length > 1 ? ` ${i + 1}` : ''}`;
+    const fx = makeRasterLayer({ name, bitmapId: bitmaps.add(p.canvas), width: W, height: H });
+    fx.blendMode = blendOfOp(p.op);
+    fx.opacity = l.opacity;
+    fx.visible = l.visible;
+    fx.label = l.label;
+    below.push(fx);
+  });
+  const fill = Math.max(0, Math.min(1, l.fillOpacity));
+  if (!parts.above) {
+    // Nothing drawn over the content: keep it at full Fill with its Fill (the same pixels the
+    // render draws, and a clipping base's clip shape stays its content).
+    const content = renderLayerToDoc(doc, { ...shown, fillOpacity: 1 } as Layer, { effects: false, mask: bakeMask });
+    return { layer: finish(content ?? createCanvas(W, H), l.opacity, fill), below, bakedOpacity: false, clipChange: null };
   }
-  const fx = makeRasterLayer({ name: `${l.name} Effects`, bitmapId: bitmaps.add(pieces), width: W, height: H });
-  fx.visible = l.visible;
-  fx.label = l.label;
-  return { layer: finish(core ?? createCanvas(W, H), l.opacity), below: fx, bakedOpacity: false, approx: opaque && l.blendMode !== 'normal' };
+  const core = parts.core ?? createCanvas(W, H);
+  let clipChange: StyleBake['clipChange'] = null;
+  if (clipBase && (fill < 0.999 || parts.coreBeyondShape)) {
+    const shape = parts.coreBeyondShape ? renderLayerToDoc(doc, { ...shown, fillOpacity: 1 } as Layer, { effects: false, mask: true }) : null;
+    clipChange = { fill: fill < 0.999 ? fill : null, pastEdge: parts.coreBeyondShape && coversPastEdge(core, shape) };
+  }
+  return { layer: finish(core, l.opacity), below, bakedOpacity: false, clipChange };
 }
 
 /**
  * Layer ▸ Rasterize Layer Style: bake effects and smart filters into pixels without changing the
- * image (see bakeStyle). The renderer masks the content BEFORE the effects (strokes and shadows
- * follow the masked edge), so an enabled mask is baked as well and removed; a disabled mask is
- * kept as it is.
+ * image (see bakeStyle; the one exception, a clipping base whose effects over its content can't
+ * keep its clip, is reported). The renderer masks the content BEFORE the effects (strokes and
+ * shadows follow the masked edge), so an enabled mask is baked as well and removed; a disabled
+ * mask is kept as it is.
  */
 export function rasterizeStyleSelected() {
   const s = needDoc();
@@ -1295,10 +1330,10 @@ export function rasterizeStyleSelected() {
   ed().commit('Rasterize Layer Style', (d) => {
     for (const b of out) {
       d.layers[b.layer.id] = b.layer;
-      if (!b.below) continue;
-      d.layers[b.below.id] = b.below;
+      if (!b.below.length) continue;
+      for (const fx of b.below) d.layers[fx.id] = fx;
       const list = siblingsOf(d, b.layer.id);
-      list.splice(list.indexOf(b.layer.id), 0, b.below.id);
+      list.splice(list.indexOf(b.layer.id), 0, ...b.below.map((fx) => fx.id));
     }
   });
   const notes: string[] = [];
@@ -1306,17 +1341,36 @@ export function rasterizeStyleSelected() {
     ed().setEditTarget('content');
     notes.push(bakedMasks > 1 ? 'The layer masks were applied with the styles.' : 'The layer mask was applied with the style.');
   }
-  const split = out.filter((b) => b.below);
+  const split = out.filter((b) => b.below.length);
   if (split.length) {
+    const one = split.length === 1 && split[0].below.length === 1;
+    // (not when a clip changes after all: that is said below)
+    const why = split.some((b) => b.clipChange) ? '.' : ', so blend modes and clipping keep looking the same.';
     notes.push(
       split.length > 1
-        ? 'Shadows and glows behind the layers were placed on their own layers below, so blend modes and clipping keep looking the same.'
-        : `Shadows and glows behind “${split[0].layer.name}” were placed on “${split[0].below!.name}” below it, so its blend mode and clipping keep looking the same.`,
+        ? `Shadows and glows behind the layers were placed on their own layers below${why}`
+        : one
+          ? `Shadows and glows behind “${split[0].layer.name}” were placed on “${split[0].below[0].name}” below it${why}`
+          : `Shadows and glows behind “${split[0].layer.name}” were placed on their own layers below it${why}`,
     );
   }
-  if (out.some((b) => b.approx)) notes.push('Where the content covers those effects, its blend mode may look a little different.');
   if (out.some((b) => b.bakedOpacity)) notes.push('The layer opacity was merged into the pixels to keep the same look.');
-  if (notes.length) toast(notes.join(' '), 'info', 3200);
+  // Clipping bases whose clip had to change (see bakeStyle): say how, and how to get it back.
+  const changed = out.filter((b) => b.clipChange);
+  for (const b of changed) {
+    const c = b.clipChange!;
+    const how = [
+      c.fill !== null && `fade with its ${Math.round(c.fill * 100)}% Fill`,
+      c.pastEdge && 'also cover its effects past its edge',
+    ].filter(Boolean);
+    notes.push(
+      how.length
+        ? `Layers clipped to “${b.layer.name}” now ${how.join(' and ')}: pixels can't keep the style's clipping exactly.`
+        : `Layers clipped to “${b.layer.name}” may look slightly different along its edge.`,
+    );
+  }
+  if (changed.length) notes.push('Undo (Ctrl+Z) brings the style back.');
+  if (notes.length) toast(notes.join(' '), changed.length ? 'warning' : 'info', changed.length ? 6000 : 3200);
 }
 
 /* ------------------------------------------------------------------ */
